@@ -26,6 +26,7 @@ To give it to someone else, send them `dist/ClipMonster-windows.zip`. They unzip
 | **Find clips tab** | Weight sliders and length rules. Clips update live as you move them. Clips you've edited by hand are kept. |
 | **Export tab** | Format, resolution, GPU encoding, captions, loudness and more. Then **Export N clips**. |
 | **Library** | Every exported clip with thumbnails. Double-click to play; right-click to show in Explorer. |
+| **Research** | What's trending on YouTube in the countries you pick, scored for how well each video will cut into clips. Keeps checking in the background. Send the best ones to the studio with a double-click. See [Research](#research). |
 
 ### How clips are found
 
@@ -74,6 +75,36 @@ One click sets everything for a style: **Shorts / TikTok / Reels**, **Vertical c
 | `Ctrl+E` | Export |
 | `Ctrl+O` | Open video files |
 | `Ctrl+,` | Settings |
+
+## Research
+
+The **Research** tab watches YouTube's most-popular chart for each region you choose (US, GB, CA and AU to start) and gives every video a **clip-ability** score out of 100.
+
+| Part | What it measures |
+|---|---|
+| **Momentum** (40%) | Views per hour. After the second check this is measured between checks, so you see what's taking off right now, not lifetime averages. Marked with ↑ in the table. |
+| **Most replayed peaks** (30%) | Reads the video's *Most replayed* graph, using the same signal the studio's clip finder uses, and looks for sharp standout moments. Their timestamps appear in the reasons. This runs for the best candidates each scan, or any video with **Check replays**. |
+| **Engagement** (12%) | Likes and comments per view. |
+| **Freshness** (12%) | Clips ride a video's wave for a day or two, then the score fades. |
+| **Captions** (6%) | Captions make better titles, burned-in captions and AI picks. |
+| **Material** (multiplier) | Length and category. A 48-minute gaming video has plenty to cut. A 3-minute music video has little, and reposts of it usually get copyright-claimed, so it can't score high however hot it is. |
+
+Parts that can't be measured, such as hidden like counts or a brand-new video with no replay graph yet, are left out rather than counted as zero. Live streams, premieres and Shorts are capped low, and the reasons say why.
+
+**Setup:** it needs a free YouTube Data API key. In the [Google Cloud console](https://console.cloud.google.com/apis/library/youtube.googleapis.com), enable *YouTube Data API v3* for a project and create an API key under *Credentials*. Paste it into the Research tab, or under **Settings → Research**, or set the `YOUTUBE_API_KEY` environment variable. Each region checked costs 1 unit of the 10,000-unit daily quota (per 50 videos), so four regions every 30 minutes uses about 2% of it. Replay checks go through yt-dlp and use no quota.
+
+New arrivals scoring at least your alert level (75 by default) are counted on the tab, as **🔥 Research (3 new)**, when you're on another tab. Videos you've sent to the studio are ticked, and **Hide sent** hides them. History and the last results are kept in `%APPDATA%\ClipMonster\research.json`, so the tab opens with your last results.
+
+From the command line:
+
+```
+ytclip research                          # your regions and settings
+ytclip research -r US,GB -c gaming -n 15  # top 15 gaming videos in the US and UK
+ytclip research --watch 30               # keep checking every 30 min, print new arrivals
+ytclip research --clip 3 --min-minutes 8 # cut the top 3 straight away with your settings
+ytclip research --json > trending.json
+ytclip research --list-categories
+```
 
 ## Output layout
 
@@ -149,11 +180,16 @@ python build.py
 
 This produces `dist/ClipMonster/` and `dist/ClipMonster-windows.zip`. During development, run the app with `python -m ytclip.gui.app` and the command line with `python -m ytclip`.
 
+Run the tests with `pip install -e .[test]` and then `pytest`. They need no network or API key.
+
 | Module | Role |
 |---|---|
 | `ytclip/engine.py` | Pipeline: open → measure (cached) → transcribe → find clips → export |
 | `ytclip/analyze.py` | Signals, scoring and clip picking |
 | `ytclip/ai.py` | Claude clip finder |
+| `ytclip/trending.py` | YouTube trending charts, replay checks, research history |
+| `ytclip/clipability.py` | Clip-ability score for trending videos |
+| `ytclip/research.py` | One research scan, shared by the Research tab and `ytclip research` |
 | `ytclip/transcribe.py` | Whisper transcription |
 | `ytclip/export.py`, `captions.py` | Reframing, captions, encoding |
 | `ytclip/gui/` | Desktop app (PySide6) |

@@ -7,6 +7,8 @@ import os
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
+from .trending import CATEGORIES
+
 APP_NAME = "ClipMonster"
 
 
@@ -92,6 +94,16 @@ class Settings:
     caption_words: int = 3
     caption_uppercase: bool = True
     title_overlay: bool = False
+    # Research
+    youtube_api_key: str = ""
+    research_regions: str = "US, GB, CA, AU"
+    research_category: str = ""
+    research_per_region: int = 50
+    research_min_minutes: float = 3.0
+    research_deep_count: int = 12
+    research_auto: bool = True
+    research_interval: int = 30
+    research_alert: int = 75
 
     # ------------------------------------------------------------ helpers
     @property
@@ -117,8 +129,9 @@ class Settings:
     def apply(self, overrides: dict) -> "Settings":
         known = {f.name for f in fields(self)}
         clean = {k: v for k, v in overrides.items() if k in known}
-        if isinstance(clean.get("ai_api_key"), str):
-            clean["ai_api_key"] = clean["ai_api_key"].strip()  # pasted keys often carry a stray space
+        for key in ("ai_api_key", "youtube_api_key"):
+            if isinstance(clean.get(key), str):
+                clean[key] = clean[key].strip()  # pasted keys often carry a stray space
         return replace(self, **clean)
 
     # ------------------------------------------------------------ persistence
@@ -204,6 +217,7 @@ class Field:
     hi: float = 100
     step: float = 1
     help: str = ""
+    placeholder: str = ""
 
 
 MODES = (("auto", "Smart signals"), ("ai", "AI picks (Claude)"), ("chapters", "YouTube chapters"))
@@ -264,7 +278,8 @@ SCHEMA: list[Field] = [
           help="Downloaded once on first use"),
     Field("whisper_language", "Language code (blank = detect)", "Transcription", "str"),
 
-    Field("ai_api_key", "Anthropic API key", "AI", "secret", help="Needed for the AI clip finder"),
+    Field("ai_api_key", "Anthropic API key", "AI", "secret", help="Needed for the AI clip finder",
+          placeholder="sk-ant-…"),
     Field("ai_model", "Claude model", "AI", "choice",
           choices=(("claude-opus-5-5", "Claude Opus 5.5 (best)"), ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
                    ("claude-haiku-5-5", "Claude Haiku 5.5 (cheapest)"))),
@@ -293,4 +308,20 @@ SCHEMA: list[Field] = [
     Field("caption_words", "Words on screen", "Captions", "int", lo=1, hi=10),
     Field("caption_uppercase", "UPPERCASE", "Captions", "bool"),
     Field("title_overlay", "Show clip title at top", "Captions", "bool"),
+
+    Field("youtube_api_key", "YouTube Data API key", "Research", "secret", placeholder="AIza…",
+          help="Free from the Google Cloud console. Each region checked uses 1 of 10,000 daily units"),
+    Field("research_regions", "Regions", "Research", "str",
+          help="Two-letter country codes, comma separated, e.g. US, GB, CA"),
+    Field("research_category", "Category", "Research", "choice", choices=tuple(CATEGORIES.items())),
+    Field("research_per_region", "Videos per region", "Research", "int", lo=10, hi=200, step=10,
+          help="YouTube's charts go up to 200; every 50 costs 1 quota unit"),
+    Field("research_min_minutes", "Skip videos shorter than (min)", "Research", "float", lo=0, hi=120, step=1,
+          help="Short videos have little to cut. 0 keeps everything"),
+    Field("research_deep_count", "Most-replayed checks per scan", "Research", "int", lo=0, hi=50,
+          help="The best candidates get their Most replayed graph read (a few seconds each, no quota)"),
+    Field("research_auto", "Keep checking while ClipMonster is open", "Research", "bool"),
+    Field("research_interval", "Check every (minutes)", "Research", "int", lo=10, hi=720, step=5),
+    Field("research_alert", "Highlight new videos scoring at least", "Research", "int", lo=0, hi=100,
+          help="New arrivals above this score are counted on the Research tab"),
 ]

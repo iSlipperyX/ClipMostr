@@ -1,0 +1,178 @@
+"""One research scan, shared by the Research tab and `ytclip research`:
+
+charts per region → merge → history (momentum) → quick score → most-replayed check on
+the best candidates → final score, best first.
+"""
+
+from __future__ import annotations
+
+import math
+import os
+import time
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from dataclasses import dataclass, field
+from typing import Callable
+
+from . import clipability
+from .settings import Settings, app_dir
+from .trending import (CATEGORIES, ChartUnavailable, DeepInfo, History, ResearchError, TrendingVideo, deep_check,
+                       fetch_chart, parse_regions)
+
+Log = Callable[[str], None]
+Progress = Callable[[str, "float | None"], None]
+
+
+class ScanCancelled(Exception):
+    pass
+
+
+@dataclass
+class ScanOptions:
+    api_key: str
+    regions: list[str]
+    category: str = ""
+    per_region: int = 50
+    min_minutes: float = 0.0
+    deep_count: int = 10
+    cookies: str | None = None
+
+    @classmethod
+    def from_settings(cls, s: Settings) -> "ScanOptions":
+        return cls(api_key=youtube_key(s), regions=parse_regions(s.research_regions) or ["US"],
+                   category=s.research_category, per_region=s.research_per_region,
+                   min_minutes=s.research_min_minutes, deep_count=s.research_deep_count,
+                   cookies=s.cookies_browser or None)
+
+    @property
+    def quota(self) -> int:
+        """YouTube API units one scan uses (deep checks go through yt-dlp and cost none)."""
+        return len(self.regions) * math.ceil(self.per_region / 50)
+
+
+@dataclass
+class ScanResult:
+    videos: list[TrendingVideo]
+    time: float
+    regions: list[str]
+    category: str = ""
+    problems: list[str] = field(default_factory=list)
+    quota: int = 0
+    first: bool = False  # nothing to compare with yet, so nothing counts as "new"
+
+    @property
+    def new(self) -> list[TrendingVideo]:
+        return [v for v in self.videos if v.new]
+
+
+def youtube_key(s: Settings) -> str:
+    return (s.youtube_api_key or os.environ.get("YOUTUBE_API_KEY", "")).strip()
+
+
+def history_path():
+    return app_dir() / "research.json"
+
+
+def scan(opts: ScanOptions, history: History, log: Log | None = None, progress: Progress | None = None,
+         cancelled: Callable[[], bool] | None = None,
+         fetch: Callable[..., list[TrendingVideo]] = fetch_chart,
+         deep: Callable[..., DeepInfo] = deep_check, now: float | None = None) -> ScanResult:
+    log = log or (lambda m: None)
+    cancelled = cancelled or (lambda: False)
+    now = now or time.time()
+
+    def step(msg: str, frac: float | None) -> None:
+        if cancelled():
+            raise ScanCancelled()
+        if progress:
+            progress(msg, frac)
+
+    if not opts.regions:
+        raise ResearchError("Pick at least one region to check.")
+    merged: dict[str, TrendingVideo] = {}
+    problems: list[str] = []
+    category = CATEGORIES.get(opts.category, "")
+    quota = 0
+    for i, region in enumerate(opts.regions):
+        step(f"Checking what's popular in {region}", i / (len(opts.regions) + 1))
+        try:
+            chart = fetch(opts.api_key, region, opts.category, opts.per_region)
+        except ChartUnavailable:
+            problems.append(f"{region} has no {category} chart." if opts.category
+                            else f"{region} has no chart (is it a YouTube region?).")
+            quota += 1
+            continue
+        except ResearchError as exc:
+            if not merged:  # a bad key or used-up quota fails every region the same way
+                raise
+            problems.append(f"{region}: {exc}")
+            continue
+        quota += math.ceil(max(1, len(chart)) / 50)
+        for v in chart:
+            if v.id in merged:
+                merged[v.id].regions.update(v.regions)
+                merged[v.id].views = max(merged[v.id].views, v.views)
+            else:
+                merged[v.id] = v
+
+    videos = [v for v in merged.values()
+              if v.live != "upcoming" and (not opts.min_minutes or v.duration >= opts.min_minutes * 60
+                                           or v.live == "live")]
+    if merged and len(videos) < len(merged):
+        log(f"Skipped {len(merged) - len(videos)} video(s) shorter than {opts.min_minutes:g} min or not yet live.")
+    first = not history.videos
+    for v in videos:
+        history.record(v, now)
+        v.new = v.new and not first
+        v.deep = history.cached_deep(v.id, now)
+    velocities = [v.velocity for v in videos]
+    for v in videos:
+        clipability.score(v, velocities, now)
+
+    # Most-replayed checks cost a few seconds each, so only the best candidates get one.
+    todo = [v for v in sorted(videos, key=lambda v: v.score, reverse=True)[:max(0, opts.deep_count)]
+            if v.deep is None and v.live == "none" and v.duration > 60]
+    if todo:
+        step(f"Checking most-replayed moments (0/{len(todo)})", len(opts.regions) / (len(opts.regions) + 1))
+        pool = ThreadPoolExecutor(max_workers=4)
+        jobs = {pool.submit(deep, v.url, opts.cookies, log): v for v in todo}
+        finished = False
+        done = 0
+        try:
+            pending = set(jobs)
+            while pending:
+                # Wake up regularly so Cancel works even while every check is still running.
+                ready, pending = wait(pending, timeout=0.25, return_when=FIRST_COMPLETED)
+                for job in ready:
+                    v = jobs[job]
+                    try:
+                        v.deep = job.result()
+                    except Exception as exc:  # a failed check only means less to go on
+                        v.deep = DeepInfo(checked=now, error=str(exc) or exc.__class__.__name__)
+                    history.store_deep(v.id, v.deep)
+                    done += 1
+                step(f"Checking most-replayed moments ({done}/{len(todo)})",
+                     (len(opts.regions) + done / len(todo)) / (len(opts.regions) + 1))
+            finished = True
+        finally:
+            # On cancel, don't sit waiting for checks still in flight; their results are dropped.
+            pool.shutdown(wait=finished, cancel_futures=True)
+        for v in videos:
+            clipability.score(v, velocities, now)
+
+    videos.sort(key=lambda v: (v.score, v.velocity), reverse=True)
+    result = ScanResult(videos, now, list(opts.regions), opts.category, problems, quota, first)
+    history.remember(videos, {"regions": result.regions, "category": opts.category, "problems": problems}, now)
+    history.save()
+    return result
+
+
+def last_result(history: History) -> ScanResult | None:
+    """The previous scan, so the Research tab opens with results instead of an empty table."""
+    if not history.last_scan.get("videos"):
+        return None
+    ls = history.last_scan
+    videos = history.last_videos()
+    for v in videos:
+        v.new = False
+    return ScanResult(videos, ls.get("time", 0.0), ls.get("regions", []), ls.get("category", ""),
+                      ls.get("problems", []))
