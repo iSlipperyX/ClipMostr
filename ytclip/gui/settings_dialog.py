@@ -10,9 +10,11 @@ from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QHBoxLay
 
 from .. import __version__, updater
 from ..settings import SCHEMA, Settings, app_dir
+from ..trending import KEY_HELP_URL
 from . import forms, theme
 
-GROUPS = ("General", "Download", "Clip finding", "Transcription", "AI", "Export", "Captions", "Layout", "Updates")
+GROUPS = ("General", "Download", "Clip finding", "Transcription", "AI", "Export", "Captions", "Layout",
+          "Research", "Updates")
 
 
 class SettingsDialog(QDialog):
@@ -54,6 +56,16 @@ class SettingsDialog(QDialog):
                               + "Updates download in the background, are checked against their SHA-256 checksum, "
                                 "and install when ClipMonster restarts. Your settings and session are kept.")
                 note.setWordWrap(True)
+                note.setProperty("muted", True)
+                page.layout().insertRow(0, note)
+            if group == "Research":
+                note = QLabel("The Research tab reads YouTube's most-popular chart for each region and scores "
+                              "every video on how well it will cut into clips. It needs a free YouTube Data API "
+                              f"key: <a href='{KEY_HELP_URL}' style='color:{theme.ACCENT_2}'>enable YouTube Data "
+                              "API v3</a> in a Google Cloud project, then create an API key under Credentials. "
+                              "You can also set the YOUTUBE_API_KEY environment variable instead.")
+                note.setWordWrap(True)
+                note.setOpenExternalLinks(True)
                 note.setProperty("muted", True)
                 page.layout().insertRow(0, note)
             if group == "Transcription":

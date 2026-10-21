@@ -28,6 +28,7 @@ from . import forms, theme
 from .layout_tab import LayoutTab
 from .library import Library, reveal
 from .player import Preview
+from .research import Research
 from .settings_dialog import SettingsDialog
 from .tasks import Task, TaskQueue
 from .timeline import Timeline
@@ -46,6 +47,7 @@ REDETECT_FIELDS = {"clip_count", "min_len", "max_len", "min_gap", "quality_floor
                    "pad_start", "pad_end", "keywords", "mode", "w_heatmap", "w_audio", "w_reactions",
                    "w_scenes", "w_keywords"}
 RESCORE_FIELDS = {"keywords", "w_heatmap", "w_audio", "w_reactions", "w_scenes", "w_keywords"}
+RESEARCH_TAB = "🔥  Research"
 SHORTCUTS = [
     ("Space", "Play / pause"), ("← / →", "Seek 5 s (Shift: 1 s)"), ("J / L", "Previous / next clip"),
     ("P", "Play selected clip"), ("I / O", "Set clip start / end at playhead"), ("N", "New clip at playhead"),
@@ -176,9 +178,23 @@ class MainWindow(QMainWindow):
         self.library.reopen.connect(lambda src: (self.add_sources([src]), self.tabs.setCurrentIndex(0)))
         self.tabs.addTab(self.library, "📚  Library")
         self.tabs.currentChanged.connect(lambda i: self.library.refresh() if i == 1 else None)
+        self.research = Research(lambda: self.settings, self._setting_changed)
+        self.research.send.connect(self._research_send)
+        self.research.notice.connect(self._notice)
+        self.research.log.connect(self._log)
+        self.research.hits_changed.connect(self._research_hits)
+        self.research_tab = self.tabs.addTab(self.research, RESEARCH_TAB)
         outer.addWidget(self.tabs, 1)
         outer.addWidget(self._build_footer())
         self.setCentralWidget(root)
+
+    def _research_send(self, urls: list[str]) -> None:
+        self.add_sources(urls)
+        self.tabs.setCurrentIndex(0)
+        self._notice(f"Sent {len(urls)} video{'s' if len(urls) != 1 else ''} from Research to the Studio.")
+
+    def _research_hits(self, n: int) -> None:
+        self.tabs.setTabText(self.research_tab, f"{RESEARCH_TAB}  ({n} new)" if n else RESEARCH_TAB)
 
     def _build_header(self) -> QHBoxLayout:
         row = QHBoxLayout()
@@ -1261,6 +1277,7 @@ class MainWindow(QMainWindow):
         self.settings.save()
         forms.refresh(self.tune_editors, new)
         forms.refresh(self.export_editors, new)
+        self.research.settings_changed()
         self.layout_tab.set_settings(new, refresh_editors=True)
         self._update_preview_frame()
         self._update_out_label()
@@ -1431,6 +1448,7 @@ class MainWindow(QMainWindow):
     def closeEvent(self, e) -> None:
         self._closing = True
         self.banner.shutdown()
+        self.research.shutdown()
         self._save_session()
         self.settings.save()
         self.qs.setValue("geometry", self.saveGeometry())

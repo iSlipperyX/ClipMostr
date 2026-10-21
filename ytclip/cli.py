@@ -33,7 +33,9 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(
         prog="ytclip",
         description="Download YouTube videos (or open local files) and cut them into their best clips.",
-        epilog='Example: ytclip "https://youtu.be/VIDEO" --preset "Shorts / TikTok / Reels"',
+        epilog='Example: ytclip "https://youtu.be/VIDEO" --preset "Shorts / TikTok / Reels"\n'
+           "Trending research: ytclip research --help",
+    formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("sources", nargs="*", help="video/playlist/channel URLs, video files or folders")
     p.add_argument("-a", "--batch-file", type=Path, help="text file with one URL or path per line")
@@ -179,7 +181,152 @@ def process(source: str, engine: Engine, dry_run: bool) -> None:
     console.print(f"[green]✓ {len(p.clips)} clips →[/] {escape(str(folder))}")
 
 
+def build_research_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="ytclip research",
+        description="See what's trending on YouTube by region and score how well each video will cut into clips.",
+        epilog="Example: ytclip research -r US,GB -c gaming --top 15   (needs a YouTube Data API key: "
+               "--api-key, the YOUTUBE_API_KEY variable, or Settings → Research in the app)",
+    )
+    p.add_argument("-r", "--regions", help="comma-separated country codes, e.g. US,GB,CA (default: your settings)")
+    p.add_argument("-c", "--category", help="category name or id, e.g. gaming, comedy, 20 (see --list-categories)")
+    p.add_argument("-n", "--top", type=int, default=20, help="how many videos to list (default 20)")
+    p.add_argument("--per-region", type=int, help="videos to read from each chart, up to 200")
+    p.add_argument("--min-minutes", type=float, help="skip videos shorter than this")
+    p.add_argument("--deep", type=int, help="how many top candidates get a most-replayed check (0 = none)")
+    p.add_argument("--watch", type=float, metavar="MINUTES",
+                   help="keep checking every MINUTES and print new arrivals (Ctrl+C to stop)")
+    p.add_argument("--clip", type=int, metavar="N", help="send the top N straight to the clipper with your settings")
+    p.add_argument("--json", action="store_true", help="print results as JSON")
+    p.add_argument("--api-key", help="YouTube Data API key (otherwise from settings or YOUTUBE_API_KEY)")
+    p.add_argument("--list-categories", action="store_true", help="show category names and ids and exit")
+    return p
+
+
+def _category_id(text: str) -> str:
+    from .trending import CATEGORIES
+
+    t = text.strip().lower()
+    if t in ("", "all", "any"):
+        return ""
+    if t in CATEGORIES:
+        return t
+    match = next((cid for cid, name in CATEGORIES.items() if cid and name.lower().startswith(t)), None)
+    if match is None:
+        raise SystemExit(f"Unknown category '{text}'. Try --list-categories.")
+    return match
+
+
+def _research_table(videos: list, title: str) -> Table:
+    from .clipability import age_text, compact
+
+    table = Table(title=title, show_edge=False, header_style="bold", title_justify="left")
+    for col in ("Score", "Video", "Trending in", "Views/h", "Length", "Posted", "Why"):
+        table.add_column(col, overflow="fold" if col in ("Video", "Why") else "ellipsis")
+    for v in videos:
+        colour = "green" if v.score >= 75 else "cyan" if v.score >= 55 else "yellow" if v.score >= 40 else "dim"
+        where = " ".join(f"{c}#{n}" for c, n in sorted(v.regions.items(), key=lambda kv: kv[1])[:3])
+        table.add_row(f"[bold {colour}]{v.score:.0f}[/]", f"{escape(v.title)}\n[dim]{escape(v.channel)} · {v.url}[/]",
+                      where, ("↑" if v.recent else "") + compact(v.velocity),
+                      stamp(v.duration) if v.live == "none" else v.live, age_text(v.age_hours()),
+                      escape(v.reasons[0]) if v.reasons else "")
+    return table
+
+
+def run_research(argv: list[str]) -> int:
+    import json
+    import time
+
+    from .research import ScanOptions, history_path, scan
+    from .trending import CATEGORIES, History, ResearchError, parse_regions
+
+    args = build_research_parser().parse_args(argv)
+    if args.list_categories:
+        for cid, name in CATEGORIES.items():
+            console.print(f"{cid or '-':>3}  {name}")
+        return 0
+    s = Settings.load()
+    opts = ScanOptions.from_settings(s)
+    if args.api_key:
+        opts.api_key = args.api_key.strip()
+    if args.regions:
+        opts.regions = parse_regions(args.regions)
+        if not opts.regions:
+            console.print("[red]--regions needs two-letter country codes, e.g. US,GB[/]")
+            return 2
+    if args.category is not None:
+        opts.category = _category_id(args.category)
+    if args.per_region:
+        opts.per_region = max(1, min(200, args.per_region))
+    if args.min_minutes is not None:
+        opts.min_minutes = args.min_minutes
+    if args.deep is not None:
+        opts.deep_count = max(0, args.deep)
+    if not opts.api_key:
+        console.print("[red]A YouTube Data API key is needed.[/] Get a free one: enable \"YouTube Data API v3\" "
+                      "in a Google Cloud project, create an API key, then pass --api-key, set YOUTUBE_API_KEY, "
+                      "or paste it in the app under Settings → Research.")
+        return 2
+
+    history = History(history_path())
+    log = lambda m: console.print(f"[dim]{escape(m)}[/]")  # noqa: E731
+    first = True
+    while True:
+        try:
+            with Progress(TextColumn("[cyan]{task.description}"), BarColumn(), TimeElapsedColumn(),
+                          console=console, transient=True, disable=args.json) as bar:
+                task = bar.add_task("Checking", total=None)
+                result = scan(opts, history, None if args.json else log,
+                              lambda m, f: bar.update(task, description=m, completed=f,
+                                                      total=1 if f is not None else None))
+        except ResearchError as exc:
+            console.print(f"[red]{escape(str(exc))}[/]")
+            if first:
+                return 1
+        except KeyboardInterrupt:
+            return 130 if first else 0
+        else:
+            for problem in result.problems:
+                log(problem)
+            top = result.videos[:max(1, args.top)]
+            if args.json:
+                keep = ("id", "url", "title", "channel", "score", "parts", "reasons", "moments", "regions",
+                        "views", "velocity", "recent", "duration", "published", "category", "new")
+                print(json.dumps([{k: (v.url if k == "url" else getattr(v, k)) for k in keep} for v in top], indent=1))
+            elif first:
+                console.print(_research_table(top, f"Clip-ability · {', '.join(result.regions)}"
+                                                   f"{' · ' + CATEGORIES[opts.category] if opts.category else ''}"))
+            else:
+                fresh = [v for v in result.new if v.score >= s.research_alert]
+                stamp_now = time.strftime("%H:%M")
+                if fresh:
+                    console.print(_research_table(fresh, f"{stamp_now} · {len(fresh)} new worth clipping"))
+                else:
+                    console.print(f"[dim]{stamp_now} · checked {len(result.videos)} videos, nothing new above "
+                                  f"{s.research_alert}[/]")
+            if args.clip and first:
+                engine = Engine(s, log=log)
+                for v in top[:args.clip]:
+                    console.rule(f"[bold]{escape(v.title)}")
+                    try:
+                        process(v.url, engine, dry_run=False)
+                        history.mark_sent(v.id)
+                    except Exception as exc:
+                        console.print(f"[red]✗ {escape(str(exc))}[/]")
+                history.save()
+        if not args.watch:
+            return 0
+        first = False
+        try:
+            time.sleep(max(1.0, args.watch) * 60)
+        except KeyboardInterrupt:
+            return 0
+
+
 def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["research"]:
+        return run_research(argv[1:])
     args = build_parser().parse_args(argv)
     from . import updater
 

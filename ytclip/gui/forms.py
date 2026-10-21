@@ -201,7 +201,7 @@ def make_editor(f: Field, value: Any, on_change: OnChange) -> Editor:
         w.setMinimumWidth(170)
         if f.kind == "secret":
             w.setEchoMode(QLineEdit.Password)
-            w.setPlaceholderText("sk-ant-…")
+            w.setPlaceholderText(f.placeholder or "Paste key")
         w.textChanged.connect(emit)
         editor = Editor(w, w.text, lambda v: w.setText(str(v)))
 
