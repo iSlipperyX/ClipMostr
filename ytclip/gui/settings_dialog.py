@@ -12,7 +12,7 @@ from .. import __version__, updater
 from ..settings import SCHEMA, Settings, app_dir
 from . import forms, theme
 
-GROUPS = ("General", "Download", "Clip finding", "Transcription", "AI", "Export", "Captions", "Updates")
+GROUPS = ("General", "Download", "Clip finding", "Transcription", "AI", "Export", "Captions", "Layout", "Updates")
 
 
 class SettingsDialog(QDialog):

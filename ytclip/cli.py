@@ -48,6 +48,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-f", "--format", dest="aspect", choices=[a for a, _ in ASPECTS], help="output framing")
     p.add_argument("--vertical", action="store_true", help="shortcut for --format vertical_blur")
     p.add_argument("--captions", action="store_true", help="burn in animated word-by-word captions")
+    p.add_argument("--top-text", metavar="TEXT", help='top banner text; {title} = clip title (e.g. "{title}")')
+    p.add_argument("--bottom-text", metavar="TEXT", help="bottom banner text, e.g. \"Follow for part 2\"")
+    p.add_argument("--stack", metavar="VIDEO", type=Path,
+                   help="stack a second video (gameplay, satisfying clips...) under each clip, 9:16")
     p.add_argument("--keywords", help="comma-separated words/phrases to boost")
     p.add_argument("-q", "--quality", type=int, help="max download height, e.g. 720")
     p.add_argument("--encoder", choices=["auto", "libx264", "h264_amf", "h264_nvenc", "h264_qsv"])
@@ -131,6 +135,14 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
         "fast_copy": True if args.fast else None,
         "keep_source": False if args.delete_source else None,
     }
+    if args.top_text is not None:
+        overrides |= {"banner_top": True, "banner_top_text": args.top_text}
+    if args.bottom_text is not None:
+        overrides |= {"banner_bottom": True, "banner_bottom_text": args.bottom_text}
+    if args.stack:
+        if not args.stack.is_file():
+            raise SystemExit(f"--stack: no such video: {args.stack}")
+        overrides |= {"stack_enabled": True, "stack_video": str(args.stack.resolve())}
     return s.apply({k: v for k, v in overrides.items() if v is not None})
 
 
