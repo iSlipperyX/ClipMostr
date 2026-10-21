@@ -20,7 +20,8 @@ from .. import __version__, layout, updater
 from ..analyze import SIGNAL_LABELS, Clip, clip_score
 from ..download import VIDEO_EXTS, expand_sources, is_url, needs_expansion
 from ..engine import Engine, Project
-from ..export import export_clip, output_size
+from ..export import export_clip
+from ..export import frame as export_frame
 from ..ffmpeg import MediaInfo
 from ..organize import stamp
 from ..settings import APP_NAME, SCHEMA, Settings, all_presets, app_dir, save_user_preset
@@ -381,6 +382,7 @@ class MainWindow(QMainWindow):
         self.side.addTab(self._build_tune_tab(), "Find clips")
         self.layout_tab = LayoutTab(self.settings, self._setting_changed)
         self.layout_tab.clipChanged.connect(self._save_session)
+        self.layout_tab.presetChosen.connect(self._apply_layout_preset)
         self.side.addTab(self.layout_tab, "Layout")
         self.side.addTab(self._build_export_tab(), "Export")
         box = _panel(self.side)
@@ -817,6 +819,8 @@ class MainWindow(QMainWindow):
     # ================================================================== editor
     def load_project(self, p: Project | None) -> None:
         self.current = p
+        self._update_preview_frame()  # an 'original' frame follows each video's own size
+        self._update_out_label()
         self.sel = -1
         self._play_until = None
         ready = p is not None and p.status in ("ready", "done", "exporting") and p.measurements is not None
@@ -1143,8 +1147,7 @@ class MainWindow(QMainWindow):
         self._save_timer.start()
         self.layout_tab.set_settings(self.settings)
         self._update_preview_frame()
-        if name == "output_dir":
-            self._update_out_label()
+        self._update_out_label()
         p = self._ready()
         if not p:
             return
@@ -1159,13 +1162,13 @@ class MainWindow(QMainWindow):
     def _update_preview_frame(self) -> None:
         """Match the preview's reframe box to what the export keeps, including a layout's clip area."""
         s = self.settings
-        if not layout.active(s):
-            self.preview.set_aspect(s.aspect)
-            return
         media = self.current.media if self.current and self.current.media else MediaInfo(width=1920, height=1080)
-        w, h = output_size(layout.frame_aspect(s), s.resolution, media)
+        aspect, w, h = export_frame(s, media)
+        if not layout.active(s):
+            self.preview.set_aspect(aspect)
+            return
         ratio = layout.crop_ratio(s, w, h)
-        self.preview.set_aspect(s.aspect if ratio else "original", ratio)
+        self.preview.set_aspect(aspect if ratio else "original", ratio)
 
     @staticmethod
     def _kept(p: Project) -> list[Clip]:
@@ -1289,6 +1292,19 @@ class MainWindow(QMainWindow):
             else:
                 self.timeline.update_data(p.signals, p.score, p.clips)
 
+    def _apply_layout_preset(self, name: str, values: dict) -> None:
+        """Swap in a top/bottom view. A stacked view needs a second video, so ask for one if there isn't one yet."""
+        stack_video = values.get("stack_video", self.settings.stack_video)
+        if values.get("stack_enabled") and not (stack_video and Path(stack_video).is_file()):
+            exts = " ".join(f"*{e}" for e in sorted(VIDEO_EXTS))
+            path, _ = QFileDialog.getOpenFileName(self, "Choose the video to stack (gameplay, satisfying clips…)",
+                                                  "", f"Videos ({exts})")
+            if path:
+                values["stack_video"] = path
+        self._apply_settings(self.settings.apply(values))
+        self._log(f"Applied layout '{name}'")
+        self._notice(f"Layout applied: {name}")
+
     def _open_settings(self) -> None:
         dlg = SettingsDialog(self.settings, self)
         if dlg.exec():
@@ -1302,7 +1318,11 @@ class MainWindow(QMainWindow):
         self.export_btn.setText(f"Export {n} clip{'s' if n != 1 else ''}" if p else "Export clips")
 
     def _update_out_label(self) -> None:
-        self.out_label.setText(f"Saving to: {self.settings.output_path}")
+        s = self.settings
+        media = self.current.media if self.current and self.current.media else MediaInfo(width=1920, height=1080)
+        _, w, h = export_frame(s, media)
+        size = f"{w}×{h}" + (" · TikTok-ready" if s.tiktok_ready else "")
+        self.out_label.setText(f"Output: {size}\nSaving to: {s.output_path}")
 
     def _open_output(self) -> None:
         p = self.current
