@@ -171,7 +171,7 @@ python release.py 1.2.0
 git push && git push --tags
 ```
 
-`release.py` bumps the version, commits and tags. Pushing the tag starts the **Release** workflow in GitHub Actions, which takes about 10 minutes. It builds the app on Windows and publishes `ClipMonster-windows.zip` and `SHA256SUMS.txt` as a GitHub Release, with notes generated from your commits. Every installed copy then offers the update. A tag with a suffix, such as `v1.3.0-beta.1`, becomes a pre-release, which only reaches people who opted into betas.
+`release.py` bumps the version, commits and tags. Pushing the tag starts the **Release** workflow in GitHub Actions, which takes about 10 minutes. It builds the app on Windows and publishes `ClipMonster-windows.zip` and `SHA256SUMS.txt` as a GitHub Release, with notes generated from your commits. To lead with your own notes, add `release-notes/v1.2.0.md` (named after the tag) before tagging. Every installed copy then offers the update. A tag with a suffix, such as `v1.3.0-beta.1`, becomes a pre-release, which only reaches people who opted into betas.
 
 Builds record which repository they came from, so they need no update configuration. Local builds read it from the git remote; releases built on GitHub get it from Actions.
 
