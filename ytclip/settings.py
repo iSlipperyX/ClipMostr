@@ -73,7 +73,7 @@ class Settings:
         "strong hooks, punchlines, surprising facts, hot takes, emotional peaks."
     )
     # Export
-    aspect: str = "original"
+    aspect: str = "vertical_blur"
     resolution: int = 1080
     encoder: str = "auto"
     video_quality: int = 20
@@ -175,7 +175,7 @@ class Settings:
 
 PRESETS: dict[str, dict] = {
     "Balanced highlights": {
-        "aspect": "original", "min_len": 20, "max_len": 60, "clip_count": 5, "burn_captions": False,
+        "aspect": "vertical_blur", "min_len": 20, "max_len": 60, "clip_count": 5, "burn_captions": False,
         "mode": "auto",
     },
     "Shorts / TikTok / Reels": {
@@ -187,16 +187,16 @@ PRESETS: dict[str, dict] = {
         "normalize_audio": True, "mode": "auto",
     },
     "Podcast moments": {
-        "aspect": "original", "min_len": 45, "max_len": 120, "clip_count": 5, "w_reactions": 0.35,
+        "aspect": "vertical_blur", "min_len": 45, "max_len": 120, "clip_count": 5, "w_reactions": 0.35,
         "w_scenes": 0.0, "burn_captions": False, "mode": "auto",
     },
     "Gaming / action": {
-        "aspect": "original", "min_len": 15, "max_len": 45, "clip_count": 8, "w_audio": 0.5,
+        "aspect": "vertical_blur", "min_len": 15, "max_len": 45, "clip_count": 8, "w_audio": 0.5,
         "w_scenes": 0.3, "mode": "auto",
     },
     "Square posts": {
         "aspect": "square", "min_len": 15, "max_len": 60, "clip_count": 5, "burn_captions": True,
-        "caption_position": "lower", "mode": "auto",
+        "caption_position": "lower", "mode": "auto", "tiktok_ready": False,  # 1:1 is for Instagram/X
     },
     "Stacked (gameplay below)": {
         "aspect": "vertical_crop", "min_len": 15, "max_len": 58, "clip_count": 6, "burn_captions": True,
@@ -208,9 +208,14 @@ PRESETS: dict[str, dict] = {
         "caption_position": "lower", "normalize_audio": True, "banner_top": True, "banner_bottom": True,
         "banner_mode": "bar", "stack_enabled": False, "title_overlay": False, "mode": "auto",
     },
-    "Split by chapters": {"mode": "chapters", "aspect": "original", "burn_captions": False},
+    "Split by chapters": {"mode": "chapters", "aspect": "vertical_blur", "burn_captions": False},
     "AI picks (Claude)": {"mode": "ai", "min_len": 20, "max_len": 75, "clip_count": 6},
 }
+# Every built-in that picks a format also says whether it's for TikTok, so choosing "Square posts" and
+# then another preset doesn't leave TikTok-ready output switched off.
+for _values in PRESETS.values():
+    if "aspect" in _values:
+        _values.setdefault("tiktok_ready", True)
 
 
 def user_presets_path() -> Path:
@@ -233,6 +238,96 @@ def save_user_preset(name: str, settings: Settings) -> None:
 
 def all_presets() -> dict[str, dict]:
     return PRESETS | load_user_presets()
+
+
+# ---------------------------------------------------------------- layout ("view") presets
+# Top/bottom views only: banners, the stacked video and their look. Picking one replaces the layout and
+# leaves clip finding, format and captions alone. Built-ins keep your chosen second video.
+
+LAYOUT_PRESETS: dict[str, dict] = {
+    "Clip only": {"banner_top": False, "banner_bottom": False, "stack_enabled": False},
+    "Title on top": {
+        "banner_top": True, "banner_top_text": "{title}", "banner_bottom": False, "stack_enabled": False,
+        "banner_mode": "bar",
+    },
+    "Title top + follow bottom": {
+        "banner_top": True, "banner_top_text": "{title}", "banner_bottom": True,
+        "banner_bottom_text": "Follow for part 2", "stack_enabled": False, "banner_mode": "bar",
+    },
+    "Text over video": {
+        "banner_top": True, "banner_top_text": "{title}", "banner_bottom": True,
+        "banner_bottom_text": "Follow for part 2", "stack_enabled": False, "banner_mode": "overlay",
+    },
+    "Meme (white bar)": {
+        "banner_top": True, "banner_top_text": "{title}", "banner_bottom": False, "stack_enabled": False,
+        "banner_mode": "bar", "banner_bg": "#FFFFFF", "banner_color": "#000000", "banner_uppercase": False,
+        "banner_font": "Archivo Black", "banner_top_size": 14,
+    },
+    "Gameplay below": {
+        "stack_enabled": True, "stack_position": "bottom", "stack_split": 0.5, "banner_top": False,
+        "banner_bottom": False,
+    },
+    "Gameplay below + title": {
+        "stack_enabled": True, "stack_position": "bottom", "stack_split": 0.5, "banner_top": True,
+        "banner_top_text": "{title}", "banner_bottom": False, "banner_mode": "bar",
+    },
+    "Gameplay above": {
+        "stack_enabled": True, "stack_position": "top", "stack_split": 0.5, "banner_top": False,
+        "banner_bottom": False,
+    },
+    "Big clip, small gameplay": {
+        "stack_enabled": True, "stack_position": "bottom", "stack_split": 0.65, "banner_top": False,
+        "banner_bottom": False,
+    },
+}
+
+
+def layout_keys() -> set[str]:
+    return {f.name for f in SCHEMA if f.group == "Layout"}
+
+
+def user_layouts_path() -> Path:
+    return app_dir() / "layout_presets.json"
+
+
+def load_user_layouts() -> dict[str, dict]:
+    try:
+        data = json.loads(user_layouts_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_user_layouts(layouts: dict[str, dict]) -> None:
+    user_layouts_path().write_text(json.dumps(layouts, indent=2), encoding="utf-8")
+
+
+def save_user_layout(name: str, settings: Settings) -> None:
+    """Save the whole current layout (including the second video and fonts) under `name`."""
+    layouts = load_user_layouts()
+    keys = layout_keys()
+    layouts[name] = {k: v for k, v in asdict(settings).items() if k in keys}
+    _write_user_layouts(layouts)
+
+
+def delete_user_layout(name: str) -> None:
+    layouts = load_user_layouts()
+    if layouts.pop(name, None) is not None:
+        _write_user_layouts(layouts)
+
+
+def all_layouts() -> dict[str, dict]:
+    return LAYOUT_PRESETS | load_user_layouts()
+
+
+def find_layout(name: str) -> str | None:
+    """Exact name first, then the first name starting with it (case-insensitive), for the CLI."""
+    layouts = all_layouts()
+    if name in layouts:
+        return name
+    low = name.lower()
+    return next((k for k in layouts if k.lower() == low), None) or \
+        next((k for k in layouts if k.lower().startswith(low)), None)
 
 
 # ---------------------------------------------------------------- schema for the GUI
@@ -321,7 +416,8 @@ SCHEMA: list[Field] = [
                    ("claude-haiku-5-5", "Claude Haiku 5.5 (cheapest)"))),
     Field("ai_instructions", "What makes a good clip?", "AI", "text"),
 
-    Field("aspect", "Format", "Export", "choice", choices=ASPECTS),
+    Field("aspect", "Format", "Export", "choice", choices=ASPECTS,
+          help="With TikTok-ready output on, Original and 1:1 are fitted into a 9:16 frame with a blurred fill"),
     Field("resolution", "Resolution (short side)", "Export", "choice",
           choices=((2160, "2160"), (1440, "1440"), (1080, "1080"), (720, "720"), (480, "480"))),
     Field("encoder", "Encoder", "Export", "choice", choices=ENCODERS),
@@ -332,9 +428,10 @@ SCHEMA: list[Field] = [
     Field("fast_copy", "Fast copy (no re-encode, original format only)", "Export", "bool"),
     Field("thumbnails", "Save thumbnails", "Export", "bool"),
     Field("write_srt", "Save .srt subtitles per clip", "Export", "bool"),
-    Field("tiktok_ready", "TikTok-ready output", "Export", "bool",
-          help="Keeps text out of TikTok's buttons and captions (in 9:16), caps frame rate at 60 and bitrate at "
-               "20 Mbps, uses 44.1 kHz audio, and warns about clips over 10 minutes or 287 MB"),
+    Field("tiktok_ready", "TikTok-ready output (1080×1920)", "Export", "bool",
+          help="Every clip comes out 9:16 at TikTok's size (1080×1920 at the 1080 setting, never above it, never "
+               "under 540×960), keeps text out of TikTok's buttons and captions, caps frame rate at 60 and bitrate "
+               "at 20 Mbps, uses 44.1 kHz audio, and warns about clips over 10 minutes or 287 MB"),
 
     Field("burn_captions", "Burn in animated captions", "Captions", "bool"),
     Field("caption_font", "Font", "Captions", "font"),

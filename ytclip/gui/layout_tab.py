@@ -9,14 +9,16 @@ from pathlib import Path
 
 from PySide6.QtCore import QObject, QRectF, Qt, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QPainter, QPen, QPixmap
-from PySide6.QtWidgets import (QCheckBox, QHBoxLayout, QLabel, QLineEdit, QPushButton, QScrollArea, QSizePolicy,
-                               QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout, QInputDialog, QLabel, QLineEdit, QMessageBox,
+                               QPushButton, QScrollArea, QSizePolicy, QVBoxLayout, QWidget)
 
 from .. import layout
 from ..analyze import Clip
-from ..export import export_clip, output_size
+from ..export import export_clip
+from ..export import frame as export_frame
 from ..ffmpeg import MediaInfo
-from ..settings import APP_NAME, SCHEMA, Settings
+from ..settings import (APP_NAME, LAYOUT_PRESETS, SCHEMA, Settings, all_layouts, delete_user_layout,
+                        load_user_layouts, save_user_layout)
 from . import forms, qt_fonts, theme
 
 
@@ -124,6 +126,7 @@ class LayoutTab(QWidget):
     """Edits the Layout settings (via on_change, like the other side tabs) and the selected clip's banner text."""
 
     clipChanged = Signal()  # the selected clip's banner text was edited
+    presetChosen = Signal(str, dict)  # a top/bottom view preset to apply: name, layout values
 
     def __init__(self, settings: Settings, on_change, parent=None):
         super().__init__(parent)
@@ -142,6 +145,24 @@ class LayoutTab(QWidget):
 
         lay = QVBoxLayout(self)
         lay.setContentsMargins(4, 8, 4, 4)
+
+        presets = QHBoxLayout()
+        self.preset = QComboBox()
+        self.preset.setToolTip("Top and bottom views: banners and stacked videos in one click")
+        self.preset.activated.connect(self._preset_picked)
+        save = QPushButton("Save…")
+        save.setToolTip("Save the current layout (banners, second video, fonts, colours) as your own preset")
+        save.clicked.connect(self._save_preset)
+        self.delete_btn = QPushButton("Delete")
+        self.delete_btn.setToolTip("Delete one of your saved layouts")
+        self.delete_btn.clicked.connect(self._delete_preset)
+        presets.addWidget(QLabel("View"))
+        presets.addWidget(self.preset, 1)
+        presets.addWidget(save)
+        presets.addWidget(self.delete_btn)
+        lay.addLayout(presets)
+        self.fill_presets()
+
         self.sketch = LayoutSketch()
         lay.addWidget(self.sketch, 3)
 
@@ -191,6 +212,50 @@ class LayoutTab(QWidget):
         self._refresh_clip_fields()
         self._redraw()
 
+    # ------------------------------------------------------------ presets
+    def fill_presets(self) -> None:
+        self.preset.clear()
+        self.preset.addItem("Pick a view…")
+        for name in LAYOUT_PRESETS:
+            self.preset.addItem(name, name)
+        mine = load_user_layouts()
+        if mine:
+            self.preset.insertSeparator(self.preset.count())
+            for name in mine:
+                self.preset.addItem(f"★ {name}", name)
+        self.delete_btn.setEnabled(bool(mine))
+
+    def _preset_picked(self, index: int) -> None:
+        name = self.preset.itemData(index)
+        self.preset.setCurrentIndex(0)
+        values = all_layouts().get(name) if name else None
+        if values is not None:
+            self.presetChosen.emit(name, dict(values))
+
+    def _save_preset(self) -> None:
+        name, ok = QInputDialog.getText(self, "Save layout", "Name for this top/bottom view:")
+        name = name.strip()
+        if not ok or not name:
+            return
+        if name in LAYOUT_PRESETS:
+            QMessageBox.information(self, APP_NAME, f"“{name}” is a built-in layout. Pick another name.")
+            return
+        if name in load_user_layouts() and QMessageBox.question(
+                self, APP_NAME, f"Replace your saved layout “{name}”?") != QMessageBox.Yes:
+            return
+        save_user_layout(name, self.settings)
+        self.fill_presets()
+        self.status.setText(f"Saved layout “{name}”")
+
+    def _delete_preset(self) -> None:
+        mine = list(load_user_layouts())
+        if not mine:
+            return
+        name, ok = QInputDialog.getItem(self, "Delete layout", "Delete which saved layout?", mine, 0, False)
+        if ok and name:
+            delete_user_layout(name)
+            self.fill_presets()
+
     # ------------------------------------------------------------ inputs from the main window
     def set_settings(self, s: Settings, refresh_editors: bool = False) -> None:
         self.settings = s
@@ -237,16 +302,12 @@ class LayoutTab(QWidget):
 
     def _frame_size(self) -> tuple[int, int]:
         media = self.media or MediaInfo(width=1920, height=1080)
-        return output_size(layout.frame_aspect(self.settings), self.settings.resolution, media)
+        _, w, h = export_frame(self.settings, media)
+        return w, h
 
     def _redraw(self) -> None:
         s = self.settings
         self._gen += 1  # any in-flight still is now out of date
-        if not layout.active(s):
-            self.sketch.show_plan(None, s, "", "")
-            self.status.setText("")
-            self.still_btn.setEnabled(False)
-            return
         w, h = self._frame_size()
         plan = layout.plan(s, w, h)
         title = self.clip.title if self.clip else "Your clip title"
@@ -264,7 +325,7 @@ class LayoutTab(QWidget):
         self._redraw()
 
     def render_still(self) -> None:
-        if self.clip is None or self.src is None or self.media is None or not layout.active(self.settings):
+        if self.clip is None or self.src is None or self.media is None:
             return
         self._gen += 1
         gen = self._gen
@@ -296,5 +357,5 @@ class LayoutTab(QWidget):
         if not pix.isNull():
             self.sketch.show_still(pix)
             w, h = self._frame_size()
-            self.status.setText(f"{w}×{h} · live")
+            self.status.setText(f"{w}×{h}")
             self.status.setToolTip("")

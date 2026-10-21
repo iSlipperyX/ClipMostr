@@ -29,6 +29,17 @@ def output_size(aspect: str, res: int, src: MediaInfo) -> tuple[int, int]:
     return even(w), even(h)
 
 
+def frame(s: Settings, src: MediaInfo) -> tuple[str, int, int]:
+    """(format, width, height) a clip is exported at. TikTok-ready output is 9:16 with the short side kept
+    between TikTok's minimum (540) and its native 1080, so the 1080 setting gives exactly 1080x1920."""
+    aspect = layout.frame_aspect(s)
+    res = s.resolution
+    if s.tiktok_ready:
+        res = min(max(res, TIKTOK_MIN_SHORT_SIDE), TIKTOK_SHORT_SIDE)
+    w, h = output_size(aspect, res, src)
+    return aspect, w, h
+
+
 def _video_filter(aspect: str, w: int, h: int, crop_x: float) -> str:
     cx = min(1.0, max(0.0, crop_x))
     if aspect == "vertical_crop":
@@ -94,7 +105,8 @@ def export_clip(src: Path, src_info: MediaInfo, dest: Path, clip: Clip, words: l
     """Render one clip. With `still_at` (seconds into the clip), write a single JPEG frame instead:
     the layout and captions are drawn exactly as the export would draw them."""
     dur = clip.length
-    reframed = s.aspect != "original"
+    aspect, w, h = frame(s, src_info)
+    reframed = aspect != "original"
     overlay = (s.burn_captions and words) or s.title_overlay
     use_layout = layout.active(s)
     if (s.fast_copy and not reframed and not overlay and not s.normalize_audio and not use_layout
@@ -105,9 +117,6 @@ def export_clip(src: Path, src_info: MediaInfo, dest: Path, clip: Clip, words: l
             progress(1.0)
         return
 
-    aspect = layout.frame_aspect(s) if use_layout else s.aspect
-    res = max(s.resolution, TIKTOK_MIN_SHORT_SIDE) if s.tiktok_ready else s.resolution
-    w, h = output_size(aspect, res, src_info)
     fps = min(src_info.fps or 30.0, TIKTOK_MAX_FPS) if s.tiktok_ready else (src_info.fps or 30.0)
     seek = clip.start if still_at is None else clip.start + min(max(0.0, still_at), max(0.0, dur - 0.05))
     length = dur if still_at is None else 0.5
@@ -143,7 +152,7 @@ def export_clip(src: Path, src_info: MediaInfo, dest: Path, clip: Clip, words: l
                 graph += f";[{last}]subtitles=banners.ass{_fontsdir([s.banner_font], tmp)}[lb]"
                 last = "lb"
         else:
-            graph, last = f"[0:v]{_video_filter(s.aspect, w, h, clip.crop_x)}[v0]", "v0"
+            graph, last = f"[0:v]{_video_filter(aspect, w, h, clip.crop_x)}[v0]", "v0"
 
         if overlay:
             # libass reads the file relative to ffmpeg's working directory, which
@@ -189,6 +198,7 @@ def _fontsdir(names: list[str], tmp: str) -> str:
 # phone app (4 GB from a computer). Bitrate above ~20 Mbps only grows the file; TikTok re-encodes anyway.
 TIKTOK_MAX_FPS = 60
 TIKTOK_MIN_SHORT_SIDE = 540
+TIKTOK_SHORT_SIDE = 1080
 TIKTOK_MAX_SECONDS = 10 * 60
 TIKTOK_APP_MAX_BYTES = 287_600_000
 

@@ -36,11 +36,13 @@ def test_stack_splits_content_and_respects_position():
 
 
 def test_stack_makes_original_vertical():
-    s = Settings(stack_enabled=True)
+    s = Settings(stack_enabled=True, aspect="original")
     assert layout.frame_aspect(s) == "vertical_crop"
     assert layout.fit_mode(s) == "crop"
-    assert layout.fit_mode(s.copy(aspect="vertical_blur")) == "blur"
-    assert layout.fit_mode(Settings(banner_top=True)) == "fit"
+    assert layout.fit_mode(s.copy(aspect="vertical_blur")) == "crop"  # stacked halves always fill
+    assert layout.fit_mode(Settings(banner_top=True, aspect="vertical_blur")) == "blur"
+    assert layout.fit_mode(s.copy(layout_fit="fit")) == "fit"
+    assert layout.fit_mode(Settings(banner_top=True, aspect="original", tiktok_ready=False)) == "fit"
 
 
 def test_banner_text_override_and_template():

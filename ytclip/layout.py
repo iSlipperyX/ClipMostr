@@ -95,9 +95,13 @@ def active(s: Settings) -> bool:
 
 
 def frame_aspect(s: Settings) -> str:
-    """Stacking two videos only makes sense in a tall frame, so 'original' becomes 9:16 there."""
+    """The frame clips are actually exported in. Stacking two videos only makes sense in a tall frame, so
+    'original' becomes 9:16 there; TikTok-ready output is always 9:16, so 'original' and 1:1 are fitted
+    into it with a blurred fill."""
     if s.stack_enabled and s.aspect == "original":
         return "vertical_crop"
+    if s.tiktok_ready and s.aspect not in ("vertical_blur", "vertical_crop"):
+        return "vertical_blur"
     return s.aspect
 
 
@@ -105,7 +109,7 @@ def fit_mode(s: Settings) -> str:
     if s.layout_fit != "auto":
         return s.layout_fit
     aspect = frame_aspect(s)
-    if aspect in ("vertical_crop", "square"):
+    if s.stack_enabled or aspect in ("vertical_crop", "square"):  # a stacked half looks best filled edge to edge
         return "crop"
     if aspect == "vertical_blur":
         return "blur"

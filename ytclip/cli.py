@@ -15,7 +15,7 @@ from . import __version__
 from .download import expand_sources
 from .engine import Engine, Project
 from .organize import stamp
-from .settings import ASPECTS, PRESETS, Settings, all_presets
+from .settings import ASPECTS, LAYOUT_PRESETS, PRESETS, Settings, all_layouts, all_presets, find_layout
 
 # Redirected output on Windows defaults to cp1252, which can't encode ✓, → or most
 # video titles; switch to UTF-8 so printing never crashes the run.
@@ -52,6 +52,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--captions", action="store_true", help="burn in animated word-by-word captions")
     p.add_argument("--top-text", metavar="TEXT", help='top banner text; {title} = clip title (e.g. "{title}")')
     p.add_argument("--bottom-text", metavar="TEXT", help="bottom banner text, e.g. \"Follow for part 2\"")
+    p.add_argument("-l", "--layout", metavar="NAME",
+                   help='top/bottom view preset, e.g. "Gameplay below" (see --list-layouts)')
+    p.add_argument("--list-layouts", action="store_true", help="show top/bottom view presets and exit")
+    p.add_argument("--no-tiktok", action="store_true",
+                   help="turn off TikTok-ready output (needed to keep the original frame or 1:1)")
     p.add_argument("--stack", metavar="VIDEO", type=Path,
                    help="stack a second video (gameplay, satisfying clips...) under each clip, 9:16")
     p.add_argument("--keywords", help="comma-separated words/phrases to boost")
@@ -127,6 +132,11 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
         if not match:
             raise SystemExit(f"Unknown preset '{args.preset}'. Try --list-presets.")
         s = s.apply(presets[match])
+    if args.layout:
+        name = find_layout(args.layout)
+        if not name:
+            raise SystemExit(f"Unknown layout '{args.layout}'. Try --list-layouts.")
+        s = s.apply(all_layouts()[name])
     overrides = {
         "output_dir": str(args.output) if args.output else None,
         "clip_count": args.clips, "min_len": args.min_len, "max_len": args.max_len, "mode": args.mode,
@@ -136,6 +146,7 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
         "burn_captions": True if args.captions else None,
         "fast_copy": True if args.fast else None,
         "keep_source": False if args.delete_source else None,
+        "tiktok_ready": False if args.no_tiktok else None,
     }
     if args.top_text is not None:
         overrides |= {"banner_top": True, "banner_top_text": args.top_text}
@@ -335,6 +346,11 @@ def main(argv: list[str] | None = None) -> int:
         console.print(f"[green]✓ {escape(finished[0])}[/]" if finished[1] else f"[yellow]⚠ {escape(finished[0])}[/]")
     if args.check_update or args.update:
         return run_update(install=args.update)
+    if args.list_layouts:
+        for name, values in all_layouts().items():
+            tag = "" if name in LAYOUT_PRESETS else " [dim](yours)[/]"
+            console.print(f"[bold]{escape(name)}[/]{tag}: {escape(', '.join(f'{k}={v}' for k, v in values.items()))}")
+        return 0
     if args.list_presets:
         for name, values in all_presets().items():
             tag = "" if name in PRESETS else " [dim](yours)[/]"
