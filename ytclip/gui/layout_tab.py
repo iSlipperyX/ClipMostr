@@ -17,7 +17,7 @@ from ..analyze import Clip
 from ..export import export_clip, output_size
 from ..ffmpeg import MediaInfo
 from ..settings import APP_NAME, SCHEMA, Settings
-from . import forms, theme
+from . import forms, qt_fonts, theme
 
 
 class LayoutSketch(QWidget):
@@ -31,6 +31,7 @@ class LayoutSketch(QWidget):
         self.settings: Settings | None = None
         self.top_text = self.bottom_text = ""
         self.still: QPixmap | None = None
+        self.show_safe = True
 
     def show_plan(self, plan: layout.Plan | None, s: Settings, top: str, bottom: str) -> None:
         self.plan, self.settings, self.top_text, self.bottom_text = plan, s, top, bottom
@@ -61,6 +62,8 @@ class LayoutSketch(QWidget):
         frame = QRectF(ox, oy, fw, fh)
         if self.still is not None:
             g.drawPixmap(frame, self.still, QRectF(self.still.rect()))
+            if p.safe is not None and self.show_safe:
+                self._safe_zone(g, frame, rect(p.safe))
         else:
             g.fillRect(frame, QColor(s.banner_bg))
             g.fillRect(rect(p.main), QColor("#2B2350"))
@@ -69,25 +72,39 @@ class LayoutSketch(QWidget):
                 g.fillRect(rect(p.second), QColor("#173A33"))
                 name = Path(s.stack_video).name if s.stack_video else "Choose a second video"
                 self._label(g, rect(p.second), name, QColor("#7FE0C4"))
-            for box, text in ((p.top, self.top_text), (p.bottom, self.bottom_text)):
-                if box is None:
+            for box, text_box, text in ((p.top, p.top_text, self.top_text),
+                                        (p.bottom, p.bottom_text, self.bottom_text)):
+                if box is None or text_box is None:
                     continue
-                r = rect(box)
                 if p.bars:
-                    g.fillRect(r, QColor(s.banner_bg))
+                    g.fillRect(rect(box), QColor(s.banner_bg))
                 else:
                     g.setPen(QPen(QColor(s.banner_color), 1, Qt.DashLine))
-                    g.drawRect(r.adjusted(1, 1, -1, -1))
-                shown = text.upper() if s.banner_uppercase else text
-                f = QFont(s.banner_font)
-                f.setBold(True)
-                f.setPixelSize(max(7, int(s.banner_font_size * min(p.width, p.height) / 1080 * k)))
-                g.setFont(f)
+                    g.drawRect(rect(text_box).adjusted(1, 1, -1, -1))
+                shown = (text.upper() if s.banner_uppercase else text) or "(no text)"
+                # Same line breaks and size as the export, so the sketch is a fair preview.
+                lines, size = layout.wrap(shown, int(s.banner_font_size * min(p.width, p.height) / 1080),
+                                          text_box, s.banner_uppercase, s.banner_font)
+                g.setFont(qt_fonts.qfont(s.banner_font, max(6, int(size * k))))
                 g.setPen(QColor(s.banner_color))
-                g.drawText(r.adjusted(4, 2, -4, -2), Qt.AlignCenter | Qt.TextWordWrap, shown or "(no text)")
+                g.drawText(rect(text_box), Qt.AlignCenter, "\n".join(lines))
+        if p.safe is not None and self.show_safe:
+            self._safe_zone(g, frame, rect(p.safe))
         g.setPen(QPen(QColor(theme.ACCENT_2), 2))
         g.setBrush(Qt.NoBrush)
         g.drawRect(frame)
+
+    @staticmethod
+    def _safe_zone(g: QPainter, frame: QRectF, safe: QRectF) -> None:
+        """Shade where TikTok draws its tabs, buttons and caption, and outline the safe area."""
+        shade = QColor(255, 80, 80, 46)
+        g.fillRect(QRectF(frame.left(), frame.top(), frame.width(), safe.top() - frame.top()), shade)
+        g.fillRect(QRectF(frame.left(), safe.bottom(), frame.width(), frame.bottom() - safe.bottom()), shade)
+        g.fillRect(QRectF(frame.left(), safe.top(), safe.left() - frame.left(), safe.height()), shade)
+        g.fillRect(QRectF(safe.right(), safe.top(), frame.right() - safe.right(), safe.height()), shade)
+        g.setPen(QPen(QColor(255, 120, 120, 200), 1, Qt.DashLine))
+        g.setBrush(Qt.NoBrush)
+        g.drawRect(safe)
 
     @staticmethod
     def _label(g: QPainter, r: QRectF, text: str, colour: QColor) -> None:
@@ -137,7 +154,12 @@ class LayoutTab(QWidget):
         self.still_btn.clicked.connect(self.render_still)
         self.status = QLabel("")
         self.status.setStyleSheet(f"color:{theme.MUTED}")
+        self.safe_box = QCheckBox("TikTok UI")
+        self.safe_box.setChecked(True)
+        self.safe_box.setToolTip("Shade the parts of the frame that TikTok's tabs, buttons and caption cover")
+        self.safe_box.toggled.connect(self._toggle_safe)
         row.addWidget(self.auto_still)
+        row.addWidget(self.safe_box)
         row.addWidget(self.status, 1)
         row.addWidget(self.still_btn)
         lay.addLayout(row)
@@ -209,6 +231,10 @@ class LayoutTab(QWidget):
         self.clipChanged.emit()
         self._redraw()
 
+    def _toggle_safe(self, on: bool) -> None:
+        self.sketch.show_safe = on
+        self.sketch.update()
+
     def _frame_size(self) -> tuple[int, int]:
         media = self.media or MediaInfo(width=1920, height=1080)
         return output_size(layout.frame_aspect(self.settings), self.settings.resolution, media)
@@ -270,5 +296,5 @@ class LayoutTab(QWidget):
         if not pix.isNull():
             self.sketch.show_still(pix)
             w, h = self._frame_size()
-            self.status.setText(f"{w}×{h} · real frame")
+            self.status.setText(f"{w}×{h} · live")
             self.status.setToolTip("")

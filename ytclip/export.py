@@ -6,7 +6,7 @@ import tempfile
 from pathlib import Path
 from typing import Callable
 
-from . import layout
+from . import fonts, layout
 from .analyze import Clip
 from .captions import build_ass
 from .ffmpeg import MediaInfo, encoder_args, ffmpeg_exe, pick_encoder, probe, run, run_with_progress
@@ -106,7 +106,9 @@ def export_clip(src: Path, src_info: MediaInfo, dest: Path, clip: Clip, words: l
         return
 
     aspect = layout.frame_aspect(s) if use_layout else s.aspect
-    w, h = output_size(aspect, s.resolution, src_info)
+    res = max(s.resolution, TIKTOK_MIN_SHORT_SIDE) if s.tiktok_ready else s.resolution
+    w, h = output_size(aspect, res, src_info)
+    fps = min(src_info.fps or 30.0, TIKTOK_MAX_FPS) if s.tiktok_ready else (src_info.fps or 30.0)
     seek = clip.start if still_at is None else clip.start + min(max(0.0, still_at), max(0.0, dur - 0.05))
     length = dur if still_at is None else 0.5
 
@@ -114,10 +116,12 @@ def export_clip(src: Path, src_info: MediaInfo, dest: Path, clip: Clip, words: l
         cmd = [ffmpeg_exe(), "-y", "-v", "error", "-ss", f"{seek:.3f}", "-i", str(src.resolve()),
                "-t", f"{length:.3f}"]
         second_audio = False
-        area = None
-        if use_layout:
+        area, side = None, 0
+        font_names = [s.caption_font] if overlay else []
+        if use_layout or layout.uses_safe_zone(s, w, h):
             p = layout.plan(s, w, h)
-            area = p.caption_area
+            area, side = p.caption_area, p.side_margin
+        if use_layout:
             has_second = p.second is not None
             if has_second:
                 second = Path(s.stack_video).expanduser() if s.stack_video else None
@@ -131,12 +135,12 @@ def export_clip(src: Path, src_info: MediaInfo, dest: Path, clip: Clip, words: l
                 cmd += ["-stream_loop", "-1", "-ss", f"{offset:.3f}", "-i", str(second.resolve()),
                         "-t", f"{length:.3f}"]
                 second_audio = info2.has_audio and s.stack_volume > 0 and src_info.has_audio
-            graph, last = layout_graph(p, src_info.fps or 30.0, length, clip.crop_x, s.banner_bg, has_second)
+            graph, last = layout_graph(p, fps, length, clip.crop_x, s.banner_bg, has_second)
             top = layout.banner_text(s.banner_top_text, clip.title, clip.top_text) if p.top else ""
             bottom = layout.banner_text(s.banner_bottom_text, clip.title, clip.bottom_text) if p.bottom else ""
             if top or bottom:
                 Path(tmp, "banners.ass").write_text(layout.banner_ass(p, s, top, bottom), encoding="utf-8")
-                graph += f";[{last}]subtitles=banners.ass[lb]"
+                graph += f";[{last}]subtitles=banners.ass{_fontsdir([s.banner_font], tmp)}[lb]"
                 last = "lb"
         else:
             graph, last = f"[0:v]{_video_filter(s.aspect, w, h, clip.crop_x)}[v0]", "v0"
@@ -145,10 +149,11 @@ def export_clip(src: Path, src_info: MediaInfo, dest: Path, clip: Clip, words: l
             # libass reads the file relative to ffmpeg's working directory, which
             # sidesteps Windows drive-letter escaping in filter arguments.
             Path(tmp, "captions.ass").write_text(
-                build_ass(words, seek, clip.end, w, h, s, clip.title, area), encoding="utf-8")
-            graph += f";[{last}]subtitles=captions.ass[vc]"
+                build_ass(words, seek, clip.end, w, h, s, clip.title, area, side), encoding="utf-8")
+            graph += f";[{last}]subtitles=captions.ass{_fontsdir(font_names, tmp)}[vc]"
             last = "vc"
-        graph += f";[{last}]format=yuv420p[vout]"
+        cap_fps = f"fps={TIKTOK_MAX_FPS}," if s.tiktok_ready and (src_info.fps or 0) > TIKTOK_MAX_FPS + 0.5 else ""
+        graph += f";[{last}]{cap_fps}format=yuv420p[vout]"
 
         if still_at is not None:
             cmd += ["-filter_complex", graph, "-map", "[vout]", "-frames:v", "1", "-q:v", "3", str(dest.resolve())]
@@ -164,11 +169,52 @@ def export_clip(src: Path, src_info: MediaInfo, dest: Path, clip: Clip, words: l
             else:
                 graph += f";[0:a]{','.join(af) or 'anull'}[aout]"
         cmd += ["-filter_complex", graph, "-map", "[vout]"]
-        cmd += encoder_args(pick_encoder(s.encoder), s.video_quality) + ["-pix_fmt", "yuv420p"]
+        encoder = pick_encoder(s.encoder)
+        cmd += encoder_args(encoder, s.video_quality) + ["-pix_fmt", "yuv420p"]
+        if s.tiktok_ready:
+            cmd += tiktok_rate_args(encoder)
         if src_info.has_audio:
-            cmd += ["-map", "[aout]", "-c:a", "aac", "-b:a", f"{s.audio_bitrate}k", "-ar", "48000"]
+            cmd += ["-map", "[aout]", "-c:a", "aac", "-b:a", f"{s.audio_bitrate}k",
+                    "-ar", "44100" if s.tiktok_ready else "48000"]
         cmd += ["-t", f"{dur:.3f}", "-movflags", "+faststart", str(dest.resolve())]
         run_with_progress(cmd, dur, progress, cwd=Path(tmp))
+
+
+def _fontsdir(names: list[str], tmp: str) -> str:
+    """subtitles= option pointing libass at the bundled fonts this render uses (copied into tmp/fonts)."""
+    return ":fontsdir=fonts" if fonts.stage(names, Path(tmp)) else ""
+
+
+# TikTok's upload limits (checked 2026-10): 23-60 fps, 540x960 minimum, 10 minutes, 287.6 MB from the
+# phone app (4 GB from a computer). Bitrate above ~20 Mbps only grows the file; TikTok re-encodes anyway.
+TIKTOK_MAX_FPS = 60
+TIKTOK_MIN_SHORT_SIDE = 540
+TIKTOK_MAX_SECONDS = 10 * 60
+TIKTOK_APP_MAX_BYTES = 287_600_000
+
+
+def tiktok_rate_args(encoder: str) -> list[str]:
+    """Cap the bitrate where the encoder's quality mode allows it (AMF's constant-QP and QSV's ICQ modes don't)."""
+    if encoder == "libx264":
+        return ["-maxrate", "20M", "-bufsize", "40M", "-profile:v", "high"]
+    if encoder == "h264_nvenc":
+        return ["-maxrate", "20M", "-bufsize", "40M"]
+    return []
+
+
+def tiktok_warnings(path: Path, duration: float) -> list[str]:
+    """Anything about a finished clip that TikTok would refuse or that needs uploading from a computer."""
+    out = []
+    if duration > TIKTOK_MAX_SECONDS:
+        out.append(f"{path.name} is {duration / 60:.1f} minutes; TikTok allows up to 10.")
+    try:
+        size = path.stat().st_size
+    except OSError:
+        size = 0
+    if size > TIKTOK_APP_MAX_BYTES:
+        out.append(f"{path.name} is {size / 1e6:.0f} MB; the TikTok phone app takes up to 287 MB, "
+                   "so upload it from a computer (up to 4 GB).")
+    return out
 
 
 def thumbnail(src: Path, dest: Path, at: float) -> None:

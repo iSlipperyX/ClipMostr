@@ -5,13 +5,15 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtGui import QColor, QFontDatabase
 from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QSlider, QSpinBox,
                                QWidget)
 
 from ..download import VIDEO_EXTS
+from ..fonts import BUNDLED
 from ..settings import Field, Settings
+from . import qt_fonts
 
 OnChange = Callable[[str, Any], None]
 
@@ -140,6 +142,35 @@ def make_editor(f: Field, value: Any, on_change: OnChange) -> Editor:
         btn.clicked.connect(choose)
         line.editingFinished.connect(emit)
         editor = Editor(box, line.text, lambda v: line.setText(str(v)))
+
+    elif f.kind == "font":
+        # Bundled fonts first, each drawn in itself; any installed font can be picked or typed below them.
+        w = QComboBox()
+        w.setEditable(True)
+        w.setInsertPolicy(QComboBox.NoInsert)
+        w.setMaxVisibleItems(18)
+        for name in BUNDLED:
+            w.addItem(name, name)
+            w.setItemData(w.count() - 1, qt_fonts.qfont(name, 15), Qt.FontRole)
+        w.insertSeparator(w.count())
+        for family in QFontDatabase.families():
+            if family not in BUNDLED and not QFontDatabase.isPrivateFamily(family):
+                w.addItem(family, family)
+
+        def set_font(v: Any) -> None:
+            w.blockSignals(True)
+            i = w.findText(str(v))
+            if i >= 0:
+                w.setCurrentIndex(i)
+            else:
+                w.setEditText(str(v))
+            w.blockSignals(False)
+
+        set_font(value)
+        w.currentTextChanged.connect(emit)
+        editor = Editor(w, lambda: w.currentText().strip(), set_font)
+        if not f.help:
+            editor.widget.setToolTip("Fonts at the top ship with ClipMonster and look the same on every PC")
 
     elif f.kind == "color":
         w = QPushButton()

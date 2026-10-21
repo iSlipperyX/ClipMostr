@@ -8,6 +8,7 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
+from . import fonts
 from .captions import _ass_colour, _escape
 from .settings import Settings
 
@@ -42,6 +43,9 @@ class Plan:
     bottom: Box | None = None
     bars: bool = True  # False = banner text sits on top of the video with no bar behind it
     fit: str = "crop"  # how the clip fills `main`: crop | blur | fit
+    top_text: Box | None = None  # where each banner's words go (inside the safe zone when there is one)
+    bottom_text: Box | None = None
+    safe: Box | None = None  # the part of the frame TikTok's buttons and captions don't cover
 
     @property
     def caption_area(self) -> tuple[int, int, int]:
@@ -49,7 +53,37 @@ class Plan:
         mid = self.main.cy
         if self.second is not None:
             mid = self.main.bottom if self.second.y >= self.main.bottom else self.main.y
-        return self.main.y, self.main.bottom, mid
+        top, bottom = self.main.y, self.main.bottom
+        if self.safe is not None:
+            top, bottom = max(top, self.safe.y), min(bottom, self.safe.bottom)
+        if not self.bars:  # banner words drawn over the video: keep captions off them
+            if self.top_text is not None:
+                top = max(top, self.top_text.bottom)
+            if self.bottom_text is not None:
+                bottom = min(bottom, self.bottom_text.y)
+        mid = min(max(mid, top), bottom)
+        return top, bottom, mid
+
+    @property
+    def side_margin(self) -> int:
+        return self.safe.x if self.safe is not None else 0
+
+
+# TikTok's own interface over a 1080x1920 video: the Following / For You tabs on top, the caption,
+# username and sound line at the bottom, and the like/comment/share buttons down the right side.
+TIKTOK_SAFE = {"top": 131 / 1920, "bottom": 367 / 1920, "left": 120 / 1080, "right": 120 / 1080}
+
+
+def safe_box(width: int, height: int) -> Box:
+    left = _even(width * TIKTOK_SAFE["left"])
+    right = _even(width * TIKTOK_SAFE["right"])
+    top = _even(height * TIKTOK_SAFE["top"])
+    bottom = _even(height * TIKTOK_SAFE["bottom"])
+    return Box(left, top, width - left - right, height - top - bottom)
+
+
+def uses_safe_zone(s: Settings, width: int, height: int) -> bool:
+    return s.tiktok_ready and height > width
 
 
 def _even(v: float) -> int:
@@ -79,15 +113,37 @@ def fit_mode(s: Settings) -> str:
 
 
 def plan(s: Settings, width: int, height: int) -> Plan:
+    """Lay out the frame. With TikTok-ready output in a tall frame, banner words are kept inside the safe
+    zone: the top bar grows if the tabs would cover its text, and the bottom bar sits just above TikTok's
+    caption area and extends down behind it, so no video is hidden under the interface."""
     bars = s.banner_mode == "bar"
+    safe = safe_box(width, height) if uses_safe_zone(s, width, height) else None
     th = _even(height * s.banner_top_size / 100) if s.banner_top else 0
     bh = _even(height * s.banner_bottom_size / 100) if s.banner_bottom else 0
-    top = Box(0, 0, width, th) if th else None
-    bottom = Box(0, height - bh, width, bh) if bh else None
+    tx, tw = (safe.x, safe.w) if safe else (0, width)
 
-    y0, y1 = (th, height - bh) if bars else (0, height)
+    top = top_text = bottom = bottom_text = None
+    if th:
+        if safe is None:
+            top = top_text = Box(0, 0, width, th)
+        elif bars:  # the bar also covers TikTok's tabs, and its words sit just below them
+            top, top_text = Box(0, 0, width, safe.y + th), Box(tx, safe.y, tw, th)
+        else:
+            top = top_text = Box(tx, safe.y, tw, th)
+    if bh:
+        if safe is None:
+            bottom = bottom_text = Box(0, height - bh, width, bh)
+        elif bars:
+            below = height - safe.bottom
+            bottom, bottom_text = Box(0, height - bh - below, width, bh + below), Box(tx, safe.bottom - bh, tw, bh)
+        else:
+            bottom = bottom_text = Box(tx, safe.bottom - bh, tw, bh)
+
+    y0 = top.bottom if bars and top else 0
+    y1 = bottom.y if bars and bottom else height
     content = max(2, y1 - y0)
-    p = Plan(width, height, Box(0, y0, width, content), top=top, bottom=bottom, bars=bars, fit=fit_mode(s))
+    p = Plan(width, height, Box(0, y0, width, content), top=top, bottom=bottom, bars=bars, fit=fit_mode(s),
+             top_text=top_text, bottom_text=bottom_text, safe=safe)
     if s.stack_enabled:
         main_h = _even(content * min(0.85, max(0.15, s.stack_split)))
         second_h = content - main_h
@@ -120,7 +176,7 @@ def banner_text(template: str, title: str, override: str | None = None) -> str:
         return template.strip()  # a stray brace in the user's text: show it as typed
 
 
-def wrap(text: str, size: int, box: Box, uppercase: bool) -> tuple[list[str], int]:
+def wrap(text: str, size: int, box: Box, uppercase: bool, font: str = "") -> tuple[list[str], int]:
     """Break text into lines and shrink the font until the block fits the box.
 
     libass can't wrap into a box of our choosing when text is positioned with \\pos, so lines are
@@ -128,24 +184,41 @@ def wrap(text: str, size: int, box: Box, uppercase: bool) -> tuple[list[str], in
     words = text.split()
     if not words:
         return [], size
-    glyph = 0.68 if uppercase else 0.58
+    glyph = fonts.glyph_width(font, uppercase) * 1.05  # a little slack for wide letters and spaces
     max_w, max_h = box.w * 0.9, box.h * 0.84
     while True:
         per_line = max(1, int(max_w / (size * glyph)))
-        lines: list[str] = []
-        cur = ""
-        for w in words:
-            cand = f"{cur} {w}".strip()
-            if cur and len(cand) > per_line:
-                lines.append(cur)
-                cur = w
-            else:
-                cur = cand
-        lines.append(cur)
+        lines = _greedy(words, per_line)
         fits = len(lines) * size * 1.15 <= max_h and max(len(ln) for ln in lines) <= per_line
         if fits or size <= 14:
-            return lines, size
+            return _balance(words, lines), size
         size = int(size * 0.92)
+
+
+def _greedy(words: list[str], per_line: int) -> list[str]:
+    lines: list[str] = []
+    cur = ""
+    for w in words:
+        cand = f"{cur} {w}".strip()
+        if cur and len(cand) > per_line:
+            lines.append(cur)
+            cur = w
+        else:
+            cur = cand
+    return lines + [cur]
+
+
+def _balance(words: list[str], lines: list[str]) -> list[str]:
+    """Same number of lines with the longest one as short as possible, so "PART / 2" doesn't dangle."""
+    n = len(lines)
+    if n < 2:
+        return lines
+    width = max(len(w) for w in words)
+    for target in range(max(width, len(" ".join(words)) // n), max(len(ln) for ln in lines) + 1):
+        even = _greedy(words, target)
+        if len(even) == n:
+            return even
+    return lines
 
 
 def second_offset(clip_start: float, clip_len: float, second_duration: float, mode: str, fixed: float) -> float:
@@ -171,18 +244,18 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Banner,{s.banner_font},{int(s.banner_font_size * scale)},{_ass_colour(s.banner_color)},&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{outline},{shadow},5,0,0,0,1
+Style: Banner,{s.banner_font},{int(s.banner_font_size * scale)},{_ass_colour(s.banner_color)},&H000000FF,&H00000000,&H80000000,{fonts.ass_bold(s.banner_font)},0,0,0,100,100,0,0,1,{outline},{shadow},5,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     events = []
-    for box, text in ((p.top, top_text), (p.bottom, bottom_text)):
+    for box, text in ((p.top_text, top_text), (p.bottom_text, bottom_text)):
         if box is None or not text:
             continue
         if s.banner_uppercase:
             text = text.upper()
-        lines, size = wrap(_escape(text), int(s.banner_font_size * scale), box, s.banner_uppercase)
+        lines, size = wrap(_escape(text), int(s.banner_font_size * scale), box, s.banner_uppercase, s.banner_font)
         body = "\\N".join(lines)
         events.append(f"Dialogue: 2,0:00:00.00,9:59:59.00,Banner,,0,0,0,,{{\\an5\\pos({box.cx},{box.cy})\\fs{size}}}{body}")
     return header + "\n".join(events) + "\n"

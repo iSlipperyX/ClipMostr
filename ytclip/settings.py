@@ -81,9 +81,10 @@ class Settings:
     fast_copy: bool = False
     thumbnails: bool = True
     write_srt: bool = True
+    tiktok_ready: bool = True
     # Captions
     burn_captions: bool = False
-    caption_font: str = "Arial Black"
+    caption_font: str = "Montserrat Black"
     caption_size: int = 70
     caption_color: str = "#FFFFFF"
     caption_highlight: str = "#FFD400"
@@ -95,15 +96,15 @@ class Settings:
     # Layout (banners and stacked video)
     banner_top: bool = False
     banner_top_text: str = "{title}"
-    banner_top_size: int = 14
+    banner_top_size: int = 10
     banner_bottom: bool = False
     banner_bottom_text: str = "Follow for part 2"
-    banner_bottom_size: int = 10
+    banner_bottom_size: int = 8
     banner_mode: str = "bar"
     banner_bg: str = "#000000"
     banner_color: str = "#FFFFFF"
-    banner_font: str = "Arial Black"
-    banner_font_size: int = 72
+    banner_font: str = "TikTok Sans Black"
+    banner_font_size: int = 96
     banner_uppercase: bool = True
     stack_enabled: bool = False
     stack_video: str = ""
@@ -229,7 +230,7 @@ class Field:
     name: str
     label: str
     group: str
-    kind: str  # bool | int | float | str | choice | path | file | color | secret | text
+    kind: str  # bool | int | float | str | choice | path | file | font | color | secret | text
     choices: tuple = ()
     lo: float = 0
     hi: float = 100
@@ -316,9 +317,12 @@ SCHEMA: list[Field] = [
     Field("fast_copy", "Fast copy (no re-encode, original format only)", "Export", "bool"),
     Field("thumbnails", "Save thumbnails", "Export", "bool"),
     Field("write_srt", "Save .srt subtitles per clip", "Export", "bool"),
+    Field("tiktok_ready", "TikTok-ready output", "Export", "bool",
+          help="Keeps text out of TikTok's buttons and captions (in 9:16), caps frame rate at 60 and bitrate at "
+               "20 Mbps, uses 44.1 kHz audio, and warns about clips over 10 minutes or 287 MB"),
 
     Field("burn_captions", "Burn in animated captions", "Captions", "bool"),
-    Field("caption_font", "Font", "Captions", "str"),
+    Field("caption_font", "Font", "Captions", "font"),
     Field("caption_size", "Size", "Captions", "int", lo=20, hi=200),
     Field("caption_color", "Text colour", "Captions", "color"),
     Field("caption_highlight", "Active word colour", "Captions", "color"),
@@ -332,14 +336,17 @@ SCHEMA: list[Field] = [
     Field("banner_top", "Top banner", "Layout", "bool", help="A bar of text above the video"),
     Field("banner_top_text", "Top text", "Layout", "str",
           help="{title} is replaced with the clip title. Each clip can override this in the Layout tab"),
-    Field("banner_top_size", "Top banner height (%)", "Layout", "int", lo=4, hi=35),
+    Field("banner_top_size", "Top banner height (%)", "Layout", "int", lo=4, hi=35,
+          help="Height of the text area. With TikTok-ready output the bar also covers TikTok's tabs above it"),
     Field("banner_bottom", "Bottom banner", "Layout", "bool", help="A bar of text below the video"),
     Field("banner_bottom_text", "Bottom text", "Layout", "str", help="{title} is replaced with the clip title"),
-    Field("banner_bottom_size", "Bottom banner height (%)", "Layout", "int", lo=4, hi=35),
+    Field("banner_bottom_size", "Bottom banner height (%)", "Layout", "int", lo=4, hi=35,
+          help="Height of the text area. With TikTok-ready output the bar sits above TikTok's caption and "
+               "fills the strip behind it, so no video is hidden. Pick 'Text over the video' to keep that video"),
     Field("banner_mode", "Banner style", "Layout", "choice", choices=BANNER_MODES),
     Field("banner_bg", "Banner colour", "Layout", "color"),
     Field("banner_color", "Banner text colour", "Layout", "color"),
-    Field("banner_font", "Banner font", "Layout", "str"),
+    Field("banner_font", "Banner font", "Layout", "font"),
     Field("banner_font_size", "Banner text size", "Layout", "int", lo=20, hi=200,
           help="Largest size; long text shrinks to fit the banner"),
     Field("banner_uppercase", "Banner UPPERCASE", "Layout", "bool"),

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from . import fonts
 from .settings import Settings
 from .subtitles import Word, words_between
 
@@ -41,9 +42,9 @@ def _groups(words: list[Word], size: int) -> list[list[Word]]:
 
 
 def build_ass(words: list[Word], clip_start: float, clip_end: float, width: int, height: int,
-              s: Settings, title: str = "", area: tuple[int, int, int] | None = None) -> str:
-    """`area` is (top, bottom, middle) of the part of the frame showing the clip, when a layout
-    with banners or a stacked video leaves it less than the whole frame."""
+              s: Settings, title: str = "", area: tuple[int, int, int] | None = None, side: int = 0) -> str:
+    """`area` is (top, bottom, middle) of the part of the frame captions may use, when a layout or
+    TikTok's safe zone leaves less than the whole frame; `side` is the minimum left/right margin."""
     scale = min(width, height) / 1080
     size = int(s.caption_size * scale)
     vertical = height > width
@@ -65,6 +66,8 @@ def build_ass(words: list[Word], clip_start: float, clip_end: float, width: int,
         }.get(s.caption_position, (2, height - bottom + int(span * 0.1)))
         title_margin = top + int(span * 0.05)
 
+    bold = fonts.ass_bold(s.caption_font)
+    lr = max(int(60 * scale), side)
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {width}
@@ -74,8 +77,8 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Cap,{s.caption_font},{size},{_ass_colour(s.caption_color)},&H000000FF,&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{max(0, int(s.caption_outline * scale))},{int(2 * scale)},{align},{int(60 * scale)},{int(60 * scale)},{margin_v},1
-Style: Title,{s.caption_font},{int(size * 0.8)},&H00FFFFFF,&H000000FF,&H00000000,&HC0000000,-1,0,0,0,100,100,0,0,3,{int(14 * scale)},0,8,{int(60 * scale)},{int(60 * scale)},{title_margin},1
+Style: Cap,{s.caption_font},{size},{_ass_colour(s.caption_color)},&H000000FF,&H00000000,&H80000000,{bold},0,0,0,100,100,0,0,1,{max(0, int(s.caption_outline * scale))},{int(2 * scale)},{align},{lr},{lr},{margin_v},1
+Style: Title,{s.caption_font},{int(size * 0.8)},&H00FFFFFF,&H000000FF,&H00000000,&HC0000000,{bold},0,0,0,100,100,0,0,3,{int(14 * scale)},0,8,{lr},{lr},{title_margin},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

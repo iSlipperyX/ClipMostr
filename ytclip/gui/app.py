@@ -60,7 +60,7 @@ def main() -> int:
     from PySide6.QtWidgets import QApplication
 
     from ..settings import APP_NAME
-    from . import theme
+    from . import qt_fonts, theme
     from .main_window import MainWindow
 
     if os.name == "nt":
@@ -77,6 +77,7 @@ def main() -> int:
     app.setOrganizationName(APP_NAME)
     app.setWindowIcon(theme.app_icon())
     theme.apply(app)
+    qt_fonts.register()  # bundled fonts, for the font picker and layout sketch
 
     win = MainWindow()
     win.show()

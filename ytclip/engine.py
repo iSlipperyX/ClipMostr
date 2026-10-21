@@ -13,7 +13,7 @@ from . import transcribe as whisper
 from .analyze import (SIGNAL_LABELS, Clip, Measurements, breathing_room, build_signals, chapter_clips, clip_score,
                       combine, fit_to_sentences, loudness_db, pick_clips, quiet_frames, snap)
 from .download import Video, download, is_url, local_video
-from .export import export_clip, thumbnail
+from .export import export_clip, thumbnail, tiktok_warnings
 from .ffmpeg import MediaInfo, probe
 from .organize import clip_filename, video_dir, write_index
 from .scenes import detect_scenes
@@ -257,6 +257,9 @@ class Engine:
             label = f"Exporting clip {i}/{len(clips)}"
             export_clip(v.path, media, folder / name, clip, p.words, self.s,
                         lambda f, i=i: self.progress(label, (i - 1 + f) / len(clips)))
+            if self.s.tiktok_ready:
+                for warning in tiktok_warnings(folder / name, clip.length):
+                    self.log(f"TikTok: {warning}")
             if self.s.thumbnails:
                 thumbnail(v.path, thumbs / f"{i:02d}.jpg", clip.start + clip.length / 2)
             if self.s.write_srt and p.words:
