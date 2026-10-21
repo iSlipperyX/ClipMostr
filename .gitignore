@@ -1,0 +1,17 @@
+# Build output
+dist/
+build/
+*.spec.bak
+packaging/clipmonster.ico
+ytclip/_build_info.py
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# Local clips and caches (in case the output folder is pointed here)
+clips/
+.downloads/

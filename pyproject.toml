@@ -1,0 +1,35 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ytclip"
+dynamic = ["version"]
+description = "ClipMonster: download YouTube videos and automatically cut them into their most interesting clips."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "yt-dlp[default]>=2025.11.12",
+    "imageio-ffmpeg>=0.5",
+    "numpy>=1.24",
+    "rich>=13",
+    "PySide6-Essentials>=6.7",
+    "PySide6-Addons>=6.7",
+]
+
+[project.optional-dependencies]
+ai = ["anthropic>=1.0"]
+whisper = ["faster-whisper>=1.0"]
+build = ["pyinstaller>=6.10"]
+
+[project.scripts]
+ytclip = "ytclip.cli:main"
+
+[project.gui-scripts]
+clipmonster = "ytclip.gui.app:main"
+
+[tool.setuptools]
+packages = ["ytclip", "ytclip.gui"]
+
+[tool.setuptools.dynamic]
+version = { attr = "ytclip.__version__" }  # single source of truth; release.py bumps it
