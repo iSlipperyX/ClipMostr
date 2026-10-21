@@ -13,8 +13,8 @@ from ..settings import SCHEMA, Settings, app_dir
 from ..trending import KEY_HELP_URL
 from . import forms, theme
 
-GROUPS = ("General", "Download", "Clip finding", "Transcription", "AI", "Export", "Captions", "Research",
-          "Updates")
+GROUPS = ("General", "Download", "Clip finding", "Transcription", "AI", "Export", "Captions", "Layout",
+          "Research", "Updates")
 
 
 class SettingsDialog(QDialog):

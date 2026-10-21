@@ -57,6 +57,7 @@ class Preview(QGraphicsView):
         self.player.mediaStatusChanged.connect(self._media_status)
 
         self.aspect = "original"
+        self.ratio: float | None = None
         self.crop_x = 0.5
         self._dragging = False
         self._layout_overlay()
@@ -93,9 +94,15 @@ class Preview(QGraphicsView):
             self._layout_overlay()
 
     # ------------------------------------------------------------ overlay
-    def set_aspect(self, aspect: str) -> None:
+    def set_aspect(self, aspect: str, ratio: float | None = None) -> None:
+        """`ratio` overrides the kept width/height, e.g. for the clip's half of a stacked layout."""
         self.aspect = aspect
+        self.ratio = ratio
         self._layout_overlay()
+
+    @property
+    def _ratio(self) -> float | None:
+        return self.ratio if self.ratio is not None else FRAME_RATIOS.get(self.aspect)
 
     def set_crop(self, x: float) -> None:
         self.crop_x = min(1.0, max(0.0, x))
@@ -109,7 +116,7 @@ class Preview(QGraphicsView):
         self.scene_.setSceneRect(vr)
         pr = self.placeholder.boundingRect()
         self.placeholder.setPos(vr.center().x() - pr.width() / 2, vr.center().y() - pr.height() / 2)
-        ratio = FRAME_RATIOS.get(self.aspect)
+        ratio = self._ratio
         show = ratio is not None and not self.placeholder.isVisible()
         for item in (self.mask_l, self.mask_r, self.frame):
             item.setVisible(show)
@@ -131,7 +138,7 @@ class Preview(QGraphicsView):
 
     def _crop_from(self, view_x: float) -> None:
         vr = self._video_rect()
-        ratio = FRAME_RATIOS.get(self.aspect)
+        ratio = self._ratio
         if ratio is None:
             return
         w = min(vr.width(), vr.height() * ratio)

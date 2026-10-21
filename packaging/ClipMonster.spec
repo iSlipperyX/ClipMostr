@@ -12,6 +12,7 @@ datas = (
     collect_data_files("imageio_ffmpeg", includes=["binaries/*"])  # bundled ffmpeg.exe
     + collect_data_files("yt_dlp_ejs")  # YouTube challenge-solver scripts
     + collect_data_files("faster_whisper")  # Silero VAD model
+    + [(os.path.join(ROOT, "ytclip", "fonts"), os.path.join("ytclip", "fonts"))]  # bundled caption/banner fonts
 )
 binaries = collect_dynamic_libs("ctranslate2")
 hiddenimports = (

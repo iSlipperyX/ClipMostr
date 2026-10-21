@@ -34,6 +34,7 @@ testpaths = ["tests"]
 
 [tool.setuptools]
 packages = ["ytclip", "ytclip.gui"]
+package-data = { ytclip = ["fonts/*.ttf", "fonts/licenses/*.txt"] }
 
 [tool.setuptools.dynamic]
 version = { attr = "ytclip.__version__" }  # single source of truth; release.py bumps it
