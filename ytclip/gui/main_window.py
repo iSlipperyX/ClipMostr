@@ -16,14 +16,16 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleS
                                QPushButton, QScrollArea, QSlider, QSplitter, QTableWidget, QTableWidgetItem,
                                QTabWidget, QTextEdit, QVBoxLayout, QWidget)
 
-from .. import __version__, updater
+from .. import __version__, layout, updater
 from ..analyze import SIGNAL_LABELS, Clip, clip_score
 from ..download import VIDEO_EXTS, expand_sources, is_url, needs_expansion
 from ..engine import Engine, Project
-from ..export import export_clip
+from ..export import export_clip, output_size
+from ..ffmpeg import MediaInfo
 from ..organize import stamp
 from ..settings import APP_NAME, SCHEMA, Settings, all_presets, app_dir, save_user_preset
 from . import forms, theme
+from .layout_tab import LayoutTab
 from .library import Library, reveal
 from .player import Preview
 from .settings_dialog import SettingsDialog
@@ -273,7 +275,7 @@ class MainWindow(QMainWindow):
         pl.addLayout(head)
 
         self.preview = Preview()
-        self.preview.set_aspect(self.settings.aspect)
+        self._update_preview_frame()
         self.preview.cropChanged.connect(self._crop_dragged)
         self.preview.player.positionChanged.connect(self._position_changed)
         self.preview.player.playbackStateChanged.connect(self._playback_changed)
@@ -361,6 +363,9 @@ class MainWindow(QMainWindow):
         self.side = QTabWidget()
         self.side.addTab(self._build_clips_tab(), "Clips")
         self.side.addTab(self._build_tune_tab(), "Find clips")
+        self.layout_tab = LayoutTab(self.settings, self._setting_changed)
+        self.layout_tab.clipChanged.connect(self._save_session)
+        self.side.addTab(self.layout_tab, "Layout")
         self.side.addTab(self._build_export_tab(), "Export")
         box = _panel(self.side)
         box.setMinimumWidth(380)
@@ -891,6 +896,10 @@ class MainWindow(QMainWindow):
             self.transcript.setPlainText(p.transcript(c) or "(no transcript for this part)")
             self.preview.set_crop(c.crop_x)
         self._filling = False
+        if c is None:
+            self.layout_tab.set_clip(None)
+        else:
+            self.layout_tab.set_clip(c, p.video.path, p.media, p.words)
 
     def select_clip(self, i: int, seek: bool = True) -> None:
         p = self._ready()
@@ -939,6 +948,7 @@ class MainWindow(QMainWindow):
         p.clips[self.sel].edited = True
         self._fill_row(self.sel, p.clips[self.sel])
         self.timeline.update()
+        self.layout_tab.set_clip(p.clips[self.sel], p.video.path, p.media, p.words)
 
     def _spin_changed(self, edge: str, value: float) -> None:
         p = self._ready()
@@ -993,6 +1003,7 @@ class MainWindow(QMainWindow):
         p.clips[self.sel].crop_x = v / 100
         p.clips[self.sel].edited = True
         self.preview.set_crop(v / 100)
+        self.layout_tab.set_clip(p.clips[self.sel], p.video.path, p.media, p.words)
 
     def _crop_dragged(self, x: float) -> None:
         p = self._ready()
@@ -1003,6 +1014,7 @@ class MainWindow(QMainWindow):
         self._filling = True
         self.crop_slider.setValue(int(x * 100))
         self._filling = False
+        self.layout_tab.set_clip(p.clips[self.sel], p.video.path, p.media, p.words)
 
     def add_clip(self, t: float) -> None:
         p = self._ready()
@@ -1113,8 +1125,8 @@ class MainWindow(QMainWindow):
     def _setting_changed(self, name: str, value) -> None:
         self.settings = self.settings.apply({name: value})
         self._save_timer.start()
-        if name == "aspect":
-            self.preview.set_aspect(value)
+        self.layout_tab.set_settings(self.settings)
+        self._update_preview_frame()
         if name == "output_dir":
             self._update_out_label()
         p = self._ready()
@@ -1127,6 +1139,17 @@ class MainWindow(QMainWindow):
         elif name in RESCORE_FIELDS:
             self.timeline.update_data(p.signals, p.score, p.clips)
             self._fill_table()
+
+    def _update_preview_frame(self) -> None:
+        """Match the preview's reframe box to what the export keeps, including a layout's clip area."""
+        s = self.settings
+        if not layout.active(s):
+            self.preview.set_aspect(s.aspect)
+            return
+        media = self.current.media if self.current and self.current.media else MediaInfo(width=1920, height=1080)
+        w, h = output_size(layout.frame_aspect(s), s.resolution, media)
+        ratio = layout.crop_ratio(s, w, h)
+        self.preview.set_aspect(s.aspect if ratio else "original", ratio)
 
     @staticmethod
     def _kept(p: Project) -> list[Clip]:
@@ -1238,7 +1261,8 @@ class MainWindow(QMainWindow):
         self.settings.save()
         forms.refresh(self.tune_editors, new)
         forms.refresh(self.export_editors, new)
-        self.preview.set_aspect(new.aspect)
+        self.layout_tab.set_settings(new, refresh_editors=True)
+        self._update_preview_frame()
         self._update_out_label()
         p = self._ready()
         if p and any(getattr(old, k) != getattr(new, k) for k in REDETECT_FIELDS):

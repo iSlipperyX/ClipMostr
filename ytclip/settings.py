@@ -92,6 +92,27 @@ class Settings:
     caption_words: int = 3
     caption_uppercase: bool = True
     title_overlay: bool = False
+    # Layout (banners and stacked video)
+    banner_top: bool = False
+    banner_top_text: str = "{title}"
+    banner_top_size: int = 14
+    banner_bottom: bool = False
+    banner_bottom_text: str = "Follow for part 2"
+    banner_bottom_size: int = 10
+    banner_mode: str = "bar"
+    banner_bg: str = "#000000"
+    banner_color: str = "#FFFFFF"
+    banner_font: str = "Arial Black"
+    banner_font_size: int = 72
+    banner_uppercase: bool = True
+    stack_enabled: bool = False
+    stack_video: str = ""
+    stack_position: str = "bottom"
+    stack_split: float = 0.5
+    stack_start: str = "random"
+    stack_offset: float = 0.0
+    stack_volume: int = 0
+    layout_fit: str = "auto"
 
     # ------------------------------------------------------------ helpers
     @property
@@ -163,6 +184,16 @@ PRESETS: dict[str, dict] = {
         "aspect": "square", "min_len": 15, "max_len": 60, "clip_count": 5, "burn_captions": True,
         "caption_position": "lower", "mode": "auto",
     },
+    "Stacked (gameplay below)": {
+        "aspect": "vertical_crop", "min_len": 15, "max_len": 58, "clip_count": 6, "burn_captions": True,
+        "caption_position": "middle", "normalize_audio": True, "stack_enabled": True, "stack_position": "bottom",
+        "stack_split": 0.5, "banner_top": False, "banner_bottom": False, "mode": "auto",
+    },
+    "Banner top + bottom": {
+        "aspect": "vertical_blur", "min_len": 15, "max_len": 58, "clip_count": 6, "burn_captions": True,
+        "caption_position": "lower", "normalize_audio": True, "banner_top": True, "banner_bottom": True,
+        "banner_mode": "bar", "stack_enabled": False, "title_overlay": False, "mode": "auto",
+    },
     "Split by chapters": {"mode": "chapters", "aspect": "original", "burn_captions": False},
     "AI picks (Claude)": {"mode": "ai", "min_len": 20, "max_len": 75, "clip_count": 6},
 }
@@ -181,7 +212,7 @@ def load_user_presets() -> dict[str, dict]:
 
 def save_user_preset(name: str, settings: Settings) -> None:
     presets = load_user_presets()
-    keys = {f.name for f in SCHEMA if f.group in ("Clip finding", "Export", "Captions")} | {"mode"}
+    keys = {f.name for f in SCHEMA if f.group in ("Clip finding", "Export", "Captions", "Layout")} | {"mode"}
     presets[name] = {k: v for k, v in asdict(settings).items() if k in keys}
     user_presets_path().write_text(json.dumps(presets, indent=2), encoding="utf-8")
 
@@ -198,7 +229,7 @@ class Field:
     name: str
     label: str
     group: str
-    kind: str  # bool | int | float | str | choice | path | color | secret | text
+    kind: str  # bool | int | float | str | choice | path | file | color | secret | text
     choices: tuple = ()
     lo: float = 0
     hi: float = 100
@@ -211,6 +242,10 @@ ASPECTS = (("original", "Original"), ("vertical_blur", "9:16 vertical, blurred f
            ("vertical_crop", "9:16 vertical, cropped"), ("square", "1:1 square"))
 ENCODERS = (("auto", "Auto (fastest available)"), ("libx264", "CPU (x264)"), ("h264_amf", "AMD GPU (AMF)"),
             ("h264_nvenc", "NVIDIA GPU (NVENC)"), ("h264_qsv", "Intel GPU (Quick Sync)"))
+
+BANNER_MODES = (("bar", "Solid bar (video sits between)"), ("overlay", "Text over the video"))
+LAYOUT_FITS = (("auto", "Auto (from Format)"), ("crop", "Crop to fill"), ("blur", "Fit, blurred fill"),
+               ("fit", "Fit, banner colour fill"))
 
 SCHEMA: list[Field] = [
     Field("output_dir", "Output folder", "General", "path", help="Where finished clips are saved"),
@@ -293,4 +328,34 @@ SCHEMA: list[Field] = [
     Field("caption_words", "Words on screen", "Captions", "int", lo=1, hi=10),
     Field("caption_uppercase", "UPPERCASE", "Captions", "bool"),
     Field("title_overlay", "Show clip title at top", "Captions", "bool"),
+
+    Field("banner_top", "Top banner", "Layout", "bool", help="A bar of text above the video"),
+    Field("banner_top_text", "Top text", "Layout", "str",
+          help="{title} is replaced with the clip title. Each clip can override this in the Layout tab"),
+    Field("banner_top_size", "Top banner height (%)", "Layout", "int", lo=4, hi=35),
+    Field("banner_bottom", "Bottom banner", "Layout", "bool", help="A bar of text below the video"),
+    Field("banner_bottom_text", "Bottom text", "Layout", "str", help="{title} is replaced with the clip title"),
+    Field("banner_bottom_size", "Bottom banner height (%)", "Layout", "int", lo=4, hi=35),
+    Field("banner_mode", "Banner style", "Layout", "choice", choices=BANNER_MODES),
+    Field("banner_bg", "Banner colour", "Layout", "color"),
+    Field("banner_color", "Banner text colour", "Layout", "color"),
+    Field("banner_font", "Banner font", "Layout", "str"),
+    Field("banner_font_size", "Banner text size", "Layout", "int", lo=20, hi=200,
+          help="Largest size; long text shrinks to fit the banner"),
+    Field("banner_uppercase", "Banner UPPERCASE", "Layout", "bool"),
+    Field("stack_enabled", "Stack a second video", "Layout", "bool",
+          help="Splits the frame: your clip on one half, a looping background video on the other"),
+    Field("stack_video", "Second video", "Layout", "file",
+          help="Gameplay, satisfying clips, b-roll... It loops if it's shorter than the clip"),
+    Field("stack_position", "Second video goes", "Layout", "choice",
+          choices=(("bottom", "Below the clip"), ("top", "Above the clip"))),
+    Field("stack_split", "Clip share of the frame", "Layout", "float", lo=0, hi=1, step=0.05,
+          help="0.50 = equal halves; 0.60 gives the clip more room"),
+    Field("stack_start", "Second video starts", "Layout", "choice",
+          choices=(("random", "At a random spot per clip"), ("fixed", "At a fixed time"))),
+    Field("stack_offset", "Fixed start (s)", "Layout", "float", lo=0, hi=36000, step=1),
+    Field("stack_volume", "Second video volume (%)", "Layout", "int", lo=0, hi=100, step=5,
+          help="0 keeps it silent so only the clip is heard"),
+    Field("layout_fit", "Fit the clip", "Layout", "choice", choices=LAYOUT_FITS,
+          help="How the clip fills its part of the frame"),
 ]

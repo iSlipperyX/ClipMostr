@@ -10,6 +10,7 @@ from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDoubleSpinBo
                                QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QSlider, QSpinBox,
                                QWidget)
 
+from ..download import VIDEO_EXTS
 from ..settings import Field, Settings
 
 OnChange = Callable[[str, Any], None]
@@ -117,6 +118,27 @@ def make_editor(f: Field, value: Any, on_change: OnChange) -> Editor:
         line.editingFinished.connect(emit)
         line.textChanged.connect(lambda *_: None)
         btn.clicked.connect(emit)
+        editor = Editor(box, line.text, lambda v: line.setText(str(v)))
+
+    elif f.kind == "file":
+        box = QWidget()
+        row = QHBoxLayout(box)
+        row.setContentsMargins(0, 0, 0, 0)
+        line = QLineEdit(str(value))
+        line.setPlaceholderText("No file chosen")
+        btn = QPushButton("Choose…")
+        row.addWidget(line, 1)
+        row.addWidget(btn)
+
+        def choose() -> None:
+            exts = " ".join(f"*{e}" for e in sorted(VIDEO_EXTS))
+            path, _ = QFileDialog.getOpenFileName(box, f.label, line.text(), f"Videos ({exts});;All files (*)")
+            if path:
+                line.setText(path)
+                emit()
+
+        btn.clicked.connect(choose)
+        line.editingFinished.connect(emit)
         editor = Editor(box, line.text, lambda v: line.setText(str(v)))
 
     elif f.kind == "color":

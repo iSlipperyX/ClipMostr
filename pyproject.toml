@@ -21,6 +21,7 @@ dependencies = [
 ai = ["anthropic>=1.0"]
 whisper = ["faster-whisper>=1.0"]
 build = ["pyinstaller>=6.10"]
+test = ["pytest>=8"]
 
 [project.scripts]
 ytclip = "ytclip.cli:main"
