@@ -1,6 +1,6 @@
 """Layout geometry, banner text and the filter graph it builds. No ffmpeg needed."""
 
-from ytclip import fonts, layout
+from ytclip import fonts, layout, textlayout
 from ytclip.export import layout_graph
 from ytclip.settings import Settings
 
@@ -53,10 +53,13 @@ def test_banner_text_override_and_template():
 
 def test_wrap_shrinks_long_text_to_fit():
     box = layout.Box(0, 0, 1080, 200)
-    lines, size = layout.wrap("word " * 40, 80, box, True)
-    assert len(lines) * size * 1.15 <= box.h * 0.84 or size <= 14
-    assert size < 80
-    assert layout.wrap("", 80, box, True) == ([], 80)
+    font = "TikTok Sans Black"
+    lines, size = layout.wrap("WORD " * 40, 80, box, font)
+    assert size < fonts.ass_size(font, 80)
+    assert len(lines) * size <= box.h * 0.84
+    for ln in lines:
+        assert textlayout.text_width(font, " ".join(ln), size) <= box.w * 0.9
+    assert layout.wrap("", 80, box, font) == ([], fonts.ass_size(font, 80))
 
 
 def test_second_offset_is_stable_and_in_range():
@@ -106,7 +109,9 @@ def test_bundled_fonts_exist_and_are_never_faux_bolded():
         assert (fonts.FONTS_DIR / f.file).is_file(), f.file
         assert fonts.ass_bold(f.name) == 0
     assert fonts.ass_bold("Arial Black") == -1
-    assert fonts.glyph_width("Bebas Neue", True) < fonts.glyph_width("Archivo Black", True)
+    # Measured from the files: a condensed face is narrower than a wide one at the same letter size.
+    assert (fonts.metrics("Bebas Neue").width("FOLLOW", fonts.ass_size("Bebas Neue", 80))
+            < fonts.metrics("Archivo Black").width("FOLLOW", fonts.ass_size("Archivo Black", 80)))
 
 
 def test_staging_copies_only_bundled_fonts(tmp_path):
@@ -116,9 +121,13 @@ def test_staging_copies_only_bundled_fonts(tmp_path):
 
 
 def test_wrap_balances_lines():
-    box = layout.Box(0, 0, 840, 300)
-    lines, _ = layout.wrap("FOLLOW FOR PART 2", 80, box, True, "Montserrat Black")
-    assert lines == ["FOLLOW FOR", "PART 2"]  # not "FOLLOW FOR PART" / "2"
+    font, text = "Montserrat Black", "FOLLOW FOR PART 2"
+    full = textlayout.text_width(font, text, fonts.ass_size(font, 80))
+    box = layout.Box(0, 0, int(full * 0.97 / 0.9), 300)  # one line won't fit; greedy would leave "2" alone
+    lines, _ = layout.wrap(text, 80, box, font)
+    assert len(lines) == 2 and lines[-1] != ["2"]  # evened out, not "FOLLOW FOR PART" / "2"
+    widths = [textlayout.text_width(font, " ".join(ln), 100) for ln in lines]
+    assert max(widths) < textlayout.text_width(font, "FOLLOW FOR PART", 100)
 
 
 def test_captions_avoid_banner_words_laid_over_the_video():
