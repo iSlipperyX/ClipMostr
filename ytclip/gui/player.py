@@ -127,6 +127,7 @@ class Preview(QGraphicsView):
         self._second_timing = (0.0, 0.0, "random", 0.0)  # clip start, clip length, start mode, fixed offset
         self._volume = 0.8
         self._stack_volume = 0.0
+        self._last_nudge = 0.0
 
         self.export_item = _ExportItem(self)
         self.export_item.hide()
@@ -228,7 +229,8 @@ class Preview(QGraphicsView):
             return None
         start, length, mode, fixed = self._second_timing
         off = layout.second_offset(start, length, dur, mode, fixed)
-        return (off + max(0.0, self.player.position() / 1000 - start)) % dur
+        now = self.main_src.time if self.main_src.time is not None else self.player.position() / 1000
+        return (off + max(0.0, now - start)) % dur
 
     def _sync_second(self, force: bool = False) -> None:
         """Keep the stacked video in step with the clip: same play state, position within a few frames."""
@@ -241,9 +243,15 @@ class Preview(QGraphicsView):
         if want is None:
             return
         playing = self.player.playbackState() == QMediaPlayer.PlayingState
-        drift = abs(sp.position() / 1000 - want)
-        if force or drift > (0.25 if playing else 0.03):
-            sp.setPosition(int(want * 1000))
+        have = self.second_src.time if self.second_src.time is not None else sp.position() / 1000
+        drift = abs(have - want)
+        dur = sp.duration() / 1000
+        drift = min(drift, abs(dur - drift)) if dur > 0 else drift  # across the loop point
+        # While playing, nudge at most twice a second so a correction never stutters into another one.
+        now = time.monotonic()
+        if force or (drift > 0.06 and (not playing or now - self._last_nudge > 0.5)):
+            self._last_nudge = now
+            sp.setPosition(int((want + (0.03 if playing else 0.0)) * 1000) % max(1, int(dur * 1000)))
         if playing and sp.playbackState() != QMediaPlayer.PlayingState:
             sp.play()
         elif not playing and sp.playbackState() == QMediaPlayer.PlayingState:
@@ -253,6 +261,8 @@ class Preview(QGraphicsView):
         self.main_src.push(frame)  # kept even when hidden, so switching views shows the frame at once
         if self.exporting:
             self.export_item.update()
+            if self._second_path and self.player.playbackState() == QMediaPlayer.PlayingState:
+                self._sync_second()
 
     def _second_frame(self, frame: QVideoFrame) -> None:
         self.second_src.push(frame)  # kept even when hidden, so switching views shows the frame at once
