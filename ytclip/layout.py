@@ -8,8 +8,8 @@ from __future__ import annotations
 import random
 from dataclasses import dataclass
 
-from . import fonts
-from .captions import _ass_colour, _escape
+from . import fonts, textlayout
+from .captions import BREAK, _ass_colour, _escape
 from .settings import Settings
 
 
@@ -180,49 +180,21 @@ def banner_text(template: str, title: str, override: str | None = None) -> str:
         return template.strip()  # a stray brace in the user's text: show it as typed
 
 
-def wrap(text: str, size: int, box: Box, uppercase: bool, font: str = "") -> tuple[list[str], int]:
-    """Break text into lines and shrink the font until the block fits the box.
-
-    libass can't wrap into a box of our choosing when text is positioned with \\pos, so lines are
-    broken here using an average glyph width. Bold display fonts run wide, hence the generous factor."""
+def wrap(text: str, em_px: float, box: Box, font: str) -> tuple[list[list[str]], int]:
+    """Break text into lines and shrink it until the block fits the box. Returns the lines and the ASS
+    font size to draw them at. libass can't wrap into a box of our choosing when text is placed with
+    \\pos, so ClipMonster breaks the lines itself, measured from the font file."""
     words = text.split()
+    size = fonts.ass_size(font, em_px)
     if not words:
         return [], size
-    glyph = fonts.glyph_width(font, uppercase) * 1.05  # a little slack for wide letters and spaces
     max_w, max_h = box.w * 0.9, box.h * 0.84
     while True:
-        per_line = max(1, int(max_w / (size * glyph)))
-        lines = _greedy(words, per_line)
-        fits = len(lines) * size * 1.15 <= max_h and max(len(ln) for ln in lines) <= per_line
-        if fits or size <= 14:
-            return _balance(words, lines), size
-        size = int(size * 0.92)
-
-
-def _greedy(words: list[str], per_line: int) -> list[str]:
-    lines: list[str] = []
-    cur = ""
-    for w in words:
-        cand = f"{cur} {w}".strip()
-        if cur and len(cand) > per_line:
-            lines.append(cur)
-            cur = w
-        else:
-            cur = cand
-    return lines + [cur]
-
-
-def _balance(words: list[str], lines: list[str]) -> list[str]:
-    """Same number of lines with the longest one as short as possible, so "PART / 2" doesn't dangle."""
-    n = len(lines)
-    if n < 2:
-        return lines
-    width = max(len(w) for w in words)
-    for target in range(max(width, len(" ".join(words)) // n), max(len(ln) for ln in lines) + 1):
-        even = _greedy(words, target)
-        if len(even) == n:
-            return even
-    return lines
+        lines = textlayout.break_lines(words, font, size, max_w)
+        widest = max(textlayout.text_width(font, " ".join(ln), size) for ln in lines)
+        if (widest <= max_w and len(lines) * size <= max_h) or size <= fonts.ass_size(font, 12):
+            return lines, size
+        size = max(1, int(size * 0.95))
 
 
 def second_offset(clip_start: float, clip_len: float, second_duration: float, mode: str, fixed: float) -> float:
@@ -233,33 +205,55 @@ def second_offset(clip_start: float, clip_len: float, second_duration: float, mo
     return min(max(0.0, fixed), room) if room else 0.0
 
 
+@dataclass
+class BannerText:
+    box: Box
+    block: textlayout.Block  # every line and word, placed in output pixels
+    outline: int
+    shadow: int
+
+
+def banner_texts(p: Plan, s: Settings, top_text: str, bottom_text: str) -> list[BannerText]:
+    """The banner words as they'll be burned in: shared by the .ass file and the editor's export view."""
+    scale = min(p.width, p.height) / 1080
+    outline = 0 if p.bars else max(2, int(6 * scale))
+    shadow = 0 if p.bars else max(1, int(2 * scale))
+    out = []
+    for box, text in ((p.top_text, top_text), (p.bottom_text, bottom_text)):
+        if box is None or not text or not text.strip():
+            continue
+        text = _escape(text.upper() if s.banner_uppercase else text)  # measured as libass will show it
+        lines, size = wrap(text, s.banner_font_size * scale, box, s.banner_font)
+        block = textlayout.place([[(w, 1.0, False) for w in ln] for ln in lines], s.banner_font, size,
+                                 box.cx, box.cy, "middle")
+        out.append(BannerText(box, block, outline, shadow))
+    return out
+
+
 def banner_ass(p: Plan, s: Settings, top_text: str, bottom_text: str) -> str:
     """An ASS file that draws the banner text (the bars themselves are part of the video filter)."""
-    scale = min(p.width, p.height) / 1080
-    bar = p.bars
-    outline = 0 if bar else max(2, int(6 * scale))
-    shadow = 0 if bar else max(1, int(2 * scale))
+    texts = banner_texts(p, s, top_text, bottom_text)
+    outline = texts[0].outline if texts else 0
+    shadow = texts[0].shadow if texts else 0
+    size = fonts.ass_size(s.banner_font, s.banner_font_size * min(p.width, p.height) / 1080)
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {p.width}
 PlayResY: {p.height}
 WrapStyle: 2
 ScaledBorderAndShadow: yes
+Kerning: no
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Banner,{s.banner_font},{int(s.banner_font_size * scale)},{_ass_colour(s.banner_color)},&H000000FF,&H00000000,&H80000000,{fonts.ass_bold(s.banner_font)},0,0,0,100,100,0,0,1,{outline},{shadow},5,0,0,0,1
+Style: Banner,{s.banner_font},{size},{_ass_colour(s.banner_color)},&H000000FF,&H00000000,&H80000000,{fonts.ass_bold(s.banner_font)},0,0,0,100,100,0,0,1,{outline},{shadow},5,0,0,0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
 """
     events = []
-    for box, text in ((p.top_text, top_text), (p.bottom_text, bottom_text)):
-        if box is None or not text:
-            continue
-        if s.banner_uppercase:
-            text = text.upper()
-        lines, size = wrap(_escape(text), int(s.banner_font_size * scale), box, s.banner_uppercase, s.banner_font)
-        body = "\\N".join(lines)
-        events.append(f"Dialogue: 2,0:00:00.00,9:59:59.00,Banner,,0,0,0,,{{\\an5\\pos({box.cx},{box.cy})\\fs{size}}}{body}")
+    for bt in texts:
+        body = BREAK.join(" ".join(w.text for w in ln.words) for ln in bt.block.lines)
+        events.append(f"Dialogue: 2,0:00:00.00,9:59:59.00,Banner,,0,0,0,,"
+                      f"{{\\an5\\pos({bt.box.cx},{bt.box.cy})\\fs{bt.block.size}}}{body}")
     return header + "\n".join(events) + "\n"

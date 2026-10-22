@@ -7,6 +7,7 @@ import os
 from dataclasses import asdict, dataclass, fields, replace
 from pathlib import Path
 
+from . import fonts
 from .trending import CATEGORIES
 
 APP_NAME = "ClipMonster"
@@ -87,7 +88,7 @@ class Settings:
     # Captions
     burn_captions: bool = False
     caption_font: str = "Montserrat Black"
-    caption_size: int = 70
+    caption_size: int = 45  # letter (em) height in pixels on a 1080-wide frame
     caption_color: str = "#FFFFFF"
     caption_highlight: str = "#FFD400"
     caption_outline: int = 5
@@ -106,7 +107,7 @@ class Settings:
     banner_bg: str = "#000000"
     banner_color: str = "#FFFFFF"
     banner_font: str = "TikTok Sans Black"
-    banner_font_size: int = 96
+    banner_font_size: int = 70
     banner_uppercase: bool = True
     stack_enabled: bool = False
     stack_video: str = ""
@@ -126,6 +127,8 @@ class Settings:
     research_auto: bool = True
     research_interval: int = 30
     research_alert: int = 75
+    # 2 = text sizes are letter heights (1 = raw .ass sizes, which looked different in every font)
+    text_units: int = 2
 
     # ------------------------------------------------------------ helpers
     @property
@@ -164,11 +167,30 @@ class Settings:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             return cls()
-        return cls().apply(data)
+        return cls().apply(migrate(data))
 
     def save(self, path: Path | None = None) -> None:
         path = path or app_dir() / "settings.json"
         path.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
+
+
+# ---------------------------------------------------------------- old files
+
+_SIZED = (("caption_size", "caption_font", "Montserrat Black"), ("banner_font_size", "banner_font", "TikTok Sans Black"))
+
+
+def migrate(data: dict) -> dict:
+    """Bring settings, presets and saved views from older versions up to date. Text sizes used to be
+    raw .ass font sizes; they're now letter heights, so convert them and the text looks exactly as it did."""
+    if not isinstance(data, dict) or data.get("text_units", 1) >= 2:
+        return data
+    data = dict(data)
+    for size_key, font_key, default_font in _SIZED:
+        if isinstance(data.get(size_key), (int, float)):
+            font = data.get(font_key) or default_font
+            data[size_key] = max(1, round(data[size_key] * fonts.metrics(str(font)).em_ratio))
+    data["text_units"] = 2
+    return data
 
 
 # ---------------------------------------------------------------- presets
@@ -224,15 +246,16 @@ def user_presets_path() -> Path:
 
 def load_user_presets() -> dict[str, dict]:
     try:
-        return json.loads(user_presets_path().read_text(encoding="utf-8"))
+        data = json.loads(user_presets_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    return {k: migrate(v) for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
 
 
 def save_user_preset(name: str, settings: Settings) -> None:
     presets = load_user_presets()
     keys = {f.name for f in SCHEMA if f.group in ("Clip finding", "Export", "Captions", "Layout")} | {"mode"}
-    presets[name] = {k: v for k, v in asdict(settings).items() if k in keys}
+    presets[name] = {k: v for k, v in asdict(settings).items() if k in keys | {"text_units"}}
     user_presets_path().write_text(json.dumps(presets, indent=2), encoding="utf-8")
 
 
@@ -295,7 +318,7 @@ def load_user_layouts() -> dict[str, dict]:
         data = json.loads(user_layouts_path().read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
-    return data if isinstance(data, dict) else {}
+    return {k: migrate(v) for k, v in data.items() if isinstance(v, dict)} if isinstance(data, dict) else {}
 
 
 def _write_user_layouts(layouts: dict[str, dict]) -> None:
@@ -306,7 +329,7 @@ def save_user_layout(name: str, settings: Settings) -> None:
     """Save the whole current layout (including the second video and fonts) under `name`."""
     layouts = load_user_layouts()
     keys = layout_keys()
-    layouts[name] = {k: v for k, v in asdict(settings).items() if k in keys}
+    layouts[name] = {k: v for k, v in asdict(settings).items() if k in keys | {"text_units"}}
     _write_user_layouts(layouts)
 
 
@@ -435,7 +458,8 @@ SCHEMA: list[Field] = [
 
     Field("burn_captions", "Burn in animated captions", "Captions", "bool"),
     Field("caption_font", "Font", "Captions", "font"),
-    Field("caption_size", "Size", "Captions", "int", lo=20, hi=200),
+    Field("caption_size", "Size", "Captions", "int", lo=12, hi=160,
+          help="Letter height in pixels on a 1080-wide video. The same size looks the same in every font"),
     Field("caption_color", "Text colour", "Captions", "color"),
     Field("caption_highlight", "Active word colour", "Captions", "color"),
     Field("caption_outline", "Outline width", "Captions", "int", lo=0, hi=20),
@@ -459,8 +483,8 @@ SCHEMA: list[Field] = [
     Field("banner_bg", "Banner colour", "Layout", "color"),
     Field("banner_color", "Banner text colour", "Layout", "color"),
     Field("banner_font", "Banner font", "Layout", "font"),
-    Field("banner_font_size", "Banner text size", "Layout", "int", lo=20, hi=200,
-          help="Largest size; long text shrinks to fit the banner"),
+    Field("banner_font_size", "Banner text size", "Layout", "int", lo=12, hi=160,
+          help="Letter height in pixels on a 1080-wide video. Long text shrinks to fit the banner"),
     Field("banner_uppercase", "Banner UPPERCASE", "Layout", "bool"),
     Field("stack_enabled", "Stack a second video", "Layout", "bool",
           help="Splits the frame: your clip on one half, a looping background video on the other"),

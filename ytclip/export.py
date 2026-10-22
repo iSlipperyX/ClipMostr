@@ -158,7 +158,7 @@ def export_clip(src: Path, src_info: MediaInfo, dest: Path, clip: Clip, words: l
             # libass reads the file relative to ffmpeg's working directory, which
             # sidesteps Windows drive-letter escaping in filter arguments.
             Path(tmp, "captions.ass").write_text(
-                build_ass(words, seek, clip.end, w, h, s, clip.title, area, side), encoding="utf-8")
+                build_ass(words, clip.start, clip.end, w, h, s, clip.title, area, side, seek - clip.start), encoding="utf-8")
             graph += f";[{last}]subtitles=captions.ass{_fontsdir(font_names, tmp)}[vc]"
             last = "vc"
         cap_fps = f"fps={TIKTOK_MAX_FPS}," if s.tiktok_ready and (src_info.fps or 0) > TIKTOK_MAX_FPS + 0.5 else ""

@@ -1,6 +1,6 @@
 """Layout geometry, banner text and the filter graph it builds. No ffmpeg needed."""
 
-from ytclip import fonts, layout
+from ytclip import fonts, layout, textlayout
 from ytclip.export import layout_graph
 from ytclip.settings import Settings
 
@@ -53,10 +53,13 @@ def test_banner_text_override_and_template():
 
 def test_wrap_shrinks_long_text_to_fit():
     box = layout.Box(0, 0, 1080, 200)
-    lines, size = layout.wrap("word " * 40, 80, box, True)
-    assert len(lines) * size * 1.15 <= box.h * 0.84 or size <= 14
-    assert size < 80
-    assert layout.wrap("", 80, box, True) == ([], 80)
+    font = "TikTok Sans Black"
+    lines, size = layout.wrap("WORD " * 40, 80, box, font)
+    assert size < fonts.ass_size(font, 80)
+    assert len(lines) * size <= box.h * 0.84
+    for ln in lines:
+        assert textlayout.text_width(font, " ".join(ln), size) <= box.w * 0.9
+    assert layout.wrap("", 80, box, font) == ([], fonts.ass_size(font, 80))
 
 
 def test_second_offset_is_stable_and_in_range():
@@ -106,7 +109,9 @@ def test_bundled_fonts_exist_and_are_never_faux_bolded():
         assert (fonts.FONTS_DIR / f.file).is_file(), f.file
         assert fonts.ass_bold(f.name) == 0
     assert fonts.ass_bold("Arial Black") == -1
-    assert fonts.glyph_width("Bebas Neue", True) < fonts.glyph_width("Archivo Black", True)
+    # Measured from the files: a condensed face is narrower than a wide one at the same letter size.
+    assert (fonts.metrics("Bebas Neue").width("FOLLOW", fonts.ass_size("Bebas Neue", 80))
+            < fonts.metrics("Archivo Black").width("FOLLOW", fonts.ass_size("Archivo Black", 80)))
 
 
 def test_staging_copies_only_bundled_fonts(tmp_path):
@@ -116,12 +121,71 @@ def test_staging_copies_only_bundled_fonts(tmp_path):
 
 
 def test_wrap_balances_lines():
-    box = layout.Box(0, 0, 840, 300)
-    lines, _ = layout.wrap("FOLLOW FOR PART 2", 80, box, True, "Montserrat Black")
-    assert lines == ["FOLLOW FOR", "PART 2"]  # not "FOLLOW FOR PART" / "2"
+    font, text = "Montserrat Black", "FOLLOW FOR PART 2"
+    full = textlayout.text_width(font, text, fonts.ass_size(font, 80))
+    box = layout.Box(0, 0, int(full * 0.97 / 0.9), 300)  # one line won't fit; greedy would leave "2" alone
+    lines, _ = layout.wrap(text, 80, box, font)
+    assert len(lines) == 2 and lines[-1] != ["2"]  # evened out, not "FOLLOW FOR PART" / "2"
+    widths = [textlayout.text_width(font, " ".join(ln), 100) for ln in lines]
+    assert max(widths) < textlayout.text_width(font, "FOLLOW FOR PART", 100)
 
 
 def test_captions_avoid_banner_words_laid_over_the_video():
     p = layout.plan(Settings(banner_top=True, banner_bottom=True, banner_mode="overlay"), 1080, 1920)
     top, bottom, _ = p.caption_area
     assert top >= p.top_text.bottom and bottom <= p.bottom_text.y
+
+
+def test_old_text_sizes_are_converted_to_letter_heights(tmp_path):
+    import json
+
+    from ytclip.settings import load_user_layouts, migrate, user_layouts_path
+
+    old = {"caption_size": 70, "caption_font": "Montserrat Black", "banner_font_size": 96}
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(old))
+    s = Settings.load(path)
+    # Same pixels on screen as before: the old raw .ass size times the font's em ratio.
+    assert s.caption_size == round(70 * fonts.metrics("Montserrat Black").em_ratio) == 45
+    assert s.banner_font_size == round(96 * fonts.metrics("TikTok Sans Black").em_ratio)
+    s.save(path)
+    assert Settings.load(path).caption_size == 45  # converted once, never again
+    assert migrate({"caption_size": 50, "text_units": 2})["caption_size"] == 50
+    user_layouts_path().write_text(json.dumps({"Mine": {"banner_font_size": 100, "banner_font": "Anton"}}))
+    assert load_user_layouts()["Mine"]["banner_font_size"] == round(100 * fonts.metrics("Anton").em_ratio)
+
+
+def test_a_size_looks_the_same_in_every_font():
+    for name in ("Montserrat Black", "Anton", "Bebas Neue", "Luckiest Guy"):
+        assert abs(fonts.ass_size(name, 60) * fonts.metrics(name).em_ratio - 60) < 1
+
+
+def test_caption_lines_never_move_as_the_highlight_moves():
+    from ytclip import captions
+
+    s = Settings(burn_captions=True, caption_words=6, caption_size=80)
+    st = captions.caption_style(s, 1080, 1920)
+    words = "THIS IS THE CRAZIEST THING EVER".split()
+    blocks = [captions.caption_block(captions.CaptionEvent(0, 1, words, i), s, st, 1080, 1920) for i in range(6)]
+    breaks = {tuple(len(ln.words) for ln in b.lines) for b in blocks}
+    assert len(breaks) == 1 and len(next(iter(breaks))) > 1
+    for b in blocks:
+        assert all(ln.x >= st.margin_lr - 1 and ln.x + ln.width <= 1080 - st.margin_lr + 1 for ln in b.lines)
+
+
+def test_a_clip_can_hide_a_banners_words():
+    s = Settings(banner_top=True, banner_bottom=True)
+    p = layout.plan(s, 1080, 1920)
+    top = layout.banner_text(s.banner_top_text, "Title", "")
+    assert top == ""
+    assert [bt.box for bt in layout.banner_texts(p, s, top, "Follow")] == [p.bottom_text]
+    assert "Dialogue" in layout.banner_ass(p, s, top, "Follow")
+
+
+def test_banner_words_stay_inside_their_box():
+    s = Settings(banner_top=True, banner_top_text="{title}", banner_font="Luckiest Guy", banner_font_size=120)
+    p = layout.plan(s, 1080, 1920)
+    for text in ("short", "a much much longer banner title that has to wrap onto several lines to fit at all"):
+        (bt,) = layout.banner_texts(p, s, text, "")
+        assert bt.block.top >= bt.box.y and bt.block.bottom <= bt.box.bottom
+        assert all(ln.x >= bt.box.x and ln.x + ln.width <= bt.box.x + bt.box.w for ln in bt.block.lines)

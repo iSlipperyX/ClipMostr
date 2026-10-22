@@ -16,13 +16,13 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleS
                                QPushButton, QScrollArea, QSlider, QSplitter, QTableWidget, QTableWidgetItem,
                                QTabWidget, QTextEdit, QVBoxLayout, QWidget)
 
-from .. import __version__, layout, updater
+from .. import __version__, compose, layout, updater
 from ..analyze import SIGNAL_LABELS, Clip, clip_score
 from ..download import VIDEO_EXTS, expand_sources, is_url, needs_expansion
 from ..engine import Engine, Project
 from ..export import export_clip
 from ..export import frame as export_frame
-from ..ffmpeg import MediaInfo
+from ..ffmpeg import MediaInfo, probe
 from ..organize import stamp
 from ..settings import APP_NAME, SCHEMA, Settings, all_presets, app_dir, save_user_preset
 from . import forms, theme
@@ -289,9 +289,25 @@ class MainWindow(QMainWindow):
         self.video_meta = _label("", muted=True)
         head.addWidget(self.video_title)
         head.addWidget(self.video_meta, 1)
+        self.export_view_btn = QPushButton("Export view")
+        self.export_view_btn.setCheckable(True)
+        self.export_view_btn.setToolTip("Show the clip exactly as it will be exported, playing: format, layout, "
+                                        "banners, stacked video and captions (V)")
+        self.safe_btn = QPushButton("Safe zone")
+        self.safe_btn.setCheckable(True)
+        self.safe_btn.setToolTip("Shade where TikTok's buttons, tabs and caption cover the video")
+        head.addWidget(self.export_view_btn)
+        head.addWidget(self.safe_btn)
         pl.addLayout(head)
 
         self.preview = Preview()
+        self._second_info: dict[str, MediaInfo] = {}
+        self.export_view_btn.setChecked(self.qs.value("export_view", True, type=bool))
+        self.safe_btn.setChecked(self.qs.value("safe_zone", False, type=bool))
+        self.preview.set_export_view(self.export_view_btn.isChecked())
+        self.preview.set_safe_zone(self.safe_btn.isChecked())
+        self.export_view_btn.toggled.connect(self._export_view_toggled)
+        self.safe_btn.toggled.connect(self._safe_zone_toggled)
         self._update_preview_frame()
         self.preview.cropChanged.connect(self._crop_dragged)
         self.preview.player.positionChanged.connect(self._position_changed)
@@ -314,7 +330,7 @@ class MainWindow(QMainWindow):
         vol.setRange(0, 100)
         vol.setValue(80)
         vol.setFixedWidth(100)
-        vol.valueChanged.connect(lambda v: self.preview.audio.setVolume(v / 100))
+        vol.valueChanged.connect(lambda v: self.preview.set_volume(v / 100))
         for w in (self.btn_prev, self.btn_back, self.btn_play, self.btn_fwd, self.btn_next):
             tr.addWidget(w)
         tr.addSpacing(8)
@@ -382,6 +398,7 @@ class MainWindow(QMainWindow):
         self.side.addTab(self._build_tune_tab(), "Find clips")
         self.layout_tab = LayoutTab(self.settings, self._setting_changed)
         self.layout_tab.clipChanged.connect(self._save_session)
+        self.layout_tab.clipChanged.connect(self._refresh_export_view)
         self.layout_tab.presetChosen.connect(self._apply_layout_preset)
         self.side.addTab(self.layout_tab, "Layout")
         self.side.addTab(self._build_export_tab(), "Export")
@@ -580,6 +597,7 @@ class MainWindow(QMainWindow):
             QShortcut(QKeySequence(keys), self, activated=fn)
 
         sc("Space", self.toggle_play)
+        sc("V", self.export_view_btn.toggle)
         sc("Left", lambda: self.seek_rel(-5))
         sc("Right", lambda: self.seek_rel(5))
         sc("Shift+Left", lambda: self.seek_rel(-1))
@@ -918,8 +936,9 @@ class MainWindow(QMainWindow):
         self._filling = False
         if c is None:
             self.layout_tab.set_clip(None)
+            self._refresh_export_view()
         else:
-            self.layout_tab.set_clip(c, p.video.path, p.media, p.words)
+            self._clip_shown()
 
     def select_clip(self, i: int, seek: bool = True) -> None:
         p = self._ready()
@@ -968,7 +987,7 @@ class MainWindow(QMainWindow):
         p.clips[self.sel].edited = True
         self._fill_row(self.sel, p.clips[self.sel])
         self.timeline.update()
-        self.layout_tab.set_clip(p.clips[self.sel], p.video.path, p.media, p.words)
+        self._clip_shown()
 
     def _spin_changed(self, edge: str, value: float) -> None:
         p = self._ready()
@@ -993,10 +1012,56 @@ class MainWindow(QMainWindow):
             c.end = max(t, c.start + 1)
         self._clip_edited(self.sel)
 
+    def _clip_shown(self) -> None:
+        """The selected clip changed (picked, retimed, reframed, retitled): refresh what shows it."""
+        p = self._ready()
+        if p and 0 <= self.sel < len(p.clips):
+            self.layout_tab.set_clip(p.clips[self.sel], p.video.path, p.media, p.words)
+        self._refresh_export_view()
+
+    def _second_media(self, path: str) -> MediaInfo | None:
+        """Size and length of the stacked video (probed once per file)."""
+        f = Path(path).expanduser() if path else None
+        if f is None or not f.is_file():
+            return None
+        key = f"{f}|{f.stat().st_mtime_ns}"
+        if key not in self._second_info:
+            try:
+                self._second_info[key] = probe(f)
+            except Exception:  # unreadable file: the export view shows the layout without it
+                return None
+        return self._second_info[key]
+
+    def _refresh_export_view(self) -> None:
+        """Rebuild the export view's frame for the selected clip from the current settings."""
+        if not hasattr(self, "preview"):
+            return  # still building the window
+        s = self.settings
+        p = self._ready()
+        clip = p.clips[self.sel] if p and 0 <= self.sel < len(p.clips) else None
+        media = p.media if p and p.media else MediaInfo(width=1920, height=1080)
+        second = self._second_media(s.stack_video) if s.stack_enabled else None
+        size = (second.width, second.height) if second and second.width else None
+        comp = compose.compose(s, media, clip, p.words if p else None, second=size)
+        self.preview.set_composition(comp, clip.start if clip else 0.0, clip.end if clip else 0.0)
+        self.preview.set_second(str(Path(s.stack_video).expanduser()) if size else "", clip.start if clip else 0.0,
+                                clip.length if clip else 0.0, s.stack_start, s.stack_offset, s.stack_volume)
+        self.safe_btn.setEnabled(comp.safe is not None)
+
+    def _export_view_toggled(self, on: bool) -> None:
+        self.qs.setValue("export_view", on)
+        self.preview.set_export_view(on)
+
+    def _safe_zone_toggled(self, on: bool) -> None:
+        self.qs.setValue("safe_zone", on)
+        self.preview.set_safe_zone(on)
+
     def _clip_dragging(self, i: int) -> None:
         p = self._ready()
         if p and 0 <= i < len(p.clips):
             self._fill_row(i, p.clips[i])
+            if i == self.sel:
+                self._refresh_export_view()
 
     def _clip_edited(self, i: int, seek_to: float | None = None) -> None:
         p = self._ready()
@@ -1023,7 +1088,7 @@ class MainWindow(QMainWindow):
         p.clips[self.sel].crop_x = v / 100
         p.clips[self.sel].edited = True
         self.preview.set_crop(v / 100)
-        self.layout_tab.set_clip(p.clips[self.sel], p.video.path, p.media, p.words)
+        self._clip_shown()
 
     def _crop_dragged(self, x: float) -> None:
         p = self._ready()
@@ -1034,7 +1099,7 @@ class MainWindow(QMainWindow):
         self._filling = True
         self.crop_slider.setValue(int(x * 100))
         self._filling = False
-        self.layout_tab.set_clip(p.clips[self.sel], p.video.path, p.media, p.words)
+        self._clip_shown()
 
     def add_clip(self, t: float) -> None:
         p = self._ready()
@@ -1166,9 +1231,10 @@ class MainWindow(QMainWindow):
         aspect, w, h = export_frame(s, media)
         if not layout.active(s):
             self.preview.set_aspect(aspect)
-            return
-        ratio = layout.crop_ratio(s, w, h)
-        self.preview.set_aspect(aspect if ratio else "original", ratio)
+        else:
+            ratio = layout.crop_ratio(s, w, h)
+            self.preview.set_aspect(aspect if ratio else "original", ratio)
+        self._refresh_export_view()
 
     @staticmethod
     def _kept(p: Project) -> list[Clip]:

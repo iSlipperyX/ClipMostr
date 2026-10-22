@@ -19,7 +19,8 @@ from ..export import frame as export_frame
 from ..ffmpeg import MediaInfo
 from ..settings import (APP_NAME, LAYOUT_PRESETS, SCHEMA, Settings, all_layouts, delete_user_layout,
                         load_user_layouts, save_user_layout)
-from . import forms, qt_fonts, theme
+from . import forms, overlay, theme
+from .compositor import paint_safe_zone
 
 
 class LayoutSketch(QWidget):
@@ -74,8 +75,7 @@ class LayoutSketch(QWidget):
                 g.fillRect(rect(p.second), QColor("#173A33"))
                 name = Path(s.stack_video).name if s.stack_video else "Choose a second video"
                 self._label(g, rect(p.second), name, QColor("#7FE0C4"))
-            for box, text_box, text in ((p.top, p.top_text, self.top_text),
-                                        (p.bottom, p.bottom_text, self.bottom_text)):
+            for box, text_box in ((p.top, p.top_text), (p.bottom, p.bottom_text)):
                 if box is None or text_box is None:
                     continue
                 if p.bars:
@@ -83,13 +83,13 @@ class LayoutSketch(QWidget):
                 else:
                     g.setPen(QPen(QColor(s.banner_color), 1, Qt.DashLine))
                     g.drawRect(rect(text_box).adjusted(1, 1, -1, -1))
-                shown = (text.upper() if s.banner_uppercase else text) or "(no text)"
-                # Same line breaks and size as the export, so the sketch is a fair preview.
-                lines, size = layout.wrap(shown, int(s.banner_font_size * min(p.width, p.height) / 1080),
-                                          text_box, s.banner_uppercase, s.banner_font)
-                g.setFont(qt_fonts.qfont(s.banner_font, max(6, int(size * k))))
-                g.setPen(QColor(s.banner_color))
-                g.drawText(rect(text_box), Qt.AlignCenter, "\n".join(lines))
+            # The banner words exactly as the export burns them in (same lines, size and outline).
+            g.save()
+            g.translate(ox, oy)
+            g.scale(k, k)
+            for bt in layout.banner_texts(p, s, self.top_text if p.top else "", self.bottom_text if p.bottom else ""):
+                overlay.paint_block(g, bt.block, QColor(s.banner_color), outline=bt.outline, shadow=bt.shadow)
+            g.restore()
         if p.safe is not None and self.show_safe:
             self._safe_zone(g, frame, rect(p.safe))
         g.setPen(QPen(QColor(theme.ACCENT_2), 2))
@@ -98,15 +98,7 @@ class LayoutSketch(QWidget):
 
     @staticmethod
     def _safe_zone(g: QPainter, frame: QRectF, safe: QRectF) -> None:
-        """Shade where TikTok draws its tabs, buttons and caption, and outline the safe area."""
-        shade = QColor(255, 80, 80, 46)
-        g.fillRect(QRectF(frame.left(), frame.top(), frame.width(), safe.top() - frame.top()), shade)
-        g.fillRect(QRectF(frame.left(), safe.bottom(), frame.width(), frame.bottom() - safe.bottom()), shade)
-        g.fillRect(QRectF(frame.left(), safe.top(), safe.left() - frame.left(), safe.height()), shade)
-        g.fillRect(QRectF(safe.right(), safe.top(), frame.right() - safe.right(), safe.height()), shade)
-        g.setPen(QPen(QColor(255, 120, 120, 200), 1, Qt.DashLine))
-        g.setBrush(Qt.NoBrush)
-        g.drawRect(safe)
+        paint_safe_zone(g, frame, safe)
 
     @staticmethod
     def _label(g: QPainter, r: QRectF, text: str, colour: QColor) -> None:
@@ -193,10 +185,17 @@ class LayoutTab(QWidget):
         cl.addWidget(head)
         self.top_edit = QLineEdit()
         self.bottom_edit = QLineEdit()
-        for edit, which in ((self.top_edit, "top"), (self.bottom_edit, "bottom")):
+        self.top_none = QCheckBox("No text")
+        self.bottom_none = QCheckBox("No text")
+        for edit, none, which in ((self.top_edit, self.top_none, "top"), (self.bottom_edit, self.bottom_none, "bottom")):
             edit.setClearButtonEnabled(True)
             edit.textEdited.connect(lambda text, w=which: self._clip_text(w, text))
-            cl.addWidget(edit)
+            none.setToolTip(f"Leave the {which} banner empty on this clip only (the bar stays, without words)")
+            none.toggled.connect(lambda on, w=which: self._clip_blank(w, on))
+            r = QHBoxLayout()
+            r.addWidget(edit, 1)
+            r.addWidget(none)
+            cl.addLayout(r)
         hint = QLabel("Leave blank to use the default text below. {title} = the clip title.")
         hint.setWordWrap(True)
         hint.setStyleSheet(f"color:{theme.MUTED}")
@@ -274,11 +273,17 @@ class LayoutTab(QWidget):
     def _refresh_clip_fields(self) -> None:
         s, c = self.settings, self.clip
         title = c.title if c else ""
-        for edit, on, template, value in (
-            (self.top_edit, s.banner_top, s.banner_top_text, c.top_text if c else None),
-            (self.bottom_edit, s.banner_bottom, s.banner_bottom_text, c.bottom_text if c else None),
+        for edit, none, on, template, value in (
+            (self.top_edit, self.top_none, s.banner_top, s.banner_top_text, c.top_text if c else None),
+            (self.bottom_edit, self.bottom_none, s.banner_bottom, s.banner_bottom_text, c.bottom_text if c else None),
         ):
-            edit.setEnabled(c is not None and on)
+            blank = value is not None and not value.strip()  # "" = this clip shows no words on this banner
+            none.setEnabled(c is not None and on)
+            if none.isChecked() != blank:
+                none.blockSignals(True)
+                none.setChecked(blank)
+                none.blockSignals(False)
+            edit.setEnabled(c is not None and on and not blank)
             default = layout.banner_text(template, title)
             where = "Top" if edit is self.top_edit else "Bottom"
             if not on:
@@ -293,6 +298,15 @@ class LayoutTab(QWidget):
             return
         setattr(self.clip, f"{which}_text", text if text.strip() else None)
         self.clip.edited = True
+        self.clipChanged.emit()
+        self._redraw()
+
+    def _clip_blank(self, which: str, on: bool) -> None:
+        if self.clip is None:
+            return
+        setattr(self.clip, f"{which}_text", "" if on else None)
+        self.clip.edited = True
+        self._refresh_clip_fields()
         self.clipChanged.emit()
         self._redraw()
 
