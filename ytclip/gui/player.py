@@ -265,6 +265,8 @@ class Preview(QGraphicsView):
         if t is None:
             t = self.player.position() / 1000
         start, end = self.clip_span
+        if start - 0.05 <= t < start:  # seeking to a clip's start lands on the frame just before it
+            return 0.0
         return t - start if start <= t < end else None
 
     def _paint_export(self, g: QPainter) -> None:

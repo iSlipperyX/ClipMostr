@@ -20,7 +20,7 @@ To give it to someone else, send them `dist/ClipMonster-windows.zip`. They unzip
 |---|---|
 | **Link bar** | Paste one or many YouTube links, playlists or channels. Drop video files or whole folders anywhere on the window. `Ctrl+V` adds links straight from the clipboard. |
 | **Videos queue** | Every video is downloaded and analysed in the background, one at a time. Right-click a video to re-analyse, export, open its folder or remove it. Your queue and clip edits are saved and restored the next time you open the app. |
-| **Preview** | Plays the video. When the format is 9:16 cropped or 1:1, a frame shows exactly what will be kept. Drag it to reframe each clip. |
+| **Preview** | **Export view** (on by default, `V` to switch) plays the selected clip exactly as it will export: the format, the blurred fill, banners, the stacked second video in sync, and captions that follow the speech word by word. It's drawn from the same numbers as the export, so what you see is what you get. Drag the picture to reframe it. **Safe zone** shades where TikTok's buttons and caption will sit. Switch Export view off to see the whole source video, with a frame showing what a crop keeps. |
 | **Interest timeline** | The purple curve is how interesting each second is. Toggle the individual signals on and off. Clips are blocks you can trim by dragging their edges or move by dragging their body. Scroll to zoom, right-click to add or delete. |
 | **Clips tab** | Rename, include or exclude, reorder, nudge start and end, and read the transcript of each clip. **Render preview** encodes just one clip so you can check it. |
 | **Find clips tab** | Weight sliders and length rules. Clips update live as you move them. Clips you've edited by hand are kept. |
@@ -52,8 +52,8 @@ Clips grow outward from the peaks. When there's a transcript, their edges are al
 ### Export options
 
 - **Formats:** original; 9:16 vertical with a blurred fill; 9:16 vertical cropped (reframe per clip); 1:1 square
-- **Animated captions:** word groups pop on screen with the spoken word highlighted. Font, size, colours, outline, position, words per screen and UPPERCASE are all adjustable. Optionally, the clip title appears as a banner at the top.
-- **Banners:** a solid bar of text at the top, the bottom or both (the video sits between them), or the same text laid over the video. `{title}` fills in the clip title, long text shrinks to fit, and each clip can override the text.
+- **Animated captions:** word groups pop on screen with the spoken word highlighted. Font, size, colours, outline, position, words per screen and UPPERCASE are all adjustable. Sizes are letter heights in pixels on a 1080-wide video, so a size looks the same in every font. Optionally, the clip title appears as a banner at the top.
+- **Banners:** a solid bar of text at the top, the bottom or both (the video sits between them), or the same text laid over the video. `{title}` fills in the clip title, long text wraps and shrinks to fit, and each clip can override the text or show none.
 - **Stacked layout:** your clip on one part of a 9:16 frame and a looping second video on the other. You choose which goes on top, how much room the clip gets, where the second video starts (a random spot per clip, or a fixed time) and how loud it is (silent by default). Captions set to *Middle* sit on the seam.
 - **Fonts:** 13 free display fonts ship with the app and look the same on every PC: TikTok Sans Black, Montserrat Black/ExtraBold, Poppins Black/ExtraBold, Archivo Black, Anton, Bebas Neue, Bangers, Luckiest Guy, Lilita One, Titan One and Permanent Marker. Pick one for captions and one for banners. Any font installed on the PC works too. Licences are in `ytclip/fonts/licenses`.
 - **TikTok-ready output** (on by default): every clip comes out 9:16 at 1080×1920 (between 540×960 and 1080×1920 at other resolution settings). *Original* and *1:1* are fitted in with a blurred fill; turn this off to keep them. In 9:16 the banner text and captions stay out of the areas TikTok covers with its tabs, buttons and caption (the layout sketch shades them). Output is H.264 High with AAC 44.1 kHz audio, at most 60 fps and 20 Mbps, and at least 540×960. The log warns about any clip over 10 minutes, or over 287 MB (the phone-app limit; computers can upload up to 4 GB).
@@ -73,6 +73,7 @@ One click sets everything for a style: **Shorts / TikTok / Reels**, **Vertical c
 | Key | Action |
 |---|---|
 | `Space` | Play / pause |
+| `V` | Export view on / off |
 | `←` `→` (`Shift` for 1 s) | Seek 5 s |
 | `J` / `L` | Previous / next clip |
 | `P` | Play selected clip |

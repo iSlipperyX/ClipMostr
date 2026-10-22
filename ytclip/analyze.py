@@ -51,7 +51,7 @@ class Clip:
     origin: str = "auto"  # auto | ai | chapter | manual
     reason: str = ""
     edited: bool = False  # touched by the user, so re-detection keeps it
-    top_text: str | None = None  # banner text for this clip; None = the banner template in settings
+    top_text: str | None = None  # banner text for this clip; None = the template in settings, "" = no words
     bottom_text: str | None = None
 
     @property

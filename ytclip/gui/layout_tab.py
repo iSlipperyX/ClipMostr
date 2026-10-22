@@ -185,10 +185,17 @@ class LayoutTab(QWidget):
         cl.addWidget(head)
         self.top_edit = QLineEdit()
         self.bottom_edit = QLineEdit()
-        for edit, which in ((self.top_edit, "top"), (self.bottom_edit, "bottom")):
+        self.top_none = QCheckBox("No text")
+        self.bottom_none = QCheckBox("No text")
+        for edit, none, which in ((self.top_edit, self.top_none, "top"), (self.bottom_edit, self.bottom_none, "bottom")):
             edit.setClearButtonEnabled(True)
             edit.textEdited.connect(lambda text, w=which: self._clip_text(w, text))
-            cl.addWidget(edit)
+            none.setToolTip(f"Leave the {which} banner empty on this clip only (the bar stays, without words)")
+            none.toggled.connect(lambda on, w=which: self._clip_blank(w, on))
+            r = QHBoxLayout()
+            r.addWidget(edit, 1)
+            r.addWidget(none)
+            cl.addLayout(r)
         hint = QLabel("Leave blank to use the default text below. {title} = the clip title.")
         hint.setWordWrap(True)
         hint.setStyleSheet(f"color:{theme.MUTED}")
@@ -266,11 +273,17 @@ class LayoutTab(QWidget):
     def _refresh_clip_fields(self) -> None:
         s, c = self.settings, self.clip
         title = c.title if c else ""
-        for edit, on, template, value in (
-            (self.top_edit, s.banner_top, s.banner_top_text, c.top_text if c else None),
-            (self.bottom_edit, s.banner_bottom, s.banner_bottom_text, c.bottom_text if c else None),
+        for edit, none, on, template, value in (
+            (self.top_edit, self.top_none, s.banner_top, s.banner_top_text, c.top_text if c else None),
+            (self.bottom_edit, self.bottom_none, s.banner_bottom, s.banner_bottom_text, c.bottom_text if c else None),
         ):
-            edit.setEnabled(c is not None and on)
+            blank = value is not None and not value.strip()  # "" = this clip shows no words on this banner
+            none.setEnabled(c is not None and on)
+            if none.isChecked() != blank:
+                none.blockSignals(True)
+                none.setChecked(blank)
+                none.blockSignals(False)
+            edit.setEnabled(c is not None and on and not blank)
             default = layout.banner_text(template, title)
             where = "Top" if edit is self.top_edit else "Bottom"
             if not on:
@@ -285,6 +298,15 @@ class LayoutTab(QWidget):
             return
         setattr(self.clip, f"{which}_text", text if text.strip() else None)
         self.clip.edited = True
+        self.clipChanged.emit()
+        self._redraw()
+
+    def _clip_blank(self, which: str, on: bool) -> None:
+        if self.clip is None:
+            return
+        setattr(self.clip, f"{which}_text", "" if on else None)
+        self.clip.edited = True
+        self._refresh_clip_fields()
         self.clipChanged.emit()
         self._redraw()
 
