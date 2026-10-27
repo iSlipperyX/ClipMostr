@@ -99,16 +99,23 @@ class CaptionEvent:
     active: int  # index of the word being spoken (drawn in the highlight colour, 112% size)
 
 
+HOLD = 1.5  # seconds a caption may stay up after its last word, if nothing follows sooner
+
+
 def caption_events(words: list[Word], clip_start: float, clip_end: float, s: Settings) -> list[CaptionEvent]:
     """Word-pop caption timing for one clip. Groups always start from the clip's first word, so a
     preview at any moment shows exactly the grouping the export will."""
     duration = clip_end - clip_start
     out: list[CaptionEvent] = []
     clip_words = words_between(words, clip_start, clip_end)
-    for group in _groups(clip_words, max(1, s.caption_words)):
+    groups = _groups(clip_words, max(1, s.caption_words))
+    for g, group in enumerate(groups):
         texts = [censor(w.text) if s.caption_censor else w.text for w in group]
         texts = [t.upper() if s.caption_uppercase else t for t in texts]
-        group_end = group[-1].end
+        # Keep the last words up a little longer, until the next group starts, so short pauses
+        # (and caption timing that runs ahead of the speech) don't flash an empty screen.
+        nxt = groups[g + 1][0].start if g + 1 < len(groups) else clip_end
+        group_end = max(group[-1].end, min(nxt, group[-1].end + HOLD))
         for i, w in enumerate(group):
             a = max(0.0, w.start - clip_start)
             b = min(duration, (group[i + 1].start if i + 1 < len(group) else group_end) - clip_start)

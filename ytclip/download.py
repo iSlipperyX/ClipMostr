@@ -31,6 +31,7 @@ class Video:
     subtitles: Path | None = None
     is_local: bool = False
     language: str = ""  # two-letter code from the platform, if known
+    license: str = ""  # as the platform words it, e.g. "Creative Commons Attribution license (reuse allowed)"
 
     def to_json(self) -> dict:
         d = asdict(self)
@@ -189,6 +190,7 @@ def download(url: str, cache_dir: Path, max_height: int, cookies: str | None = N
         heatmap=info.get("heatmap") or [],
         chapters=info.get("chapters") or [],
         language=(info.get("language") or "").split("-")[0].lower(),
+        license=info.get("license") or "",
     )
     progress("Fetching captions", None)
     video.subtitles = _download_captions(info, cache_dir, cookies, log)

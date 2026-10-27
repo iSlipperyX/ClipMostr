@@ -22,6 +22,10 @@ from .settings import PICK_FROM, Settings, app_dir
 from .sources import parse_channel, split_entries
 from .trending import CATEGORIES, TrendingVideo
 
+LANGUAGES = {"en": "English", "es": "Spanish", "fr": "French", "de": "German", "pt": "Portuguese",
+             "it": "Italian", "nl": "Dutch", "id": "Indonesian", "hi": "Hindi", "ja": "Japanese", "ko": "Korean",
+             "zh": "Chinese", "ru": "Russian", "ar": "Arabic", "tr": "Turkish", "pl": "Polish", "vi": "Vietnamese",
+             "th": "Thai", "tl": "Filipino", "ms": "Malay"}
 KEEP_DAYS = 120  # picks are remembered this long, so nothing is picked twice
 DAY = 86400.0
 
@@ -38,6 +42,7 @@ class Policy:
     block_channels: list[str] = field(default_factory=list)  # names, @handles or channel ids, lowercased
     block_categories: set[str] = field(default_factory=set)
     block_words: list[str] = field(default_factory=list)  # lowercased
+    languages: set[str] = field(default_factory=set)  # two-letter codes; empty = any
 
     @classmethod
     def from_settings(cls, s: Settings) -> "Policy":
@@ -49,7 +54,21 @@ class Policy:
             block_channels=_blocked_channels(s.pick_block_channels),
             block_categories={c for c in re.split(r"[\s,;]+", s.pick_block_categories) if c in CATEGORIES and c},
             block_words=[w.strip().lower() for w in s.pick_block_words.split(",") if w.strip()],
+            languages=parse_languages(s.pick_languages),
         )
+
+
+def language_codes(text: str) -> list[str]:
+    """"en, es-MX" -> ["en", "es"], in the order given."""
+    out: list[str] = []
+    for c in re.split(r"[\s,;]+", text or ""):
+        if re.fullmatch(r"[A-Za-z]{2,3}(-\w+)?", c) and c.split("-")[0].lower() not in out:
+            out.append(c.split("-")[0].lower())
+    return out
+
+
+def parse_languages(text: str) -> set[str]:
+    return set(language_codes(text))
 
 
 def _blocked_channels(text: str) -> list[str]:
@@ -217,6 +236,10 @@ def _decide_one(v: TrendingVideo, p: Policy, log: PickLog, now: float, notes: di
     word = next((w for w in p.block_words if w in title), None)
     if word:
         return skip("word", f"The title contains \"{word}\".")
+
+    if p.languages and v.language and v.language not in p.languages:
+        return skip("language", f"In {LANGUAGES.get(v.language, v.language)}; you only pick "
+                                f"{', '.join(LANGUAGES.get(c, c) for c in sorted(p.languages))} videos.")
 
     permission = _permission(v, notes)
     if p.pick_from == "cc" and v.license != "creativeCommon":
