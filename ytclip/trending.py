@@ -127,6 +127,7 @@ class TrendingVideo:
     channel_id: str = ""
     regions: dict[str, int] = field(default_factory=dict)  # region -> rank on its chart (1 = top)
     license: str = ""  # "creativeCommon" or "youtube" (standard licence), per the API
+    language: str = ""  # two-letter code of the spoken language, when the uploader set one
     origins: list[str] = field(default_factory=list)  # chart | watchlist | cc: where the scan found it
     # Filled in by the scan:
     velocity: float = 0.0  # views per hour
@@ -183,6 +184,7 @@ def video_from_api(item: dict) -> TrendingVideo:
         live=sn.get("liveBroadcastContent") or "none",
         thumbnail=thumb,
         license=(item.get("status") or {}).get("license") or "",
+        language=(sn.get("defaultAudioLanguage") or sn.get("defaultLanguage") or "").split("-")[0].lower(),
     )
 
 

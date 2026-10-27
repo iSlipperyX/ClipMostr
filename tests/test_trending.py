@@ -35,6 +35,8 @@ def test_video_from_api_reads_every_field():
     assert v.category == "23" and v.captions and v.live == "none"
     assert v.thumbnail.endswith("/xyz/hqdefault.jpg")
     assert v.url == "https://www.youtube.com/watch?v=xyz"
+    assert v.language == ""
+    assert video_from_api(api_item(language="pt-BR")).language == "pt"
 
 
 def test_video_round_trips_through_json():

@@ -14,6 +14,7 @@ from dataclasses import dataclass, field
 from typing import Callable
 
 from . import clipability
+from .policy import language_codes
 from .settings import Settings, app_dir
 from .sources import ChannelRef, Gathered, gather, parse_channels, parse_searches
 from .trending import (CATEGORIES, ChartUnavailable, DeepInfo, History, ResearchError, TrendingVideo, deep_check,
@@ -39,6 +40,7 @@ class ScanOptions:
     channels: list[ChannelRef] = field(default_factory=list)  # the channel list (Settings → Picking)
     searches: list[str] = field(default_factory=list)  # Creative Commons searches
     unreadable: list[str] = field(default_factory=list)  # channel list lines that aren't a channel
+    language: str = ""  # Creative Commons searches favour this spoken language (the first of Picking's)
 
     @classmethod
     def from_settings(cls, s: Settings) -> "ScanOptions":
@@ -47,7 +49,8 @@ class ScanOptions:
                    category=s.research_category, per_region=s.research_per_region,
                    min_minutes=s.research_min_minutes, deep_count=s.research_deep_count,
                    cookies=s.cookies_browser or None, channels=channels,
-                   searches=parse_searches(s.pick_searches), unreadable=bad)
+                   searches=parse_searches(s.pick_searches), unreadable=bad,
+                   language=next(iter(language_codes(s.pick_languages)), ""))
 
     @property
     def quota(self) -> int:
@@ -127,7 +130,7 @@ def scan(opts: ScanOptions, history: History, log: Log | None = None, progress: 
     if opts.channels or opts.searches:
         step("Checking your channel list" if opts.channels else "Searching Creative Commons videos",
              len(opts.regions) / (len(opts.regions) + 1))
-        extra = sources(opts.api_key, opts.channels, opts.searches, history, now, log)
+        extra = sources(opts.api_key, opts.channels, opts.searches, history, now, log, language=opts.language)
         quota += extra.quota
         problems += extra.problems
     problems += [f"Channel list: \"{x}\" isn't a channel link, @handle or id." for x in opts.unreadable]

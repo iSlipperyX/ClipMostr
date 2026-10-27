@@ -21,7 +21,8 @@ NOW = 1_800_000_000.0  # a fixed "now" so ages and velocities are exact
 
 
 def api_item(vid="abc", title="A video", views=100_000, likes=5_000, comments=400, minutes=20.0,
-             hours_old=10.0, category="20", live="none", caption=False, channel="Chan", license="youtube"):
+             hours_old=10.0, category="20", live="none", caption=False, channel="Chan", license="youtube",
+             language=""):
     """One item as videos.list returns it (chart=mostPopular, or by id)."""
     from datetime import datetime, timezone
 
@@ -32,7 +33,7 @@ def api_item(vid="abc", title="A video", views=100_000, likes=5_000, comments=40
         stats["likeCount"] = str(likes)
     if comments is not None:
         stats["commentCount"] = str(comments)
-    return {
+    item = {
         "id": vid,
         "snippet": {"title": title, "channelTitle": channel, "channelId": "UC" + channel, "publishedAt": published,
                     "categoryId": category, "liveBroadcastContent": live,
@@ -42,6 +43,9 @@ def api_item(vid="abc", title="A video", views=100_000, likes=5_000, comments=40
                            "caption": "true" if caption else "false"},
         "status": {"license": license},
     }
+    if language:
+        item["snippet"]["defaultAudioLanguage"] = language
+    return item
 
 
 def spiky_heatmap(duration=1200, peaks=(300, 700, 1000), base=0.15, segments=100):

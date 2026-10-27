@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import html
 import re
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -12,6 +13,8 @@ _TAG = re.compile(r"<[^>]+>")
 REACTION = re.compile(r"[\[(](?:laughter|laughs|laughing|applause|cheering|cheers)[\])]", re.I)
 _BRACKETED = re.compile(r"[\[(][^\])]*[\])]")
 _SENTENCE_END = (".", "!", "?", "…")
+_SPEAKER = re.compile(r"(?:^|(?<=\s))>{2,}(?=\s|$)")  # ">>": YouTube's "someone else speaks" mark
+_WORDY = re.compile(r"\w")
 
 
 @dataclass
@@ -75,6 +78,18 @@ def _blocks(path: Path):
         yield _seconds(a), _seconds(b.split()[0]), lines[idx + 1 :]
 
 
+def clean_text(text: str) -> str:
+    """Caption text as people read it: no tags, HTML entities decoded (YouTube's translated captions
+    encode them twice: "&amp;gt;&amp;gt;"), no ">>" speaker marks, single spaces."""
+    text = _TAG.sub("", text)
+    for _ in range(3):
+        decoded = html.unescape(text)
+        if decoded == text:
+            break
+        text = decoded
+    return " ".join(_SPEAKER.sub(" ", text).split())
+
+
 def parse_vtt(path: Path) -> list[Cue]:
     cues: list[Cue] = []
     last_line = ""
@@ -83,7 +98,7 @@ def parse_vtt(path: Path) -> list[Cue]:
         # keep only lines we haven't just emitted.
         new_lines = []
         for raw in raw_lines:
-            line = " ".join(_TAG.sub("", raw).split())
+            line = clean_text(raw)
             if line and line != last_line:
                 new_lines.append(line)
                 last_line = line
@@ -93,7 +108,21 @@ def parse_vtt(path: Path) -> list[Cue]:
 
 
 def _clean_word(text: str) -> str:
-    return " ".join(_BRACKETED.sub(" ", _TAG.sub("", text)).split())
+    return " ".join(_BRACKETED.sub(" ", clean_text(text)).split())
+
+
+def _attach_punctuation(words: list[Word]) -> list[Word]:
+    """Tokens with no letters or digits ("," "." "..." "-") join the word before them, so captions never
+    show a lone comma as a word. Leading ones are dropped."""
+    out: list[Word] = []
+    for w in words:
+        if _WORDY.search(w.text):
+            out.append(w)
+        elif out:
+            prev = out[-1]
+            prev.text += w.text if w.text[:1] in ",.!?…:;)]\"'”’" else " " + w.text
+            prev.end = max(prev.end, w.end)
+    return out
 
 
 def parse_vtt_words(path: Path) -> list[Word]:
@@ -103,22 +132,43 @@ def parse_vtt_words(path: Path) -> list[Word]:
     has_inline = any(_INLINE_TIME.search(ln) for _, _, lines in blocks for ln in lines)
     words: list[Word] = []
     if has_inline:
+        # YouTube sometimes ends a timed line with a bare time stamp ("... Don't blame<00:00:04.074>")
+        # and only shows the words after it ("me for") in the next cue's untimed repeat of the line.
+        # `dangling` remembers such a line, so those words can be picked up from the repeat.
+        dangling: tuple[str, float] | None = None  # (the timed line's text, its last stamp)
         for start, end, lines in blocks:
             for line in lines:
                 if not _INLINE_TIME.search(line):
-                    continue  # the repeated "previous line" carries no timing tags
+                    # the repeated "previous line" carries no timing tags
+                    if dangling:
+                        said, at = dangling
+                        full = _clean_word(line)
+                        if full != said and full.startswith(said):
+                            toks = full[len(said):].split()
+                            step = (end - at) / len(toks) if end > at else 0.0
+                            words += [Word(at + i * step, at + i * step, w) for i, w in enumerate(toks)]
+                            dangling = None
+                    continue
                 parts = _INLINE_TIME.split(line)
                 stamps = [start] + [_seconds(t) for t in parts[1::2]]
-                for t, chunk in zip(stamps, parts[0::2]):
-                    for w in _clean_word(chunk).split():
-                        words.append(Word(t, t, w))
+                for n, (t, chunk) in enumerate(zip(stamps, parts[0::2])):
+                    toks = _clean_word(chunk).split()
+                    if not toks:
+                        continue
+                    # Several words under one time stamp (common in translated captions): spread them
+                    # over the time until the next stamp, so each word gets its own moment.
+                    until = stamps[n + 1] if n + 1 < len(stamps) else end
+                    step = max(0.0, until - t) / len(toks) if until > t else 0.0
+                    words += [Word(t + i * step, t + i * step, w) for i, w in enumerate(toks)]
+                ends_bare = len(stamps) > 1 and not _clean_word(parts[-1])
+                dangling = (_clean_word(line), stamps[-1]) if ends_bare else None
         words.sort(key=lambda w: w.start)
     else:
         for cue in parse_vtt(path):
             toks = _clean_word(cue.text).split()
             step = (cue.end - cue.start) / max(1, len(toks))
             words += [Word(cue.start + i * step, cue.start + (i + 1) * step, w) for i, w in enumerate(toks)]
-    return _fix_ends(words)
+    return _fix_ends(_attach_punctuation(words))
 
 
 def _fix_ends(words: list[Word]) -> list[Word]:

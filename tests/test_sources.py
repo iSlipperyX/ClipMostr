@@ -172,7 +172,8 @@ def test_scan_merges_sources_with_charts_and_marks_listed_channels():
             out.append(v)
         return out
 
-    def fake_sources(key, channels, searches, history, now, log=None):
+    def fake_sources(key, channels, searches, history, now, log=None, language=""):
+        assert language == ""
         v = video_from_api(api_item("listed", channel="Pod", minutes=40))
         v.origins = ["watchlist"]
         dup = video_from_api(api_item("hot", channel="Pod", minutes=30))
@@ -206,3 +207,15 @@ def test_settings_feed_the_scan_options():
     opts = ScanOptions.from_settings(s)
     assert [r.label for r in opts.channels] == ["@Pod"] and opts.searches == ["a", "b"]
     assert opts.unreadable == ["not a channel!"]
+    assert opts.language == "en"
+    assert ScanOptions.from_settings(Settings().apply({"pick_languages": "es-MX, en"})).language == "es"
+    assert ScanOptions.from_settings(Settings().apply({"pick_languages": ""})).language == ""
+
+
+def test_search_favours_the_picking_language():
+    from ytclip.sources import search_cc
+    api = FakeAPI(search={"talk": ["a"]})
+    assert search_cc("KEY", "talk", NOW - 86400, get=api, language="en") == ["a"]
+    assert api.calls[-1][1]["relevanceLanguage"] == "en"
+    search_cc("KEY", "talk", NOW - 86400, get=api)
+    assert "relevanceLanguage" not in api.calls[-1][1]

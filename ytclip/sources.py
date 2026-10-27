@@ -140,13 +140,15 @@ def latest_uploads(api_key: str, playlist: str, limit: int = CHANNEL_VIDEOS,
 
 
 def search_cc(api_key: str, query: str, published_after: float, limit: int = SEARCH_VIDEOS,
-              get: Callable[[str], dict] = _get) -> list[str]:
+              get: Callable[[str], dict] = _get, language: str = "") -> list[str]:
     """Creative Commons video ids matching a search, most viewed first; 100 quota units."""
     from datetime import datetime, timezone
 
     after = datetime.fromtimestamp(published_after, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     params = {"part": "id", "type": "video", "videoLicense": "creativeCommon", "q": query, "order": "viewCount",
               "publishedAfter": after, "maxResults": str(max(1, min(50, limit))), "key": api_key.strip()}
+    if language:
+        params["relevanceLanguage"] = language  # favours that language; the picking rules still check it
     data = get(f"{API_URL}/search?{urllib.parse.urlencode(params)}")
     ids = [((it.get("id") or {}).get("videoId") or "") for it in data.get("items") or []]
     return [i for i in ids if i][:limit]
@@ -175,7 +177,7 @@ class Gathered:
 
 
 def gather(api_key: str, channels: list[ChannelRef], searches: list[str], history: History, now: float,
-           log: Log | None = None, get: Callable[[str], dict] = _get) -> Gathered:
+           log: Log | None = None, get: Callable[[str], dict] = _get, language: str = "") -> Gathered:
     """Videos from the channel list and Creative Commons searches, each tagged in .origins.
 
     A bad key or a used-up quota fails every call the same way, so that is raised; anything
@@ -228,7 +230,7 @@ def gather(api_key: str, channels: list[ChannelRef], searches: list[str], histor
         if now - rec.get("checked", 0) >= SEARCH_EVERY:
             try:
                 g.quota += 100
-                rec = {"videos": search_cc(api_key, query, oldest, SEARCH_VIDEOS, get), "checked": now}
+                rec = {"videos": search_cc(api_key, query, oldest, SEARCH_VIDEOS, get, language), "checked": now}
                 log(f"Searched Creative Commons videos for \"{query}\" (100 quota units).")
             except ResearchBlocked:
                 raise

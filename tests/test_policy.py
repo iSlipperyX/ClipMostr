@@ -7,9 +7,10 @@ from ytclip.trending import video_from_api
 
 
 def vid(vid="v", score=80, minutes=30, hours_old=5, channel="Pod", origins=("watchlist",), license="youtube",
-        category="22", title=None, live="none"):
+        category="22", title=None, live="none", language=""):
     v = video_from_api(api_item(vid, title=title or f"Video {vid}", minutes=minutes, hours_old=hours_old,
-                                channel=channel, license=license, category=category, live=live))
+                                channel=channel, license=license, category=category, live=live,
+                                language=language))
     v.score, v.origins = score, list(origins)
     return v
 
@@ -141,3 +142,20 @@ def test_two_processes_sharing_the_log_keep_each_others_picks(tmp_path):
     assert sorted(p["id"] for p in PickLog(path).picks) == ["a", "r"]
     app.reload()
     assert app.get("r") is not None
+
+
+def test_language_rule():
+    p = Policy.from_settings(Settings())
+    assert p.languages == {"en"}
+    d = one(vid(language="id"), p)
+    assert not d.picked and d.rule == "language"
+    assert d.reason == "In Indonesian; you only pick English videos."
+    assert one(vid(language="en-GB"), p).picked
+    assert one(vid(), p).picked  # no language on record: let it through
+    assert one(vid(language="id"), Policy(languages=set())).picked  # empty setting: any language
+
+
+def test_language_codes():
+    from ytclip.policy import language_codes, parse_languages
+    assert language_codes("es-MX, en; EN  pt-BR junk!") == ["es", "en", "pt"]
+    assert parse_languages("") == set()

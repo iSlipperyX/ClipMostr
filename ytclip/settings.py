@@ -137,6 +137,7 @@ class Settings:
     research_alert: int = 75
     # Picking rules (policy.py): which researched videos may be clipped without asking
     pick_from: str = "watchlist"
+    pick_languages: str = "en"  # only pick videos in these spoken languages (when YouTube knows it); "" = any
     pick_channels: str = ""
     pick_searches: str = ""
     pick_min_score: int = 65
@@ -598,6 +599,11 @@ SCHEMA: list[Field] = [
           help="One search per line, e.g. 'gaming highlights'. Each search costs 100 quota units and runs "
                "at most every 6 hours",
           placeholder="gaming highlights\nscience lecture"),
+    Field("pick_languages", "Only pick videos in", "Picking", "str",
+          help="Spoken language codes, comma separated (en, es, fr…). Empty = any language. Videos whose "
+               "uploader didn't set a language are allowed. Creative Commons searches favour the first "
+               "one",
+          placeholder="en"),
     Field("pick_min_score", "Lowest clip-ability to pick", "Picking", "int", lo=0, hi=100),
     Field("pick_min_minutes", "Shortest video (min)", "Picking", "float", lo=0, hi=120, step=1),
     Field("pick_max_minutes", "Longest video (min, 0 = any)", "Picking", "float", lo=0, hi=1200, step=10,
