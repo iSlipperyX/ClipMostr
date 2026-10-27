@@ -144,6 +144,7 @@ class Settings:
     pick_min_minutes: float = 8.0
     pick_max_minutes: float = 180.0
     pick_max_age_days: float = 3.0
+    pick_max_age_allowed_days: float = 14.0
     pick_daily: int = 3
     pick_channel_weekly: int = 2
     pick_block_channels: str = ""
@@ -609,7 +610,11 @@ SCHEMA: list[Field] = [
     Field("pick_min_minutes", "Shortest video (min)", "Picking", "float", lo=0, hi=120, step=1),
     Field("pick_max_minutes", "Longest video (min, 0 = any)", "Picking", "float", lo=0, hi=1200, step=10,
           help="Very long streams take a long time to download and analyse"),
-    Field("pick_max_age_days", "Oldest video (days, 0 = any)", "Picking", "float", lo=0, hi=60, step=1),
+    Field("pick_max_age_days", "Oldest trending video (days, 0 = any)", "Picking", "float", lo=0, hi=60, step=1,
+          help="For videos you don't have permission on record for"),
+    Field("pick_max_age_allowed_days", "Oldest channel-list or CC video (days, 0 = any)", "Picking", "float",
+          lo=0, hi=60, step=1,
+          help="Videos from your channel list or under Creative Commons stay worth clipping for longer"),
     Field("pick_daily", "Videos picked per day", "Picking", "int", lo=0, hi=50,
           help="Counted over the last 24 hours. Each video makes several clips"),
     Field("pick_channel_weekly", "Most picks per channel per week (0 = any)", "Picking", "int", lo=0, hi=20,

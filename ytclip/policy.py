@@ -37,6 +37,7 @@ class Policy:
     min_minutes: float = 8.0
     max_minutes: float = 180.0  # 0 = no limit
     max_age_days: float = 3.0  # 0 = no limit
+    max_age_allowed_days: float = 14.0  # for videos you have permission to clip (channel list, CC); 0 = no limit
     daily: int = 3
     per_channel_week: int = 2  # 0 = no limit
     block_channels: list[str] = field(default_factory=list)  # names, @handles or channel ids, lowercased
@@ -50,6 +51,7 @@ class Policy:
             pick_from=s.pick_from if s.pick_from in dict(PICK_FROM) else "watchlist",
             min_score=float(s.pick_min_score), min_minutes=float(s.pick_min_minutes),
             max_minutes=float(s.pick_max_minutes), max_age_days=float(s.pick_max_age_days),
+            max_age_allowed_days=float(s.pick_max_age_allowed_days),
             daily=int(s.pick_daily), per_channel_week=int(s.pick_channel_weekly),
             block_channels=_blocked_channels(s.pick_block_channels),
             block_categories={c for c in re.split(r"[\s,;]+", s.pick_block_categories) if c in CATEGORIES and c},
@@ -253,8 +255,10 @@ def _decide_one(v: TrendingVideo, p: Policy, log: PickLog, now: float, notes: di
     if p.max_minutes and minutes > p.max_minutes:
         return skip("length", f"{stamp(v.duration)} long; your maximum is {p.max_minutes:g} min.")
     age_days = v.age_hours(now) / 24
-    if p.max_age_days and age_days > p.max_age_days:
-        return skip("age", f"Posted {age_days:.0f} days ago; your limit is {p.max_age_days:g}.")
+    # Trending videos fade within days; videos you have permission to clip stay worth it for longer.
+    limit = p.max_age_allowed_days if permission is not None else p.max_age_days
+    if limit and age_days > limit:
+        return skip("age", f"Posted {age_days:.0f} days ago; your limit is {limit:g}.")
     if v.score + bonus < p.min_score:
         if bonus:
             return skip("score", f"Clip-ability {v.score:.0f}, {v.score + bonus:.0f} after your results, is under "
