@@ -17,6 +17,7 @@ from .download import expand_sources
 from .engine import Engine, Project
 from .organize import stamp
 from .settings import ASPECTS, LAYOUT_PRESETS, PRESETS, Settings, all_layouts, all_presets, find_layout
+from .qc import REJECTED as QC_REJECTED
 from .stackpool import pool_files
 
 # Redirected output on Windows defaults to cp1252, which can't encode ✓, → or most
@@ -65,6 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--polish", action="store_true",
                    help="AI polish: hooks for the top banner, caption fixes, speaker crops (needs an Anthropic key)")
     p.add_argument("--bleep", action="store_true", help="mask strong swearing in captions (f*ck, sh*t)")
+    p.add_argument("--qc", action="store_true", help="check each clip after export; failures move to _rejected")
     p.add_argument("--keywords", help="comma-separated words/phrases to boost")
     p.add_argument("-q", "--quality", type=int, help="max download height, e.g. 720")
     p.add_argument("--encoder", choices=["auto", "libx264", "h264_amf", "h264_nvenc", "h264_qsv"])
@@ -155,6 +157,7 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
         "tiktok_ready": False if args.no_tiktok else None,
         "ai_polish": True if args.polish else None,
         "caption_censor": True if args.bleep else None,
+        "qc_enabled": True if args.qc else None,
     }
     if args.top_text is not None:
         overrides |= {"banner_top": True, "banner_top_text": args.top_text}
@@ -208,7 +211,12 @@ def process(source: str, engine: Engine, dry_run: bool) -> None:
         task = bar.add_task("Exporting", total=1)
         engine._progress = lambda msg, f: bar.update(task, description=msg, completed=f or 0)
         folder = engine.export(p)
-    console.print(f"[green]✓ {len(p.clips)} clips →[/] {escape(str(folder))}")
+    if p.qc:
+        console.print(f"[green]✓ {p.qc['passed']} clips ready[/]"
+                      + (f", [red]{p.qc['rejected']} rejected[/] (in {QC_REJECTED})" if p.qc["rejected"] else "")
+                      + f" → {escape(str(folder))}")
+    else:
+        console.print(f"[green]✓ {len(p.clips)} clips →[/] {escape(str(folder))}")
 
 
 def build_research_parser() -> argparse.ArgumentParser:
@@ -454,7 +462,8 @@ def _auto_status(db) -> None:
         if j.error and j.status != "done":
             status += f"\n[dim]{escape(j.error[:200])}[/]"
         table.add_row(j.id, f"{escape(j.title or j.url)}\n[dim]{escape(j.channel)}[/]", status,
-                      str(j.clips or ""), age_text((now - j.updated) / 3600) + " ago", escape(j.permission))
+                      f"{j.clips} (+{j.rejected} rejected)" if j.rejected else str(j.clips or ""),
+                      age_text((now - j.updated) / 3600) + " ago", escape(j.permission))
     console.print(table)
 
 
@@ -505,12 +514,47 @@ def run_auto(argv: list[str]) -> int:
     return pipeline.Runner(db, log=log).run(once=args.once)
 
 
+def run_qc(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="ytclip qc", description="Check exported clips again: silence, black or frozen "
+                                "picture, wrong length or size, and low AI ratings. Failed clips move to _rejected.")
+    p.add_argument("folders", nargs="+", type=Path, help="video folders (with a clips.json) or a folder of them")
+    p.add_argument("--min-rating", type=int, help="reject AI ratings under this (0 ignores them)")
+    p.add_argument("--size", metavar="WxH", help="the frame size every clip should have, e.g. 1080x1920")
+    args = p.parse_args(argv)
+    from . import qc
+
+    s = Settings.load()
+    size = None
+    if args.size:
+        try:
+            w, h = (int(x) for x in args.size.lower().split("x"))
+            size = (w, h)
+        except ValueError:
+            raise SystemExit("--size must look like 1080x1920")
+    indexes = [f for root in args.folders for f in ([root / "clips.json"] if (root / "clips.json").is_file()
+                                                       else sorted(root.rglob("clips.json")))]
+    if not indexes:
+        console.print("[red]No clips.json found in those folders.[/]")
+        return 2
+    total = {"passed": 0, "rejected": 0, "warned": 0}
+    for index in indexes:
+        console.print(f"[bold]{escape(str(index.parent))}[/]")
+        result = qc.check_folder(index.parent, lambda m: console.print(f"  {escape(m)}"),
+                                 s.qc_min_rating if args.min_rating is None else args.min_rating, size)
+        total = {k: total[k] + result[k] for k in total}
+    console.print(f"[green]{total['passed']} ready[/] · [red]{total['rejected']} rejected[/]"
+                  + (f" · [yellow]{total['warned']} with warnings[/]" if total["warned"] else ""))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["research"]:
         return run_research(argv[1:])
     if argv[:1] == ["auto"]:
         return run_auto(argv[1:])
+    if argv[:1] == ["qc"]:
+        return run_qc(argv[1:])
     args = build_parser().parse_args(argv)
     from . import updater
 

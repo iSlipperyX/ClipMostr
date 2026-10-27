@@ -37,7 +37,8 @@ class Job:
     created: float = 0.0
     updated: float = 0.0
     folder: str = ""
-    clips: int = 0
+    clips: int = 0  # ready to upload
+    rejected: int = 0  # moved to _rejected by the quality check
     recipe: str = ""
     pruned: int = 0  # cache files removed
 

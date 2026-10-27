@@ -50,6 +50,7 @@ Clips grow outward from the peaks. When there's a transcript, their edges are al
 **AI polish** (*Settings → AI → Polish clips with AI*, off by default) makes one more Claude call per video, sending each clip's transcript and one small frame from it. It sends back:
 - a **hook** for each clip: a few honest, specific words that go in the top banner when it shows `{title}`, and into `clips.json` for your upload caption;
 - **caption fixes** for words the transcript misheard, mostly names and jargon ("Joe Rogen" becomes "Joe Rogan"), swapped word for word so the timing stays right;
+- a 1-10 **rating** of how well each clip stands alone, used by the [quality check](#export-options);
 - where the **speaker** is, so *9:16 vertical cropped* and *1:1* keep them in shot;
 - whether the video **already has subtitles** in the picture. If it does, your captions are left off for that video (or kept, if you choose), so there aren't two sets of words on screen.
 
@@ -67,6 +68,7 @@ Anything you've edited by hand is left alone, and if the call fails the clips si
 - **TikTok-ready output** (on by default): every clip comes out 9:16 at 1080×1920 (between 540×960 and 1080×1920 at other resolution settings). *Original* and *1:1* are fitted in with a blurred fill; turn this off to keep them. In 9:16 the banner text and captions stay out of the areas TikTok covers with its tabs, buttons and caption (the layout sketch shades them). Output is H.264 High with AAC 44.1 kHz audio, at most 60 fps and 20 Mbps, and at least 540×960. The log warns about any clip over 10 minutes, or over 287 MB (the phone-app limit; computers can upload up to 4 GB).
 - **Encoding:** GPU encoding on AMD (AMF), NVIDIA (NVENC) or Intel (Quick Sync), detected automatically, with x264 as the fallback
 - **Polish:** loudness normalisation (−14 LUFS, the level social platforms target), fade in/out, resolution, quality and audio bitrate
+- **Quality check** (*Check clips after export*): each clip is watched once, quickly, after it's made. A clip that's silent, mostly black or frozen, or the wrong length or size is **rejected**: it moves to a `_rejected` folder beside the others, so it never ends up in front of you as ready to upload. With AI polish on, Claude also rates how well each clip stands alone, from 1 to 10, and clips under *Reject AI ratings under* (5) are rejected too, with its reason. Clips that start or end mid-sentence, are very quiet or have hardly any talking are kept but flagged. The Library, the video's `README.md` and `clips.json` (a `qc` record per clip) all show the result. `ytclip qc FOLDER` checks existing folders again.
 - **Extras:** an `.srt` subtitle file and a thumbnail per clip, plus a `README.md` and `clips.json` index for each video
 - **Naming:** templates for folders (`{channel}/{date} {title} [{id}]`) and files (`{rank:02d} - {time} - {label}`)
 
@@ -163,6 +165,7 @@ The **Automation** tab runs the whole job without you: it checks Research on you
 | Always burn in captions | on | Word-by-word captions on every clip |
 | Work from / until | any time | Hours in which downloads and encodes may start, e.g. 1 to 7 overnight |
 | Minutes between downloads | 10 | Spacing that keeps YouTube from flagging the PC |
+| Check clips after export | on | The [quality check](#export-options); rejected clips go to `_rejected` and the queue shows them as "3 ✓ 1 ✗" |
 | Polish clips with AI | on | [AI polish](#how-clips-are-found) for every video, when there's an Anthropic key |
 | AI calls per day | 10 | The AI clip finder and AI polish each count as one. Over this, videos use the smart signals and skip polishing, so Claude costs stay predictable |
 | Tries per video | 3 | Before a video is marked failed |
@@ -208,11 +211,12 @@ ytclip "C:\Videos\podcast.mp4" --mode ai --captions -f vertical_crop
 ytclip "https://youtu.be/VIDEO" --keywords "goal, penalty" --dry-run
 ytclip "C:\Videos\stream.mp4" --layout "Gameplay below + title" --captions
 ytclip "C:\Videos\stream.mp4" --stack "C:\Videos\parkour.mp4" --top-text "{title}" --bottom-text "Follow for part 2" --captions
-ytclip "https://youtu.be/VIDEO" --stack "C:\Videos\Gameplay" --polish --captions --bleep
+ytclip "https://youtu.be/VIDEO" --stack "C:\Videos\Gameplay" --polish --captions --bleep --qc
+ytclip qc "C:\Users\me\Videos\ClipMonster"      # check exported clips again
 ytclip --list-presets
 ```
 
-Main options: `-n` number of clips · `--min/--max` length in seconds · `--mode auto|ai|chapters` · `-f original|vertical_blur|vertical_crop|square` · `--captions` · `--polish` AI hooks and caption fixes · `--bleep` mask swearing · `--stack VIDEO|FOLDER` · `--keywords` · `-q` max download resolution · `--encoder` · `--limit` videos per playlist · `-o` output folder · `--dry-run` analyse without exporting · `--cookies-from-browser chrome` for age-restricted videos.
+Main options: `-n` number of clips · `--min/--max` length in seconds · `--mode auto|ai|chapters` · `-f original|vertical_blur|vertical_crop|square` · `--captions` · `--polish` AI hooks and caption fixes · `--bleep` mask swearing · `--qc` check clips after export · `--stack VIDEO|FOLDER` · `--keywords` · `-q` max download resolution · `--encoder` · `--limit` videos per playlist · `-o` output folder · `--dry-run` analyse without exporting · `--cookies-from-browser chrome` for age-restricted videos.
 
 ## Updates
 
@@ -266,6 +270,7 @@ Run the tests with `pip install -e .[test]` and then `pytest`. They need no netw
 | `ytclip/analyze.py` | Signals, scoring and clip picking |
 | `ytclip/ai.py` | Claude clip finder |
 | `ytclip/polish.py` | AI polish: hooks, caption fixes, speaker crops, burned-in subtitle check |
+| `ytclip/qc.py` | Quality check: silence, black/frozen picture, length/size, mid-sentence edges, AI ratings |
 | `ytclip/stackpool.py` | Deals a different second video to each clip from a folder |
 | `ytclip/trending.py` | YouTube trending charts, replay checks, research history |
 | `ytclip/clipability.py` | Clip-ability score for trending videos |

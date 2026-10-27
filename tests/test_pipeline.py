@@ -30,6 +30,7 @@ class FakeEngine:
 
     plan: dict = {}
     made: list = []
+    reject = 0  # clips the quality check rejects
 
     def __init__(self, settings, log=None, progress=None, cancelled=None):
         self.s, self.progress, self.cancelled = settings, progress, cancelled
@@ -49,12 +50,14 @@ class FakeEngine:
 
     def export(self, p):
         self.exported = p
+        if self.s.qc_enabled and self.reject:
+            p.qc = {"passed": len(p.clips) - self.reject, "rejected": self.reject, "warned": 0}
         return self.s.auto_output_path / p.video.id
 
 
 @pytest.fixture(autouse=True)
 def fresh_engine():
-    FakeEngine.plan, FakeEngine.made = {}, []
+    FakeEngine.plan, FakeEngine.made, FakeEngine.reject = {}, [], 0
 
 
 def _settings(**kw):
@@ -278,6 +281,17 @@ def test_no_polish_without_a_key_or_when_turned_off(tmp_path, monkeypatch):
     assert not settings_for(Job("a", "u"), _settings())[0].ai_polish
     assert settings_for(Job("a", "u"), _settings(ai_api_key="k"))[0].ai_polish
     assert not settings_for(Job("a", "u"), _settings(ai_api_key="k", auto_polish=False))[0].ai_polish
+
+
+def test_quality_check_counts_reach_the_queue(tmp_path):
+    r = _runner(tmp_path)
+    FakeEngine.reject = 1
+    r.add_manual("https://youtu.be/fffffffffff")
+    r.process(r.db.next_due(NOW), r.load())
+    job = r.db.get("fffffffffff")
+    assert FakeEngine.made[0].s.qc_enabled
+    assert (job.clips, job.rejected) == (2, 1)
+    assert any("1 rejected by the quality check" in m for m in r.logs)
 
 
 def test_spacing_between_downloads(tmp_path):

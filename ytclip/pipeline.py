@@ -133,6 +133,7 @@ def settings_for(job: Job, s: Settings) -> tuple[Settings, str]:
         overrides["burn_captions"] = True
     if s.auto_delete_sources:
         overrides["keep_source"] = False
+    overrides["qc_enabled"] = s.auto_qc
     overrides["ai_polish"] = s.auto_polish and bool(s.ai_api_key.strip() or os.environ.get("ANTHROPIC_API_KEY"))
     out = out.apply(overrides)
     label = " · ".join(x for x in (preset or "My settings", view) if x)
@@ -349,10 +350,13 @@ class Runner:
             self.failed(job, str(exc) or exc.__class__.__name__, s)
             return
         title = p.video.title if p.video else job.title
+        made = len([c for c in p.clips if c.enabled])
+        rejected = p.qc.get("rejected", 0) if p.qc else 0
         self.db.update(job.id, self.now(), status="done", stage="Done", folder=str(folder),
-                       clips=len([c for c in p.clips if c.enabled]), title=title,
+                       clips=made - rejected, rejected=rejected, title=title,
                        channel=p.video.channel if p.video else job.channel)
-        self.log(f"✓ {len(p.clips)} clips from {title} → {folder}")
+        self.log(f"✓ {made - rejected} clips from {title} → {folder}"
+                 + (f" ({rejected} rejected by the quality check)" if rejected else ""))
         self.prune(s)
 
     def failed(self, job: Job, error: str, s: Settings) -> None:

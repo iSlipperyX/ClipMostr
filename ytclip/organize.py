@@ -88,6 +88,7 @@ def write_index(folder: Path, video: Video, clips: list[Clip], files: list[str],
             "reason": c.reason,
             "watch": watch_link(video, c.start),
             **({"hook": c.hook} if c.hook else {}),
+            **({"rating": c.rating, **({"rating_note": c.rating_note} if c.rating_note else {})} if c.rating else {}),
             **((details or [])[i - 1] if i <= len(details or []) else {}),
         }
         for i, (c, f) in enumerate(zip(clips, files), 1)
@@ -120,6 +121,11 @@ def write_index(folder: Path, video: Video, clips: list[Clip], files: list[str],
             f"{stamp(r['start'])}–{stamp(r['end'])} | {r['length']:.0f}s | {r['score']:.0f} | "
             f"[▶]({r['watch']}) |"
         )
+        check = r.get("qc") or {}
+        if check.get("ok") is False:
+            lines.append(f"| | ✗ **Rejected:** {'; '.join(check.get('problems', []))} | | | | |")
+        elif check.get("warnings"):
+            lines.append(f"| | ⚠ {'; '.join(check['warnings'])} | | | | |")
         if r.get("hook"):
             lines.append(f"| | Hook: **{r['hook']}** | | | | |")
         if r["reason"]:

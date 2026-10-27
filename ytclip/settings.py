@@ -89,6 +89,8 @@ class Settings:
     thumbnails: bool = True
     write_srt: bool = True
     tiktok_ready: bool = True
+    qc_enabled: bool = False  # qc.py: check every clip after export, moving bad ones to _rejected
+    qc_min_rating: int = 5  # with AI polish: reject clips Claude rates under this (0 = ignore ratings)
     # Captions
     burn_captions: bool = False
     caption_font: str = "Montserrat Black"
@@ -153,6 +155,7 @@ class Settings:
     auto_recipes: str = ""  # lines of "match = preset | view"
     auto_captions: bool = True
     auto_polish: bool = True
+    auto_qc: bool = True
     auto_start_hour: int = 0  # the runner downloads and encodes between these hours (equal = any time)
     auto_end_hour: int = 0
     auto_gap_minutes: int = 10
@@ -510,6 +513,11 @@ SCHEMA: list[Field] = [
           help="Every clip comes out 9:16 at TikTok's size (1080×1920 at the 1080 setting, never above it, never "
                "under 540×960), keeps text out of TikTok's buttons and captions, caps frame rate at 60 and bitrate "
                "at 20 Mbps, uses 44.1 kHz audio, and warns about clips over 10 minutes or 287 MB"),
+    Field("qc_enabled", "Check clips after export", "Export", "bool",
+          help="Watches each clip once for silence, black or frozen picture and the wrong length or size, and "
+               "notes clips that start or end mid-sentence. Failed clips move to a _rejected folder"),
+    Field("qc_min_rating", "Reject AI ratings under", "Export", "int", lo=0, hi=10,
+          help="With AI polish on, Claude rates how well each clip stands alone, 1 to 10. 0 ignores the ratings"),
 
     Field("burn_captions", "Burn in animated captions", "Captions", "bool"),
     Field("caption_font", "Font", "Captions", "font"),
@@ -617,6 +625,9 @@ SCHEMA: list[Field] = [
                "@handle, or * for everything else. The first matching line wins",
           placeholder="Gaming = Gaming / action | Gameplay below\n@somepodcast = Podcast moments | Title on top"),
     Field("auto_captions", "Always burn in captions", "Automation", "bool"),
+    Field("auto_qc", "Check clips after export", "Automation", "bool",
+          help="Clips that fail (silent, black, frozen, wrong length, or rated low by the AI polish) go to a "
+               "_rejected folder instead of being ready to upload"),
     Field("auto_polish", "Polish clips with AI", "Automation", "bool",
           help="Hooks, caption fixes and speaker crops (see Settings → AI). Needs an Anthropic key and "
                "counts toward the AI limit below"),

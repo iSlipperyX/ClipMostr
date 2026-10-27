@@ -54,6 +54,8 @@ class Clip:
     top_text: str | None = None  # banner text for this clip; None = the template in settings, "" = no words
     bottom_text: str | None = None
     hook: str = ""  # a short line written by the AI polish (polish.py) for the banner and the upload caption
+    rating: int = 0  # the AI polish's 1-10 "does it stand alone?" (0 = not rated); qc.py rejects low ones
+    rating_note: str = ""  # what holds it back, when rated low
 
     @property
     def length(self) -> float:

@@ -14,6 +14,7 @@ from .analyze import (SIGNAL_LABELS, Clip, Measurements, breathing_room, build_s
                       combine, fit_to_sentences, loudness_db, pick_clips, quiet_frames, snap, trim_dead_air)
 from .download import Video, download, is_url, local_video
 from .export import export_clip, thumbnail, tiktok_warnings
+from .export import frame as export_frame
 from .ffmpeg import MediaInfo, probe
 from .organize import clip_filename, video_dir, write_index
 from .scenes import detect_scenes
@@ -52,6 +53,7 @@ class Project:
     polished: bool = False  # the AI polish answered (polish.py)
     polish_error: str = ""
     captions_off: bool = False  # the video has subtitles of its own, so ours stay off
+    qc: dict = field(default_factory=dict)  # the quality check's tally after export (qc.py)
     export_dir: Path | None = None
     meta: dict = field(default_factory=dict)  # extra sections for clips.json, e.g. why automation picked it
 
@@ -303,6 +305,8 @@ class Engine:
         if self.s.thumbnails:
             thumbs.mkdir(exist_ok=True)
         self._remove_previous_export(folder)
+        p.qc = {}
+        p.meta.pop("qc", None)
 
         base = self.s.copy(burn_captions=False) if p.captions_off else self.s
         pool = None
@@ -332,12 +336,36 @@ class Engine:
             files.append(name)
             details.append(extra)
 
+        if self.s.qc_enabled and clips:
+            self.check(p, folder, clips, files, details, base)
         write_index(folder, v, clips, files, self.signal_names(p), p.mode_used or self.s.mode, p.meta, details)
         if not self.s.keep_source and not v.is_local:
             v.path.unlink(missing_ok=True)
         p.export_dir = folder
         self.log(f"Exported {len(files)} clips to {folder}")
         return folder
+
+    def check(self, p: Project, folder: Path, clips: list[Clip], files: list[str], details: list[dict],
+              s: Settings) -> None:
+        """The quality check (qc.py): rejected clips move to _rejected and `files` is updated to match."""
+        from . import qc
+
+        _, w, h = export_frame(s, p.media)
+        verdicts = []
+        for i, (clip, name) in enumerate(zip(clips, files)):
+            self.progress(f"Checking clip {i + 1}/{len(clips)}", i / len(clips))
+            stats = qc.measure(folder / name)
+            v = qc.merge(qc.judge_file(stats, 0 if s.fast_copy else clip.length, None if s.fast_copy else (w, h),
+                                       p.media.has_audio),
+                         qc.judge_content(clip, p.words, s.qc_min_rating))
+            if not v.ok:
+                files[i] = qc.reject(folder, name)
+                self.log(f"Rejected {name}: {'; '.join(v.problems)}")
+            details[i]["qc"] = v.to_json()
+            verdicts.append(v)
+        p.qc = p.meta["qc"] = qc.summary(verdicts)
+        self.log(f"Quality check: {p.qc['passed']} ready, {p.qc['rejected']} rejected"
+                 + (f", {p.qc['warned']} with warnings" if p.qc["warned"] else ""))
 
     @staticmethod
     def _remove_previous_export(folder: Path) -> None:

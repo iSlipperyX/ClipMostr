@@ -190,7 +190,7 @@ class Automation(QWidget):
 
     def _fill_table(self) -> None:
         jobs = self.db.jobs()
-        sig = [(j.id, j.status, j.stage, j.updated, j.clips) for j in jobs]
+        sig = [(j.id, j.status, j.stage, j.updated, j.clips, j.rejected) for j in jobs]
         counts = self.db.counts()
         self.counts.setText(f"{counts['queued']} waiting · {counts['working']} working · {counts['done']} done · "
                             f"{counts['failed']} failed")
@@ -208,7 +208,9 @@ class Automation(QWidget):
                 _item(j.title or j.url, j.url),
                 _item(j.channel),
                 _item(status, "\n".join(x for x in (status, tip, j.recipe and f"Style: {j.recipe}") if x)),
-                _item(str(j.clips) if j.clips else ""),
+                _item(f"{j.clips} ✓ {j.rejected} ✗" if j.rejected else str(j.clips) if j.clips else "",
+                      f"{j.clips} ready to upload, {j.rejected} rejected by the quality check (in the _rejected "
+                      "folder)" if j.rejected else ""),
                 _item(age_text((now - j.updated) / 3600) + " ago" if j.updated else ""),
                 _item(j.permission),
             ]

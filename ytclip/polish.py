@@ -45,6 +45,11 @@ SCHEMA = {
                 "properties": {
                     "clip": {"type": "integer", "description": "The clip number from the list"},
                     "hook": {"type": "string", "description": "2 to 7 punchy words that make people stop scrolling"},
+                    "rating": {"type": "integer",
+                               "description": "1-10: how well this works as a standalone short for someone who "
+                                              "hasn't seen the video"},
+                    "rating_note": {"type": "string",
+                                    "description": "Under 7: what holds it back, in a few words. Otherwise empty"},
                     "subject_x": {"type": "number",
                                   "description": "Where the main speaker's face is across the frame: 0 left edge, "
                                                  "0.5 centre, 1 right edge. 0.5 if nobody is on screen"},
@@ -63,7 +68,7 @@ SCHEMA = {
                         },
                     },
                 },
-                "required": ["clip", "hook", "subject_x", "fixes"],
+                "required": ["clip", "hook", "rating", "rating_note", "subject_x", "fixes"],
                 "additionalProperties": False,
             },
         },
@@ -81,6 +86,9 @@ SYSTEM = (
     "- fixes: only words the captions clearly got wrong, judged from context and the video title. 'heard' "
     "must be copied exactly from that clip's transcript, and 'correct' must have the same number of words. "
     "Don't fix grammar, filler words or the speaker's own slang. Usually there are none.\n"
+    "- rating: be a tough judge. 8+ means it hooks fast, makes sense with no context and pays off. 4 or less "
+    "means it starts mid-thought, needs context from earlier, ends before the payoff or is just dull. "
+    "Rate tragedy, violence or anything about children low unless it's clearly fine to repost.\n"
     "- subject_x: where the person talking is, across the frame.\n"
     "- burned_in_subtitles: whether any frame shows subtitles or captions that are part of the picture "
     "(not on-screen titles, logos or a news ticker)."
@@ -96,6 +104,8 @@ class ClipPolish:
     hook: str = ""
     subject_x: float | None = None
     fixes: list[tuple[str, str]] = field(default_factory=list)
+    rating: int = 0
+    rating_note: str = ""
 
 
 @dataclass
@@ -156,7 +166,12 @@ def parse(text: str, count: int) -> Polish:
             heard, correct = str(f.get("heard") or "").split(), str(f.get("correct") or "").split()
             if heard and len(heard) == len(correct) and heard != correct:
                 fixes.append((" ".join(heard), " ".join(correct)))
-        out.clips[n] = ClipPolish(hook, x, fixes)
+        try:
+            rating = min(10, max(1, int(item.get("rating"))))
+        except (TypeError, ValueError):
+            rating = 0
+        note = re.sub(r"\s+", " ", str(item.get("rating_note") or "")).strip()[:120] if rating and rating < 7 else ""
+        out.clips[n] = ClipPolish(hook, x, fixes, rating, note)
     return out
 
 
@@ -234,6 +249,7 @@ def apply(polish: Polish, clips: list[Clip], words: list[Word], banner_template:
         cp = polish.clips.get(i)
         if not cp:
             continue
+        c.rating, c.rating_note = cp.rating, cp.rating_note
         if cp.hook:
             c.hook = cp.hook
             hooks += 1

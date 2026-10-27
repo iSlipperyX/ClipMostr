@@ -100,7 +100,10 @@ class Library(QWidget):
             v = meta.get("video", {})
             n = len(meta.get("clips", []))
             total += n
-            item = QListWidgetItem(f"{v.get('title', folder.name)}\n{v.get('channel', '')} · {n} clips")
+            check = meta.get("qc") or {}
+            count = (f"{check.get('passed', 0)} ready · {check['rejected']} rejected" if check.get("rejected")
+                     else f"{n} clips")
+            item = QListWidgetItem(f"{v.get('title', folder.name)}\n{v.get('channel', '')} · {count}")
             thumb = folder / "thumbnails" / "01.jpg"
             if thumb.exists():
                 item.setIcon(QIcon(QPixmap(str(thumb)).scaled(96, 54, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
@@ -120,15 +123,22 @@ class Library(QWidget):
         folder, meta = self._videos[row]
         for rec in meta.get("clips", []):
             path = folder / rec["file"]
+            check = rec.get("qc") or {}
+            rejected = check.get("ok") is False
             text = (f"{rec['rank']:02d} · {rec.get('title') or 'clip'}\n"
-                    f"{stamp(rec['start'])} · {rec['length']:.0f}s · score {rec.get('score', 0):.0f}")
+                    f"{stamp(rec['start'])} · {rec['length']:.0f}s · score {rec.get('score', 0):.0f}"
+                    + (f" · AI {rec['rating']}/10" if rec.get("rating") else "")
+                    + (" · ✗ rejected" if rejected else " · ⚠ check" if check.get("warnings") else ""))
             item = QListWidgetItem(text)
             thumb = folder / "thumbnails" / f"{rec['rank']:02d}.jpg"
             if thumb.exists():
                 item.setIcon(QIcon(QPixmap(str(thumb))))
             item.setData(Qt.UserRole, str(path))
-            item.setToolTip(rec.get("reason") or str(path))
-            if not path.exists():
+            tip = [f"Hook: {rec['hook']}" if rec.get("hook") else "", rec.get("reason") or "",
+                   "Rejected: " + "; ".join(check.get("problems", [])) if rejected else "",
+                   "Warnings: " + "; ".join(check.get("warnings", [])) if check.get("warnings") else ""]
+            item.setToolTip("\n".join(x for x in tip if x) or str(path))
+            if rejected or not path.exists():
                 item.setForeground(Qt.gray)
             self.clips.addItem(item)
 
