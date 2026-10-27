@@ -244,3 +244,17 @@ def test_settings_dialog_picking_page(app):
                  if editor.widget.item(i).data(Qt.UserRole) == "10")
     music.setCheckState(Qt.Unchecked)
     assert dlg.result_settings.pick_block_categories == "1"
+
+
+def test_a_sign_in_request_during_a_tab_check_pauses_automation_too(app):
+    from ytclip.jobs import JobDB
+    from ytclip.pipeline import paused_until
+
+    tab, _ = _make(app, youtube_api_key="k")
+    result = _result()
+    result.blocked = "Sign in to confirm you're not a bot"
+    logs = []
+    tab.log.connect(logs.append)
+    tab._scan_done(result, auto=True)
+    import time
+    assert paused_until(JobDB(), time.time()) and "carries on by itself" in logs[0]

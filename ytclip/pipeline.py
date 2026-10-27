@@ -148,6 +148,35 @@ def settings_for(job: Job, s: Settings) -> tuple[Settings, str]:
 # ---------------------------------------------------------------- the runner
 
 
+def paused_until(db: JobDB, now: float) -> float:
+    """When requests to YouTube may start again after it asked this PC to sign in (0 = not paused)."""
+    until = db.meta_float("blocked_until")
+    return until if now < until else 0.0
+
+
+def gap_factor(db: JobDB, now: float) -> int:
+    """Downloads are spaced out twice as much after each sign-in request (up to 4 times), until a
+    day passes without one."""
+    if now - db.meta_float("blocked_at") > BLOCK_PAUSE + CALM_DAY:
+        return 1
+    return max(1, min(4, int(db.meta_float("gap_factor") or 1)))
+
+
+def record_block(db: JobDB, error: str, now: float) -> str:
+    """YouTube asked this PC to sign in: stop all requests to it for a while, and slow down after.
+    Shared by automation and the Research tab. Returns the line to log."""
+    recent = now - db.meta_float("blocked_at") <= BLOCK_PAUSE + CALM_DAY
+    factor = min(4, gap_factor(db, now) * 2) if recent else 2
+    until = now + BLOCK_PAUSE
+    db.set_meta("blocked_until", until)
+    db.set_meta("blocked_at", now)
+    db.set_meta("gap_factor", factor)
+    db.set_meta("last_error", error)
+    return (f"⚠ YouTube asked this PC to sign in, so ClipMonster stops asking it for anything until "
+            f"{time.strftime('%H:%M', time.localtime(until))} and then spaces downloads {factor}x further "
+            f"apart for a day. Nothing needs doing; it carries on by itself. ({error})")
+
+
 class Runner:
     def __init__(self, db: JobDB | None = None, load: Callable[[], Settings] = Settings.load,
                  log: Log | None = None, now: Callable[[], float] = time.time,
@@ -163,6 +192,7 @@ class Runner:
         self._picks = picks or (lambda: PickLog(picks_path()))
         self.pid = os.getpid()
         self._last_beat = 0.0
+        self._stop: Callable[[], bool] = lambda: False  # run()'s stop check, so a long scan can be stopped
         self._last_flag_check = 0.0
 
     # ------------------------------------------------------------ bookkeeping
@@ -235,16 +265,10 @@ class Runner:
         return max(1.0, min(next_scan - now, (upcoming - now) if upcoming else IDLE, IDLE))
 
     def blocked(self, now: float) -> float:
-        """When downloads may start again after YouTube asked this PC to sign in (0 = not paused)."""
-        until = self.db.meta_float("blocked_until")
-        return until if now < until else 0.0
+        return paused_until(self.db, now)
 
     def gap_factor(self, now: float) -> int:
-        """Downloads are spaced out twice as much after each sign-in request (up to 4 times),
-        until a day passes without one."""
-        if now - self.db.meta_float("blocked_at") > BLOCK_PAUSE + CALM_DAY:
-            return 1
-        return max(1, min(4, int(self.db.meta_float("gap_factor") or 1)))
+        return gap_factor(self.db, now)
 
     def wait_reason(self, s: Settings, now: float) -> tuple[float, str]:
         blocked = self.blocked(now)
@@ -263,17 +287,7 @@ class Runner:
         return 0.0, ""
 
     def block(self, error: str, now: float) -> None:
-        """YouTube asked this PC to sign in: stop all requests to it for a while, and slow down after."""
-        recent = now - self.db.meta_float("blocked_at") <= BLOCK_PAUSE + CALM_DAY
-        factor = min(4, self.gap_factor(now) * 2) if recent else 2
-        until = now + BLOCK_PAUSE
-        self.db.set_meta("blocked_until", until)
-        self.db.set_meta("blocked_at", now)
-        self.db.set_meta("gap_factor", factor)
-        self.db.set_meta("last_error", error)
-        self.log(f"⚠ YouTube asked this PC to sign in, so automation stops asking it for anything until "
-                 f"{time.strftime('%H:%M', time.localtime(until))} and then spaces downloads {factor}x further "
-                 f"apart for a day. Nothing needs doing; it carries on by itself. ({error})")
+        self.log(record_block(self.db, error, now))
 
     # ------------------------------------------------------------ research → queue
     def research(self, s: Settings) -> int:
@@ -289,6 +303,7 @@ class Runner:
                 self.log("Using the Research tab's last check.")
             else:
                 scan = self._scan or research.scan
+                stop = self._stop
                 opts = research.ScanOptions.from_settings(s)
                 # Most-replayed checks load YouTube pages: one at a time, spaced out, and none at
                 # all while YouTube has asked this PC to sign in. (The charts use the API.)
@@ -296,12 +311,15 @@ class Runner:
                 if self.blocked(now):
                     opts.deep_count = 0
                 # Spaced-out checks take minutes: keep the heartbeat going so the runner isn't taken for dead.
-                result = scan(opts, history, self.log, progress=lambda m, f: self.beat(), now=now)
+                result = scan(opts, history, self.log, progress=lambda m, f: self.beat(),
+                              cancelled=lambda: stop() or self.stop_requested(), now=now)
                 self.log(f"Checked {len(result.videos)} videos ({result.quota} quota units).")
                 for p in result.problems:
                     self.log(f"Research: {p}")
                 if getattr(result, "blocked", ""):
                     self.block(result.blocked, self.now())
+        except research.ScanCancelled:
+            raise Stopped()
         except Exception as exc:
             self.log(f"⚠ Research failed: {exc}")
             self.db.set_meta("last_error", f"Research: {exc}")
@@ -445,7 +463,7 @@ class Runner:
             self.log(why)
             return 1
         self.log(f"Automation started (process {self.pid}).")
-        stop = stop or (lambda: False)
+        stop = self._stop = stop or (lambda: False)
         try:
             while True:
                 try:

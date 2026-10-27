@@ -150,7 +150,7 @@ def test_settings_for_a_job(tmp_path):
 
 
 def test_research_queues_picks_once(tmp_path):
-    r = _runner(tmp_path, scan=lambda opts, history, log=None, progress=None, now=None: _scan_result("a", "b"))
+    r = _runner(tmp_path, scan=lambda opts, history, log=None, progress=None, cancelled=None, now=None: _scan_result("a", "b"))
     assert r.research(_settings()) == 2
     jobs = {j.id: j for j in r.db.jobs()}
     assert set(jobs) == {"a", "b"} and jobs["a"].how == "auto"
@@ -268,7 +268,7 @@ def test_after_a_bot_check_downloads_slow_down_then_recover(tmp_path):
 def test_research_asks_youtube_nothing_while_paused(tmp_path):
     seen = []
 
-    def scan(opts, history, log=None, progress=None, now=None):
+    def scan(opts, history, log=None, progress=None, cancelled=None, now=None):
         seen.append(opts)
         result = _scan_result("a")
         result.blocked = "Sign in to confirm you're not a bot" if len(seen) == 1 else ""
@@ -459,3 +459,18 @@ def test_jobs_db_basics(tmp_path):
     assert db.get("a") is None
     again = JobDB(tmp_path / "jobs.db")  # a second connection (the app) sees the same data
     assert again.get("b").status == "queued"
+
+
+def test_stop_interrupts_a_long_research_scan(tmp_path):
+    from ytclip.research import ScanCancelled
+
+    def scan(opts, history, log=None, progress=None, cancelled=None, now=None):
+        assert cancelled() is False
+        r.db.set_meta("stop", "1")  # Stop pressed (or the updater pausing automation) mid-scan
+        if cancelled():
+            raise ScanCancelled()
+        raise AssertionError("not cancelled")
+
+    r = _runner(tmp_path, scan=scan)
+    with pytest.raises(pipeline.Stopped):
+        r.research(r.load())

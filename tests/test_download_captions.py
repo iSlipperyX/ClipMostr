@@ -52,3 +52,35 @@ def test_a_page_instead_of_captions_is_not_kept(tmp_path, monkeypatch):
 def test_requests_are_spaced_out():
     assert download._base_opts(None, None)["sleep_interval_requests"] >= 1
     assert download.is_blocked("ERROR: [youtube] x: Sign in to confirm you're not a bot")
+
+
+def _http_error(status):
+    from yt_dlp.networking import Response
+    from yt_dlp.networking.exceptions import HTTPError
+    import io
+    return HTTPError(Response(io.BytesIO(b""), "https://x/v", {}, status=status))
+
+
+def test_a_server_error_is_tried_again(monkeypatch):
+    calls = []
+
+    class Flaky(FakeYDL):
+        def urlopen(self, url):
+            calls.append(url)
+            if len(calls) < 3:
+                raise _http_error(503)
+            return super().urlopen(url)
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", Flaky)
+    assert download._fetch("https://x/v", None, sleep=lambda s: None).startswith(b"WEBVTT") and len(calls) == 3
+
+
+def test_too_many_requests_pauses_the_video_instead_of_dropping_captions(tmp_path, monkeypatch):
+    class Limited(FakeYDL):
+        def urlopen(self, url):
+            raise _http_error(429)
+
+    monkeypatch.setattr(yt_dlp, "YoutubeDL", Limited)
+    import pytest
+    with pytest.raises(Exception, match="429"):
+        download._download_captions(INFO, tmp_path, None, None)

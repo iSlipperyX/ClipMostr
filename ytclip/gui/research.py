@@ -486,6 +486,19 @@ class Research(QWidget):
             return
         self._debounce.stop()
         opts = ScanOptions.from_settings(s)
+        # Most-replayed checks load YouTube pages. While YouTube has asked this PC to sign in there
+        # are none, and checks that run by themselves are spaced out like automation's.
+        from ..jobs import JobDB
+        from ..pipeline import DEEP_PAUSE, paused_until
+
+        db = JobDB()
+        try:
+            if paused_until(db, time.time()):
+                opts.deep_count = 0
+        finally:
+            db.close()
+        if auto:
+            opts.deep_workers, opts.deep_pause = 1, DEEP_PAUSE
         history = self.history
         job = _Job(lambda j: scan(opts, history, j.log.emit,
                                   lambda m, f: j.progress.emit(m, -1.0 if f is None else float(f)),
@@ -531,6 +544,15 @@ class Research(QWidget):
     def _scan_done(self, result: ScanResult, auto: bool) -> None:
         self.result = result
         self._error = ""
+        if result.blocked:
+            from ..jobs import JobDB
+            from ..pipeline import record_block
+
+            db = JobDB()
+            try:
+                self.log.emit(record_block(db, result.blocked, time.time()))
+            finally:
+                db.close()
         self._show_result(result)
         self._update_summary()
         for p in result.problems:

@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import shutil
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -227,8 +228,6 @@ def download(url: str, cache_dir: Path, max_height: int, cookies: str | None = N
 
 def _download_captions(info: dict, cache_dir: Path, cookies: str | None, log: Log | None) -> Path | None:
     """Captions are optional: they improve clip naming, captions and reaction detection."""
-    import yt_dlp
-
     choice = _pick_caption_lang(info)
     if not choice:
         return None
@@ -247,18 +246,39 @@ def _download_captions(info: dict, cache_dir: Path, cookies: str | None, log: Lo
             log("Captions unavailable (no WebVTT version); continuing without them.")
         return None
     try:
-        with yt_dlp.YoutubeDL(_base_opts(None, cookies)) as ydl:
-            data = ydl.urlopen(track["url"]).read()
+        data = _fetch(track["url"], cookies)
         if not data.lstrip(b"\xef\xbb\xbf").startswith(b"WEBVTT"):
             raise ValueError("not a WebVTT file")
         part = target.with_name(target.name + ".part")
         part.write_bytes(data)
         part.replace(target)
     except Exception as exc:
+        if is_blocked(str(exc)):
+            raise  # YouTube is pushing back on the PC: the whole video waits, see pipeline.classify
         if log:
             log(f"Captions unavailable ({exc.__class__.__name__}: {exc}); continuing without them.")
         return None
     return target
+
+
+def _fetch(url: str, cookies: str | None, tries: int = 3, sleep: Callable[[float], None] = time.sleep) -> bytes:
+    """One small download through yt-dlp (its cookies and headers), tried again after a dropped
+    connection or a server error."""
+    import yt_dlp
+    from yt_dlp.networking.exceptions import HTTPError, TransportError
+
+    for attempt in range(tries):
+        try:
+            with yt_dlp.YoutubeDL(_base_opts(None, cookies)) as ydl:
+                return ydl.urlopen(url).read()
+        except HTTPError as exc:
+            if not 500 <= exc.status < 600 or attempt == tries - 1:
+                raise
+        except TransportError:
+            if attempt == tries - 1:
+                raise
+        sleep((2, 5)[min(attempt, 1)])
+    raise AssertionError("unreachable")
 
 
 def local_video(path: Path) -> Video:
