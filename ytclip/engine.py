@@ -212,17 +212,21 @@ class Engine:
     def polish(self, p: Project) -> None:
         """Hooks, caption fixes, speaker crops and a burned-in subtitle check from one Claude call.
         Never fails the video: on any error the clips go out as they are (reason in p.polish_error)."""
-        from . import polish
+        from . import learn, polish
 
         p.polished, p.polish_error, p.captions_off = False, "", False
         clips = [c for c in p.clips if c.enabled]
         if not clips or p.video is None:
             return
         self.progress("AI is polishing the clips", None)
+        lessons = learn.for_settings(self.s)
+        guide = lessons.prompt_text() if lessons else ""
+        if guide:
+            self.log("The AI sees which of your earlier hooks worked.")
         try:
             result = polish.ask(p.video.title, clips, p.words, p.video.path, self.s.ai_api_key,
                                 self.s.ai_polish_model, self.log,
-                                check=lambda: self.progress("AI is polishing the clips", None))
+                                check=lambda: self.progress("AI is polishing the clips", None), guide=guide)
             self.progress("AI is polishing the clips", None)
         except Cancelled:
             raise

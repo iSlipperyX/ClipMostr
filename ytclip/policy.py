@@ -16,6 +16,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from .learn import Lessons
 from .organize import stamp
 from .settings import PICK_FROM, Settings, app_dir
 from .sources import parse_channel, split_entries
@@ -70,6 +71,8 @@ class Decision:
     picked: bool
     reason: str  # why it was skipped, or why it's allowed when picked
     rule: str = ""  # short id of the deciding rule, for tests and the CLI's JSON
+    learned: str = ""  # how results from earlier posts moved it up or down, if they did
+    bonus: float = 0.0  # those clip-ability points
 
     @property
     def permission(self) -> str:
@@ -168,16 +171,18 @@ def _permission(v: TrendingVideo, notes: dict[str, str]) -> str | None:
 
 
 def decide(videos: list[TrendingVideo], policy: Policy, log: PickLog, now: float | None = None,
-           notes: dict[str, str] | None = None) -> list[Decision]:
+           notes: dict[str, str] | None = None, lessons: Lessons | None = None) -> list[Decision]:
     """One decision per video, best first. Limits count earlier picks in the log plus the
-    picks made higher up this list."""
+    picks made higher up this list. With lessons, a channel whose clips did well (or badly)
+    once posted gets clip-ability points added (or taken off) for ranking and the minimum score."""
     now = now or time.time()
     notes = notes or {}
     picked_today = log.count_since(now - DAY)
     per_channel: dict[str, int] = {}
     out: list[Decision] = []
-    for v in sorted(videos, key=lambda v: (v.score, v.velocity), reverse=True):
-        out.append(_decide_one(v, policy, log, now, notes, picked_today, per_channel))
+    learned = {v.id: lessons.bonus(v.channel) if lessons else (0.0, "") for v in videos}
+    for v in sorted(videos, key=lambda v: (v.score + learned[v.id][0], v.velocity), reverse=True):
+        out.append(_decide_one(v, policy, log, now, notes, picked_today, per_channel, learned[v.id]))
         if out[-1].picked:
             picked_today += 1
             per_channel[v.channel_id] = per_channel.get(v.channel_id, 0) + 1
@@ -185,9 +190,12 @@ def decide(videos: list[TrendingVideo], policy: Policy, log: PickLog, now: float
 
 
 def _decide_one(v: TrendingVideo, p: Policy, log: PickLog, now: float, notes: dict[str, str],
-                picked_today: int, per_channel: dict[str, int]) -> Decision:
+                picked_today: int, per_channel: dict[str, int],
+                learned: tuple[float, str] = (0.0, "")) -> Decision:
+    bonus, note = learned
+
     def skip(rule: str, reason: str) -> Decision:
-        return Decision(v, False, reason, rule)
+        return Decision(v, False, reason, rule, note, bonus)
 
     earlier = log.get(v.id)
     if earlier:
@@ -224,7 +232,10 @@ def _decide_one(v: TrendingVideo, p: Policy, log: PickLog, now: float, notes: di
     age_days = v.age_hours(now) / 24
     if p.max_age_days and age_days > p.max_age_days:
         return skip("age", f"Posted {age_days:.0f} days ago; your limit is {p.max_age_days:g}.")
-    if v.score < p.min_score:
+    if v.score + bonus < p.min_score:
+        if bonus:
+            return skip("score", f"Clip-ability {v.score:.0f}, {v.score + bonus:.0f} after your results, is under "
+                                 f"your minimum of {p.min_score:g}.")
         return skip("score", f"Clip-ability {v.score:.0f} is under your minimum of {p.min_score:g}.")
 
     if p.per_channel_week:
@@ -234,7 +245,7 @@ def _decide_one(v: TrendingVideo, p: Policy, log: PickLog, now: float, notes: di
                                        f"in the last 7 days (your limit is {p.per_channel_week}).")
     if picked_today >= p.daily:
         return skip("daily_cap", f"The limit of {p.daily} pick{'s' if p.daily != 1 else ''} a day is reached.")
-    return Decision(v, True, permission or "Passed your rules (no permission on record)", "picked")
+    return Decision(v, True, permission or "Passed your rules (no permission on record)", "picked", note, bonus)
 
 
 def picked(decisions: list[Decision]) -> list[Decision]:

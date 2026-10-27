@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
-from . import research
+from . import learn, research
 from .engine import Cancelled, Engine, Project
 from .jobs import Job, JobDB
 from .policy import PickLog, Policy, decide, picks_path
@@ -267,7 +267,8 @@ class Runner:
             self.db.set_meta("last_error", f"Research: {exc}")
             return 0
         picks = self._picks()
-        decisions = decide(result.videos, Policy.from_settings(s), picks, now=now, notes=result.notes)
+        decisions = decide(result.videos, Policy.from_settings(s), picks, now=now, notes=result.notes,
+                           lessons=learn.for_settings(s))
         added = 0
         for d in decisions:
             if not d.picked:
@@ -278,7 +279,8 @@ class Runner:
                       stage="Waiting")
             if self.db.add(job, now):
                 added += 1
-                self.log(f"Picked: {v.title} ({v.channel}, clip-ability {v.score:.0f}). {d.reason}")
+                self.log(f"Picked: {v.title} ({v.channel}, clip-ability {v.score:.0f}). {d.reason}"
+                         + (f" {d.learned}" if d.learned else ""))
             picks.record(d, "auto", now)
             history.mark_sent(v.id)
         if added:

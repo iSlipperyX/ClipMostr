@@ -19,7 +19,7 @@ def _make(app, tmp_path, **settings):
 
 def test_empty_state_and_start(app, tmp_path):
     tab, db, launched = _make(app, tmp_path)
-    assert not tab.empty.isHidden() and tab.table.isHidden()
+    assert not tab.empty.isHidden() and tab.table.isHidden() and tab.pause_btn.isHidden()
     assert "Not running" in tab.status.text() and "No YouTube API key" in tab.status.text()
     tab.start()
     assert launched == [1] and "Starting" in tab.status.text()

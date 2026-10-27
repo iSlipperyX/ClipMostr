@@ -129,8 +129,10 @@ def grab_frames(src: Path, clips: list[Clip], folder: Path) -> list[Path | None]
     return out
 
 
-def build_content(title: str, clips: list[Clip], words: list[Word], frames: list[Path | None]) -> list[dict]:
-    blocks: list[dict] = [{"type": "text", "text": f"Video title: {title}\n\nClips:"}]
+def build_content(title: str, clips: list[Clip], words: list[Word], frames: list[Path | None],
+                  guide: str = "") -> list[dict]:
+    """The user message. `guide` is learn.Lessons.prompt_text(): how earlier hooks did."""
+    blocks: list[dict] = [{"type": "text", "text": (f"{guide}\n\n" if guide else "") + f"Video title: {title}\n\nClips:"}]
     for i, c in enumerate(clips, 1):
         said = " ".join(w.text for w in words_between(words, c.start, c.end)) or "(nobody speaks)"
         blocks.append({"type": "text", "text": f"\nClip {i} ({c.length:.0f}s)\nTranscript: {said}"})
@@ -176,7 +178,8 @@ def parse(text: str, count: int) -> Polish:
 
 
 def ask(title: str, clips: list[Clip], words: list[Word], src: Path, api_key: str, model: str,
-        log: Callable[[str], None] | None = None, check: Callable[[], None] | None = None) -> Polish:
+        log: Callable[[str], None] | None = None, check: Callable[[], None] | None = None,
+        guide: str = "") -> Polish:
     """Send the clips to Claude and read back its polish. Raises PolishError."""
     if not ((api_key or "").strip() or os.environ.get("ANTHROPIC_API_KEY")):
         raise PolishError("No Anthropic API key set (Settings → AI).")
@@ -186,7 +189,7 @@ def ask(title: str, clips: list[Clip], words: list[Word], src: Path, api_key: st
 
     with tempfile.TemporaryDirectory(prefix="ytclip-polish-") as tmp:
         frames = grab_frames(src, clips, Path(tmp))
-        content = build_content(title, clips, words, frames)
+        content = build_content(title, clips, words, frames, guide)
     if log:
         log(f"Asking {model} to polish {len(clips)} clip{'s' if len(clips) != 1 else ''}…")
     try:

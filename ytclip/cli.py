@@ -12,7 +12,7 @@ from rich.markup import escape
 from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
-from . import __version__
+from . import __version__, learn
 from .download import expand_sources
 from .engine import Engine, Project
 from .organize import stamp
@@ -37,7 +37,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="ytclip",
         description="Download YouTube videos (or open local files) and cut them into their best clips.",
         epilog='Example: ytclip "https://youtu.be/VIDEO" --preset "Shorts / TikTok / Reels"\n'
-           "Trending research: ytclip research --help\nAutomation: ytclip auto --help",
+           "Trending research: ytclip research --help\nAutomation: ytclip auto --help\n"
+           "Quality check: ytclip qc --help\nWhat's working: ytclip results --help",
     formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("sources", nargs="*", help="video/playlist/channel URLs, video files or folders")
@@ -280,7 +281,8 @@ def _research_table(videos: list, title: str, decisions: dict | None = None) -> 
                escape(v.reasons[0]) if v.reasons else ""]
         if decisions:
             d = decisions.get(v.id)
-            row.append(("[green]✓ " if d.picked else "[dim]– ") + escape(d.reason) + "[/]" if d else "")
+            row.append(("[green]✓ " if d.picked else "[dim]– ") + escape(d.reason)
+                       + (f"\n📈 {escape(d.learned)}" if d.learned else "") + "[/]" if d else "")
         table.add_row(*row)
     return table
 
@@ -344,8 +346,8 @@ def run_research(argv: list[str]) -> int:
         else:
             for problem in result.problems:
                 log(problem)
-            decisions = {d.video.id: d for d in decide(result.videos, policy, picks, notes=result.notes)} \
-                if picks else None
+            decisions = {d.video.id: d for d in decide(result.videos, policy, picks, notes=result.notes,
+                                                       lessons=learn.for_settings(s))} if picks else None
             top = result.videos[:max(1, args.top)]
             if decisions:
                 # Picks first, so they're on screen even when they aren't the highest scorers.
@@ -361,7 +363,8 @@ def run_research(argv: list[str]) -> int:
                     row = {k: (v.url if k == "url" else getattr(v, k)) for k in keep}
                     if decisions:
                         d = decisions[v.id]
-                        row["pick"] = {"picked": d.picked, "reason": d.reason, "rule": d.rule}
+                        row["pick"] = {"picked": d.picked, "reason": d.reason, "rule": d.rule,
+                                       **({"learned": d.learned, "bonus": d.bonus} if d.learned else {})}
                     rows.append(row)
                 print(json.dumps(rows, indent=1))
             elif first:
@@ -547,8 +550,43 @@ def run_qc(argv: list[str]) -> int:
     return 0
 
 
+def run_results(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="ytclip results", description="What's working: how your posted clips did, "
+                                "from the results TikTok Manager shares after each stats refresh.")
+    p.add_argument("--json", action="store_true", help="print the lessons as JSON")
+    args = p.parse_args(argv)
+    import json
+
+    lessons = learn.Lessons.load()
+    if args.json:
+        print(json.dumps({"posts": len(lessons.outcomes), "written_at": lessons.written_at,
+                          "channels": [vars(c) for c in sorted(lessons.channels.values(), key=lambda c: -c.bonus)],
+                          "notes": lessons.summary_lines(top=0)[1:], "polish_guide": lessons.prompt_text()}, indent=1))
+        return 0
+    if lessons.empty:
+        console.print("No results yet. In TikTok Manager, post some clips, refresh stats and give it 48 hours: "
+                      f"it shares how they did in {escape(str(learn.results_path()))}.")
+        return 0
+    for line in lessons.summary_lines(top=0):
+        console.print(escape(line))
+    table = Table(show_edge=False, header_style="bold")
+    for col in ("Channel", "Posts", "Usual views ×", "Pick bonus"):
+        table.add_column(col, justify="left" if col == "Channel" else "right")
+    for c in sorted(lessons.channels.values(), key=lambda c: -c.bonus):
+        colour = "green" if c.bonus >= 1 else "red" if c.bonus <= -1 else "dim"
+        table.add_row(escape(c.name), str(c.posts), f"{c.lift:.2f}", f"[{colour}]{c.bonus:+.0f}[/]")
+    console.print(table)
+    good, bad = lessons.hook_examples()
+    for title, rows in (("Hooks that worked", good), ("Hooks that flopped", bad)):
+        if rows:
+            console.print(f"[bold]{title}[/]: " + "; ".join(f"{escape(h)} ({lift:.1f}×)" for h, lift in rows))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["results"]:
+        return run_results(argv[1:])
     if argv[:1] == ["research"]:
         return run_research(argv[1:])
     if argv[:1] == ["auto"]:

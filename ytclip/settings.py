@@ -148,6 +148,7 @@ class Settings:
     pick_block_channels: str = ""
     pick_block_categories: str = "10, 1"  # Music, Film & Animation: reposts are usually claimed
     pick_block_words: str = "music video, lyric video, lyrics, official audio, trailer, full movie, full album"
+    learn_from_results: bool = True  # learn.py: TikTok Manager's results rank channels and guide AI hooks
     # Automation (pipeline.py): the unattended runner
     auto_output_dir: str = ""  # "" = <output_dir>/Automation
     auto_preset: str = "Shorts / TikTok / Reels"
@@ -612,6 +613,9 @@ SCHEMA: list[Field] = [
           choices=tuple((cid, name) for cid, name in CATEGORIES.items() if cid)),
     Field("pick_block_words", "Skip titles containing", "Picking", "str",
           help="Comma separated words or phrases"),
+    Field("learn_from_results", "Learn from how my clips do", "Picking", "bool",
+          help="TikTok Manager shares the views your posted clips get. Channels whose clips beat your usual "
+               "views rank higher, ones that flop rank lower, and the AI polish sees which hooks worked"),
 
     Field("auto_output_dir", "Clips go to", "Automation", "path",
           help="Empty = an Automation folder inside your output folder"),

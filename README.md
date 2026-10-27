@@ -184,6 +184,16 @@ ytclip auto --retry ID         # try a failed video again
 ytclip auto --install          # start with Windows (--uninstall to undo)
 ```
 
+### Learning from results
+
+TikTok Manager shares how your posted clips did: after each stats refresh it writes `%APPDATA%\ClipMonster\results.json`, with the views of every ClipMonster clip that has been up for two days, compared with the usual views on that TikTok account (so "2×" means twice your usual). With **Settings → Picking → Learn from how my clips do** on (the default), ClipMonster uses it in three ways:
+
+- **Picking.** Channels whose clips beat your usual views get up to 12 extra clip-ability points when ranking and checking the minimum score, and channels whose clips flop lose up to 12. One lucky clip counts for little; the effect grows as a channel gets more posts. Research shows why in the Pick tooltip and the video's details, e.g. "Your clips from Some Pod get 2.4× your usual views (5 posts): +8."
+- **AI polish.** Once six or more clips with hooks have results, the polish sees the hooks that worked and the ones that flopped, and writes new hooks more like the hits.
+- **Tips.** The Automation tab shows **What's working**: the best and worst channels, which clip length does best, and whether the AI rating predicts views (and so whether a higher quality-check minimum would help). Settings are never changed for you.
+
+`ytclip results` prints the same, with every channel's numbers (`--json` for scripts). Results older than 90 days are ignored.
+
 ## Output layout
 
 ```
@@ -213,6 +223,7 @@ ytclip "C:\Videos\stream.mp4" --layout "Gameplay below + title" --captions
 ytclip "C:\Videos\stream.mp4" --stack "C:\Videos\parkour.mp4" --top-text "{title}" --bottom-text "Follow for part 2" --captions
 ytclip "https://youtu.be/VIDEO" --stack "C:\Videos\Gameplay" --polish --captions --bleep --qc
 ytclip qc "C:\Users\me\Videos\ClipMonster"      # check exported clips again
+ytclip results                                  # what's working, from TikTok Manager's stats
 ytclip --list-presets
 ```
 

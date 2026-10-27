@@ -233,15 +233,15 @@ def _polish_project():
 def test_engine_polish_applies_the_answer(monkeypatch):
     seen = {}
 
-    def ask(title, clips, w, src, key, model, log=None, check=None):
-        seen.update(title=title, n=len(clips), model=model)
+    def ask(title, clips, w, src, key, model, log=None, check=None, guide=""):
+        seen.update(title=title, n=len(clips), model=model, guide=guide)
         return Polish({0: ClipPolish("Hook!", 0.7, [("joe rogen", "Joe Rogan")])}, True, model)
 
     monkeypatch.setattr(polish, "ask", ask)
     s = Settings(ai_api_key="k", burn_captions=True, banner_top=True, banner_top_text="{title}")
     p = _polish_project()
     Engine(s).polish(p)
-    assert seen == {"title": "Big Talk", "n": 1, "model": "claude-sonnet-5-5"}  # only enabled clips go
+    assert seen == {"title": "Big Talk", "n": 1, "model": "claude-sonnet-5-5", "guide": ""}  # only enabled clips go
     assert p.polished and p.captions_off and p.clips[0].top_text == "Hook!"
     assert p.meta["polish"]["captions_off"] and p.words[2].text == "Rogan"
     p2 = _polish_project()

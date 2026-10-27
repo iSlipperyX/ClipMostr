@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QPushButton, QScrollArea, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
-from .. import clipability
+from .. import clipability, learn
 from ..clipability import FIT, PART_LABELS, WEIGHTS, age_text, compact, verdict
 from ..organize import stamp
 from ..policy import Decision, PickLog, Policy, decide, picks_path
@@ -598,7 +598,7 @@ class Research(QWidget):
         self.table.setRowCount(len(self.videos))
         s = self._settings()
         self.decisions = {d.video.id: d for d in decide(self.videos, Policy.from_settings(s), self.picks,
-                                                        notes=result.notes)}
+                                                        notes=result.notes, lessons=learn.for_settings(s))}
         for r, v in enumerate(self.videos):
             self._fill_row(r, v)
         self.table.setSortingEnabled(True)
@@ -666,7 +666,7 @@ class Research(QWidget):
         it = _SortItem("✓ Pick" if d and d.picked else "–" if d else "")
         it.setData(SORT_ROLE, v.score + (1000 if d and d.picked else 0))  # picks sort above the rest
         if d:
-            it.setToolTip(("Picked: " if d.picked else "Not picked: ") + d.reason)
+            it.setToolTip(("Picked: " if d.picked else "Not picked: ") + d.reason + (f"\n{d.learned}" if d.learned else ""))
             it.setForeground(QColor(theme.GOOD if d.picked else theme.MUTED))
         it.setTextAlignment(Qt.AlignCenter)
         return it
@@ -677,7 +677,7 @@ class Research(QWidget):
         self.picks.reload()  # the automation runner may have picked videos since
         notes = self.result.notes if self.result else {}
         self.decisions = {d.video.id: d for d in decide(self.videos, Policy.from_settings(s), self.picks,
-                                                        notes=notes)}
+                                                        notes=notes, lessons=learn.for_settings(s))}
         self.table.setSortingEnabled(False)
         for r in range(self.table.rowCount()):
             v = self._video_at(r)
@@ -767,12 +767,13 @@ class Research(QWidget):
         self.d_verdict.setText(f"<b>{verdict(v.score)}</b><br><span style='color:{theme.MUTED}'>clip-ability "
                                f"out of 100</span>")
         d = self.decisions.get(v.id)
+        learned = f"<br><span style='color:{theme.MUTED}'>📈 {_esc(d.learned)}</span>" if d and d.learned else ""
         if d is None:
             self.d_pick.setText("")
         elif d.picked:
-            self.d_pick.setText(f"<span style='color:{theme.GOOD}'><b>✓ Picked.</b></span> {_esc(d.reason)}")
+            self.d_pick.setText(f"<span style='color:{theme.GOOD}'><b>✓ Picked.</b></span> {_esc(d.reason)}{learned}")
         else:
-            self.d_pick.setText(f"<span style='color:{theme.MUTED}'><b>Not picked:</b> {_esc(d.reason)}</span>")
+            self.d_pick.setText(f"<span style='color:{theme.MUTED}'><b>Not picked:</b> {_esc(d.reason)}</span>{learned}")
 
         keys = sorted(WEIGHTS, key=WEIGHTS.get, reverse=True) + list(FIT)
         for row, key in enumerate(keys):

@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QHBox
                                QLineEdit, QMenu, QPlainTextEdit, QPushButton, QSplitter, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
-from .. import pipeline
+from .. import learn, pipeline
 from ..clipability import age_text
 from ..jobs import Job, JobDB
 from ..research import youtube_key
@@ -45,6 +45,7 @@ class Automation(QWidget):
         self._sig = None
         self._log_size = -1
         self._windows_checked = False
+        self._lessons_sig: tuple | None = None
         self._build()
         self.refresh()
         self.timer = QTimer(self, interval=3000)
@@ -142,6 +143,12 @@ class Automation(QWidget):
         self.counts = QLabel()
         self.counts.setProperty("muted", True)
         uv.addWidget(self.counts)
+        self.learned = QLabel()
+        self.learned.setTextFormat(Qt.RichText)
+        self.learned.setWordWrap(True)
+        self.learned.setToolTip("From the views TikTok Manager reads for your posted clips (Settings → Picking → "
+                                "Learn from how my clips do). Details: ytclip results")
+        uv.addWidget(self.learned)
 
         split = QSplitter(Qt.Vertical)
         split.addWidget(upper)
@@ -182,11 +189,33 @@ class Automation(QWidget):
         self.status.setText("   " + text)
         self.start_btn.setVisible(not alive and not starting)
         self.stop_btn.setVisible(alive)
+        self.pause_btn.setVisible(alive or paused)
         self.pause_btn.setText("▶  Resume" if paused else "❚❚  Pause")
         self.pause_btn.setToolTip("Carry on" if paused else "Finish nothing new until you resume; a video in "
                                                             "progress carries on")
         self._fill_table()
         self._tail_log()
+        self._show_lessons()
+
+    def _show_lessons(self) -> None:
+        """What's working, from TikTok Manager's results (re-read only when the file changes)."""
+        path = learn.results_path()
+        try:
+            stamp = path.stat().st_mtime
+        except OSError:
+            stamp = None
+        on = self._settings().learn_from_results
+        if (stamp, on) == self._lessons_sig:
+            return
+        self._lessons_sig = (stamp, on)
+        lines = learn.Lessons.load(path).summary_lines() if stamp is not None else []
+        if not lines:
+            self.learned.setVisible(False)
+            return
+        head = "📈 What's working" + ("" if on else " (not used: learning is off in Settings → Picking)")
+        self.learned.setText(f"<b>{head}</b><br>" + "<br>".join(
+            f"<span style='color:{theme.MUTED}'>{_esc(line)}</span>" for line in lines))
+        self.learned.setVisible(True)
 
     def _fill_table(self) -> None:
         jobs = self.db.jobs()
