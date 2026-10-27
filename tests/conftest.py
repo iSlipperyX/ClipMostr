@@ -21,8 +21,8 @@ NOW = 1_800_000_000.0  # a fixed "now" so ages and velocities are exact
 
 
 def api_item(vid="abc", title="A video", views=100_000, likes=5_000, comments=400, minutes=20.0,
-             hours_old=10.0, category="20", live="none", caption=False, channel="Chan"):
-    """One item as videos.list(chart=mostPopular) returns it."""
+             hours_old=10.0, category="20", live="none", caption=False, channel="Chan", license="youtube"):
+    """One item as videos.list returns it (chart=mostPopular, or by id)."""
     from datetime import datetime, timezone
 
     published = datetime.fromtimestamp(NOW - hours_old * 3600, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -40,6 +40,7 @@ def api_item(vid="abc", title="A video", views=100_000, likes=5_000, comments=40
         "statistics": stats,
         "contentDetails": {"duration": f"PT{total // 3600}H{total % 3600 // 60}M{total % 60}S",
                            "caption": "true" if caption else "false"},
+        "status": {"license": license},
     }
 
 

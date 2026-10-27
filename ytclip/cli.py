@@ -207,7 +207,12 @@ def build_research_parser() -> argparse.ArgumentParser:
     p.add_argument("--deep", type=int, help="how many top candidates get a most-replayed check (0 = none)")
     p.add_argument("--watch", type=float, metavar="MINUTES",
                    help="keep checking every MINUTES and print new arrivals (Ctrl+C to stop)")
-    p.add_argument("--clip", type=int, metavar="N", help="send the top N straight to the clipper with your settings")
+    p.add_argument("--picks", action="store_true",
+                   help="apply your picking rules (Settings → Picking): show what they pick and why the rest "
+                        "were skipped")
+    p.add_argument("--clip", type=int, metavar="N",
+                   help="cut up to N videos straight away with your settings: the top N, or with --picks the "
+                        "picked ones. With --watch, every check clips what's new")
     p.add_argument("--json", action="store_true", help="print results as JSON")
     p.add_argument("--api-key", help="YouTube Data API key (otherwise from settings or YOUTUBE_API_KEY)")
     p.add_argument("--list-categories", action="store_true", help="show category names and ids and exit")
@@ -228,19 +233,28 @@ def _category_id(text: str) -> str:
     return match
 
 
-def _research_table(videos: list, title: str) -> Table:
+ORIGIN_LABELS = {"watchlist": "your list", "cc": "CC search"}
+
+
+def _research_table(videos: list, title: str, decisions: dict | None = None) -> Table:
     from .clipability import age_text, compact
 
     table = Table(title=title, show_edge=False, header_style="bold", title_justify="left")
-    for col in ("Score", "Video", "Trending in", "Views/h", "Length", "Posted", "Why"):
-        table.add_column(col, overflow="fold" if col in ("Video", "Why") else "ellipsis")
+    cols = ["Score", "Video", "Found in", "Views/h", "Length", "Posted", "Why"] + (["Pick"] if decisions else [])
+    for col in cols:
+        table.add_column(col, overflow="fold" if col in ("Video", "Why", "Pick") else "ellipsis")
     for v in videos:
         colour = "green" if v.score >= 75 else "cyan" if v.score >= 55 else "yellow" if v.score >= 40 else "dim"
-        where = " ".join(f"{c}#{n}" for c, n in sorted(v.regions.items(), key=lambda kv: kv[1])[:3])
-        table.add_row(f"[bold {colour}]{v.score:.0f}[/]", f"{escape(v.title)}\n[dim]{escape(v.channel)} · {v.url}[/]",
-                      where, ("↑" if v.recent else "") + compact(v.velocity),
-                      stamp(v.duration) if v.live == "none" else v.live, age_text(v.age_hours()),
-                      escape(v.reasons[0]) if v.reasons else "")
+        where = [f"{c}#{n}" for c, n in sorted(v.regions.items(), key=lambda kv: kv[1])[:3]]
+        where += [ORIGIN_LABELS[o] for o in v.origins if o in ORIGIN_LABELS]
+        row = [f"[bold {colour}]{v.score:.0f}[/]", f"{escape(v.title)}\n[dim]{escape(v.channel)} · {v.url}[/]",
+               " ".join(where), ("↑" if v.recent else "") + compact(v.velocity),
+               stamp(v.duration) if v.live == "none" else v.live, age_text(v.age_hours()),
+               escape(v.reasons[0]) if v.reasons else ""]
+        if decisions:
+            d = decisions.get(v.id)
+            row.append(("[green]✓ " if d.picked else "[dim]– ") + escape(d.reason) + "[/]" if d else "")
+        table.add_row(*row)
     return table
 
 
@@ -248,6 +262,7 @@ def run_research(argv: list[str]) -> int:
     import json
     import time
 
+    from .policy import Policy, PickLog, decide, picks_path
     from .research import ScanOptions, history_path, scan
     from .trending import CATEGORIES, History, ResearchError, parse_regions
 
@@ -280,7 +295,10 @@ def run_research(argv: list[str]) -> int:
         return 2
 
     history = History(history_path())
+    picks = PickLog(picks_path()) if args.picks else None
+    policy = Policy.from_settings(s)
     log = lambda m: console.print(f"[dim]{escape(m)}[/]")  # noqa: E731
+    engine: Engine | None = None
     first = True
     while True:
         try:
@@ -299,31 +317,54 @@ def run_research(argv: list[str]) -> int:
         else:
             for problem in result.problems:
                 log(problem)
+            decisions = {d.video.id: d for d in decide(result.videos, policy, picks, notes=result.notes)} \
+                if picks else None
             top = result.videos[:max(1, args.top)]
+            if decisions:
+                # Picks first, so they're on screen even when they aren't the highest scorers.
+                chosen = [v for v in result.videos if decisions[v.id].picked]
+                top = chosen + [v for v in top if v not in chosen][:max(0, args.top - len(chosen))]
+            stamp_now = time.strftime("%H:%M")
             if args.json:
                 keep = ("id", "url", "title", "channel", "score", "parts", "reasons", "moments", "regions",
-                        "views", "velocity", "recent", "duration", "published", "category", "new")
-                print(json.dumps([{k: (v.url if k == "url" else getattr(v, k)) for k in keep} for v in top], indent=1))
+                        "views", "velocity", "recent", "duration", "published", "category", "new", "origins",
+                        "license")
+                rows = []
+                for v in top:
+                    row = {k: (v.url if k == "url" else getattr(v, k)) for k in keep}
+                    if decisions:
+                        d = decisions[v.id]
+                        row["pick"] = {"picked": d.picked, "reason": d.reason, "rule": d.rule}
+                    rows.append(row)
+                print(json.dumps(rows, indent=1))
             elif first:
+                n_picked = sum(d.picked for d in decisions.values()) if decisions else 0
                 console.print(_research_table(top, f"Clip-ability · {', '.join(result.regions)}"
-                                                   f"{' · ' + CATEGORIES[opts.category] if opts.category else ''}"))
+                                                   f"{' · ' + CATEGORIES[opts.category] if opts.category else ''}"
+                                                   + (f" · {n_picked} picked" if decisions else ""), decisions))
             else:
                 fresh = [v for v in result.new if v.score >= s.research_alert]
-                stamp_now = time.strftime("%H:%M")
+                if decisions:
+                    fresh = [v for v in result.videos if decisions[v.id].picked]
                 if fresh:
-                    console.print(_research_table(fresh, f"{stamp_now} · {len(fresh)} new worth clipping"))
+                    console.print(_research_table(fresh, f"{stamp_now} · {len(fresh)} new worth clipping", decisions))
                 else:
-                    console.print(f"[dim]{stamp_now} · checked {len(result.videos)} videos, nothing new above "
-                                  f"{s.research_alert}[/]")
-            if args.clip and first:
-                engine = Engine(s, log=log)
-                for v in top[:args.clip]:
+                    console.print(f"[dim]{stamp_now} · checked {len(result.videos)} videos, nothing new "
+                                  + ("picked" if decisions else f"above {s.research_alert}") + "[/]")
+            if args.clip:
+                todo = _to_clip(result, decisions, first, s.research_alert, args.clip)
+                engine = engine or Engine(s, log=log)
+                for v in todo:
                     console.rule(f"[bold]{escape(v.title)}")
                     try:
                         process(v.url, engine, dry_run=False)
-                        history.mark_sent(v.id)
                     except Exception as exc:
                         console.print(f"[red]✗ {escape(str(exc))}[/]")
+                        continue
+                    history.mark_sent(v.id)
+                    if picks is not None and decisions:
+                        picks.record(decisions[v.id], "cli")
+                        picks.save()
                 history.save()
         if not args.watch:
             return 0
@@ -332,6 +373,15 @@ def run_research(argv: list[str]) -> int:
             time.sleep(max(1.0, args.watch) * 60)
         except KeyboardInterrupt:
             return 0
+
+
+def _to_clip(result, decisions: dict | None, first: bool, alert: float, limit: int) -> list:
+    """What --clip cuts this round: the picks, or else the best unsent videos (later rounds: only
+    new arrivals above the alert score)."""
+    if decisions:
+        return [v for v in result.videos if decisions[v.id].picked][:limit]
+    pool = result.videos if first else [v for v in result.new if v.score >= alert]
+    return [v for v in pool if not v.sent][:limit]
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -1,7 +1,7 @@
 """One research scan, shared by the Research tab and `ytclip research`:
 
-charts per region → merge → history (momentum) → quick score → most-replayed check on
-the best candidates → final score, best first.
+charts per region + channel list + Creative Commons searches → merge → history (momentum)
+→ quick score → most-replayed check on the best candidates → final score, best first.
 """
 
 from __future__ import annotations
@@ -15,6 +15,7 @@ from typing import Callable
 
 from . import clipability
 from .settings import Settings, app_dir
+from .sources import ChannelRef, Gathered, gather, parse_channels, parse_searches
 from .trending import (CATEGORIES, ChartUnavailable, DeepInfo, History, ResearchError, TrendingVideo, deep_check,
                        fetch_chart, parse_regions)
 
@@ -35,17 +36,23 @@ class ScanOptions:
     min_minutes: float = 0.0
     deep_count: int = 10
     cookies: str | None = None
+    channels: list[ChannelRef] = field(default_factory=list)  # the channel list (Settings → Picking)
+    searches: list[str] = field(default_factory=list)  # Creative Commons searches
+    unreadable: list[str] = field(default_factory=list)  # channel list lines that aren't a channel
 
     @classmethod
     def from_settings(cls, s: Settings) -> "ScanOptions":
+        channels, bad = parse_channels(s.pick_channels)
         return cls(api_key=youtube_key(s), regions=parse_regions(s.research_regions) or ["US"],
                    category=s.research_category, per_region=s.research_per_region,
                    min_minutes=s.research_min_minutes, deep_count=s.research_deep_count,
-                   cookies=s.cookies_browser or None)
+                   cookies=s.cookies_browser or None, channels=channels,
+                   searches=parse_searches(s.pick_searches), unreadable=bad)
 
     @property
     def quota(self) -> int:
-        """YouTube API units one scan uses (deep checks go through yt-dlp and cost none)."""
+        """YouTube API units the charts use each scan (deep checks go through yt-dlp and cost none).
+        The channel list and searches add their own, only when due; see sources.py."""
         return len(self.regions) * math.ceil(self.per_region / 50)
 
 
@@ -58,6 +65,7 @@ class ScanResult:
     problems: list[str] = field(default_factory=list)
     quota: int = 0
     first: bool = False  # nothing to compare with yet, so nothing counts as "new"
+    notes: dict[str, str] = field(default_factory=dict)  # channel id -> its note on the channel list
 
     @property
     def new(self) -> list[TrendingVideo]:
@@ -75,7 +83,8 @@ def history_path():
 def scan(opts: ScanOptions, history: History, log: Log | None = None, progress: Progress | None = None,
          cancelled: Callable[[], bool] | None = None,
          fetch: Callable[..., list[TrendingVideo]] = fetch_chart,
-         deep: Callable[..., DeepInfo] = deep_check, now: float | None = None) -> ScanResult:
+         deep: Callable[..., DeepInfo] = deep_check, now: float | None = None,
+         sources: Callable[..., Gathered] = gather) -> ScanResult:
     log = log or (lambda m: None)
     cancelled = cancelled or (lambda: False)
     now = now or time.time()
@@ -113,6 +122,23 @@ def scan(opts: ScanOptions, history: History, log: Log | None = None, progress: 
                 merged[v.id].views = max(merged[v.id].views, v.views)
             else:
                 merged[v.id] = v
+
+    extra = Gathered()
+    if opts.channels or opts.searches:
+        step("Checking your channel list" if opts.channels else "Searching Creative Commons videos",
+             len(opts.regions) / (len(opts.regions) + 1))
+        extra = sources(opts.api_key, opts.channels, opts.searches, history, now, log)
+        quota += extra.quota
+        problems += extra.problems
+    problems += [f"Channel list: \"{x}\" isn't a channel link, @handle or id." for x in opts.unreadable]
+    for v in extra.videos:
+        if v.id in merged:
+            merged[v.id].origins = sorted(set(merged[v.id].origins) | set(v.origins))
+        else:
+            merged[v.id] = v
+    for v in merged.values():
+        if v.channel_id in extra.watch_ids and "watchlist" not in v.origins:
+            v.origins = sorted(v.origins + ["watchlist"])
 
     videos = [v for v in merged.values()
               if v.live != "upcoming" and (not opts.min_minutes or v.duration >= opts.min_minutes * 60
@@ -160,8 +186,9 @@ def scan(opts: ScanOptions, history: History, log: Log | None = None, progress: 
             clipability.score(v, velocities, now)
 
     videos.sort(key=lambda v: (v.score, v.velocity), reverse=True)
-    result = ScanResult(videos, now, list(opts.regions), opts.category, problems, quota, first)
-    history.remember(videos, {"regions": result.regions, "category": opts.category, "problems": problems}, now)
+    result = ScanResult(videos, now, list(opts.regions), opts.category, problems, quota, first, extra.notes)
+    history.remember(videos, {"regions": result.regions, "category": opts.category, "problems": problems,
+                              "notes": extra.notes}, now)
     history.save()
     return result
 
@@ -175,4 +202,4 @@ def last_result(history: History) -> ScanResult | None:
     for v in videos:
         v.new = False
     return ScanResult(videos, ls.get("time", 0.0), ls.get("regions", []), ls.get("category", ""),
-                      ls.get("problems", []))
+                      ls.get("problems", []), notes=ls.get("notes") or {})

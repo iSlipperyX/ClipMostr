@@ -184,6 +184,7 @@ class MainWindow(QMainWindow):
         self.research.notice.connect(self._notice)
         self.research.log.connect(self._log)
         self.research.hits_changed.connect(self._research_hits)
+        self.research.open_settings.connect(self._open_settings)
         self.research_tab = self.tabs.addTab(self.research, RESEARCH_TAB)
         outer.addWidget(self.tabs, 1)
         outer.addWidget(self._build_footer())
@@ -220,7 +221,7 @@ class MainWindow(QMainWindow):
         self.preset.activated.connect(self._preset_chosen)
 
         settings_btn = QPushButton("⚙  Settings")
-        settings_btn.clicked.connect(self._open_settings)
+        settings_btn.clicked.connect(lambda: self._open_settings())
         help_btn = QPushButton("?")
         help_btn.setObjectName("icon")
         help_btn.clicked.connect(self._show_help)
@@ -612,7 +613,7 @@ class MainWindow(QMainWindow):
         sc("Ctrl+E", self.export_current)
         sc("Ctrl+O", self._open_files)
         sc("Ctrl+V", self._paste)
-        sc("Ctrl+,", self._open_settings)
+        sc("Ctrl+,", lambda: self._open_settings())
 
     # ================================================================== sources & queue
     def _add_from_input(self) -> None:
@@ -1371,8 +1372,8 @@ class MainWindow(QMainWindow):
         self._log(f"Applied layout '{name}'")
         self._notice(f"Layout applied: {name}")
 
-    def _open_settings(self) -> None:
-        dlg = SettingsDialog(self.settings, self)
+    def _open_settings(self, tab: str = "") -> None:
+        dlg = SettingsDialog(self.settings, self, tab)
         if dlg.exec():
             self._apply_settings(dlg.result_settings)
 

@@ -103,6 +103,27 @@ Parts that can't be measured, such as hidden like counts or a brand-new video wi
 
 New arrivals scoring at least your alert level (75 by default) are counted on the tab, as **🔥 Research (3 new)**, when you're on another tab. Videos you've sent to the studio are ticked, and **Hide sent** hides them. History and the last results are kept in `%APPDATA%\ClipMonster\research.json`, so the tab opens with your last results.
 
+### Picking rules
+
+ClipMonster can also decide by itself which videos to clip, so they can be cut without you looking first. The rules are under **Settings → Picking** (or **Picking rules…** on the Research tab), and the **Pick** column shows what they would pick. Hover over a dash to see why a video was skipped. **Picks only** hides the rest, and **Send N picks to Studio** sends them all.
+
+**Where videos come from.** Besides the trending charts, Research can watch two more sources:
+
+- **Channel list:** new uploads from channels you choose, one per line, as `@handle`, a channel link or a channel id. Put a note after `#` saying why clips are allowed, e.g. `@somepodcast  # clipping programme, credit in caption`. The note is kept with every pick from that channel. Each channel costs about 1 quota unit an hour.
+- **Creative Commons searches:** YouTube searches limited to videos under a Creative Commons licence, which allows reuse with credit. Each search costs 100 quota units, so it runs at most every 6 hours.
+
+**Pick videos from** decides what may be picked:
+
+| Setting | Picks |
+|---|---|
+| **My channel list and Creative Commons only** (default) | Videos from channels on your list (even when they're trending) and Creative Commons videos |
+| **Creative Commons only** | Only Creative Commons videos |
+| **Anything that passes the rules** | Any video, including trending videos nobody gave permission for. Reposts like these risk copyright strikes |
+
+Then the rules go through the videos best first. A video is skipped if it was picked or sent before, is live or not out yet, is from a blocked channel or category (Music and Film by default), has a blocked word in its title (music video, trailer…), is shorter or longer than your limits (8 to 180 minutes), is older than your limit (3 days), or scores under your minimum (65). Finally, at most **3 videos a day** and **2 per channel a week** are picked. Each skipped video shows the rule that stopped it.
+
+Only picks that are actually used count towards the limits: sent to the Studio, or clipped from the command line. The picks are kept in `%APPDATA%\ClipMonster\picks.json` with the reason each one was allowed, so nothing is picked twice.
+
 From the command line:
 
 ```
@@ -110,6 +131,8 @@ ytclip research                          # your regions and settings
 ytclip research -r US,GB -c gaming -n 15  # top 15 gaming videos in the US and UK
 ytclip research --watch 30               # keep checking every 30 min, print new arrivals
 ytclip research --clip 3 --min-minutes 8 # cut the top 3 straight away with your settings
+ytclip research --picks                  # what your picking rules pick, and why the rest were skipped
+ytclip research --picks --clip 5 --watch 30   # keep checking, and cut whatever the rules pick
 ytclip research --json > trending.json
 ytclip research --list-categories
 ```
@@ -200,6 +223,8 @@ Run the tests with `pip install -e .[test]` and then `pytest`. They need no netw
 | `ytclip/trending.py` | YouTube trending charts, replay checks, research history |
 | `ytclip/clipability.py` | Clip-ability score for trending videos |
 | `ytclip/research.py` | One research scan, shared by the Research tab and `ytclip research` |
+| `ytclip/sources.py` | Channel list and Creative Commons searches for Research |
+| `ytclip/policy.py` | Picking rules and the log of picks |
 | `ytclip/transcribe.py` | Whisper transcription |
 | `ytclip/export.py`, `captions.py` | Reframing, captions, encoding |
 | `ytclip/gui/` | Desktop app (PySide6) |

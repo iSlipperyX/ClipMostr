@@ -7,8 +7,8 @@ from typing import Any, Callable
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QFontDatabase
 from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
-                               QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit, QPushButton, QSlider, QSpinBox,
-                               QWidget)
+                               QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit,
+                               QPushButton, QSlider, QSpinBox, QWidget)
 
 from ..download import VIDEO_EXTS
 from ..fonts import BUNDLED
@@ -95,9 +95,33 @@ def make_editor(f: Field, value: Any, on_change: OnChange) -> Editor:
         w.currentIndexChanged.connect(emit)
         editor = Editor(w, w.currentData, set_choice)
 
+    elif f.kind == "multi":  # several of f.choices, stored as "id, id"
+        w = QListWidget()
+        w.setFixedHeight(150)
+        for data, text in f.choices:
+            it = QListWidgetItem(text)
+            it.setData(Qt.UserRole, data)
+            it.setFlags(it.flags() | Qt.ItemIsUserCheckable)
+            w.addItem(it)
+
+        def checked() -> str:
+            return ", ".join(str(w.item(i).data(Qt.UserRole)) for i in range(w.count())
+                             if w.item(i).checkState() == Qt.Checked)
+
+        def set_checked(v: Any) -> None:
+            chosen = {x.strip() for x in str(v).split(",") if x.strip()}
+            for i in range(w.count()):
+                it = w.item(i)
+                it.setCheckState(Qt.Checked if str(it.data(Qt.UserRole)) in chosen else Qt.Unchecked)
+
+        set_checked(value)
+        w.itemChanged.connect(emit)
+        editor = Editor(w, checked, set_checked)
+
     elif f.kind == "text":
         w = QPlainTextEdit()
         w.setFixedHeight(90)
+        w.setPlaceholderText(f.placeholder)
         w.setPlainText(str(value))
         w.textChanged.connect(emit)
         editor = Editor(w, w.toPlainText, lambda v: w.setPlainText(str(v)))

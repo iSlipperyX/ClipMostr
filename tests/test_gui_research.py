@@ -173,3 +173,80 @@ def test_filter_change_during_a_scan_checks_again(app):
     tab._job_finished()
     assert tab._debounce.isActive() and not tab._again
     tab._debounce.stop()
+
+
+def test_pick_column_and_detail_explain_the_rules(app):
+    tab, _ = _make(app, youtube_api_key="k", pick_from="any", pick_min_score=60)
+    tab._scan_done(_result(), auto=False)
+    from ytclip.gui.research import PICK_COLUMN
+
+    picks = {tab._video_at(r).id: tab.table.item(r, PICK_COLUMN) for r in range(3)}
+    assert picks["v0"].text() == "✓ Pick" and picks["v2"].text() == "✓ Pick"
+    assert picks["v1"].text() == "–" and "Clip-ability 41 is under your minimum of 60" in picks["v1"].toolTip()
+    assert "✓ Picked." in tab.d_pick.text() and "no permission on record" in tab.d_pick.text()
+    assert tab.count.text() == "3 videos · 2 picked"
+    assert tab.send_picks_btn.text() == "➜  Send 2 picks to Studio"
+
+
+def test_default_rules_need_permission(app):
+    tab, _ = _make(app, youtube_api_key="k")
+    tab._scan_done(_result(), auto=False)
+    assert tab.picked_videos() == []
+    assert "Not on your channel list" in tab.d_pick.text()
+    assert tab.send_picks_btn.isHidden()
+
+
+def test_picks_only_filter(app):
+    tab, _ = _make(app, youtube_api_key="k", pick_from="any", pick_min_score=60)
+    tab._scan_done(_result(), auto=False)
+    tab.picks_only.setChecked(True)
+    assert sorted(tab._video_at(r).id for r in range(3) if not tab.table.isRowHidden(r)) == ["v0", "v2"]
+
+
+def test_sending_picks_records_them_and_counts_towards_the_limit(app):
+    tab, host = _make(app, youtube_api_key="k", pick_from="any", pick_min_score=60, pick_daily=2)
+    tab._scan_done(_result(), auto=False)
+    sent = []
+    tab.send.connect(sent.append)
+    tab._send_picks()
+    assert sorted(u.rsplit("=", 1)[-1] for u in sent[0]) == ["v0", "v2"]
+    assert {p["id"]: p["how"] for p in tab.picks.picks} == {"v0": "studio", "v2": "studio"}
+    assert tab.picked_videos() == []  # both done, and the daily limit of 2 is used up
+    host.change("pick_min_score", 0)
+    tab.settings_changed()
+    v1 = next(d for d in tab.decisions.values() if d.video.id == "v1")
+    assert v1.rule == "daily_cap"
+
+
+def test_sending_an_unpicked_video_does_not_use_up_picks(app):
+    tab, _ = _make(app, youtube_api_key="k", pick_from="any", pick_min_score=60)
+    tab._scan_done(_result(), auto=False)
+    row = next(r for r in range(3) if tab._video_at(r).id == "v1")
+    tab.table.selectRow(row)
+    tab._send_selected()
+    assert tab.picks.picks == []
+
+
+def test_rules_button_opens_the_picking_settings(app):
+    tab, _ = _make(app, youtube_api_key="k")
+    asked = []
+    tab.open_settings.connect(asked.append)
+    tab.rules_btn.click()
+    assert asked == ["Picking"]
+
+
+def test_settings_dialog_picking_page(app):
+    from PySide6.QtWidgets import QListWidget, QTabWidget
+
+    from ytclip.gui.settings_dialog import SettingsDialog
+
+    dlg = SettingsDialog(Settings(), tab="Picking")
+    tabs = dlg.findChild(QTabWidget)
+    assert tabs.tabText(tabs.currentIndex()) == "Picking"
+    editor = dlg._editors["pick_block_categories"]
+    assert isinstance(editor.widget, QListWidget)
+    assert editor.get() == "1, 10"  # Film & Animation and Music, in list order
+    music = next(editor.widget.item(i) for i in range(editor.widget.count())
+                 if editor.widget.item(i).data(Qt.UserRole) == "10")
+    music.setCheckState(Qt.Unchecked)
+    assert dlg.result_settings.pick_block_categories == "1"

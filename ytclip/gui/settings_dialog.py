@@ -14,11 +14,11 @@ from ..trending import KEY_HELP_URL
 from . import forms, theme
 
 GROUPS = ("General", "Download", "Clip finding", "Transcription", "AI", "Export", "Captions", "Layout",
-          "Research", "Updates")
+          "Research", "Picking", "Updates")
 
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings: Settings, parent=None):
+    def __init__(self, settings: Settings, parent=None, tab: str = ""):
         super().__init__(parent)
         self.setWindowTitle("Settings")
         self.resize(640, 620)
@@ -68,6 +68,15 @@ class SettingsDialog(QDialog):
                 note.setOpenExternalLinks(True)
                 note.setProperty("muted", True)
                 page.layout().insertRow(0, note)
+            if group == "Picking":
+                note = QLabel("These rules decide which researched videos ClipMonster may clip without asking you. "
+                              "Reposting other people's videos without permission can get clips removed and "
+                              "accounts struck, so by default only channels on your list (creators who say clips "
+                              "are welcome) and Creative Commons videos are picked. The Research tab's Pick column "
+                              "shows what the rules would pick, and why the rest were skipped.")
+                note.setWordWrap(True)
+                note.setProperty("muted", True)
+                page.layout().insertRow(0, note)
             if group == "Transcription":
                 note = QLabel("When a video has no captions (or for local files) ClipMonster can transcribe "
                               "speech on your computer with Whisper. Transcripts power clip titles, "
@@ -79,6 +88,8 @@ class SettingsDialog(QDialog):
             scroll.setWidgetResizable(True)
             scroll.setWidget(page)
             tabs.addTab(scroll, group)
+        if tab in GROUPS:
+            tabs.setCurrentIndex(GROUPS.index(tab))
         layout.addWidget(tabs, 1)
 
         footer = QLabel(f"Settings are stored in {app_dir()}")

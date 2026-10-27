@@ -127,6 +127,19 @@ class Settings:
     research_auto: bool = True
     research_interval: int = 30
     research_alert: int = 75
+    # Picking rules (policy.py): which researched videos may be clipped without asking
+    pick_from: str = "watchlist"
+    pick_channels: str = ""
+    pick_searches: str = ""
+    pick_min_score: int = 65
+    pick_min_minutes: float = 8.0
+    pick_max_minutes: float = 180.0
+    pick_max_age_days: float = 3.0
+    pick_daily: int = 3
+    pick_channel_weekly: int = 2
+    pick_block_channels: str = ""
+    pick_block_categories: str = "10, 1"  # Music, Film & Animation: reposts are usually claimed
+    pick_block_words: str = "music video, lyric video, lyrics, official audio, trailer, full movie, full album"
     # 2 = text sizes are letter heights (1 = raw .ass sizes, which looked different in every font)
     text_units: int = 2
 
@@ -361,7 +374,7 @@ class Field:
     name: str
     label: str
     group: str
-    kind: str  # bool | int | float | str | choice | path | file | font | color | secret | text
+    kind: str  # bool | int | float | str | choice | multi | path | file | font | color | secret | text
     choices: tuple = ()
     lo: float = 0
     hi: float = 100
@@ -375,6 +388,12 @@ ASPECTS = (("original", "Original"), ("vertical_blur", "9:16 vertical, blurred f
            ("vertical_crop", "9:16 vertical, cropped"), ("square", "1:1 square"))
 ENCODERS = (("auto", "Auto (fastest available)"), ("libx264", "CPU (x264)"), ("h264_amf", "AMD GPU (AMF)"),
             ("h264_nvenc", "NVIDIA GPU (NVENC)"), ("h264_qsv", "Intel GPU (Quick Sync)"))
+
+PICK_FROM = (
+    ("watchlist", "My channel list and Creative Commons only"),
+    ("cc", "Creative Commons only"),
+    ("any", "Anything that passes the rules"),
+)
 
 BANNER_MODES = (("bar", "Solid bar (video sits between)"), ("overlay", "Text over the video"))
 LAYOUT_FITS = (("auto", "Auto (from Format)"), ("crop", "Crop to fill"), ("blur", "Fit, blurred fill"),
@@ -516,4 +535,32 @@ SCHEMA: list[Field] = [
     Field("research_interval", "Check every (minutes)", "Research", "int", lo=10, hi=720, step=5),
     Field("research_alert", "Highlight new videos scoring at least", "Research", "int", lo=0, hi=100,
           help="New arrivals above this score are counted on the Research tab"),
+
+    Field("pick_from", "Pick videos from", "Picking", "choice", choices=PICK_FROM,
+          help="Creators on your channel list, or Creative Commons videos, have said clips are fine. "
+               "'Anything' also picks trending videos nobody gave permission for, which risks copyright strikes"),
+    Field("pick_channels", "Channel list", "Picking", "text",
+          help="One channel per line: @handle, channel link or channel id. Add a note after #, e.g. "
+               "'@somepodcast  # clipping programme, credit in caption'. Each channel costs about 1 quota "
+               "unit an hour",
+          placeholder="@somepodcast  # clipping programme, credit in caption\nhttps://www.youtube.com/@streamer"),
+    Field("pick_searches", "Creative Commons searches", "Picking", "text",
+          help="One search per line, e.g. 'gaming highlights'. Each search costs 100 quota units and runs "
+               "at most every 6 hours",
+          placeholder="gaming highlights\nscience lecture"),
+    Field("pick_min_score", "Lowest clip-ability to pick", "Picking", "int", lo=0, hi=100),
+    Field("pick_min_minutes", "Shortest video (min)", "Picking", "float", lo=0, hi=120, step=1),
+    Field("pick_max_minutes", "Longest video (min, 0 = any)", "Picking", "float", lo=0, hi=1200, step=10,
+          help="Very long streams take a long time to download and analyse"),
+    Field("pick_max_age_days", "Oldest video (days, 0 = any)", "Picking", "float", lo=0, hi=60, step=1),
+    Field("pick_daily", "Videos picked per day", "Picking", "int", lo=0, hi=50,
+          help="Counted over the last 24 hours. Each video makes several clips"),
+    Field("pick_channel_weekly", "Most picks per channel per week (0 = any)", "Picking", "int", lo=0, hi=20,
+          help="Keeps your feed from being one channel's content"),
+    Field("pick_block_channels", "Never pick these channels", "Picking", "text",
+          help="One per line: channel name, @handle, link or id", placeholder="Some Channel\n@another"),
+    Field("pick_block_categories", "Never pick these categories", "Picking", "multi",
+          choices=tuple((cid, name) for cid, name in CATEGORIES.items() if cid)),
+    Field("pick_block_words", "Skip titles containing", "Picking", "str",
+          help="Comma separated words or phrases"),
 ]

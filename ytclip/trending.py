@@ -55,6 +55,10 @@ class ResearchError(RuntimeError):
     """A plain-English reason a chart couldn't be fetched."""
 
 
+class ResearchBlocked(ResearchError):
+    """Every call would fail the same way: a bad key, a used-up quota, the API switched off, no internet."""
+
+
 class ChartUnavailable(ResearchError):
     """This region has no chart for the chosen category (not worth stopping the scan for)."""
 
@@ -122,6 +126,8 @@ class TrendingVideo:
     thumbnail: str = ""
     channel_id: str = ""
     regions: dict[str, int] = field(default_factory=dict)  # region -> rank on its chart (1 = top)
+    license: str = ""  # "creativeCommon" or "youtube" (standard licence), per the API
+    origins: list[str] = field(default_factory=list)  # chart | watchlist | cc: where the scan found it
     # Filled in by the scan:
     velocity: float = 0.0  # views per hour
     recent: bool = False  # velocity measured between two checks rather than since upload
@@ -176,6 +182,7 @@ def video_from_api(item: dict) -> TrendingVideo:
         captions=str(cd.get("caption")).lower() == "true",
         live=sn.get("liveBroadcastContent") or "none",
         thumbnail=thumb,
+        license=(item.get("status") or {}).get("license") or "",
     )
 
 
@@ -192,15 +199,15 @@ def _friendly(status: int, body: bytes) -> ResearchError:
     key_rejected = "keyInvalid" in reasons or "API_KEY_INVALID" in str(err) or (
         status == 400 and "api key" in message.lower())
     if key_rejected:
-        return ResearchError("The YouTube API key was rejected. Check it was copied completely.")
+        return ResearchBlocked("The YouTube API key was rejected. Check it was copied completely.")
     if reasons & {"quotaExceeded", "dailyLimitExceeded", "rateLimitExceeded"}:
-        return ResearchError("Today's YouTube API quota is used up. It resets at midnight Pacific time; "
+        return ResearchBlocked("Today's YouTube API quota is used up. It resets at midnight Pacific time; "
                              "check fewer regions or less often until then.")
     if reasons & {"accessNotConfigured"} or "has not been used" in message or "is disabled" in message:
-        return ResearchError("YouTube Data API v3 isn't enabled for this key's Google Cloud project. "
+        return ResearchBlocked("YouTube Data API v3 isn't enabled for this key's Google Cloud project. "
                              "Enable it in the Google Cloud console, then try again.")
     if reasons & {"keyExpired"}:
-        return ResearchError("The YouTube API key has expired. Create a new one in the Google Cloud console.")
+        return ResearchBlocked("The YouTube API key has expired. Create a new one in the Google Cloud console.")
     if status == 404 or reasons & {"notFound", "videoChartNotFound"}:
         return ChartUnavailable(message)
     if status == 400 and ("regionCode" in message or reasons & {"invalidRegionCode", "unsupportedRegionCode"}):
@@ -219,9 +226,13 @@ def _get(url: str, timeout: float = 20) -> dict:
     except urllib.error.HTTPError as exc:
         raise _friendly(exc.code, exc.read() or b"") from exc
     except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as exc:
-        raise ResearchError("Couldn't reach YouTube. Check your internet connection.") from exc
+        raise ResearchBlocked("Couldn't reach YouTube. Check your internet connection.") from exc
     except ValueError as exc:
         raise ResearchError("YouTube sent an answer that couldn't be read.") from exc
+
+
+# videos.list costs 1 unit per call whichever parts are asked for; "status" carries the licence.
+VIDEO_PARTS = "snippet,statistics,contentDetails,status"
 
 
 def fetch_chart(api_key: str, region: str, category: str = "", limit: int = 50,
@@ -232,7 +243,7 @@ def fetch_chart(api_key: str, region: str, category: str = "", limit: int = 50,
     videos: list[TrendingVideo] = []
     token = ""
     while len(videos) < limit:
-        params = {"part": "snippet,statistics,contentDetails", "chart": "mostPopular", "regionCode": region,
+        params = {"part": VIDEO_PARTS, "chart": "mostPopular", "regionCode": region,
                   "maxResults": str(min(50, limit - len(videos))), "key": api_key.strip()}
         if category:
             params["videoCategoryId"] = category
@@ -244,6 +255,7 @@ def fetch_chart(api_key: str, region: str, category: str = "", limit: int = 50,
                 continue
             v = video_from_api(item)
             v.regions[region] = len(videos) + 1
+            v.origins = ["chart"]
             videos.append(v)
         token = data.get("nextPageToken") or ""
         if not token or not data.get("items"):
@@ -309,12 +321,18 @@ class History:
         self.path = path
         self.videos: dict[str, dict] = {}
         self.last_scan: dict = {}
+        # What the extra sources (channel list, Creative Commons searches) found and when,
+        # so they're only re-read when due. See sources.py.
+        self.sources: dict[str, dict] = {"channels": {}, "searches": {}}
         self.lock = threading.RLock()  # a scan thread and the GUI both touch it
         if path:
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 self.videos = data.get("videos") or {}
                 self.last_scan = data.get("last_scan") or {}
+                for kind, recs in (data.get("sources") or {}).items():
+                    if kind in self.sources and isinstance(recs, dict):
+                        self.sources[kind] = recs
             except (OSError, ValueError, AttributeError):
                 pass
 
@@ -380,7 +398,8 @@ class History:
             return
         tmp = self.path.with_suffix(".tmp")
         try:
-            tmp.write_text(json.dumps({"videos": self.videos, "last_scan": self.last_scan}), encoding="utf-8")
+            tmp.write_text(json.dumps({"videos": self.videos, "last_scan": self.last_scan,
+                                       "sources": self.sources}), encoding="utf-8")
             os.replace(tmp, self.path)
         except OSError:
             pass

@@ -7,8 +7,8 @@ import pytest
 from conftest import NOW, api_item
 
 from ytclip import trending
-from ytclip.trending import (ChartUnavailable, DeepInfo, History, ResearchError, TrendingVideo, deep_from_info,
-                             fetch_chart, parse_duration, parse_regions, video_from_api)
+from ytclip.trending import (ChartUnavailable, DeepInfo, History, ResearchBlocked, ResearchError, TrendingVideo,
+                             deep_from_info, fetch_chart, parse_duration, parse_regions, video_from_api)
 
 
 def test_parse_regions_normalises_and_dedupes():
@@ -94,9 +94,9 @@ def _body(reason, message="x", code=403):
 
 
 @pytest.mark.parametrize("status,body,cls,text", [
-    (400, json.dumps(BAD_KEY).encode(), ResearchError, "key was rejected"),
-    (403, _body("quotaExceeded"), ResearchError, "quota is used up"),
-    (403, _body("accessNotConfigured", "YouTube Data API v3 has not been used in project 1"), ResearchError,
+    (400, json.dumps(BAD_KEY).encode(), ResearchBlocked, "key was rejected"),
+    (403, _body("quotaExceeded"), ResearchBlocked, "quota is used up"),
+    (403, _body("accessNotConfigured", "YouTube Data API v3 has not been used in project 1"), ResearchBlocked,
      "isn't enabled"),
     (404, _body("videoChartNotFound", "The requested video chart is not supported", 404), ChartUnavailable, ""),
     (400, _body("invalidArgument", "Invalid regionCode 'ZZ'", 400), ChartUnavailable, ""),
