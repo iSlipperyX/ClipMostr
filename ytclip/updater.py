@@ -6,8 +6,9 @@ and SHA256SUMS.txt (both made by .github/workflows/release.yml). Updating:
 1. check()    - ask the GitHub API for the newest release and compare versions.
 2. download() - stream the zip to %LOCALAPPDATA%\\ClipMonster\\updates and verify SHA-256.
 3. extract()  - unpack next to the installed app (same drive, so the swap is a rename).
-4. launch_swap() - a small PowerShell script waits for the app to exit, moves the old
-   folder aside, moves the new one in, relaunches, and rolls back if anything fails.
+4. launch_swap() - a small PowerShell script waits for the app to exit, moves the app's own
+   files into a backup folder inside the install folder (file by file if a folder is held
+   open), moves the new files in, relaunches, and puts everything back if anything fails.
    (A running app can't replace its own files on Windows.)
 """
 
@@ -254,6 +255,26 @@ def _writable(folder: Path) -> bool:
 
 
 MAX_PATH = 259  # Windows' classic limit (260 including the terminator) unless long paths are enabled
+BACKUP_NAME = ".cm-old-20991231235959"  # the longest name the swap script gives its backup folder
+
+
+def _path_need(path: Path, folder: bool = False) -> int:
+    """Characters the file (or folder) `path` needs against MAX_PATH: Windows keeps 12 free in
+    every folder path it creates."""
+    return len(str(path)) + 12 if folder else max(len(str(path)), len(str(path.parent)) + 12)
+
+
+def _old_app_files(target: Path, names: set[str]) -> list[Path]:
+    """The installed app's own files (relative to `target`), which move into the backup folder."""
+    found = []
+    for name in names:
+        top = target / name
+        if top.is_file():
+            found.append(Path(name))
+        elif top.is_dir():
+            for folder, _, files in os.walk(top, onerror=lambda e: None):
+                found += [Path(folder, f).relative_to(target) for f in files]
+    return found
 
 
 def extract(zip_path: Path, target: Path, cancelled: Callable[[], bool] | None = None) -> Path:
@@ -273,13 +294,19 @@ def extract(zip_path: Path, target: Path, cancelled: Callable[[], bool] | None =
                 if root not in dest.parents and dest != root:
                     raise UpdateError("The update archive contains unsafe paths. Not installing it.")
             # Check up front, so a too-deep install fails cleanly instead of halfway through.
-            longest = max((len(str(target.parent / target.name / Path(m.filename).relative_to(APP_FOLDER)))
-                           for m in members if m.filename.startswith(APP_FOLDER + "/")), default=0)
-            longest = max(longest, max((len(str(root / m.filename)) for m in members), default=0))
+            # Both the old and the new files can end up in the backup folder inside the app
+            # folder (old ones on install, new ones' folders on a file-by-file move), which is
+            # the deepest place either goes.
+            new = [(Path(m.filename).relative_to(APP_FOLDER), m.is_dir()) for m in members
+                   if m.filename.startswith(APP_FOLDER + "/") and m.filename != APP_FOLDER + "/"]
+            tops = {"ClipMonster.exe", "ytclip.exe", "_internal"} | {rel.parts[0] for rel, _ in new}
+            old = [(rel, False) for rel in _old_app_files(target, tops)]
+            longest = max((_path_need(target / BACKUP_NAME / rel, folder) for rel, folder in new + old), default=0)
+            longest = max(longest, max((_path_need(root / m.filename, m.is_dir()) for m in members), default=0))
             if longest > MAX_PATH:
                 raise UpdateError(f"The ClipMonster folder is too deep for Windows' path length limit "
                                   f"({longest} characters needed, {MAX_PATH} allowed). Move it to a shorter "
-                                  f"location such as C:\\ClipMonster and try again.")
+                                  f"location such as {Path.home() / 'ClipMonster'} and try again.")
             _need_space(target.parent, sum(m.file_size for m in members), "unpack the update")
             shutil.rmtree(staging, ignore_errors=True)
             staging.mkdir()
@@ -313,7 +340,7 @@ def other_instances(target: Path) -> list[str]:
     if os.name != "nt":
         return []
     query = ("Get-CimInstance Win32_Process -Filter \"Name='ClipMonster.exe' OR Name='ytclip.exe'\" | "
-             "ForEach-Object { \"$($_.ProcessId)`t$($_.ExecutablePath)\" }")
+             "ForEach-Object { \"$($_.ProcessId)`t$($_.ExecutablePath)`t$($_.CommandLine)\" }")
     try:
         out = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", query],
                              capture_output=True, text=True, timeout=20,
@@ -323,34 +350,158 @@ def other_instances(target: Path) -> list[str]:
     found = []
     root = str(target.resolve()).lower()
     for line in out.splitlines():
-        pid, _, path = line.partition("\t")
+        pid, _, rest = line.partition("\t")
+        path, _, command = rest.partition("\t")
         if pid.strip().isdigit() and int(pid) != os.getpid() and path.lower().startswith(root + os.sep):
-            found.append(f"{Path(path).name} (process {pid.strip()})")
+            name = "ClipMonster automation" if "--automation" in command else Path(path).name
+            found.append(f"{name} (process {pid.strip()})")
     return found
+
+
+def stop_automation(timeout: float = 90.0) -> bool:
+    """A background automation run keeps the app folder in use: ask it to stop (its current video
+    goes back in the queue) and have the updated app start it again. False if it didn't stop."""
+    from .jobs import JobDB
+    from .pipeline import runner_alive
+
+    db = JobDB()
+    try:
+        if not runner_alive(db):
+            return True
+        db.set_meta("stop", "1")
+        db.set_meta("resume_after_update", "1")
+        end = time.time() + timeout
+        while runner_alive(db) and time.time() < end:
+            time.sleep(1)
+        if runner_alive(db):
+            return False
+        time.sleep(3)  # let the process exit after it signs off
+        return True
+    finally:
+        db.close()
+
+
+AUTOMATION_BUSY = ("Automation is still running in the background and didn't stop within 90 seconds. "
+                   "Stop it on the Automation tab (or with `ytclip auto --stop`) and try again.")
 
 
 # ---------------------------------------------------------------- swap
 
 SWAP_SCRIPT = r"""
-param([int]$WaitPid, [string]$NewDir, [string]$InstallDir, [string]$Relaunch, [string]$LogFile)
+param([int]$WaitPid, [string]$NewDir, [string]$InstallDir, [string]$Relaunch = '', [string]$LogFile)
 $ErrorActionPreference = 'Stop'
-function Log([string]$m) { Add-Content -LiteralPath $LogFile -Value ("{0:yyyy-MM-dd HH:mm:ss} {1}" -f (Get-Date), $m) -Encoding UTF8 }
-$backup = "$InstallDir.old"
+# Logging must never stop an install or a restore, so it retries briefly and then gives up.
+function Log([string]$m) {
+  $line = ("{0:yyyy-MM-dd HH:mm:ss} {1}" -f (Get-Date), $m) + "`r`n"
+  for ($i = 0; $i -lt 5; $i++) {
+    try { [System.IO.File]::AppendAllText($LogFile, $line, (New-Object System.Text.UTF8Encoding $false)); return }
+    catch { Start-Sleep -Milliseconds 200 }
+  }
+}
+# One spelling of each path (no 8.3 short names), so paths built from them line up.
+$NewDir = [System.IO.Path]::GetFullPath($NewDir).TrimEnd('\')
+$InstallDir = [System.IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
 $staging = Split-Path -Parent $NewDir
 $parent = Split-Path -Parent $InstallDir
+$note = Join-Path $parent 'CLIPMONSTER-UPDATE-FAILED.txt'
+# The install folder itself is never renamed: an open File Explorer window, a terminal or any
+# program whose working folder is inside it would block that. Instead the app's own files move
+# into a backup folder inside it, file by file when a whole folder can't move, and the new
+# files move in. Anything else in the folder (your own files) is left alone.
+$moves = New-Object System.Collections.ArrayList    # every move made, newest last, to undo on failure
+$created = New-Object System.Collections.ArrayList  # folders made for file-by-file moves
+$emptied = New-Object System.Collections.ArrayList  # old folders emptied file by file
+$newDirs = @{}                                      # the new version's folders (keys ignore case)
+$keep = @{}                                         # the old version's folders, put back by a restore
 
-# Folders only ever move with [IO.Directory]::Move: a rename that either fully happens or
-# changes nothing. (Move-Item half-moves a folder when a file inside is briefly locked by
-# antivirus or OneDrive, and a retry then nests it.) .NET calls also take paths literally,
-# so [ ] in folder names are safe.
+# .NET calls take paths literally, so [ ] in folder names are safe.
 function Retry([scriptblock]$action, [string]$what, [int]$tries = 40) {
   for ($i = 1; $i -le $tries; $i++) {
     try { & $action; return }
     catch {
-      if ($i -eq $tries) { throw "Could not $what (files may be in use): $($_.Exception.Message)" }
+      if ($i -eq $tries) { throw "Could not $what (in use by another program?): $($_.Exception.Message)" }
       Start-Sleep -Milliseconds 500
     }
   }
+}
+function Ensure-Dir([string]$dir) {
+  if ([System.IO.Directory]::Exists($dir)) { return }
+  Ensure-Dir (Split-Path -Parent $dir)
+  [void][System.IO.Directory]::CreateDirectory($dir)
+  [void]$created.Add($dir)
+}
+function Move-File([string]$from, [string]$to, [string]$what) {
+  Ensure-Dir (Split-Path -Parent $to)
+  Retry { [System.IO.File]::Move($from, $to) } "move $what"
+  [void]$moves.Add(@($from, $to, 'file'))
+}
+# Moves the contents of folder $from into $to file by file (files can move out of a folder
+# that is held open), recreating its subfolders, empty ones included. The emptied folders stay.
+function Move-Contents([string]$from, [string]$to, [string]$what) {
+  $root = $from.TrimEnd('\') + '\'
+  Ensure-Dir $to
+  foreach ($d in [System.IO.Directory]::GetDirectories($from, '*', [System.IO.SearchOption]::AllDirectories)) {
+    Ensure-Dir (Join-Path $to $d.Substring($root.Length))
+  }
+  foreach ($f in [System.IO.Directory]::GetFiles($from, '*', [System.IO.SearchOption]::AllDirectories)) {
+    $rel = $f.Substring($root.Length)
+    Move-File $f (Join-Path $to $rel) "$what\$rel"
+  }
+}
+# A folder moves in one step when it can, and file by file when something holds it open.
+function Move-Tree([string]$from, [string]$to, [string]$what) {
+  if (-not [System.IO.Directory]::Exists($to)) {
+    Ensure-Dir (Split-Path -Parent $to)
+    try {
+      Retry { [System.IO.Directory]::Move($from, $to) } "move $what" 6
+      [void]$moves.Add(@($from, $to, 'dir'))
+      return
+    } catch { Log "Moving $what file by file: $($_.Exception.Message)" }
+  }
+  Move-Contents $from $to $what
+  if ($from.StartsWith($InstallDir.TrimEnd('\') + '\', [System.StringComparison]::OrdinalIgnoreCase)) { [void]$emptied.Add($from) }
+}
+function Move-Item-Safe([string]$from, [string]$to, [string]$what) {
+  if ([System.IO.Directory]::Exists($from)) { Move-Tree $from $to $what }
+  elseif ([System.IO.File]::Exists($from)) { Move-File $from $to $what }
+}
+function Undo-One([string]$from, [string]$to, [string]$kind) {
+  if ($kind -eq 'file') {
+    Ensure-Dir (Split-Path -Parent $from)
+    Retry { [System.IO.File]::Move($to, $from) } "put back $to" 120
+  } elseif (-not [System.IO.Directory]::Exists($from)) {
+    Retry { [System.IO.Directory]::Move($to, $from) } "put back $to" 120
+  } else {
+    # A file-by-file move of the new version left folders where this one was: merge it back.
+    $root = $to.TrimEnd('\') + '\'
+    $keep[$from] = $true
+    foreach ($d in [System.IO.Directory]::GetDirectories($to, '*', [System.IO.SearchOption]::AllDirectories)) {
+      $back = Join-Path $from $d.Substring($root.Length)
+      Ensure-Dir $back
+      $keep[$back] = $true
+    }
+    foreach ($f in [System.IO.Directory]::GetFiles($to, '*', [System.IO.SearchOption]::AllDirectories)) {
+      $dest = Join-Path $from $f.Substring($root.Length)
+      Retry { [System.IO.File]::Move($f, $dest) } "put back $f" 120
+    }
+    Remove-Quietly $to
+  }
+}
+# Puts back as much as it can, newest move first, and keeps going past anything it can't.
+function Undo-Moves {
+  $failed = @()
+  $made = @($created)  # folders the install made; the old version's own come back with it
+  for ($i = $moves.Count - 1; $i -ge 0; $i--) {
+    $m = $moves[$i]
+    try { Undo-One $m[0] $m[1] $m[2] }
+    catch { Log "Could not put back $($m[1]): $($_.Exception.Message)"; $failed += , $m }
+  }
+  $moves.Clear()
+  foreach ($d in @($made | Sort-Object Length -Descending)) {
+    if ($keep.ContainsKey($d)) { continue }
+    try { [System.IO.Directory]::Delete($d) } catch { }  # only while empty
+  }
+  if ($failed.Count) { $script:stuck = $failed; throw "$($failed.Count) item(s) could not be put back" }
 }
 function Start-App {
   if (-not $Relaunch) { return }
@@ -363,51 +514,95 @@ function Start-App {
   } catch { Log "Could not restart ClipMonster: $($_.Exception.Message)" }
 }
 function Is-Complete([string]$dir) {
-  (Test-Path -LiteralPath (Join-Path $dir 'ClipMonster.exe')) -and (Test-Path -LiteralPath (Join-Path $dir '_internal'))
+  [System.IO.File]::Exists((Join-Path $dir 'ClipMonster.exe')) -and [System.IO.Directory]::Exists((Join-Path $dir '_internal'))
 }
+function App-Processes {
+  $prefix = $InstallDir.TrimEnd('\') + '\'
+  @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue | Where-Object {
+      $_.ExecutablePath -and $_.ExecutablePath.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase) })
+}
+function Describe($p) {
+  if ($p.CommandLine -like '*--automation*') { "ClipMonster automation (process $($p.ProcessId))" }
+  else { "$($p.Name) (process $($p.ProcessId))" }
+}
+function Remove-Quietly([string]$dir) {
+  if (-not [System.IO.Directory]::Exists($dir)) { return }
+  try { Retry { [System.IO.Directory]::Delete($dir, $true) } "remove $dir" 10 }
+  catch { Log "Left $dir behind (harmless, removed after the next successful update): $($_.Exception.Message)" }
+}
+# Backups of earlier updates. One marked .keep-recovery holds files a failed restore couldn't
+# put back, so it stays until an update succeeds.
+function Old-Backups { @([System.IO.Directory]::GetDirectories($InstallDir, '.cm-old*')) }
 
 try {
   Log "Update started: waiting for process $WaitPid to exit"
   $p = Get-Process -Id $WaitPid -ErrorAction SilentlyContinue
   if ($p) { if (-not $p.WaitForExit(120000)) { throw "ClipMonster did not close within 2 minutes" } }
-  # A backup from an earlier run is only stale while a working install exists.
-  if ((Test-Path -LiteralPath $backup) -and (Is-Complete $InstallDir)) {
-    Retry { [System.IO.Directory]::Delete($backup, $true) } "remove an old backup"
+  # Anything else running from the app folder (a second window, ytclip.exe, automation) must end too.
+  for ($i = 0; $i -lt 60 -and (App-Processes).Count; $i++) { Start-Sleep -Seconds 1 }
+  $still = App-Processes
+  if ($still.Count) { throw ("Close these first: " + (($still | ForEach-Object { Describe $_ }) -join ', ')) }
+
+  $appItems = @('ClipMonster.exe', 'ytclip.exe', '_internal') + @(Get-ChildItem -LiteralPath $NewDir -Force | ForEach-Object { $_.Name })
+  $appItems = @($appItems | Select-Object -Unique)
+  $nroot = $NewDir + '\'
+  foreach ($d in [System.IO.Directory]::GetDirectories($NewDir, '*', [System.IO.SearchOption]::AllDirectories)) { $newDirs[$d.Substring($nroot.Length)] = $true }
+
+  if (Is-Complete $InstallDir) {
+    foreach ($d in Old-Backups) { if (-not [System.IO.File]::Exists((Join-Path $d '.keep-recovery'))) { Remove-Quietly $d } }
+    Remove-Quietly "$InstallDir.old"
   }
-  Retry { [System.IO.Directory]::Move($InstallDir, $backup) } "move the old version aside"
+  $backup = Join-Path $InstallDir '.cm-old'
+  if ([System.IO.Directory]::Exists($backup)) { $backup = Join-Path $InstallDir ('.cm-old-' + (Get-Date -Format 'yyyyMMddHHmmss')) }
+
   try {
-    Retry { [System.IO.Directory]::Move($NewDir, $InstallDir) } "move the new version into place"
+    foreach ($name in $appItems) { Move-Item-Safe (Join-Path $InstallDir $name) (Join-Path $backup $name) "the old $name" }
+    try { $b = Get-Item -LiteralPath $backup -Force; $b.Attributes = $b.Attributes -bor [System.IO.FileAttributes]::Hidden } catch { }
+    foreach ($item in @(Get-ChildItem -LiteralPath $NewDir -Force)) {
+      Move-Item-Safe $item.FullName (Join-Path $InstallDir $item.Name) "the new $($item.Name)"
+    }
     if (-not (Is-Complete $InstallDir)) { throw "The new version is incomplete" }
   } catch {
-    Log "Install failed, restoring the previous version: $($_.Exception.Message)"
+    $why = $_.Exception.Message
     try {
-      if (Test-Path -LiteralPath $InstallDir) {
-        $aside = "$InstallDir.failed-" + (Get-Date -Format 'yyyyMMddHHmmss')
-        Retry { [System.IO.Directory]::Move($InstallDir, $aside) } "set the failed version aside" 120
-      }
-      Retry { [System.IO.Directory]::Move($backup, $InstallDir) } "restore the previous version" 120
-      Log "Previous version restored"
+      Undo-Moves
+      Log "Install failed, previous version restored: $why"
     } catch {
-      $note = Join-Path $parent 'CLIPMONSTER-UPDATE-FAILED.txt'
-      Set-Content -LiteralPath $note -Encoding UTF8 -Value @(
-        "ClipMonster's update could not finish, and the previous version could not be put back automatically.",
-        "To recover, rename the folder '$(Split-Path -Leaf $backup)' (next to this file) back to '$(Split-Path -Leaf $InstallDir)'.",
-        "Details: $LogFile")
+      $lines = @("ClipMonster's update could not finish, and some of the previous version's files could not be put",
+                 "back automatically. Don't delete anything. To recover, move each of these back by hand, or",
+                 "download ClipMonster again and copy it over '$InstallDir':", "")
+      foreach ($m in @($script:stuck)) { $lines += "  move '$($m[1])'  back to  '$($m[0])'" }
+      $lines += @("", "Details: $LogFile")
+      try { [System.IO.File]::WriteAllLines($note, [string[]]$lines) } catch { }
+      try { if ([System.IO.Directory]::Exists($backup)) { [System.IO.File]::WriteAllText((Join-Path $backup '.keep-recovery'), '') } } catch { }
       Log "RESTORE FAILED: $($_.Exception.Message). Recovery instructions: $note"
     }
-    throw
+    throw $why
   }
   Log "New version installed in $InstallDir"
+  # Folders emptied by a file-by-file move that the new version doesn't have.
+  $iroot = $InstallDir.TrimEnd('\') + '\'
+  foreach ($tree in $emptied) {
+    try {
+      if (-not [System.IO.Directory]::Exists($tree)) { continue }
+      $dirs = @([System.IO.Directory]::GetDirectories($tree, '*', [System.IO.SearchOption]::AllDirectories)) + @($tree)
+      foreach ($d in @($dirs | Sort-Object Length -Descending)) {
+        if ($newDirs.ContainsKey($d.Substring($iroot.Length))) { continue }
+        try { [System.IO.Directory]::Delete($d) } catch { }  # only while empty
+      }
+    } catch { }
+  }
   Start-App
-  Start-Sleep -Seconds 3
-  try {
-    Retry { [System.IO.Directory]::Delete($backup, $true) } "remove the backup" 20
-    if (Test-Path -LiteralPath $staging) { [System.IO.Directory]::Delete($staging, $true) }
-  } catch { Log "Cleanup left files behind (harmless, removed on the next update): $($_.Exception.Message)" }
+  foreach ($d in Old-Backups) { Remove-Quietly $d }
+  Remove-Quietly $staging
+  try { if ([System.IO.File]::Exists($note)) { [System.IO.File]::Delete($note) } } catch { }
   Log "Update finished"
 } catch {
   Log "Update failed: $($_.Exception.Message)"
-  if (Is-Complete $InstallDir) { Start-App }
+  try {  # unless it's open already (reopened while this waited)
+    $open = @(App-Processes | Where-Object { $_.Name -eq 'ClipMonster.exe' -and -not ($_.CommandLine -like '*--automation*') })
+    if ((Is-Complete $InstallDir) -and -not $open.Count) { Start-App }
+  } catch { }
 }
 """
 
@@ -416,13 +611,25 @@ def update_log() -> Path:
     return updates_dir() / "update.log"
 
 
+def _log_line(text: str) -> None:
+    try:
+        with update_log().open("a", encoding="utf-8", newline="") as f:
+            f.write(f"{time.strftime('%Y-%m-%d %H:%M:%S')} {text}\r\n")
+    except OSError:
+        pass
+
+
 def launch_swap(new_app: Path, target: Path, wait_pid: int, relaunch: str = EXE_NAME) -> None:
     """Start the detached helper that installs `new_app` over `target` once `wait_pid` exits."""
     script = updates_dir() / "apply-update.ps1"
     script.write_text(SWAP_SCRIPT, encoding="utf-8-sig")  # BOM: Windows PowerShell 5.1 then reads UTF-8 paths
     cmd = ["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-WindowStyle", "Hidden",
            "-File", str(script), "-WaitPid", str(wait_pid), "-NewDir", str(new_app), "-InstallDir", str(target),
-           "-Relaunch", relaunch, "-LogFile", str(update_log())]
+           "-LogFile", str(update_log())]
+    if relaunch:  # an empty argument would be dropped by some callers and break the parameter list
+        cmd += ["-Relaunch", relaunch]
+    # Marks this attempt, so an old failure isn't reported if the helper never gets to log.
+    _log_line(f"Update requested: helper output goes to {updates_dir() / 'apply-update.out'}")
     # A hidden console of its own (not DETACHED_PROCESS: powershell.exe with no console at all
     # exits immediately without running the script) in its own process group, so neither
     # closing the app nor Ctrl+C in a terminal stops it.
@@ -465,13 +672,52 @@ def due_for_check(hours: float = 20) -> bool:
     return time.time() - float(load_state().get("last_check", 0)) > hours * 3600
 
 
+INSTALL_WINDOW = 300  # seconds: a helper that hasn't finished by then has died or given up
+
+
 def finished_update_message() -> tuple[str, bool] | None:
     """After a restart: did the update we started succeed? Returns (message, ok) once."""
     pending = load_state().get("pending")
     if not pending:
         return None
-    save_state(pending="")
     if parse_version(pending) == parse_version(__version__):
+        save_state(pending="")
         return f"Updated to ClipMonster {__version__}.", True
-    return (f"The update to {pending} didn't complete, so you're still on {__version__}. "
-            f"Details: {update_log()}", False)
+    state, reason = last_attempt()
+    try:
+        recent = time.time() - update_log().stat().st_mtime < INSTALL_WINDOW
+    except OSError:
+        recent = False
+    if state in ("requested", "running") and recent:  # opened again while it's still installing
+        return (f"ClipMonster {pending} is still being installed. Close ClipMonster for a minute so it can "
+                f"finish, then open it again.", False)
+    save_state(pending="")
+    if state == "requested":
+        reason = f"The installer didn't start. Its output is in {updates_dir() / 'apply-update.out'}"
+    return (f"The update to {pending} didn't complete, so you're still on {__version__}."
+            + (f" {reason.rstrip('.')}." if reason else "") + f" Details: {update_log()}", False)
+
+
+def last_attempt() -> tuple[str, str]:
+    """The newest update attempt in the helper's log, as (state, reason). state is "requested"
+    (the helper hasn't started), "running", "failed", "finished" or "" (no attempt logged)."""
+    try:
+        lines = update_log().read_text(encoding="utf-8-sig", errors="replace").splitlines()
+    except OSError:
+        return "", ""
+    for line in reversed(lines[-300:]):
+        if "Update failed: " in line:
+            return "failed", line.split("Update failed: ", 1)[1].strip()
+        if "Update finished" in line:
+            return "finished", ""
+        if "Update started" in line:
+            return "running", ""
+        if "Update requested" in line:
+            return "requested", ""
+    return "", ""
+
+
+def last_failure() -> str:
+    """Why the last update failed, from the helper's log ("" if it didn't fail or didn't say)."""
+    state, reason = last_attempt()
+    return reason if state == "failed" else ""
