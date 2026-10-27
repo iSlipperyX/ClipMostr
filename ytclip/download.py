@@ -131,22 +131,37 @@ def expand_sources(sources: list[str], limit: int | None = None, cookies: str | 
 
 
 def _pick_caption_lang(info: dict) -> tuple[str, bool] | None:
-    """Prefer human-written English, then the original-language auto captions."""
-    manual = info.get("subtitles") or {}
+    """The caption track to use: human-written captions in the video's language or English first,
+    then YouTube's own transcript ("<lang>-orig") in the video's language or English.
+
+    A transcript in any other language is a last resort: YouTube sometimes guesses a video's
+    language wrong and lists, say, an "ar-orig" track for an English interview."""
+    manual = {k: v for k, v in (info.get("subtitles") or {}).items() if k != "live_chat"}
     auto = info.get("automatic_captions") or {}
-    for lang in manual:
-        if lang.split("-")[0] == "en" and lang != "live_chat":
-            return lang, False
-    for lang in auto:
-        if lang.endswith("-orig"):
-            return lang, True
-    for lang in ("en", "en-US", "en-GB"):
+    spoken = (info.get("language") or "").split("-")[0].lower()
+    wanted = [x for x in (spoken, "en") if x]
+
+    def first(tracks, langs, suffix=""):
+        for want in langs:
+            for lang in tracks:
+                if lang.split("-")[0].lower() == want and (not suffix or lang.endswith(suffix)):
+                    return lang
+        return None
+
+    for found, is_auto in ((first(manual, wanted), False), (first(auto, wanted, "-orig"), True)):
+        if found:
+            return found, is_auto
+    if not spoken:  # language unknown: YouTube's own transcript is the best guess
+        orig = next((lang for lang in auto if lang.endswith("-orig")), None)
+        if orig:
+            return orig, True
+    for lang in ("en", "en-US", "en-GB"):  # English translation of the transcript
         if lang in auto:
             return lang, True
-    for lang in manual:
-        if lang != "live_chat":
-            return lang, False
-    return None
+    if manual:
+        return next(iter(manual)), False
+    orig = next((lang for lang in auto if lang.endswith("-orig")), None)
+    return (orig, True) if orig else None
 
 
 def download(url: str, cache_dir: Path, max_height: int, cookies: str | None = None,
@@ -206,6 +221,8 @@ def _download_captions(info: dict, cache_dir: Path, cookies: str | None, log: Lo
     if not choice:
         return None
     lang, is_auto = choice
+    if log:
+        log(f"Captions: {lang} ({'YouTube auto-captions' if is_auto else 'written by the uploader'}).")
     target = cache_dir / f"{info['id']}.{lang}.vtt"
     if target.exists():
         return target

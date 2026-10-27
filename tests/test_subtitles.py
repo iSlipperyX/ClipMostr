@@ -1,4 +1,7 @@
-from ytclip.captions import HOLD, caption_events
+import pytest
+
+from ytclip.captions import HOLD, build_ass, caption_events
+from ytclip.download import _pick_caption_lang
 from ytclip.settings import Settings
 from ytclip.subtitles import Word, clean_text, parse_vtt, parse_vtt_words
 
@@ -92,3 +95,30 @@ def test_caption_holds_over_short_gaps():
     events = caption_events(words, 0.0, 6.0, s)
     showy = next(e for e in events if e.words[e.active].lower() == "showy.")
     assert showy.end == 1.5  # but never over the next caption
+
+
+def test_caption_styles_let_libass_pick_the_text_direction():
+    # Encoding -1: Arabic or Hebrew captions read right to left in the right order
+    ass = build_ass([Word(0, 0.5, "مرحبا")], 0, 1, 1080, 1920, Settings(), title="x")
+    styles = [ln for ln in ass.splitlines() if ln.startswith("Style:")]
+    assert styles and all(ln.endswith(",-1") for ln in styles)
+
+
+TRACKS = {"en": [], "ar": [], "fr": [], "id": []}
+
+
+@pytest.mark.parametrize("info,choice", [
+    # YouTube guessed Arabic for an English interview: use the English translation, not Arabic
+    ({"language": "en", "automatic_captions": {"ar-orig": [], **TRACKS}}, ("en", True)),
+    ({"language": "en", "automatic_captions": {"en-orig": [], **TRACKS}}, ("en-orig", True)),
+    ({"language": "en", "subtitles": {"en-GB": [], "live_chat": []}, "automatic_captions": {"en-orig": []}},
+     ("en-GB", False)),
+    ({"language": "id", "subtitles": {"id": []}, "automatic_captions": {"en-orig": []}}, ("id", False)),
+    ({"language": "id", "automatic_captions": {"en-orig": [], **TRACKS}}, ("en-orig", True)),
+    ({"automatic_captions": {"fr-orig": [], **TRACKS}}, ("fr-orig", True)),  # language unknown
+    ({"language": "de", "subtitles": {"es": []}}, ("es", False)),
+    ({"language": "en", "automatic_captions": {"ar-orig": []}}, ("ar-orig", True)),  # nothing else
+    ({"language": "en", "subtitles": {"live_chat": []}}, None),
+])
+def test_caption_track_choice(info, choice):
+    assert _pick_caption_lang(info) == choice

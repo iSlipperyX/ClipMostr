@@ -163,6 +163,8 @@ def build_ass(words: list[Word], clip_start: float, clip_end: float, width: int,
     """The captions .ass file. `offset` shifts every time earlier, for rendering a still from inside the clip."""
     st = caption_style(s, width, height, area, side)
     lr = st.margin_lr
+    # Encoding -1 lets libass work out each line's text direction, so Arabic or Hebrew words read
+    # right to left in the right order (with 1, every line is laid out left to right).
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {width}
@@ -173,8 +175,8 @@ Kerning: no
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Cap,{s.caption_font},{st.size},{_ass_colour(s.caption_color)},&H000000FF,&H00000000,&H80000000,{st.bold},0,0,0,100,100,0,0,1,{st.outline},{st.shadow},{st.align},{lr},{lr},{st.margin_v},1
-Style: Title,{s.caption_font},{st.title_size},&H00FFFFFF,&H000000FF,&H00000000,&HC0000000,{st.bold},0,0,0,100,100,0,0,3,{st.title_pad},0,8,{lr},{lr},{st.title_margin},1
+Style: Cap,{s.caption_font},{st.size},{_ass_colour(s.caption_color)},&H000000FF,&H00000000,&H80000000,{st.bold},0,0,0,100,100,0,0,1,{st.outline},{st.shadow},{st.align},{lr},{lr},{st.margin_v},-1
+Style: Title,{s.caption_font},{st.title_size},&H00FFFFFF,&H000000FF,&H00000000,&HC0000000,{st.bold},0,0,0,100,100,0,0,3,{st.title_pad},0,8,{lr},{lr},{st.title_margin},-1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

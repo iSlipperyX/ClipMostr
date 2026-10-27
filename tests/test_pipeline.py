@@ -142,6 +142,8 @@ def test_settings_for_a_job(tmp_path):
     plain, label = settings_for(Job("c", "u"), s.apply({"auto_preset": "", "auto_captions": False,
                                                         "auto_delete_sources": False}))
     assert label == "My settings" and not plain.burn_captions and plain.keep_source
+    assert game.caption_censor  # automation bleeps swearing by default
+    assert not settings_for(Job("d", "u"), s.apply({"auto_bleep": False, "caption_censor": False}))[0].caption_censor
 
 
 # ---------------------------------------------------------------- research → queue

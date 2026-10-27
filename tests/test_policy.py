@@ -57,7 +57,7 @@ def test_source_policy(pick_from, origins, license, ok):
     ({"score": 50}, {}, "score", "Clip-ability 50 is under your minimum of 65"),
     ({"minutes": 4}, {}, "length", "Only 4:00 long; your minimum is 8 min"),
     ({"minutes": 300}, {}, "length", "5:00:00 long; your maximum is 180 min"),
-    ({"hours_old": 24 * 5}, {}, "age", "Posted 5 days ago; your limit is 3"),
+    ({"hours_old": 24 * 15}, {}, "age", "Posted 15 days ago; your limit is 14"),
     ({"category": "10"}, {"block_categories": {"10"}}, "category", "Music is blocked"),
     ({"title": "New Official TRAILER"}, {"block_words": ["trailer"]}, "word", 'contains "trailer"'),
     ({"channel": "Bad Chan"}, {"block_channels": ["bad chan"]}, "channel", "Bad Chan is on your blocked channels"),
@@ -73,7 +73,7 @@ def test_each_rule_names_itself(kwargs, policy, rule, text):
 
 
 def test_zero_means_no_limit():
-    assert one(vid(minutes=600, hours_old=24 * 30), Policy(max_minutes=0, max_age_days=0)).picked
+    assert one(vid(minutes=600, hours_old=24 * 30), Policy(max_minutes=0, max_age_allowed_days=0)).picked
 
 
 def test_already_picked_or_sent_videos_are_skipped():
@@ -159,3 +159,13 @@ def test_language_codes():
     from ytclip.policy import language_codes, parse_languages
     assert language_codes("es-MX, en; EN  pt-BR junk!") == ["es", "en", "pt"]
     assert parse_languages("") == set()
+
+
+def test_videos_with_permission_get_the_longer_age_limit():
+    p = Policy(pick_from="any")
+    assert one(vid(hours_old=24 * 10, origins=("cc",), license="creativeCommon"), p).picked
+    assert one(vid(hours_old=24 * 10), p).picked  # on the channel list
+    d = one(vid(hours_old=24 * 10, origins=("chart",)), p)
+    assert d.rule == "age" and d.reason == "Posted 10 days ago; your limit is 3."
+    d = one(vid(hours_old=24 * 20, origins=("cc",), license="creativeCommon"), p)
+    assert d.rule == "age" and d.reason == "Posted 20 days ago; your limit is 14."

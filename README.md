@@ -130,7 +130,7 @@ ClipMonster can also decide by itself which videos to clip, so they can be cut w
 | **Creative Commons only** | Only Creative Commons videos |
 | **Anything that passes the rules** | Any video, including trending videos nobody gave permission for. Reposts like these risk copyright strikes |
 
-Then the rules go through the videos best first. A video is skipped if it was picked or sent before, is live or not out yet, is from a blocked channel or category (Music and Film by default), has a blocked word in its title (music video, trailer…), is in a language you don't pick (**Only pick videos in**, English by default; videos with no language set are allowed), is shorter or longer than your limits (8 to 180 minutes), is older than your limit (3 days), or scores under your minimum (65). Finally, at most **3 videos a day** and **2 per channel a week** are picked. Each skipped video shows the rule that stopped it.
+Then the rules go through the videos best first. A video is skipped if it was picked or sent before, is live or not out yet, is from a blocked channel or category (Music and Film by default), has a blocked word in its title (music video, trailer…), is in a language you don't pick (**Only pick videos in**, English by default; videos with no language set are allowed), is shorter or longer than your limits (8 to 180 minutes), is older than your limit (3 days for trending videos, 14 for videos from your channel list or under Creative Commons), or scores under your minimum (65). Finally, at most **3 videos a day** and **2 per channel a week** are picked. Each skipped video shows the rule that stopped it.
 
 Only picks that are actually used count towards the limits: sent to the Studio, or clipped from the command line. The picks are kept in `%APPDATA%\ClipMonster\picks.json` with the reason each one was allowed, so nothing is picked twice.
 
@@ -163,6 +163,7 @@ The **Automation** tab runs the whole job without you: it checks Research on you
 | Style (preset) and Top/bottom view | Shorts / TikTok / Reels | How clips are found and exported |
 | Recipes | none | A different style per category or channel, one per line: `Gaming = Gaming / action \| Gameplay below`, `@somepodcast = Podcast moments \| Title on top`, `* = \| Title on top`. The first matching line wins |
 | Always burn in captions | on | Word-by-word captions on every clip |
+| Bleep strong swearing | on | Writes f\*ck, sh\*t and the like in captions and `.srt` files |
 | Work from / until | any time | Hours in which downloads and encodes may start, e.g. 1 to 7 overnight |
 | Minutes between downloads | 10 | Spacing that keeps YouTube from flagging the PC |
 | Check clips after export | on | The [quality check](#export-options); rejected clips go to `_rejected` and the queue shows them as "3 ✓ 1 ✗" |
