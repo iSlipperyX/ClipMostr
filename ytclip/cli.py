@@ -106,11 +106,8 @@ def run_update(install: bool) -> int:
     if target is None:
         console.print("Running from source: update with [bold]git pull[/] instead.")
         return 1
-    cwd = Path.cwd().resolve()
-    if cwd == target or target in cwd.parents:
-        # The terminal itself sits in the folder, and Windows won't let it be replaced.
-        console.print(f"[red]Run this from outside the ClipMonster folder, e.g.:[/]\n  cd \"{target.parent}\"\n"
-                      f"  \"{target / 'ytclip.exe'}\" --update")
+    if not updater.stop_automation():
+        console.print(f"[red]{escape(updater.AUTOMATION_BUSY)}[/]")
         return 1
     others = updater.other_instances(target)
     if others:

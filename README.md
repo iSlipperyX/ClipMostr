@@ -235,7 +235,7 @@ Main options: `-n` number of clips · `--min/--max` length in seconds · `--mode
 ClipMonster updates itself from this project's GitHub Releases.
 
 - About once a day it checks quietly for a newer release. When one exists, a banner offers **What's new**, **Update now** and **Skip this version**. You can also check any time from **? → Check for updates**, or with `ytclip --check-update`.
-- **Update now** downloads the release and checks it against its SHA-256 checksum, then restarts ClipMonster. While the app is closed, a small helper swaps in the new version and keeps the old one until the new one is in place; if anything goes wrong, it restores the old version. Settings, presets and your session are untouched. The helper writes a log to `%LOCALAPPDATA%\ClipMonster\updates\update.log`.
+- **Update now** downloads the release and checks it against its SHA-256 checksum, then restarts ClipMonster. While the app is closed, a small helper replaces the app's own files (`ClipMonster.exe`, `ytclip.exe` and `_internal`) in place, keeping the old ones in a hidden backup folder until the new ones are in. If anything goes wrong, it puts the old version back. File Explorer windows or terminals open on the ClipMonster folder don't get in the way, and anything else you keep in the folder is left alone. Background automation is paused for the update and starts again afterwards. Settings, presets and your session are untouched. If an update doesn't complete, the app says why when it next opens. The helper writes a log to `%LOCALAPPDATA%\ClipMonster\updates\update.log`.
 - Turn automatic checks off, or opt into beta versions, under **Settings → Updates**.
 - The repository must be **public** so the app can see its releases without a login.
 
