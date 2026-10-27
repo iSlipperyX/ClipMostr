@@ -8,12 +8,14 @@ from __future__ import annotations
 
 import math
 import os
+import threading
 import time
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import Callable
 
 from . import clipability
+from .download import is_blocked
 from .policy import language_codes
 from .settings import Settings, app_dir
 from .sources import ChannelRef, Gathered, gather, parse_channels, parse_searches
@@ -41,6 +43,8 @@ class ScanOptions:
     searches: list[str] = field(default_factory=list)  # Creative Commons searches
     unreadable: list[str] = field(default_factory=list)  # channel list lines that aren't a channel
     language: str = ""  # Creative Commons searches favour this spoken language (the first of Picking's)
+    deep_workers: int = 4  # most-replayed checks at once
+    deep_pause: float = 0.0  # seconds between them (automation spaces them out)
 
     @classmethod
     def from_settings(cls, s: Settings) -> "ScanOptions":
@@ -69,6 +73,7 @@ class ScanResult:
     quota: int = 0
     first: bool = False  # nothing to compare with yet, so nothing counts as "new"
     notes: dict[str, str] = field(default_factory=dict)  # channel id -> its note on the channel list
+    blocked: str = ""  # YouTube asked this PC to sign in during the most-replayed checks
 
     @property
     def new(self) -> list[TrendingVideo]:
@@ -158,12 +163,20 @@ def scan(opts: ScanOptions, history: History, log: Log | None = None, progress: 
         clipability.score(v, velocities, now)
 
     # Most-replayed checks cost a few seconds each, so only the best candidates get one.
+    blocked = ""
     todo = [v for v in sorted(videos, key=lambda v: v.score, reverse=True)[:max(0, opts.deep_count)]
             if v.deep is None and v.live == "none" and v.duration > 60]
     if todo:
         step(f"Checking most-replayed moments (0/{len(todo)})", len(opts.regions) / (len(opts.regions) + 1))
-        pool = ThreadPoolExecutor(max_workers=4)
-        jobs = {pool.submit(deep, v.url, opts.cookies, log): v for v in todo}
+        pool = ThreadPoolExecutor(max_workers=max(1, opts.deep_workers))
+        stop = threading.Event()
+
+        def check(v: TrendingVideo) -> DeepInfo | None:
+            if stop.is_set() or (opts.deep_pause and stop.wait(opts.deep_pause)):
+                return None  # skipped: YouTube is pushing back, or the scan was cancelled
+            return deep(v.url, opts.cookies, log)
+
+        jobs = {pool.submit(check, v): v for v in todo}
         finished = False
         done = 0
         try:
@@ -174,22 +187,36 @@ def scan(opts: ScanOptions, history: History, log: Log | None = None, progress: 
                 for job in ready:
                     v = jobs[job]
                     try:
-                        v.deep = job.result()
+                        info = job.result()
                     except Exception as exc:  # a failed check only means less to go on
-                        v.deep = DeepInfo(checked=now, error=str(exc) or exc.__class__.__name__)
-                    history.store_deep(v.id, v.deep)
+                        info = DeepInfo(checked=now, error=str(exc) or exc.__class__.__name__)
                     done += 1
+                    if info is None:
+                        continue
+                    if is_blocked(info.error):
+                        # More checks would only make it worse: skip the rest, and don't remember
+                        # this as the video's result.
+                        if not blocked:
+                            blocked = info.error
+                            stop.set()
+                            log("YouTube asked this PC to sign in, so the remaining most-replayed checks "
+                                "are skipped.")
+                        continue
+                    v.deep = info
+                    history.store_deep(v.id, v.deep)
                 step(f"Checking most-replayed moments ({done}/{len(todo)})",
                      (len(opts.regions) + done / len(todo)) / (len(opts.regions) + 1))
             finished = True
         finally:
             # On cancel, don't sit waiting for checks still in flight; their results are dropped.
+            stop.set()
             pool.shutdown(wait=finished, cancel_futures=True)
         for v in videos:
             clipability.score(v, velocities, now)
 
     videos.sort(key=lambda v: (v.score, v.velocity), reverse=True)
-    result = ScanResult(videos, now, list(opts.regions), opts.category, problems, quota, first, extra.notes)
+    result = ScanResult(videos, now, list(opts.regions), opts.category, problems, quota, first, extra.notes,
+                        blocked=blocked)
     history.remember(videos, {"regions": result.regions, "category": opts.category, "problems": problems,
                               "notes": extra.notes}, now)
     history.save()

@@ -305,6 +305,7 @@ def deep_from_info(info: dict) -> DeepInfo:
 SNAPSHOTS = 16  # view counts kept per video
 FORGET_AFTER = 7 * 86400  # drop videos not seen on any chart for a week
 DEEP_FRESH = 6 * 3600  # re-check the heatmap after this long
+DEEP_RETRY = 3600  # a check that failed is tried again after this long, not on every scan
 MIN_GAP = 15 * 60  # two snapshots closer than this are too noisy to compare
 
 
@@ -362,7 +363,7 @@ class History:
     @_locked
     def cached_deep(self, video_id: str, now: float) -> DeepInfo | None:
         d = (self.videos.get(video_id) or {}).get("deep")
-        if not d or now - d.get("checked", 0) > DEEP_FRESH or d.get("error"):
+        if not d or now - d.get("checked", 0) > (DEEP_RETRY if d.get("error") else DEEP_FRESH):
             return None
         return DeepInfo(**{k: v for k, v in d.items() if k in DeepInfo.__dataclass_fields__})
 

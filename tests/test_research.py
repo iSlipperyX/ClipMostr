@@ -163,3 +163,18 @@ def test_cancel_during_replay_checks_doesnt_wait_for_them():
              cancelled=lambda: flag["stop"], now=NOW)
     release.set()
     assert time.monotonic() - started < 4
+
+
+def test_a_sign_in_request_stops_the_remaining_deep_checks():
+    calls = []
+
+    def deep(url, cookies=None, log=None):
+        calls.append(url)
+        return DeepInfo(checked=NOW, error="Sign in to confirm you're not a bot")
+
+    history = History(None)
+    result = scan(opts(deep_workers=1), history, fetch=fake_fetch(), deep=deep, now=NOW)
+    assert len(calls) == 1  # the rest weren't even tried
+    assert "not a bot" in result.blocked
+    assert all(history.cached_deep(v.id, NOW) is None for v in result.videos)  # not remembered as results
+    assert not scan(opts(), History(None), fetch=fake_fetch(), deep=FakeDeep(), now=NOW).blocked

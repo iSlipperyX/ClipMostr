@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -76,6 +77,14 @@ class _Logger:
         self.log(f"✗ {msg}")
 
 
+# yt-dlp errors that mean YouTube is pushing back on this PC, not on one video.
+BLOCKED = re.compile(r"sign in to confirm|not a bot|http error 429|too many requests|rate.?limit", re.I)
+
+
+def is_blocked(error: str) -> bool:
+    return bool(BLOCKED.search(error or ""))
+
+
 def _base_opts(log: Log | None, cookies_from_browser: str | None) -> dict:
     opts: dict = {
         "logger": _Logger(log),
@@ -83,6 +92,9 @@ def _base_opts(log: Log | None, cookies_from_browser: str | None) -> dict:
         "no_warnings": False,
         "noprogress": True,
         "ffmpeg_location": ffmpeg_exe(),
+        # A pause between the requests behind each video page, as a person browsing would make
+        # them: bursts of requests are what gets a PC asked to sign in.
+        "sleep_interval_requests": 1,
     }
     # YouTube needs a JavaScript runtime to solve its player challenges.
     # yt-dlp only enables Deno by default, so also allow Node/Bun if installed.
@@ -226,23 +238,27 @@ def _download_captions(info: dict, cache_dir: Path, cookies: str | None, log: Lo
     target = cache_dir / f"{info['id']}.{lang}.vtt"
     if target.exists():
         return target
-    opts = _base_opts(None, cookies) | {
-        "skip_download": True,
-        "writesubtitles": not is_auto,
-        "writeautomaticsub": is_auto,
-        "subtitleslangs": [lang],
-        "subtitlesformat": "vtt",
-        "outtmpl": str(cache_dir / "%(id)s.%(ext)s"),
-        "noplaylist": True,
-    }
+    # The track's address came with the video's info, so this is one request; asking yt-dlp
+    # again would load the whole video page a second time.
+    tracks = (info.get("automatic_captions") if is_auto else info.get("subtitles")) or {}
+    track = next((t for t in tracks.get(lang) or [] if t.get("ext") == "vtt" and t.get("url")), None)
+    if not track:
+        if log:
+            log("Captions unavailable (no WebVTT version); continuing without them.")
+        return None
     try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.extract_info(info.get("webpage_url") or info["id"], download=True)
+        with yt_dlp.YoutubeDL(_base_opts(None, cookies)) as ydl:
+            data = ydl.urlopen(track["url"]).read()
+        if not data.lstrip(b"\xef\xbb\xbf").startswith(b"WEBVTT"):
+            raise ValueError("not a WebVTT file")
+        part = target.with_name(target.name + ".part")
+        part.write_bytes(data)
+        part.replace(target)
     except Exception as exc:
         if log:
-            log(f"Captions unavailable ({exc.__class__.__name__}); continuing without them.")
+            log(f"Captions unavailable ({exc.__class__.__name__}: {exc}); continuing without them.")
         return None
-    return target if target.exists() else None
+    return target
 
 
 def local_video(path: Path) -> Video:
