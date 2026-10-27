@@ -55,6 +55,7 @@ class Settings:
     snap_to_pauses: bool = True
     pad_start: float = 0.0
     pad_end: float = 0.0
+    trim_silence: bool = True  # start where the talking starts, end soon after it stops
     keywords: str = ""
     detect_scenes: bool = True
     w_heatmap: float = 0.55
@@ -73,6 +74,9 @@ class Settings:
         "Find self-contained moments that would work as standalone short-form clips: "
         "strong hooks, punchlines, surprising facts, hot takes, emotional peaks."
     )
+    ai_polish: bool = False  # polish.py: one extra Claude call per video for hooks, caption fixes, crops
+    ai_polish_model: str = "claude-sonnet-5-5"
+    polish_burned_subs: str = "off"  # off = turn our captions off when the video already has subtitles | keep
     # Export
     aspect: str = "vertical_blur"
     resolution: int = 1080
@@ -85,6 +89,8 @@ class Settings:
     thumbnails: bool = True
     write_srt: bool = True
     tiktok_ready: bool = True
+    qc_enabled: bool = False  # qc.py: check every clip after export, moving bad ones to _rejected
+    qc_min_rating: int = 5  # with AI polish: reject clips Claude rates under this (0 = ignore ratings)
     # Captions
     burn_captions: bool = False
     caption_font: str = "Montserrat Black"
@@ -96,6 +102,7 @@ class Settings:
     caption_words: int = 3
     caption_uppercase: bool = True
     title_overlay: bool = False
+    caption_censor: bool = False
     # Layout (banners and stacked video)
     banner_top: bool = False
     banner_top_text: str = "{title}"
@@ -111,6 +118,7 @@ class Settings:
     banner_uppercase: bool = True
     stack_enabled: bool = False
     stack_video: str = ""
+    stack_folder: str = ""  # a folder of second videos: each clip gets a different one (stackpool.py)
     stack_position: str = "bottom"
     stack_split: float = 0.5
     stack_start: str = "random"
@@ -127,6 +135,35 @@ class Settings:
     research_auto: bool = True
     research_interval: int = 30
     research_alert: int = 75
+    # Picking rules (policy.py): which researched videos may be clipped without asking
+    pick_from: str = "watchlist"
+    pick_channels: str = ""
+    pick_searches: str = ""
+    pick_min_score: int = 65
+    pick_min_minutes: float = 8.0
+    pick_max_minutes: float = 180.0
+    pick_max_age_days: float = 3.0
+    pick_daily: int = 3
+    pick_channel_weekly: int = 2
+    pick_block_channels: str = ""
+    pick_block_categories: str = "10, 1"  # Music, Film & Animation: reposts are usually claimed
+    pick_block_words: str = "music video, lyric video, lyrics, official audio, trailer, full movie, full album"
+    learn_from_results: bool = True  # learn.py: TikTok Manager's results rank channels and guide AI hooks
+    # Automation (pipeline.py): the unattended runner
+    auto_output_dir: str = ""  # "" = <output_dir>/Automation
+    auto_preset: str = "Shorts / TikTok / Reels"
+    auto_layout: str = ""  # "" = the layout in your settings
+    auto_recipes: str = ""  # lines of "match = preset | view"
+    auto_captions: bool = True
+    auto_polish: bool = True
+    auto_qc: bool = True
+    auto_start_hour: int = 0  # the runner downloads and encodes between these hours (equal = any time)
+    auto_end_hour: int = 0
+    auto_gap_minutes: int = 10
+    auto_ai_daily: int = 10
+    auto_retries: int = 3
+    auto_delete_sources: bool = True
+    auto_keep_days: int = 14
     # 2 = text sizes are letter heights (1 = raw .ass sizes, which looked different in every font)
     text_units: int = 2
 
@@ -134,6 +171,10 @@ class Settings:
     @property
     def output_path(self) -> Path:
         return Path(self.output_dir).expanduser()
+
+    @property
+    def auto_output_path(self) -> Path:
+        return Path(self.auto_output_dir).expanduser() if self.auto_output_dir else self.output_path / "Automation"
 
     @property
     def cache_path(self) -> Path:
@@ -361,7 +402,7 @@ class Field:
     name: str
     label: str
     group: str
-    kind: str  # bool | int | float | str | choice | path | file | font | color | secret | text
+    kind: str  # bool | int | float | str | choice | multi | path | file | font | color | secret | text
     choices: tuple = ()
     lo: float = 0
     hi: float = 100
@@ -375,6 +416,12 @@ ASPECTS = (("original", "Original"), ("vertical_blur", "9:16 vertical, blurred f
            ("vertical_crop", "9:16 vertical, cropped"), ("square", "1:1 square"))
 ENCODERS = (("auto", "Auto (fastest available)"), ("libx264", "CPU (x264)"), ("h264_amf", "AMD GPU (AMF)"),
             ("h264_nvenc", "NVIDIA GPU (NVENC)"), ("h264_qsv", "Intel GPU (Quick Sync)"))
+
+PICK_FROM = (
+    ("watchlist", "My channel list and Creative Commons only"),
+    ("cc", "Creative Commons only"),
+    ("any", "Anything that passes the rules"),
+)
 
 BANNER_MODES = (("bar", "Solid bar (video sits between)"), ("overlay", "Text over the video"))
 LAYOUT_FITS = (("auto", "Auto (from Format)"), ("crop", "Crop to fill"), ("blur", "Fit, blurred fill"),
@@ -414,6 +461,8 @@ SCHEMA: list[Field] = [
     Field("snap_to_pauses", "Snap edges to pauses", "Clip finding", "bool"),
     Field("pad_start", "Extra lead-in (s)", "Clip finding", "float", lo=0, hi=10, step=0.5),
     Field("pad_end", "Extra tail (s)", "Clip finding", "float", lo=0, hi=10, step=0.5),
+    Field("trim_silence", "Trim dead air", "Clip finding", "bool",
+          help="Clips start just before the first word and end soon after the last, instead of on silence"),
     Field("keywords", "Boost keywords", "Clip finding", "str",
           help="Comma separated words or phrases; moments mentioning them score higher"),
     Field("detect_scenes", "Detect scene cuts", "Clip finding", "bool",
@@ -438,6 +487,16 @@ SCHEMA: list[Field] = [
           choices=(("claude-opus-5-5", "Claude Opus 5.5 (best)"), ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
                    ("claude-haiku-5-5", "Claude Haiku 5.5 (cheapest)"))),
     Field("ai_instructions", "What makes a good clip?", "AI", "text"),
+    Field("ai_polish", "Polish clips with AI", "AI", "bool",
+          help="One extra Claude call per video, with a frame from each clip: writes a hook for the top banner, "
+               "fixes misheard words in the captions, spots subtitles already in the video and centres "
+               "vertical crops on the speaker"),
+    Field("ai_polish_model", "Model for polishing", "AI", "choice",
+          choices=(("claude-opus-5-5", "Claude Opus 5.5 (best)"), ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+                   ("claude-haiku-5-5", "Claude Haiku 5.5 (cheapest)"))),
+    Field("polish_burned_subs", "If the video already has subtitles", "AI", "choice",
+          choices=(("off", "Turn my captions off for it"), ("keep", "Keep my captions anyway")),
+          help="Two sets of words on screen at once is hard to read"),
 
     Field("aspect", "Format", "Export", "choice", choices=ASPECTS,
           help="With TikTok-ready output on, Original and 1:1 are fitted into a 9:16 frame with a blurred fill"),
@@ -455,6 +514,11 @@ SCHEMA: list[Field] = [
           help="Every clip comes out 9:16 at TikTok's size (1080×1920 at the 1080 setting, never above it, never "
                "under 540×960), keeps text out of TikTok's buttons and captions, caps frame rate at 60 and bitrate "
                "at 20 Mbps, uses 44.1 kHz audio, and warns about clips over 10 minutes or 287 MB"),
+    Field("qc_enabled", "Check clips after export", "Export", "bool",
+          help="Watches each clip once for silence, black or frozen picture and the wrong length or size, and "
+               "notes clips that start or end mid-sentence. Failed clips move to a _rejected folder"),
+    Field("qc_min_rating", "Reject AI ratings under", "Export", "int", lo=0, hi=10,
+          help="With AI polish on, Claude rates how well each clip stands alone, 1 to 10. 0 ignores the ratings"),
 
     Field("burn_captions", "Burn in animated captions", "Captions", "bool"),
     Field("caption_font", "Font", "Captions", "font"),
@@ -468,6 +532,8 @@ SCHEMA: list[Field] = [
     Field("caption_words", "Words on screen", "Captions", "int", lo=1, hi=10),
     Field("caption_uppercase", "UPPERCASE", "Captions", "bool"),
     Field("title_overlay", "Show clip title at top", "Captions", "bool"),
+    Field("caption_censor", "Bleep strong swearing", "Captions", "bool",
+          help="Writes f*ck, sh*t and the like in captions, which TikTok is less likely to hold back"),
 
     Field("banner_top", "Top banner", "Layout", "bool", help="A bar of text above the video"),
     Field("banner_top_text", "Top text", "Layout", "str",
@@ -490,6 +556,9 @@ SCHEMA: list[Field] = [
           help="Splits the frame: your clip on one half, a looping background video on the other"),
     Field("stack_video", "Second video", "Layout", "file",
           help="Gameplay, satisfying clips, b-roll... It loops if it's shorter than the clip"),
+    Field("stack_folder", "Or a folder of them", "Layout", "path",
+          help="Each clip gets a different video from this folder, never the same one twice in a row. "
+               "Used instead of the single second video when it's set"),
     Field("stack_position", "Second video goes", "Layout", "choice",
           choices=(("bottom", "Below the clip"), ("top", "Above the clip"))),
     Field("stack_split", "Clip share of the frame", "Layout", "float", lo=0, hi=1, step=0.05,
@@ -516,4 +585,67 @@ SCHEMA: list[Field] = [
     Field("research_interval", "Check every (minutes)", "Research", "int", lo=10, hi=720, step=5),
     Field("research_alert", "Highlight new videos scoring at least", "Research", "int", lo=0, hi=100,
           help="New arrivals above this score are counted on the Research tab"),
+
+    Field("pick_from", "Pick videos from", "Picking", "choice", choices=PICK_FROM,
+          help="Creators on your channel list, or Creative Commons videos, have said clips are fine. "
+               "'Anything' also picks trending videos nobody gave permission for, which risks copyright strikes"),
+    Field("pick_channels", "Channel list", "Picking", "text",
+          help="One channel per line: @handle, channel link or channel id. Add a note after #, e.g. "
+               "'@somepodcast  # clipping programme, credit in caption'. Each channel costs about 1 quota "
+               "unit an hour",
+          placeholder="@somepodcast  # clipping programme, credit in caption\nhttps://www.youtube.com/@streamer"),
+    Field("pick_searches", "Creative Commons searches", "Picking", "text",
+          help="One search per line, e.g. 'gaming highlights'. Each search costs 100 quota units and runs "
+               "at most every 6 hours",
+          placeholder="gaming highlights\nscience lecture"),
+    Field("pick_min_score", "Lowest clip-ability to pick", "Picking", "int", lo=0, hi=100),
+    Field("pick_min_minutes", "Shortest video (min)", "Picking", "float", lo=0, hi=120, step=1),
+    Field("pick_max_minutes", "Longest video (min, 0 = any)", "Picking", "float", lo=0, hi=1200, step=10,
+          help="Very long streams take a long time to download and analyse"),
+    Field("pick_max_age_days", "Oldest video (days, 0 = any)", "Picking", "float", lo=0, hi=60, step=1),
+    Field("pick_daily", "Videos picked per day", "Picking", "int", lo=0, hi=50,
+          help="Counted over the last 24 hours. Each video makes several clips"),
+    Field("pick_channel_weekly", "Most picks per channel per week (0 = any)", "Picking", "int", lo=0, hi=20,
+          help="Keeps your feed from being one channel's content"),
+    Field("pick_block_channels", "Never pick these channels", "Picking", "text",
+          help="One per line: channel name, @handle, link or id", placeholder="Some Channel\n@another"),
+    Field("pick_block_categories", "Never pick these categories", "Picking", "multi",
+          choices=tuple((cid, name) for cid, name in CATEGORIES.items() if cid)),
+    Field("pick_block_words", "Skip titles containing", "Picking", "str",
+          help="Comma separated words or phrases"),
+    Field("learn_from_results", "Learn from how my clips do", "Picking", "bool",
+          help="TikTok Manager shares the views your posted clips get. Channels whose clips beat your usual "
+               "views rank higher, ones that flop rank lower, and the AI polish sees which hooks worked"),
+
+    Field("auto_output_dir", "Clips go to", "Automation", "path",
+          help="Empty = an Automation folder inside your output folder"),
+    Field("auto_preset", "Style (preset)", "Automation", "choice",
+          choices=(("", "My current settings"),) + tuple((k, k) for k in PRESETS),
+          help="How clips are found and exported, unless a recipe below says otherwise"),
+    Field("auto_layout", "Top/bottom view", "Automation", "choice",
+          choices=(("", "As in my settings"),) + tuple((k, k) for k in LAYOUT_PRESETS)),
+    Field("auto_recipes", "Recipes", "Automation", "text",
+          help="Per category or channel: 'what = preset | view'. 'what' is a category name, a channel name or "
+               "@handle, or * for everything else. The first matching line wins",
+          placeholder="Gaming = Gaming / action | Gameplay below\n@somepodcast = Podcast moments | Title on top"),
+    Field("auto_captions", "Always burn in captions", "Automation", "bool"),
+    Field("auto_qc", "Check clips after export", "Automation", "bool",
+          help="Clips that fail (silent, black, frozen, wrong length, or rated low by the AI polish) go to a "
+               "_rejected folder instead of being ready to upload"),
+    Field("auto_polish", "Polish clips with AI", "Automation", "bool",
+          help="Hooks, caption fixes and speaker crops (see Settings → AI). Needs an Anthropic key and "
+               "counts toward the AI limit below"),
+    Field("auto_start_hour", "Work from (hour)", "Automation", "int", lo=0, hi=23,
+          help="Downloads and encodes only start between these hours. The same hour twice means any time"),
+    Field("auto_end_hour", "Work until (hour)", "Automation", "int", lo=0, hi=23),
+    Field("auto_gap_minutes", "Minutes between downloads", "Automation", "int", lo=0, hi=240, step=5,
+          help="Spacing downloads out makes YouTube less likely to ask the PC to sign in"),
+    Field("auto_ai_daily", "AI calls per day", "Automation", "int", lo=0, hi=500,
+          help="Finding clips with AI and polishing each count as one. Over the limit, videos use the smart "
+               "signals and skip polishing, so Claude costs stay predictable"),
+    Field("auto_retries", "Tries per video", "Automation", "int", lo=1, hi=10,
+          help="A failed video is tried again after 15 minutes, then 1 hour, then 4 hours"),
+    Field("auto_delete_sources", "Delete full downloads after clipping", "Automation", "bool"),
+    Field("auto_keep_days", "Clear cached analysis after (days)", "Automation", "int", lo=1, hi=365,
+          help="Transcripts and measurements of finished videos are removed from the download cache"),
 ]

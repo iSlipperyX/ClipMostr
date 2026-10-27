@@ -2,15 +2,10 @@ import pytest
 
 pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)  # no Qt or no display libraries
 
-from PySide6.QtWidgets import QApplication, QInputDialog  # noqa: E402
+from PySide6.QtWidgets import QInputDialog  # noqa: E402
 
 from ytclip.gui.layout_tab import LayoutTab  # noqa: E402
 from ytclip.settings import LAYOUT_PRESETS, Settings, load_user_layouts  # noqa: E402
-
-
-@pytest.fixture(scope="module")
-def app():
-    return QApplication.instance() or QApplication([])
 
 
 def _tab(**overrides):

@@ -13,15 +13,18 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QPushButton, QScrollArea, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
-from .. import clipability
+from .. import clipability, learn
 from ..clipability import FIT, PART_LABELS, WEIGHTS, age_text, compact, verdict
 from ..organize import stamp
+from ..policy import Decision, PickLog, Policy, decide, picks_path
 from ..research import ScanCancelled, ScanOptions, ScanResult, history_path, last_result, scan, youtube_key
 from ..settings import Settings
 from ..trending import CATEGORIES, KEY_HELP_URL, REGIONS, History, TrendingVideo, deep_check, parse_regions
 from . import theme
 
-COLUMNS = ("Score", "Video", "Channel", "Trending in", "Views", "Views / h", "Engagement", "Length", "Posted")
+COLUMNS = ("Score", "Video", "Channel", "Found in", "Views", "Views / h", "Engagement", "Length", "Posted", "Pick")
+PICK_COLUMN = COLUMNS.index("Pick")
+ORIGIN_LABELS = {"watchlist": "Your list", "cc": "CC search"}
 MIN_LENGTHS = ((0.0, "Any length"), (3.0, "3 min +"), (8.0, "8 min +"), (20.0, "20 min +"), (45.0, "45 min +"))
 SORT_ROLE = Qt.UserRole + 1
 
@@ -95,14 +98,17 @@ class Research(QWidget):
     notice = Signal(str)  # a line for the main status bar
     log = Signal(str)
     hits_changed = Signal(int)  # new high scorers the user hasn't looked at yet
+    open_settings = Signal(str)  # a Settings tab to show (the picking rules)
 
     def __init__(self, settings: Callable[[], Settings], change: Callable[[str, Any], None], parent=None):
         super().__init__(parent)
         self._settings = settings
         self._change = change
         self.history = History(history_path())
+        self.picks = PickLog(picks_path())
         self.result: ScanResult | None = None
         self.videos: list[TrendingVideo] = []
+        self.decisions: dict[str, Decision] = {}
         self.job: _Job | None = None
         self.side_job: _Job | None = None
         self.hits = 0
@@ -185,6 +191,13 @@ class Research(QWidget):
         self.hide_sent = QCheckBox("Hide sent")
         self.hide_sent.setToolTip("Hide videos you've already sent to the Studio")
         self.hide_sent.toggled.connect(self._apply_filter)
+        self.picks_only = QCheckBox("Picks only")
+        self.picks_only.setToolTip("Show only the videos your picking rules would clip")
+        self.picks_only.toggled.connect(self._apply_filter)
+        self.rules_btn = QPushButton("Picking rules…")
+        self.rules_btn.setToolTip("Which videos may be clipped without asking: your channel list, Creative Commons "
+                                  "searches, limits and blocks")
+        self.rules_btn.clicked.connect(lambda: self.open_settings.emit("Picking"))
         filters.addWidget(QLabel("Regions"))
         filters.addWidget(self.regions_btn)
         filters.addWidget(self.category)
@@ -195,6 +208,8 @@ class Research(QWidget):
         filters.addStretch(1)
         filters.addWidget(self.search, 1)
         filters.addWidget(self.hide_sent)
+        filters.addWidget(self.picks_only)
+        filters.addWidget(self.rules_btn)
         layout.addLayout(filters)
 
         layout.addWidget(self._build_key_panel())
@@ -239,9 +254,14 @@ class Research(QWidget):
         row = QHBoxLayout()
         self.send_btn = QPushButton("➜  Send selected to Studio")
         self.send_btn.clicked.connect(self._send_selected)
+        self.send_picks_btn = QPushButton()
+        self.send_picks_btn.setToolTip("Send every video your picking rules picked to the Studio. They count "
+                                       "towards your daily and per-channel limits")
+        self.send_picks_btn.clicked.connect(self._send_picks)
         self.count = QLabel()
         self.count.setProperty("muted", True)
         row.addWidget(self.count, 1)
+        row.addWidget(self.send_picks_btn)
         row.addWidget(self.send_btn)
         lv.addLayout(row)
 
@@ -253,7 +273,8 @@ class Research(QWidget):
         layout.addWidget(split, 1)
 
         hint = QLabel("Clip-ability blends momentum, most-replayed peaks, engagement and freshness, then scales it by "
-                      "how much material there is to cut (length and category). Double-click a video to send it "
+                      "how much material there is to cut (length and category). The Pick column shows what your "
+                      "picking rules would clip, and why the rest were skipped. Double-click a video to send it "
                       "to the Studio.")
         hint.setProperty("muted", True)
         hint.setWordWrap(True)
@@ -301,6 +322,10 @@ class Research(QWidget):
         self.d_meta.setWordWrap(True)
         self.d_meta.setTextFormat(Qt.RichText)
 
+        self.d_pick = QLabel()
+        self.d_pick.setWordWrap(True)
+        self.d_pick.setTextFormat(Qt.RichText)
+
         score_row = QHBoxLayout()
         self.d_score = QLabel()
         self.d_verdict = QLabel()
@@ -338,6 +363,7 @@ class Research(QWidget):
         v.addWidget(self.d_title)
         v.addWidget(self.d_meta)
         v.addLayout(score_row)
+        v.addWidget(self.d_pick)
         v.addLayout(buttons)
         v.addSpacing(4)
         v.addWidget(self.parts_box)
@@ -382,6 +408,7 @@ class Research(QWidget):
 
     def settings_changed(self) -> None:
         self.sync_from_settings()
+        self.refresh_picks()
         self._schedule()
 
     def _filter_changed(self, name: str, value: Any) -> None:
@@ -569,6 +596,9 @@ class Research(QWidget):
         self.videos = result.videos
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(self.videos))
+        s = self._settings()
+        self.decisions = {d.video.id: d for d in decide(self.videos, Policy.from_settings(s), self.picks,
+                                                        notes=result.notes, lessons=learn.for_settings(s))}
         for r, v in enumerate(self.videos):
             self._fill_row(r, v)
         self.table.setSortingEnabled(True)
@@ -607,8 +637,11 @@ class Research(QWidget):
         elif v.sent:
             title.setForeground(QColor(theme.MUTED))
         regions = sorted(v.regions.items(), key=lambda kv: kv[1])
-        where = item("  ".join(f"{code} #{rank}" for code, rank in regions[:3]) + (" …" if len(regions) > 3 else ""),
-                     v.best_rank, ", ".join(f"{REGIONS.get(c, c)}: #{n}" for c, n in regions))
+        found = [f"{code} #{rank}" for code, rank in regions[:3]] + (["…"] if len(regions) > 3 else [])
+        found += [ORIGIN_LABELS[o] for o in v.origins if o in ORIGIN_LABELS]
+        where = item("  ".join(found), v.best_rank or 999,
+                     ", ".join([f"{REGIONS.get(c, c)}: #{n}" for c, n in regions]
+                               + [ORIGIN_LABELS[o] for o in v.origins if o in ORIGIN_LABELS]))
         eng = (v.parts.get("engagement") or 0)
         rate = ((v.likes or 0) + (v.comments or 0)) / v.views * 100 if v.views and v.likes is not None else None
         cells = [
@@ -621,29 +654,66 @@ class Research(QWidget):
                  "Likes and comments per view" if rate is not None else "This channel hides its like count"),
             item(stamp(v.duration) if v.live == "none" else v.live.upper(), v.duration),
             item(age_text(v.age_hours()), -v.published),
+            self._pick_item(v),
         ]
         for c, cell in enumerate(cells):
             if c >= 4:
                 cell.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.table.setItem(r, c, cell)
 
+    def _pick_item(self, v: TrendingVideo) -> QTableWidgetItem:
+        d = self.decisions.get(v.id)
+        it = _SortItem("✓ Pick" if d and d.picked else "–" if d else "")
+        it.setData(SORT_ROLE, v.score + (1000 if d and d.picked else 0))  # picks sort above the rest
+        if d:
+            it.setToolTip(("Picked: " if d.picked else "Not picked: ") + d.reason + (f"\n{d.learned}" if d.learned else ""))
+            it.setForeground(QColor(theme.GOOD if d.picked else theme.MUTED))
+        it.setTextAlignment(Qt.AlignCenter)
+        return it
+
+    def refresh_picks(self) -> None:
+        """Run the picking rules over the current results (after a scan or a rules change)."""
+        s = self._settings()
+        self.picks.reload()  # the automation runner may have picked videos since
+        notes = self.result.notes if self.result else {}
+        self.decisions = {d.video.id: d for d in decide(self.videos, Policy.from_settings(s), self.picks,
+                                                        notes=notes, lessons=learn.for_settings(s))}
+        self.table.setSortingEnabled(False)
+        for r in range(self.table.rowCount()):
+            v = self._video_at(r)
+            if v:
+                self.table.setItem(r, PICK_COLUMN, self._pick_item(v))
+        self.table.setSortingEnabled(True)
+        if self._shown:
+            self._show_detail(self._shown)
+        self._apply_filter()
+
+    def picked_videos(self) -> list[TrendingVideo]:
+        return [v for v in self.videos if (d := self.decisions.get(v.id)) and d.picked]
+
     def _apply_filter(self) -> None:
         text = self.search.text().strip().lower()
         hide_sent = self.hide_sent.isChecked()
+        only_picks = self.picks_only.isChecked()
         shown = 0
         for r in range(self.table.rowCount()):
             v = self._video_at(r)
-            hidden = v is None or (hide_sent and v.sent) or bool(
+            d = self.decisions.get(v.id) if v else None
+            hidden = v is None or (hide_sent and v.sent) or (only_picks and not (d and d.picked)) or bool(
                 text and text not in v.title.lower() and text not in v.channel.lower())
             self.table.setRowHidden(r, hidden)
             shown += not hidden
         total = len(self.videos)
-        self.count.setText(f"{shown} of {total} videos" if shown != total else f"{total} videos")
+        n_picked = len(self.picked_videos())
+        self.count.setText((f"{shown} of {total} videos" if shown != total else f"{total} videos")
+                           + (f" · {n_picked} picked" if n_picked else ""))
         has_rows = total > 0
         self.table.setVisible(has_rows)
         self.empty.setVisible(not has_rows)
         self.count.setVisible(has_rows)
         self.send_btn.setVisible(has_rows)
+        self.send_picks_btn.setVisible(has_rows and n_picked > 0)
+        self.send_picks_btn.setText(f"➜  Send {n_picked} pick{'s' if n_picked != 1 else ''} to Studio")
         if not has_rows:
             self.empty.setText("Nothing yet. Press Check now to see what's trending."
                                if youtube_key(self._settings()) else
@@ -677,13 +747,17 @@ class Research(QWidget):
         if v is None:
             self.thumb.setPixmap(QPixmap())
             self.thumb.setText("Select a video")
-            for lab in (self.d_title, self.d_meta, self.d_score, self.d_verdict, self.d_reasons):
+            for lab in (self.d_title, self.d_meta, self.d_score, self.d_verdict, self.d_reasons, self.d_pick):
                 lab.setText("")
             return
 
         self.d_title.setText(v.title)
-        where = ", ".join(f"#{rank} in {REGIONS.get(code, code)}" for code, rank in
-                          sorted(v.regions.items(), key=lambda kv: kv[1]))
+        where = ", ".join([f"#{rank} in {REGIONS.get(code, code)}" for code, rank in
+                           sorted(v.regions.items(), key=lambda kv: kv[1])]
+                          + [{"watchlist": "on your channel list", "cc": "from a Creative Commons search"}[o]
+                             for o in v.origins if o in ORIGIN_LABELS])
+        if v.license == "creativeCommon":
+            where += " · Creative Commons licence"
         length = stamp(v.duration) if v.live == "none" else v.live
         self.d_meta.setText(f"{_esc(v.channel)} · {compact(v.views)} views · {length} · posted {age_text(v.age_hours())} ago"
                             f"<br>{where}")
@@ -692,6 +766,14 @@ class Research(QWidget):
         self.d_score.setStyleSheet(f"color:{colour}; font-size:28pt; font-weight:800; padding-right:6px;")
         self.d_verdict.setText(f"<b>{verdict(v.score)}</b><br><span style='color:{theme.MUTED}'>clip-ability "
                                f"out of 100</span>")
+        d = self.decisions.get(v.id)
+        learned = f"<br><span style='color:{theme.MUTED}'>📈 {_esc(d.learned)}</span>" if d and d.learned else ""
+        if d is None:
+            self.d_pick.setText("")
+        elif d.picked:
+            self.d_pick.setText(f"<span style='color:{theme.GOOD}'><b>✓ Picked.</b></span> {_esc(d.reason)}{learned}")
+        else:
+            self.d_pick.setText(f"<span style='color:{theme.MUTED}'><b>Not picked:</b> {_esc(d.reason)}</span>{learned}")
 
         keys = sorted(WEIGHTS, key=WEIGHTS.get, reverse=True) + list(FIT)
         for row, key in enumerate(keys):
@@ -759,6 +841,7 @@ class Research(QWidget):
             clipability.score(v, [x.velocity for x in self.videos])
             self.history.save()
             self._refresh_video(v)
+            self.refresh_picks()  # a new score can change what the rules pick
             if deep.error:
                 self.notice.emit(f"<span style='color:{theme.WARN}'>⚠ Couldn't read replays: {_esc(deep.error)}</span>")
 
@@ -793,16 +876,23 @@ class Research(QWidget):
         if not videos:
             return
         for v in videos:
+            d = self.decisions.get(v.id)
+            if d and d.picked:
+                self.picks.record(d, "studio")  # counts towards the daily and per-channel limits
             v.sent = True
             self.history.mark_sent(v.id)
         self.history.save()
+        self.picks.save()
         self.send.emit([v.url for v in videos])
         for v in videos:
             self._refresh_video(v)
-        self._apply_filter()
+        self.refresh_picks()
 
     def _send_selected(self) -> None:
         self._send(self._selected_videos())
+
+    def _send_picks(self) -> None:
+        self._send(self.picked_videos())
 
     def _menu(self, pos) -> None:
         item = self.table.itemAt(pos)

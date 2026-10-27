@@ -53,6 +53,9 @@ class Clip:
     edited: bool = False  # touched by the user, so re-detection keeps it
     top_text: str | None = None  # banner text for this clip; None = the template in settings, "" = no words
     bottom_text: str | None = None
+    hook: str = ""  # a short line written by the AI polish (polish.py) for the banner and the upload caption
+    rating: int = 0  # the AI polish's 1-10 "does it stand alone?" (0 = not rated); qc.py rejects low ones
+    rating_note: str = ""  # what holds it back, when rated low
 
     @property
     def length(self) -> float:
@@ -281,6 +284,25 @@ def breathing_room(start: float, end: float, sents: list[Cue], lead: float, tail
     prev_end = max((s.end for s in sents if s.end <= start + 0.01), default=start - lead)
     next_start = min((s.start for s in sents if s.start >= end - 0.01), default=end + tail)
     return max(start - lead, min(start, prev_end + 0.05)), min(end + tail, max(end, next_start - 0.05))
+
+
+def trim_dead_air(clip: Clip, words: list, lead: float = 0.25, tail: float = 0.5, slack: float = 0.6,
+                  min_len: float = 0.0) -> bool:
+    """Pull a clip's edges in to its speech, so it doesn't open on a second of silence or trail off
+    after the last word. `words` have .start/.end. Gaps up to `slack` are left alone; a trim that
+    would leave the clip shorter than `min_len` is skipped. True if the clip changed."""
+    inside = [w for w in words if w.end > clip.start and w.start < clip.end]
+    if not inside:
+        return False
+    start, end = clip.start, clip.end
+    if inside[0].start - start > lead + slack:
+        start = inside[0].start - lead
+    if end - inside[-1].end > tail + slack:
+        end = inside[-1].end + tail
+    if (start, end) == (clip.start, clip.end) or end - start < min_len:
+        return False
+    clip.start, clip.end = round(start, 2), round(end, 2)
+    return True
 
 
 def clip_score(score: np.ndarray, start: float, end: float) -> float:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 from rich.console import Console
@@ -11,11 +12,13 @@ from rich.markup import escape
 from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
-from . import __version__
+from . import __version__, learn
 from .download import expand_sources
 from .engine import Engine, Project
 from .organize import stamp
 from .settings import ASPECTS, LAYOUT_PRESETS, PRESETS, Settings, all_layouts, all_presets, find_layout
+from .qc import REJECTED as QC_REJECTED
+from .stackpool import pool_files
 
 # Redirected output on Windows defaults to cp1252, which can't encode ✓, → or most
 # video titles; switch to UTF-8 so printing never crashes the run.
@@ -34,7 +37,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="ytclip",
         description="Download YouTube videos (or open local files) and cut them into their best clips.",
         epilog='Example: ytclip "https://youtu.be/VIDEO" --preset "Shorts / TikTok / Reels"\n'
-           "Trending research: ytclip research --help",
+           "Trending research: ytclip research --help\nAutomation: ytclip auto --help\n"
+           "Quality check: ytclip qc --help\nWhat's working: ytclip results --help",
     formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("sources", nargs="*", help="video/playlist/channel URLs, video files or folders")
@@ -58,7 +62,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-tiktok", action="store_true",
                    help="turn off TikTok-ready output (needed to keep the original frame or 1:1)")
     p.add_argument("--stack", metavar="VIDEO", type=Path,
-                   help="stack a second video (gameplay, satisfying clips...) under each clip, 9:16")
+                   help="stack a second video (gameplay, satisfying clips...) under each clip, 9:16; give a "
+                        "folder to use a different video from it for each clip")
+    p.add_argument("--polish", action="store_true",
+                   help="AI polish: hooks for the top banner, caption fixes, speaker crops (needs an Anthropic key)")
+    p.add_argument("--bleep", action="store_true", help="mask strong swearing in captions (f*ck, sh*t)")
+    p.add_argument("--qc", action="store_true", help="check each clip after export; failures move to _rejected")
     p.add_argument("--keywords", help="comma-separated words/phrases to boost")
     p.add_argument("-q", "--quality", type=int, help="max download height, e.g. 720")
     p.add_argument("--encoder", choices=["auto", "libx264", "h264_amf", "h264_nvenc", "h264_qsv"])
@@ -147,15 +156,23 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
         "fast_copy": True if args.fast else None,
         "keep_source": False if args.delete_source else None,
         "tiktok_ready": False if args.no_tiktok else None,
+        "ai_polish": True if args.polish else None,
+        "caption_censor": True if args.bleep else None,
+        "qc_enabled": True if args.qc else None,
     }
     if args.top_text is not None:
         overrides |= {"banner_top": True, "banner_top_text": args.top_text}
     if args.bottom_text is not None:
         overrides |= {"banner_bottom": True, "banner_bottom_text": args.bottom_text}
     if args.stack:
-        if not args.stack.is_file():
-            raise SystemExit(f"--stack: no such video: {args.stack}")
-        overrides |= {"stack_enabled": True, "stack_video": str(args.stack.resolve())}
+        if args.stack.is_dir():
+            if not pool_files(args.stack):
+                raise SystemExit(f"--stack: no videos in {args.stack}")
+            overrides |= {"stack_enabled": True, "stack_folder": str(args.stack.resolve())}
+        elif not args.stack.is_file():
+            raise SystemExit(f"--stack: no such video or folder: {args.stack}")
+        else:
+            overrides |= {"stack_enabled": True, "stack_video": str(args.stack.resolve()), "stack_folder": ""}
     return s.apply({k: v for k, v in overrides.items() if v is not None})
 
 
@@ -170,16 +187,22 @@ def process(source: str, engine: Engine, dry_run: bool) -> None:
         console.print(f"[bold]{escape(v.title)}[/]  [dim]{escape(v.channel)} · {stamp(v.duration)}[/]")
         engine.measure(p)
         engine.find(p)
+        if engine.s.ai_polish:
+            engine.polish(p)
 
     if p.ai_error:
         console.print(f"[yellow]⚠ AI clip finder failed: {escape(p.ai_error)} Used smart signals instead.[/]")
+    if p.polish_error:
+        console.print(f"[yellow]⚠ AI polish skipped: {escape(p.polish_error)}[/]")
     console.print(f"[dim]Picked using: {', '.join(engine.signal_names(p)) or p.mode_used}"
                   f"{' · transcript: ' + p.transcript_source if p.transcript_source else ''}[/]")
     table = Table(show_edge=False, header_style="bold")
-    for col in ("#", "Time", "Len", "Score", "Title"):
+    hooks = any(c.hook for c in p.clips)
+    for col in ("#", "Time", "Len", "Score", "Title") + (("Hook",) if hooks else ()):
         table.add_column(col)
     for i, c in enumerate(p.clips, 1):
-        table.add_row(str(i), f"{stamp(c.start)}–{stamp(c.end)}", f"{c.length:.0f}s", f"{c.score:.0f}", escape(c.title))
+        table.add_row(str(i), f"{stamp(c.start)}–{stamp(c.end)}", f"{c.length:.0f}s", f"{c.score:.0f}", escape(c.title),
+                      *((escape(c.hook),) if hooks else ()))
     console.print(table)
     if dry_run:
         return
@@ -189,7 +212,12 @@ def process(source: str, engine: Engine, dry_run: bool) -> None:
         task = bar.add_task("Exporting", total=1)
         engine._progress = lambda msg, f: bar.update(task, description=msg, completed=f or 0)
         folder = engine.export(p)
-    console.print(f"[green]✓ {len(p.clips)} clips →[/] {escape(str(folder))}")
+    if p.qc:
+        console.print(f"[green]✓ {p.qc['passed']} clips ready[/]"
+                      + (f", [red]{p.qc['rejected']} rejected[/] (in {QC_REJECTED})" if p.qc["rejected"] else "")
+                      + f" → {escape(str(folder))}")
+    else:
+        console.print(f"[green]✓ {len(p.clips)} clips →[/] {escape(str(folder))}")
 
 
 def build_research_parser() -> argparse.ArgumentParser:
@@ -207,7 +235,12 @@ def build_research_parser() -> argparse.ArgumentParser:
     p.add_argument("--deep", type=int, help="how many top candidates get a most-replayed check (0 = none)")
     p.add_argument("--watch", type=float, metavar="MINUTES",
                    help="keep checking every MINUTES and print new arrivals (Ctrl+C to stop)")
-    p.add_argument("--clip", type=int, metavar="N", help="send the top N straight to the clipper with your settings")
+    p.add_argument("--picks", action="store_true",
+                   help="apply your picking rules (Settings → Picking): show what they pick and why the rest "
+                        "were skipped")
+    p.add_argument("--clip", type=int, metavar="N",
+                   help="cut up to N videos straight away with your settings: the top N, or with --picks the "
+                        "picked ones. With --watch, every check clips what's new")
     p.add_argument("--json", action="store_true", help="print results as JSON")
     p.add_argument("--api-key", help="YouTube Data API key (otherwise from settings or YOUTUBE_API_KEY)")
     p.add_argument("--list-categories", action="store_true", help="show category names and ids and exit")
@@ -228,19 +261,29 @@ def _category_id(text: str) -> str:
     return match
 
 
-def _research_table(videos: list, title: str) -> Table:
+ORIGIN_LABELS = {"watchlist": "your list", "cc": "CC search"}
+
+
+def _research_table(videos: list, title: str, decisions: dict | None = None) -> Table:
     from .clipability import age_text, compact
 
     table = Table(title=title, show_edge=False, header_style="bold", title_justify="left")
-    for col in ("Score", "Video", "Trending in", "Views/h", "Length", "Posted", "Why"):
-        table.add_column(col, overflow="fold" if col in ("Video", "Why") else "ellipsis")
+    cols = ["Score", "Video", "Found in", "Views/h", "Length", "Posted", "Why"] + (["Pick"] if decisions else [])
+    for col in cols:
+        table.add_column(col, overflow="fold" if col in ("Video", "Why", "Pick") else "ellipsis")
     for v in videos:
         colour = "green" if v.score >= 75 else "cyan" if v.score >= 55 else "yellow" if v.score >= 40 else "dim"
-        where = " ".join(f"{c}#{n}" for c, n in sorted(v.regions.items(), key=lambda kv: kv[1])[:3])
-        table.add_row(f"[bold {colour}]{v.score:.0f}[/]", f"{escape(v.title)}\n[dim]{escape(v.channel)} · {v.url}[/]",
-                      where, ("↑" if v.recent else "") + compact(v.velocity),
-                      stamp(v.duration) if v.live == "none" else v.live, age_text(v.age_hours()),
-                      escape(v.reasons[0]) if v.reasons else "")
+        where = [f"{c}#{n}" for c, n in sorted(v.regions.items(), key=lambda kv: kv[1])[:3]]
+        where += [ORIGIN_LABELS[o] for o in v.origins if o in ORIGIN_LABELS]
+        row = [f"[bold {colour}]{v.score:.0f}[/]", f"{escape(v.title)}\n[dim]{escape(v.channel)} · {v.url}[/]",
+               " ".join(where), ("↑" if v.recent else "") + compact(v.velocity),
+               stamp(v.duration) if v.live == "none" else v.live, age_text(v.age_hours()),
+               escape(v.reasons[0]) if v.reasons else ""]
+        if decisions:
+            d = decisions.get(v.id)
+            row.append(("[green]✓ " if d.picked else "[dim]– ") + escape(d.reason)
+                       + (f"\n📈 {escape(d.learned)}" if d.learned else "") + "[/]" if d else "")
+        table.add_row(*row)
     return table
 
 
@@ -248,6 +291,7 @@ def run_research(argv: list[str]) -> int:
     import json
     import time
 
+    from .policy import Policy, PickLog, decide, picks_path
     from .research import ScanOptions, history_path, scan
     from .trending import CATEGORIES, History, ResearchError, parse_regions
 
@@ -280,7 +324,10 @@ def run_research(argv: list[str]) -> int:
         return 2
 
     history = History(history_path())
+    picks = PickLog(picks_path()) if args.picks else None
+    policy = Policy.from_settings(s)
     log = lambda m: console.print(f"[dim]{escape(m)}[/]")  # noqa: E731
+    engine: Engine | None = None
     first = True
     while True:
         try:
@@ -299,31 +346,55 @@ def run_research(argv: list[str]) -> int:
         else:
             for problem in result.problems:
                 log(problem)
+            decisions = {d.video.id: d for d in decide(result.videos, policy, picks, notes=result.notes,
+                                                       lessons=learn.for_settings(s))} if picks else None
             top = result.videos[:max(1, args.top)]
+            if decisions:
+                # Picks first, so they're on screen even when they aren't the highest scorers.
+                chosen = [v for v in result.videos if decisions[v.id].picked]
+                top = chosen + [v for v in top if v not in chosen][:max(0, args.top - len(chosen))]
+            stamp_now = time.strftime("%H:%M")
             if args.json:
                 keep = ("id", "url", "title", "channel", "score", "parts", "reasons", "moments", "regions",
-                        "views", "velocity", "recent", "duration", "published", "category", "new")
-                print(json.dumps([{k: (v.url if k == "url" else getattr(v, k)) for k in keep} for v in top], indent=1))
+                        "views", "velocity", "recent", "duration", "published", "category", "new", "origins",
+                        "license")
+                rows = []
+                for v in top:
+                    row = {k: (v.url if k == "url" else getattr(v, k)) for k in keep}
+                    if decisions:
+                        d = decisions[v.id]
+                        row["pick"] = {"picked": d.picked, "reason": d.reason, "rule": d.rule,
+                                       **({"learned": d.learned, "bonus": d.bonus} if d.learned else {})}
+                    rows.append(row)
+                print(json.dumps(rows, indent=1))
             elif first:
+                n_picked = sum(d.picked for d in decisions.values()) if decisions else 0
                 console.print(_research_table(top, f"Clip-ability · {', '.join(result.regions)}"
-                                                   f"{' · ' + CATEGORIES[opts.category] if opts.category else ''}"))
+                                                   f"{' · ' + CATEGORIES[opts.category] if opts.category else ''}"
+                                                   + (f" · {n_picked} picked" if decisions else ""), decisions))
             else:
                 fresh = [v for v in result.new if v.score >= s.research_alert]
-                stamp_now = time.strftime("%H:%M")
+                if decisions:
+                    fresh = [v for v in result.videos if decisions[v.id].picked]
                 if fresh:
-                    console.print(_research_table(fresh, f"{stamp_now} · {len(fresh)} new worth clipping"))
+                    console.print(_research_table(fresh, f"{stamp_now} · {len(fresh)} new worth clipping", decisions))
                 else:
-                    console.print(f"[dim]{stamp_now} · checked {len(result.videos)} videos, nothing new above "
-                                  f"{s.research_alert}[/]")
-            if args.clip and first:
-                engine = Engine(s, log=log)
-                for v in top[:args.clip]:
+                    console.print(f"[dim]{stamp_now} · checked {len(result.videos)} videos, nothing new "
+                                  + ("picked" if decisions else f"above {s.research_alert}") + "[/]")
+            if args.clip:
+                todo = _to_clip(result, decisions, first, s.research_alert, args.clip)
+                engine = engine or Engine(s, log=log)
+                for v in todo:
                     console.rule(f"[bold]{escape(v.title)}")
                     try:
                         process(v.url, engine, dry_run=False)
-                        history.mark_sent(v.id)
                     except Exception as exc:
                         console.print(f"[red]✗ {escape(str(exc))}[/]")
+                        continue
+                    history.mark_sent(v.id)
+                    if picks is not None and decisions:
+                        picks.record(decisions[v.id], "cli")
+                        picks.save()
                 history.save()
         if not args.watch:
             return 0
@@ -334,10 +405,194 @@ def run_research(argv: list[str]) -> int:
             return 0
 
 
+def _to_clip(result, decisions: dict | None, first: bool, alert: float, limit: int) -> list:
+    """What --clip cuts this round: the picks, or else the best unsent videos (later rounds: only
+    new arrivals above the alert score)."""
+    if decisions:
+        return [v for v in result.videos if decisions[v.id].picked][:limit]
+    pool = result.videos if first else [v for v in result.new if v.score >= alert]
+    return [v for v in pool if not v.sent][:limit]
+
+
+def build_auto_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="ytclip auto",
+        description="Run automation: check Research, queue what your picking rules pick, and clip it, "
+                    "without anyone clicking. Runs until stopped (Ctrl+C).",
+        epilog="Settings → Automation and Settings → Picking control what it does. The app's Automation tab "
+               "shows the same queue.",
+    )
+    p.add_argument("--once", action="store_true", help="do what's due now, then exit (for scheduled runs)")
+    p.add_argument("--status", action="store_true", help="show the queue and what automation is doing")
+    p.add_argument("--add", nargs="+", metavar="URL", help="queue videos yourself")
+    p.add_argument("--retry", nargs="+", metavar="ID", help="try failed videos again (ids from --status)")
+    p.add_argument("--remove", nargs="+", metavar="ID", help="take videos out of the queue")
+    p.add_argument("--pause", action="store_true", help="pause a running automation")
+    p.add_argument("--resume", action="store_true", help="carry on after --pause")
+    p.add_argument("--stop", action="store_true", help="ask a running automation to stop")
+    p.add_argument("--install", action="store_true", help="start automation whenever you sign in to Windows")
+    p.add_argument("--uninstall", action="store_true", help="stop starting automation with Windows")
+    return p
+
+
+AUTO_COLOURS = {"working": "cyan", "queued": "white", "done": "green", "failed": "red"}
+
+
+def _auto_status(db) -> None:
+    from .clipability import age_text
+    from .pipeline import runner_alive
+
+    alive = runner_alive(db)
+    state = db.meta("state") or "Stopped"
+    paused = db.meta("paused") == "1"
+    console.print("[bold]Automation:[/] " + ("[green]running[/]" if alive else "[dim]not running[/]")
+                  + (" · [yellow]paused[/]" if paused else "") + (f" · {escape(state)}" if alive else ""))
+    counts = db.counts()
+    console.print(f"[dim]{counts['queued']} waiting · {counts['working']} working · {counts['done']} done · "
+                  f"{counts['failed']} failed[/]")
+    jobs = db.jobs(limit=40)
+    if not jobs:
+        console.print("Nothing queued yet.")
+        return
+    table = Table(show_edge=False, header_style="bold")
+    for col in ("Id", "Video", "Status", "Clips", "Updated", "Why it was picked"):
+        table.add_column(col, overflow="fold" if col in ("Video", "Status", "Why it was picked") else "ellipsis")
+    now = time.time()
+    for j in jobs:
+        status = f"[{AUTO_COLOURS.get(j.status, 'white')}]{j.status}[/]"
+        if j.stage and j.stage not in ("Done", "Waiting"):
+            status += f": {escape(j.stage)}"
+        if j.error and j.status != "done":
+            status += f"\n[dim]{escape(j.error[:200])}[/]"
+        table.add_row(j.id, f"{escape(j.title or j.url)}\n[dim]{escape(j.channel)}[/]", status,
+                      f"{j.clips} (+{j.rejected} rejected)" if j.rejected else str(j.clips or ""),
+                      age_text((now - j.updated) / 3600) + " ago", escape(j.permission))
+    console.print(table)
+
+
+def run_auto(argv: list[str]) -> int:
+    from . import pipeline
+    from .jobs import JobDB
+
+    args = build_auto_parser().parse_args(argv)
+    if args.install or args.uninstall:
+        err = pipeline.set_start_with_windows(bool(args.install))
+        if err:
+            console.print(f"[red]{escape(err)}[/]")
+            return 1
+        console.print("Automation starts whenever you sign in to Windows." if args.install
+                      else "Automation no longer starts with Windows.")
+        return 0
+    db = JobDB()
+    if args.pause or args.resume:
+        db.set_meta("paused", "1" if args.pause else "0")
+        console.print("Paused." if args.pause else "Resumed.")
+        return 0
+    if args.stop:
+        db.set_meta("stop", "1")
+        console.print("Asked automation to stop. A video in progress goes back in the queue.")
+        return 0
+    if args.retry or args.remove:
+        for job_id in args.retry or args.remove:
+            if not db.get(job_id):
+                console.print(f"[red]No video {escape(job_id)} in the queue.[/]")
+                return 1
+            db.retry(job_id) if args.retry else db.remove(job_id)
+        console.print("Done.")
+        return 0
+    if args.add:
+        runner = pipeline.Runner(db)
+        for url in args.add:
+            try:
+                added = runner.add_manual(url)
+            except ValueError as exc:
+                console.print(f"[red]{escape(url)}: {escape(str(exc))}[/]")
+                return 2
+            console.print(f"Queued {escape(url)}" if added else f"[yellow]Already queued before: {escape(url)}[/]")
+        return 0
+    if args.status:
+        _auto_status(db)
+        return 0
+    log = pipeline.file_logger(lambda line: console.print(escape(line), highlight=False))
+    return pipeline.Runner(db, log=log).run(once=args.once)
+
+
+def run_qc(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="ytclip qc", description="Check exported clips again: silence, black or frozen "
+                                "picture, wrong length or size, and low AI ratings. Failed clips move to _rejected.")
+    p.add_argument("folders", nargs="+", type=Path, help="video folders (with a clips.json) or a folder of them")
+    p.add_argument("--min-rating", type=int, help="reject AI ratings under this (0 ignores them)")
+    p.add_argument("--size", metavar="WxH", help="the frame size every clip should have, e.g. 1080x1920")
+    args = p.parse_args(argv)
+    from . import qc
+
+    s = Settings.load()
+    size = None
+    if args.size:
+        try:
+            w, h = (int(x) for x in args.size.lower().split("x"))
+            size = (w, h)
+        except ValueError:
+            raise SystemExit("--size must look like 1080x1920")
+    indexes = [f for root in args.folders for f in ([root / "clips.json"] if (root / "clips.json").is_file()
+                                                       else sorted(root.rglob("clips.json")))]
+    if not indexes:
+        console.print("[red]No clips.json found in those folders.[/]")
+        return 2
+    total = {"passed": 0, "rejected": 0, "warned": 0}
+    for index in indexes:
+        console.print(f"[bold]{escape(str(index.parent))}[/]")
+        result = qc.check_folder(index.parent, lambda m: console.print(f"  {escape(m)}"),
+                                 s.qc_min_rating if args.min_rating is None else args.min_rating, size)
+        total = {k: total[k] + result[k] for k in total}
+    console.print(f"[green]{total['passed']} ready[/] · [red]{total['rejected']} rejected[/]"
+                  + (f" · [yellow]{total['warned']} with warnings[/]" if total["warned"] else ""))
+    return 0
+
+
+def run_results(argv: list[str]) -> int:
+    p = argparse.ArgumentParser(prog="ytclip results", description="What's working: how your posted clips did, "
+                                "from the results TikTok Manager shares after each stats refresh.")
+    p.add_argument("--json", action="store_true", help="print the lessons as JSON")
+    args = p.parse_args(argv)
+    import json
+
+    lessons = learn.Lessons.load()
+    if args.json:
+        print(json.dumps({"posts": len(lessons.outcomes), "written_at": lessons.written_at,
+                          "channels": [vars(c) for c in sorted(lessons.channels.values(), key=lambda c: -c.bonus)],
+                          "notes": lessons.summary_lines(top=0)[1:], "polish_guide": lessons.prompt_text()}, indent=1))
+        return 0
+    if lessons.empty:
+        console.print("No results yet. In TikTok Manager, post some clips, refresh stats and give it 48 hours: "
+                      f"it shares how they did in {escape(str(learn.results_path()))}.")
+        return 0
+    for line in lessons.summary_lines(top=0):
+        console.print(escape(line))
+    table = Table(show_edge=False, header_style="bold")
+    for col in ("Channel", "Posts", "Usual views ×", "Pick bonus"):
+        table.add_column(col, justify="left" if col == "Channel" else "right")
+    for c in sorted(lessons.channels.values(), key=lambda c: -c.bonus):
+        colour = "green" if c.bonus >= 1 else "red" if c.bonus <= -1 else "dim"
+        table.add_row(escape(c.name), str(c.posts), f"{c.lift:.2f}", f"[{colour}]{c.bonus:+.0f}[/]")
+    console.print(table)
+    good, bad = lessons.hook_examples()
+    for title, rows in (("Hooks that worked", good), ("Hooks that flopped", bad)):
+        if rows:
+            console.print(f"[bold]{title}[/]: " + "; ".join(f"{escape(h)} ({lift:.1f}×)" for h, lift in rows))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["results"]:
+        return run_results(argv[1:])
     if argv[:1] == ["research"]:
         return run_research(argv[1:])
+    if argv[:1] == ["auto"]:
+        return run_auto(argv[1:])
+    if argv[:1] == ["qc"]:
+        return run_qc(argv[1:])
     args = build_parser().parse_args(argv)
     from . import updater
 

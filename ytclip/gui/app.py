@@ -55,6 +55,10 @@ def _dark_title_bar(hwnd: int) -> None:
 
 def main() -> int:
     _prepare_process()
+    if "--automation" in sys.argv[1:]:  # Start with Windows: the runner alone, no window
+        from ..pipeline import run_headless
+
+        return run_headless()
 
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication

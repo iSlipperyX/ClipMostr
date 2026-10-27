@@ -25,10 +25,13 @@ from ..export import frame as export_frame
 from ..ffmpeg import MediaInfo, probe
 from ..organize import stamp
 from ..settings import APP_NAME, SCHEMA, Settings, all_presets, app_dir, save_user_preset
+from ..polish import reapply_fixes
+from ..stackpool import preview_video
 from . import forms, theme
 from .layout_tab import LayoutTab
 from .library import Library, reveal
 from .player import Preview
+from .automation import Automation
 from .research import Research
 from .settings_dialog import SettingsDialog
 from .tasks import Task, TaskQueue
@@ -184,7 +187,12 @@ class MainWindow(QMainWindow):
         self.research.notice.connect(self._notice)
         self.research.log.connect(self._log)
         self.research.hits_changed.connect(self._research_hits)
+        self.research.open_settings.connect(self._open_settings)
         self.research_tab = self.tabs.addTab(self.research, RESEARCH_TAB)
+        self.automation = Automation(lambda: self.settings)
+        self.automation.notice.connect(self._notice)
+        self.automation.open_settings.connect(self._open_settings)
+        self.tabs.addTab(self.automation, "🤖  Automation")
         outer.addWidget(self.tabs, 1)
         outer.addWidget(self._build_footer())
         self.setCentralWidget(root)
@@ -220,7 +228,7 @@ class MainWindow(QMainWindow):
         self.preset.activated.connect(self._preset_chosen)
 
         settings_btn = QPushButton("⚙  Settings")
-        settings_btn.clicked.connect(self._open_settings)
+        settings_btn.clicked.connect(lambda: self._open_settings())
         help_btn = QPushButton("?")
         help_btn.setObjectName("icon")
         help_btn.clicked.connect(self._show_help)
@@ -612,7 +620,7 @@ class MainWindow(QMainWindow):
         sc("Ctrl+E", self.export_current)
         sc("Ctrl+O", self._open_files)
         sc("Ctrl+V", self._paste)
-        sc("Ctrl+,", self._open_settings)
+        sc("Ctrl+,", lambda: self._open_settings())
 
     # ================================================================== sources & queue
     def _add_from_input(self) -> None:
@@ -682,8 +690,14 @@ class MainWindow(QMainWindow):
                 p.clips = [Clip(**c) for c in saved["clips"]]
                 p.mode_used = saved.get("mode", "auto")
                 eng.rescore(p)
+                if saved.get("polish"):
+                    p.meta["polish"] = saved["polish"]
+                    p.polished, p.captions_off = True, bool(saved["polish"].get("captions_off"))
+                    reapply_fixes(saved["polish"], p.words)
             else:
                 eng.find(p)
+                if settings.ai_polish:
+                    eng.polish(p)
             p.status = "ready"
             if settings.auto_export:
                 p.status = "exporting"
@@ -705,6 +719,10 @@ class MainWindow(QMainWindow):
                   f"{' and exported' if p.status == 'done' else ''}")
         if p.ai_error:
             self._warn(f"AI clip finder failed for “{p.name[:40]}”: {p.ai_error} Smart signals were used instead.")
+        if p.polish_error:
+            self._log(f"AI polish skipped for {p.name}: {p.polish_error}")
+        if p.captions_off:
+            self._notice(f"“{p.name[:40]}” already has subtitles in the picture, so your captions are off for it")
         if self.current is p or self.current is None:
             self._select_project(p)
         if p.status == "done":
@@ -1038,13 +1056,16 @@ class MainWindow(QMainWindow):
             return  # still building the window
         s = self.settings
         p = self._ready()
+        if p and p.captions_off:
+            s = s.copy(burn_captions=False)  # matches the export: the video has subtitles of its own
         clip = p.clips[self.sel] if p and 0 <= self.sel < len(p.clips) else None
         media = p.media if p and p.media else MediaInfo(width=1920, height=1080)
-        second = self._second_media(s.stack_video) if s.stack_enabled else None
+        stack_video = preview_video(s)
+        second = self._second_media(stack_video) if s.stack_enabled else None
         size = (second.width, second.height) if second and second.width else None
         comp = compose.compose(s, media, clip, p.words if p else None, second=size)
         self.preview.set_composition(comp, clip.start if clip else 0.0, clip.end if clip else 0.0)
-        self.preview.set_second(str(Path(s.stack_video).expanduser()) if size else "", clip.start if clip else 0.0,
+        self.preview.set_second(str(Path(stack_video).expanduser()) if size else "", clip.start if clip else 0.0,
                                 clip.length if clip else 0.0, s.stack_start, s.stack_offset, s.stack_volume)
         self.safe_btn.setEnabled(comp.safe is not None)
 
@@ -1360,7 +1381,7 @@ class MainWindow(QMainWindow):
 
     def _apply_layout_preset(self, name: str, values: dict) -> None:
         """Swap in a top/bottom view. A stacked view needs a second video, so ask for one if there isn't one yet."""
-        stack_video = values.get("stack_video", self.settings.stack_video)
+        stack_video = preview_video(self.settings.apply(values))
         if values.get("stack_enabled") and not (stack_video and Path(stack_video).is_file()):
             exts = " ".join(f"*{e}" for e in sorted(VIDEO_EXTS))
             path, _ = QFileDialog.getOpenFileName(self, "Choose the video to stack (gameplay, satisfying clips…)",
@@ -1371,8 +1392,8 @@ class MainWindow(QMainWindow):
         self._log(f"Applied layout '{name}'")
         self._notice(f"Layout applied: {name}")
 
-    def _open_settings(self) -> None:
-        dlg = SettingsDialog(self.settings, self)
+    def _open_settings(self, tab: str = "") -> None:
+        dlg = SettingsDialog(self.settings, self, tab)
         if dlg.exec():
             self._apply_settings(dlg.result_settings)
 
@@ -1506,8 +1527,10 @@ class MainWindow(QMainWindow):
                 continue
             saved = getattr(p, "_saved", None)
             clips = [asdict(c) for c in p.clips] if p.clips else (saved or {}).get("clips", [])
+            polish = p.meta.get("polish") or (saved or {}).get("polish")
             data.append({"source": p.source, "clips": clips, "mode": p.mode_used or (saved or {}).get("mode", ""),
-                         "title": p.video.title if p.video else (saved or {}).get("title", "")})
+                         "title": p.video.title if p.video else (saved or {}).get("title", ""),
+                         **({"polish": polish} if polish else {})})
         try:
             self._session_path().write_text(json.dumps(data, indent=1), encoding="utf-8")
         except OSError:
@@ -1535,6 +1558,7 @@ class MainWindow(QMainWindow):
         self._closing = True
         self.banner.shutdown()
         self.research.shutdown()
+        self.automation.shutdown()
         self._save_session()
         self.settings.save()
         self.qs.setValue("geometry", self.saveGeometry())

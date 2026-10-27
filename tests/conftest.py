@@ -21,8 +21,8 @@ NOW = 1_800_000_000.0  # a fixed "now" so ages and velocities are exact
 
 
 def api_item(vid="abc", title="A video", views=100_000, likes=5_000, comments=400, minutes=20.0,
-             hours_old=10.0, category="20", live="none", caption=False, channel="Chan"):
-    """One item as videos.list(chart=mostPopular) returns it."""
+             hours_old=10.0, category="20", live="none", caption=False, channel="Chan", license="youtube"):
+    """One item as videos.list returns it (chart=mostPopular, or by id)."""
     from datetime import datetime, timezone
 
     published = datetime.fromtimestamp(NOW - hours_old * 3600, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -40,6 +40,7 @@ def api_item(vid="abc", title="A video", views=100_000, likes=5_000, comments=40
         "statistics": stats,
         "contentDetails": {"duration": f"PT{total // 3600}H{total % 3600 // 60}M{total % 60}S",
                            "caption": "true" if caption else "false"},
+        "status": {"license": license},
     }
 
 
@@ -52,3 +53,21 @@ def spiky_heatmap(duration=1200, peaks=(300, 700, 1000), base=0.15, segments=100
         value = base + max((max(0.0, 1 - abs(mid - p) / 25) for p in peaks), default=0) * (1 - base)
         out.append({"start_time": i * seg, "end_time": (i + 1) * seg, "value": value})
     return out
+
+
+@pytest.fixture(scope="session")
+def app():
+    """One QApplication for the whole run. A module-scoped app was freed between test files while
+    widgets from the earlier file were still alive, which crashed Qt at exit."""
+    widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    qapp = widgets.QApplication.instance() or widgets.QApplication([])
+    yield qapp
+    for w in qapp.topLevelWidgets():
+        w.close()
+        w.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    import gc
+
+    gc.collect()

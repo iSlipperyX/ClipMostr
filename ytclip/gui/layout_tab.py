@@ -19,6 +19,7 @@ from ..export import frame as export_frame
 from ..ffmpeg import MediaInfo
 from ..settings import (APP_NAME, LAYOUT_PRESETS, SCHEMA, Settings, all_layouts, delete_user_layout,
                         load_user_layouts, save_user_layout)
+from ..stackpool import pool_files, preview_video
 from . import forms, overlay, theme
 from .compositor import paint_safe_zone
 
@@ -73,7 +74,11 @@ class LayoutSketch(QWidget):
             self._label(g, rect(p.main), "YOUR CLIP", QColor("#B9A8FF"))
             if p.second is not None:
                 g.fillRect(rect(p.second), QColor("#173A33"))
-                name = Path(s.stack_video).name if s.stack_video else "Choose a second video"
+                pool = pool_files(s.stack_folder) if s.stack_folder else []
+                if pool:
+                    name = f"{len(pool)} videos from {Path(s.stack_folder).name}, one per clip"
+                else:
+                    name = Path(s.stack_video).name if s.stack_video else "Choose a second video"
                 self._label(g, rect(p.second), name, QColor("#7FE0C4"))
             for box, text_box in ((p.top, p.top_text), (p.bottom, p.bottom_text)):
                 if box is None or text_box is None:
@@ -344,6 +349,7 @@ class LayoutTab(QWidget):
         self._gen += 1
         gen = self._gen
         clip, s = replace(self.clip), self.settings.copy()
+        s.stack_video = preview_video(s)
         src, media, words = self.src, self.media, list(self.words)
         dest = Path(tempfile.gettempdir()) / f"{APP_NAME}_layout_{gen}.jpg"
         self.status.setText("Rendering frame…")

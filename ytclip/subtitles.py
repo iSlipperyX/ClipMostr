@@ -28,6 +28,27 @@ class Word:
     text: str
 
 
+# Strong swearing only. Each is a stem: "fuck" also catches fucking, fucked, motherfucker...
+# Matches start at a word's start, so "Scunthorpe" or "classic" are left alone.
+_SWEARS = ("fuck", "shit", "bitch", "cunt", "nigga", "nigger", "faggot", "asshole", "pussy", "bastard", "whore",
+           "slut", "twat", "wanker", "bollocks")
+_SAFE = ("shitake", "pussycat", "pussyfoot")
+_SWEAR = re.compile(r"\b(mother)?(" + "|".join(_SWEARS) + r")(\w*)", re.I)
+
+
+def censor(text: str) -> str:
+    """Mask the vowels of strong swear words: "fucking" -> "f*cking", "SHIT!" -> "SH*T!"."""
+    def mask(m: re.Match) -> str:
+        word = m.group(0)
+        if word.lower().startswith(_SAFE):
+            return word
+        stem_from = len(m.group(1) or "")
+        stem = m.group(2)
+        masked = stem[0] + re.sub(r"[aeiouAEIOU]", "*", stem[1:])
+        return word[:stem_from] + masked + m.group(3)
+    return _SWEAR.sub(mask, text)
+
+
 def to_dicts(items) -> list[dict]:
     return [asdict(i) for i in items]
 
