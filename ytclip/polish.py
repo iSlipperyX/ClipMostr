@@ -178,12 +178,12 @@ def parse(text: str, count: int) -> Polish:
 def ask(title: str, clips: list[Clip], words: list[Word], src: Path, api_key: str, model: str,
         log: Callable[[str], None] | None = None, check: Callable[[], None] | None = None) -> Polish:
     """Send the clips to Claude and read back its polish. Raises PolishError."""
+    if not ((api_key or "").strip() or os.environ.get("ANTHROPIC_API_KEY")):
+        raise PolishError("No Anthropic API key set (Settings → AI).")
     import anthropic
 
     from .ai import _client, _friendly
 
-    if not ((api_key or "").strip() or os.environ.get("ANTHROPIC_API_KEY")):
-        raise PolishError("No Anthropic API key set (Settings → AI).")
     with tempfile.TemporaryDirectory(prefix="ytclip-polish-") as tmp:
         frames = grab_frames(src, clips, Path(tmp))
         content = build_content(title, clips, words, frames)

@@ -10,7 +10,6 @@ import pytest
 pytest.importorskip("PySide6")
 
 from PySide6.QtGui import QColor, QImage, QPainter  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from ytclip import captions, compose, fonts, layout  # noqa: E402
 from ytclip.analyze import Clip  # noqa: E402
@@ -35,11 +34,6 @@ pytestmark = pytest.mark.skipif(not _has_libass(), reason="needs ffmpeg built wi
 GREY = (128, 128, 128)
 WORDS = [Word(i * 0.4, i * 0.4 + 0.35, w)
          for i, w in enumerate("honestly this is the craziest thing I've ever seen in my life".split())]
-
-
-@pytest.fixture(scope="module")
-def app():
-    return QApplication.instance() or QApplication([])
 
 
 def _array(img: QImage) -> np.ndarray:

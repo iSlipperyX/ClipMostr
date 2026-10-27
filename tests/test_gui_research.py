@@ -4,16 +4,10 @@ from conftest import NOW, api_item
 pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)  # no Qt or no display libraries
 
 from PySide6.QtCore import Qt  # noqa: E402
-from PySide6.QtWidgets import QApplication  # noqa: E402
 
 from ytclip.research import ScanResult  # noqa: E402
 from ytclip.settings import Settings  # noqa: E402
 from ytclip.trending import DeepInfo, video_from_api  # noqa: E402
-
-
-@pytest.fixture(scope="module")
-def app():
-    return QApplication.instance() or QApplication([])
 
 
 class Host:

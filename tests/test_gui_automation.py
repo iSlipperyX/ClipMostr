@@ -3,15 +3,8 @@ from conftest import NOW
 
 pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)  # no Qt or no display libraries
 
-from PySide6.QtWidgets import QApplication  # noqa: E402
-
 from ytclip.jobs import Job, JobDB  # noqa: E402
 from ytclip.settings import Settings  # noqa: E402
-
-
-@pytest.fixture(scope="module")
-def app():
-    return QApplication.instance() or QApplication([])
 
 
 def _make(app, tmp_path, **settings):

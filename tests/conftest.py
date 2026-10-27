@@ -53,3 +53,21 @@ def spiky_heatmap(duration=1200, peaks=(300, 700, 1000), base=0.15, segments=100
         value = base + max((max(0.0, 1 - abs(mid - p) / 25) for p in peaks), default=0) * (1 - base)
         out.append({"start_time": i * seg, "end_time": (i + 1) * seg, "value": value})
     return out
+
+
+@pytest.fixture(scope="session")
+def app():
+    """One QApplication for the whole run. A module-scoped app was freed between test files while
+    widgets from the earlier file were still alive, which crashed Qt at exit."""
+    widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    qapp = widgets.QApplication.instance() or widgets.QApplication([])
+    yield qapp
+    for w in qapp.topLevelWidgets():
+        w.close()
+        w.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    import gc
+
+    gc.collect()
