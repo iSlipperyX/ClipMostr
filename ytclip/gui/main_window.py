@@ -29,6 +29,7 @@ from . import forms, theme
 from .layout_tab import LayoutTab
 from .library import Library, reveal
 from .player import Preview
+from .automation import Automation
 from .research import Research
 from .settings_dialog import SettingsDialog
 from .tasks import Task, TaskQueue
@@ -186,6 +187,10 @@ class MainWindow(QMainWindow):
         self.research.hits_changed.connect(self._research_hits)
         self.research.open_settings.connect(self._open_settings)
         self.research_tab = self.tabs.addTab(self.research, RESEARCH_TAB)
+        self.automation = Automation(lambda: self.settings)
+        self.automation.notice.connect(self._notice)
+        self.automation.open_settings.connect(self._open_settings)
+        self.tabs.addTab(self.automation, "🤖  Automation")
         outer.addWidget(self.tabs, 1)
         outer.addWidget(self._build_footer())
         self.setCentralWidget(root)
@@ -1536,6 +1541,7 @@ class MainWindow(QMainWindow):
         self._closing = True
         self.banner.shutdown()
         self.research.shutdown()
+        self.automation.shutdown()
         self._save_session()
         self.settings.save()
         self.qs.setValue("geometry", self.saveGeometry())

@@ -86,12 +86,22 @@ class PickLog:
         self.path = path
         self.picks: list[dict] = []
         self.lock = threading.RLock()
-        if path:
-            try:
-                data = json.loads(path.read_text(encoding="utf-8"))
-                self.picks = [p for p in data.get("picks") or [] if isinstance(p, dict) and p.get("id")]
-            except (OSError, ValueError, AttributeError):
-                pass
+        self.reload()
+
+    def _read(self) -> list[dict]:
+        if not self.path:
+            return []
+        try:
+            data = json.loads(self.path.read_text(encoding="utf-8"))
+            return [p for p in data.get("picks") or [] if isinstance(p, dict) and p.get("id")]
+        except (OSError, ValueError, AttributeError):
+            return []
+
+    def reload(self) -> None:
+        """Pick up picks another process (the runner, or the app) saved since."""
+        with self.lock:
+            mine = {p["id"]: p for p in self.picks}
+            self.picks = list(({p["id"]: p for p in self._read()} | mine).values())
 
     def get(self, video_id: str) -> dict | None:
         with self.lock:
@@ -110,14 +120,21 @@ class PickLog:
                "score": v.score, "license": v.license, "origins": list(v.origins), "permission": d.reason,
                "time": now, "how": how}
         with self.lock:
-            self.picks = [p for p in self.picks if p["id"] != v.id and now - p.get("time", 0) < KEEP_DAYS * DAY]
+            self.picks = [p for p in self.picks if p["id"] != v.id]
             self.picks.append(rec)
+            self._prune(now)
         return rec
 
+    def _prune(self, now: float) -> None:
+        self.picks = [p for p in self.picks if now - p.get("time", 0) < KEEP_DAYS * DAY]
+
     def save(self) -> None:
+        """Write, keeping picks another process saved meanwhile (the app and the runner share the file)."""
         if not self.path:
             return
         with self.lock:
+            self.reload()
+            self._prune(max([time.time()] + [p.get("time", 0) for p in self.picks]))
             tmp = self.path.with_suffix(".tmp")
             try:
                 tmp.write_text(json.dumps({"picks": self.picks}, indent=1, ensure_ascii=False), encoding="utf-8")

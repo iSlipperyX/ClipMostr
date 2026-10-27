@@ -140,6 +140,19 @@ class Settings:
     pick_block_channels: str = ""
     pick_block_categories: str = "10, 1"  # Music, Film & Animation: reposts are usually claimed
     pick_block_words: str = "music video, lyric video, lyrics, official audio, trailer, full movie, full album"
+    # Automation (pipeline.py): the unattended runner
+    auto_output_dir: str = ""  # "" = <output_dir>/Automation
+    auto_preset: str = "Shorts / TikTok / Reels"
+    auto_layout: str = ""  # "" = the layout in your settings
+    auto_recipes: str = ""  # lines of "match = preset | view"
+    auto_captions: bool = True
+    auto_start_hour: int = 0  # the runner downloads and encodes between these hours (equal = any time)
+    auto_end_hour: int = 0
+    auto_gap_minutes: int = 10
+    auto_ai_daily: int = 10
+    auto_retries: int = 3
+    auto_delete_sources: bool = True
+    auto_keep_days: int = 14
     # 2 = text sizes are letter heights (1 = raw .ass sizes, which looked different in every font)
     text_units: int = 2
 
@@ -147,6 +160,10 @@ class Settings:
     @property
     def output_path(self) -> Path:
         return Path(self.output_dir).expanduser()
+
+    @property
+    def auto_output_path(self) -> Path:
+        return Path(self.auto_output_dir).expanduser() if self.auto_output_dir else self.output_path / "Automation"
 
     @property
     def cache_path(self) -> Path:
@@ -563,4 +580,29 @@ SCHEMA: list[Field] = [
           choices=tuple((cid, name) for cid, name in CATEGORIES.items() if cid)),
     Field("pick_block_words", "Skip titles containing", "Picking", "str",
           help="Comma separated words or phrases"),
+
+    Field("auto_output_dir", "Clips go to", "Automation", "path",
+          help="Empty = an Automation folder inside your output folder"),
+    Field("auto_preset", "Style (preset)", "Automation", "choice",
+          choices=(("", "My current settings"),) + tuple((k, k) for k in PRESETS),
+          help="How clips are found and exported, unless a recipe below says otherwise"),
+    Field("auto_layout", "Top/bottom view", "Automation", "choice",
+          choices=(("", "As in my settings"),) + tuple((k, k) for k in LAYOUT_PRESETS)),
+    Field("auto_recipes", "Recipes", "Automation", "text",
+          help="Per category or channel: 'what = preset | view'. 'what' is a category name, a channel name or "
+               "@handle, or * for everything else. The first matching line wins",
+          placeholder="Gaming = Gaming / action | Gameplay below\n@somepodcast = Podcast moments | Title on top"),
+    Field("auto_captions", "Always burn in captions", "Automation", "bool"),
+    Field("auto_start_hour", "Work from (hour)", "Automation", "int", lo=0, hi=23,
+          help="Downloads and encodes only start between these hours. The same hour twice means any time"),
+    Field("auto_end_hour", "Work until (hour)", "Automation", "int", lo=0, hi=23),
+    Field("auto_gap_minutes", "Minutes between downloads", "Automation", "int", lo=0, hi=240, step=5,
+          help="Spacing downloads out makes YouTube less likely to ask the PC to sign in"),
+    Field("auto_ai_daily", "AI clip finder runs per day", "Automation", "int", lo=0, hi=500,
+          help="Videos over this limit use the smart signals instead, so Claude costs stay predictable"),
+    Field("auto_retries", "Tries per video", "Automation", "int", lo=1, hi=10,
+          help="A failed video is tried again after 15 minutes, then 1 hour, then 4 hours"),
+    Field("auto_delete_sources", "Delete full downloads after clipping", "Automation", "bool"),
+    Field("auto_keep_days", "Clear cached analysis after (days)", "Automation", "int", lo=1, hi=365,
+          help="Transcripts and measurements of finished videos are removed from the download cache"),
 ]

@@ -170,3 +170,24 @@ def test_watch_rounds_keep_clipping_new_arrivals(monkeypatch):
     monkeypatch.setattr(cli, "process", lambda url, engine, dry_run: sent.append(url.rsplit("=", 1)[-1]))
     assert cli.main(["research", "--api-key", "k", "--clip", "1", "--watch", "1"]) == 0
     assert sent == ["v0", "v2"]
+
+
+def test_auto_command_queue_status_pause_and_retry(capsys, monkeypatch):
+    from ytclip.jobs import JobDB
+
+    assert cli.main(["auto", "--add", "https://youtu.be/aaaaaaaaaaa"]) == 0
+    assert "Queued" in capsys.readouterr().out
+    assert cli.main(["auto", "--add", "https://youtu.be/aaaaaaaaaaa"]) == 0
+    assert "Already queued" in capsys.readouterr().out
+    assert cli.main(["auto", "--add", "not a link"]) == 2
+    assert cli.main(["auto", "--pause"]) == 0
+    assert JobDB().meta("paused") == "1"
+    monkeypatch.setattr(cli.console, "width", 200)
+    assert cli.main(["auto", "--status"]) == 0
+    out = capsys.readouterr().out
+    assert "not running" in out and "1 waiting" in out and "aaaaaaaaaaa" in out and "Added by you" in out
+    JobDB().update("aaaaaaaaaaa", status="failed", error="boom")
+    assert cli.main(["auto", "--retry", "aaaaaaaaaaa"]) == 0
+    assert JobDB().get("aaaaaaaaaaa").status == "queued"
+    assert cli.main(["auto", "--retry", "nope"]) == 1
+    assert cli.main(["auto", "--stop"]) == 0 and JobDB().meta("stop") == "1"

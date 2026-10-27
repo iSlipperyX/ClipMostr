@@ -72,7 +72,7 @@ def watch_link(video: Video, seconds: float) -> str:
 
 
 def write_index(folder: Path, video: Video, clips: list[Clip], files: list[str], signals: list[str],
-                mode: str) -> None:
+                mode: str, extra: dict | None = None) -> None:
     records = [
         {
             "rank": i,
@@ -95,6 +95,7 @@ def write_index(folder: Path, video: Video, clips: list[Clip], files: list[str],
         "signals": signals,
         "clips": records,
     }
+    meta |= {k: v for k, v in (extra or {}).items() if k not in meta}
     (folder / "clips.json").write_text(json.dumps(meta, indent=2, ensure_ascii=False), encoding="utf-8")
 
     lines = [

@@ -137,6 +137,41 @@ ytclip research --json > trending.json
 ytclip research --list-categories
 ```
 
+## Automation
+
+The **Automation** tab runs the whole job without you: it checks Research on your schedule, queues whatever your [picking rules](#picking-rules) pick, and clips one video at a time. Press **Start**. Automation runs as its own background process, so it keeps going after you close ClipMonster. Tick **Start with Windows** to have it start every time you sign in.
+
+- **The queue** shows every video, what it's doing now, how many clips it made and why it was picked. Right-click a video to show its clips, try it again or remove it, or paste a link above the queue to add one yourself. Finished clips go to an `Automation` folder in your output folder, and each video's `clips.json` records why it was picked and the style it was cut with.
+- **It survives anything.** The queue lives in `%APPDATA%\ClipMonster\jobs.db`. If the PC restarts or the process is killed halfway through a video, that video starts again next time. Downloads and analysis are cached, so the second try is quick. No video is ever queued twice.
+- **It's gentle with YouTube.** It does one download at a time, 10 minutes apart. When YouTube asks the PC to "sign in to confirm you're not a bot", it pauses downloads for 6 hours instead of pushing harder. A video that fails is tried again after 15 minutes, then after 1 hour. Videos that can never work (private, removed, members-only) are marked failed straight away.
+- **Pause** finishes nothing new until you resume. **Stop** ends the run within a few seconds, and a video in progress goes back in the queue. Updating ClipMonster stops automation and starts it again afterwards.
+
+**Settings → Automation** chooses the style and the pace:
+
+| Setting | Default | What it does |
+|---|---|---|
+| Style (preset) and Top/bottom view | Shorts / TikTok / Reels | How clips are found and exported |
+| Recipes | none | A different style per category or channel, one per line: `Gaming = Gaming / action \| Gameplay below`, `@somepodcast = Podcast moments \| Title on top`, `* = \| Title on top`. The first matching line wins |
+| Always burn in captions | on | Word-by-word captions on every clip |
+| Work from / until | any time | Hours in which downloads and encodes may start, e.g. 1 to 7 overnight |
+| Minutes between downloads | 10 | Spacing that keeps YouTube from flagging the PC |
+| AI clip finder runs per day | 10 | Over this, videos use the smart signals, so Claude costs stay predictable |
+| Tries per video | 3 | Before a video is marked failed |
+| Delete full downloads after clipping | on | Keeps the disk from filling up |
+| Clear cached analysis after | 14 days | Removes transcripts and measurements of finished videos |
+
+The runner writes a log to `%APPDATA%\ClipMonster\automation.log`, which the tab shows too. From the command line:
+
+```
+ytclip auto                    # run in this console until Ctrl+C
+ytclip auto --once             # do what's due now, then exit
+ytclip auto --status           # the queue and what automation is doing
+ytclip auto --add "https://youtu.be/VIDEO"
+ytclip auto --pause | --resume | --stop
+ytclip auto --retry ID         # try a failed video again
+ytclip auto --install          # start with Windows (--uninstall to undo)
+```
+
 ## Output layout
 
 ```
@@ -225,6 +260,8 @@ Run the tests with `pip install -e .[test]` and then `pytest`. They need no netw
 | `ytclip/research.py` | One research scan, shared by the Research tab and `ytclip research` |
 | `ytclip/sources.py` | Channel list and Creative Commons searches for Research |
 | `ytclip/policy.py` | Picking rules and the log of picks |
+| `ytclip/pipeline.py` | Automation: the unattended runner, recipes, pacing and retries |
+| `ytclip/jobs.py` | `jobs.db`, the automation queue shared by the runner and the app |
 | `ytclip/transcribe.py` | Whisper transcription |
 | `ytclip/export.py`, `captions.py` | Reframing, captions, encoding |
 | `ytclip/gui/` | Desktop app (PySide6) |

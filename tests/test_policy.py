@@ -129,3 +129,15 @@ def test_a_broken_log_file_starts_empty(tmp_path):
     path = tmp_path / "picks.json"
     path.write_text("{not json", encoding="utf-8")
     assert PickLog(path).picks == []
+
+
+def test_two_processes_sharing_the_log_keep_each_others_picks(tmp_path):
+    path = tmp_path / "picks.json"
+    app, runner = PickLog(path), PickLog(path)
+    runner.record(Decision(vid("r"), True, "ok"), "auto", now=NOW)
+    runner.save()
+    app.record(Decision(vid("a"), True, "ok"), "studio", now=NOW)
+    app.save()  # must not drop the runner's pick
+    assert sorted(p["id"] for p in PickLog(path).picks) == ["a", "r"]
+    app.reload()
+    assert app.get("r") is not None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from pathlib import Path
 
 from rich.console import Console
@@ -34,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="ytclip",
         description="Download YouTube videos (or open local files) and cut them into their best clips.",
         epilog='Example: ytclip "https://youtu.be/VIDEO" --preset "Shorts / TikTok / Reels"\n'
-           "Trending research: ytclip research --help",
+           "Trending research: ytclip research --help\nAutomation: ytclip auto --help",
     formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("sources", nargs="*", help="video/playlist/channel URLs, video files or folders")
@@ -384,10 +385,114 @@ def _to_clip(result, decisions: dict | None, first: bool, alert: float, limit: i
     return [v for v in pool if not v.sent][:limit]
 
 
+def build_auto_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="ytclip auto",
+        description="Run automation: check Research, queue what your picking rules pick, and clip it, "
+                    "without anyone clicking. Runs until stopped (Ctrl+C).",
+        epilog="Settings → Automation and Settings → Picking control what it does. The app's Automation tab "
+               "shows the same queue.",
+    )
+    p.add_argument("--once", action="store_true", help="do what's due now, then exit (for scheduled runs)")
+    p.add_argument("--status", action="store_true", help="show the queue and what automation is doing")
+    p.add_argument("--add", nargs="+", metavar="URL", help="queue videos yourself")
+    p.add_argument("--retry", nargs="+", metavar="ID", help="try failed videos again (ids from --status)")
+    p.add_argument("--remove", nargs="+", metavar="ID", help="take videos out of the queue")
+    p.add_argument("--pause", action="store_true", help="pause a running automation")
+    p.add_argument("--resume", action="store_true", help="carry on after --pause")
+    p.add_argument("--stop", action="store_true", help="ask a running automation to stop")
+    p.add_argument("--install", action="store_true", help="start automation whenever you sign in to Windows")
+    p.add_argument("--uninstall", action="store_true", help="stop starting automation with Windows")
+    return p
+
+
+AUTO_COLOURS = {"working": "cyan", "queued": "white", "done": "green", "failed": "red"}
+
+
+def _auto_status(db) -> None:
+    from .clipability import age_text
+    from .pipeline import runner_alive
+
+    alive = runner_alive(db)
+    state = db.meta("state") or "Stopped"
+    paused = db.meta("paused") == "1"
+    console.print("[bold]Automation:[/] " + ("[green]running[/]" if alive else "[dim]not running[/]")
+                  + (" · [yellow]paused[/]" if paused else "") + (f" · {escape(state)}" if alive else ""))
+    counts = db.counts()
+    console.print(f"[dim]{counts['queued']} waiting · {counts['working']} working · {counts['done']} done · "
+                  f"{counts['failed']} failed[/]")
+    jobs = db.jobs(limit=40)
+    if not jobs:
+        console.print("Nothing queued yet.")
+        return
+    table = Table(show_edge=False, header_style="bold")
+    for col in ("Id", "Video", "Status", "Clips", "Updated", "Why it was picked"):
+        table.add_column(col, overflow="fold" if col in ("Video", "Status", "Why it was picked") else "ellipsis")
+    now = time.time()
+    for j in jobs:
+        status = f"[{AUTO_COLOURS.get(j.status, 'white')}]{j.status}[/]"
+        if j.stage and j.stage not in ("Done", "Waiting"):
+            status += f": {escape(j.stage)}"
+        if j.error and j.status != "done":
+            status += f"\n[dim]{escape(j.error[:200])}[/]"
+        table.add_row(j.id, f"{escape(j.title or j.url)}\n[dim]{escape(j.channel)}[/]", status,
+                      str(j.clips or ""), age_text((now - j.updated) / 3600) + " ago", escape(j.permission))
+    console.print(table)
+
+
+def run_auto(argv: list[str]) -> int:
+    from . import pipeline
+    from .jobs import JobDB
+
+    args = build_auto_parser().parse_args(argv)
+    if args.install or args.uninstall:
+        err = pipeline.set_start_with_windows(bool(args.install))
+        if err:
+            console.print(f"[red]{escape(err)}[/]")
+            return 1
+        console.print("Automation starts whenever you sign in to Windows." if args.install
+                      else "Automation no longer starts with Windows.")
+        return 0
+    db = JobDB()
+    if args.pause or args.resume:
+        db.set_meta("paused", "1" if args.pause else "0")
+        console.print("Paused." if args.pause else "Resumed.")
+        return 0
+    if args.stop:
+        db.set_meta("stop", "1")
+        console.print("Asked automation to stop. A video in progress goes back in the queue.")
+        return 0
+    if args.retry or args.remove:
+        for job_id in args.retry or args.remove:
+            if not db.get(job_id):
+                console.print(f"[red]No video {escape(job_id)} in the queue.[/]")
+                return 1
+            db.retry(job_id) if args.retry else db.remove(job_id)
+        console.print("Done.")
+        return 0
+    if args.add:
+        runner = pipeline.Runner(db)
+        for url in args.add:
+            try:
+                added = runner.add_manual(url)
+            except ValueError as exc:
+                console.print(f"[red]{escape(url)}: {escape(str(exc))}[/]")
+                return 2
+            console.print(f"Queued {escape(url)}" if added else f"[yellow]Already queued before: {escape(url)}[/]")
+        return 0
+    if args.status:
+        _auto_status(db)
+        return 0
+    log = pipeline.file_logger(lambda line: console.print(escape(line), highlight=False))
+    return pipeline.Runner(db, log=log).run(once=args.once)
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["research"]:
         return run_research(argv[1:])
+    if argv[:1] == ["auto"]:
+        return run_auto(argv[1:])
     args = build_parser().parse_args(argv)
     from . import updater
 

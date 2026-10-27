@@ -166,6 +166,8 @@ class UpdateBanner(QFrame):
                                           f"this folder first: {', '.join(others)}.")
 
         def run(t: Task):
+            t.progress.emit("Pausing automation", -1.0)
+            _stop_automation()
             blockers()
             zip_path = updater.download(rel, lambda f: t.progress.emit("Downloading", f),
                                         lambda: t.cancel_requested)
@@ -226,3 +228,23 @@ class UpdateBanner(QFrame):
             if not task.wait(5000):
                 task.terminate()
                 task.wait(1000)
+
+
+def _stop_automation(timeout: float = 90.0) -> None:
+    """A background automation run keeps the app folder in use: ask it to stop (its current video
+    goes back in the queue) and have the updated app start it again."""
+    from ..jobs import JobDB
+    from ..pipeline import runner_alive
+
+    db = JobDB()
+    try:
+        if not runner_alive(db):
+            return
+        db.set_meta("stop", "1")
+        db.set_meta("resume_after_update", "1")
+        end = time.time() + timeout
+        while runner_alive(db) and time.time() < end:
+            time.sleep(1)
+        time.sleep(3)  # let the process exit after it signs off
+    finally:
+        db.close()

@@ -14,7 +14,7 @@ from ..trending import KEY_HELP_URL
 from . import forms, theme
 
 GROUPS = ("General", "Download", "Clip finding", "Transcription", "AI", "Export", "Captions", "Layout",
-          "Research", "Picking", "Updates")
+          "Research", "Picking", "Automation", "Updates")
 
 
 class SettingsDialog(QDialog):
@@ -74,6 +74,13 @@ class SettingsDialog(QDialog):
                               "accounts struck, so by default only channels on your list (creators who say clips "
                               "are welcome) and Creative Commons videos are picked. The Research tab's Pick column "
                               "shows what the rules would pick, and why the rest were skipped.")
+                note.setWordWrap(True)
+                note.setProperty("muted", True)
+                page.layout().insertRow(0, note)
+            if group == "Automation":
+                note = QLabel("Automation clips what your picking rules pick, one video at a time, with no one "
+                              "clicking. Start it from the Automation tab. These settings choose the style of its "
+                              "clips, when it works, and how hard it pushes YouTube and the Claude API.")
                 note.setWordWrap(True)
                 note.setProperty("muted", True)
                 page.layout().insertRow(0, note)

@@ -49,6 +49,7 @@ class Project:
     ai_model: str = ""  # the model that actually answered (may differ after a refusal fallback)
     ai_error: str = ""  # why AI mode fell back to signals, if it did
     export_dir: Path | None = None
+    meta: dict = field(default_factory=dict)  # extra sections for clips.json, e.g. why automation picked it
 
     @property
     def name(self) -> str:
@@ -267,7 +268,7 @@ class Engine:
                     srt(words_between(p.words, clip.start, clip.end), clip.start), encoding="utf-8")
             files.append(name)
 
-        write_index(folder, v, clips, files, self.signal_names(p), p.mode_used or self.s.mode)
+        write_index(folder, v, clips, files, self.signal_names(p), p.mode_used or self.s.mode, p.meta)
         if not self.s.keep_source and not v.is_local:
             v.path.unlink(missing_ok=True)
         p.export_dir = folder

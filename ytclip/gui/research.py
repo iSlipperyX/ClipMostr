@@ -674,6 +674,7 @@ class Research(QWidget):
     def refresh_picks(self) -> None:
         """Run the picking rules over the current results (after a scan or a rules change)."""
         s = self._settings()
+        self.picks.reload()  # the automation runner may have picked videos since
         notes = self.result.notes if self.result else {}
         self.decisions = {d.video.id: d for d in decide(self.videos, Policy.from_settings(s), self.picks,
                                                         notes=notes)}
