@@ -17,6 +17,7 @@ from .download import expand_sources
 from .engine import Engine, Project
 from .organize import stamp
 from .settings import ASPECTS, LAYOUT_PRESETS, PRESETS, Settings, all_layouts, all_presets, find_layout
+from .stackpool import pool_files
 
 # Redirected output on Windows defaults to cp1252, which can't encode ✓, → or most
 # video titles; switch to UTF-8 so printing never crashes the run.
@@ -59,7 +60,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-tiktok", action="store_true",
                    help="turn off TikTok-ready output (needed to keep the original frame or 1:1)")
     p.add_argument("--stack", metavar="VIDEO", type=Path,
-                   help="stack a second video (gameplay, satisfying clips...) under each clip, 9:16")
+                   help="stack a second video (gameplay, satisfying clips...) under each clip, 9:16; give a "
+                        "folder to use a different video from it for each clip")
+    p.add_argument("--polish", action="store_true",
+                   help="AI polish: hooks for the top banner, caption fixes, speaker crops (needs an Anthropic key)")
+    p.add_argument("--bleep", action="store_true", help="mask strong swearing in captions (f*ck, sh*t)")
     p.add_argument("--keywords", help="comma-separated words/phrases to boost")
     p.add_argument("-q", "--quality", type=int, help="max download height, e.g. 720")
     p.add_argument("--encoder", choices=["auto", "libx264", "h264_amf", "h264_nvenc", "h264_qsv"])
@@ -148,15 +153,22 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
         "fast_copy": True if args.fast else None,
         "keep_source": False if args.delete_source else None,
         "tiktok_ready": False if args.no_tiktok else None,
+        "ai_polish": True if args.polish else None,
+        "caption_censor": True if args.bleep else None,
     }
     if args.top_text is not None:
         overrides |= {"banner_top": True, "banner_top_text": args.top_text}
     if args.bottom_text is not None:
         overrides |= {"banner_bottom": True, "banner_bottom_text": args.bottom_text}
     if args.stack:
-        if not args.stack.is_file():
-            raise SystemExit(f"--stack: no such video: {args.stack}")
-        overrides |= {"stack_enabled": True, "stack_video": str(args.stack.resolve())}
+        if args.stack.is_dir():
+            if not pool_files(args.stack):
+                raise SystemExit(f"--stack: no videos in {args.stack}")
+            overrides |= {"stack_enabled": True, "stack_folder": str(args.stack.resolve())}
+        elif not args.stack.is_file():
+            raise SystemExit(f"--stack: no such video or folder: {args.stack}")
+        else:
+            overrides |= {"stack_enabled": True, "stack_video": str(args.stack.resolve()), "stack_folder": ""}
     return s.apply({k: v for k, v in overrides.items() if v is not None})
 
 
@@ -171,16 +183,22 @@ def process(source: str, engine: Engine, dry_run: bool) -> None:
         console.print(f"[bold]{escape(v.title)}[/]  [dim]{escape(v.channel)} · {stamp(v.duration)}[/]")
         engine.measure(p)
         engine.find(p)
+        if engine.s.ai_polish:
+            engine.polish(p)
 
     if p.ai_error:
         console.print(f"[yellow]⚠ AI clip finder failed: {escape(p.ai_error)} Used smart signals instead.[/]")
+    if p.polish_error:
+        console.print(f"[yellow]⚠ AI polish skipped: {escape(p.polish_error)}[/]")
     console.print(f"[dim]Picked using: {', '.join(engine.signal_names(p)) or p.mode_used}"
                   f"{' · transcript: ' + p.transcript_source if p.transcript_source else ''}[/]")
     table = Table(show_edge=False, header_style="bold")
-    for col in ("#", "Time", "Len", "Score", "Title"):
+    hooks = any(c.hook for c in p.clips)
+    for col in ("#", "Time", "Len", "Score", "Title") + (("Hook",) if hooks else ()):
         table.add_column(col)
     for i, c in enumerate(p.clips, 1):
-        table.add_row(str(i), f"{stamp(c.start)}–{stamp(c.end)}", f"{c.length:.0f}s", f"{c.score:.0f}", escape(c.title))
+        table.add_row(str(i), f"{stamp(c.start)}–{stamp(c.end)}", f"{c.length:.0f}s", f"{c.score:.0f}", escape(c.title),
+                      *((escape(c.hook),) if hooks else ()))
     console.print(table)
     if dry_run:
         return

@@ -45,6 +45,7 @@ class FakeEngine:
                         path=Path("x.mp4"))
         p.clips = [Clip(i * 60, i * 60 + 30, 80) for i in range(what)]
         p.mode_used = self.s.mode
+        p.polished = self.s.ai_polish
 
     def export(self, p):
         self.exported = p
@@ -259,6 +260,24 @@ def test_ai_budget(tmp_path):
     r.process(r.db.next_due(NOW), r.load())
     assert [e.s.mode for e in FakeEngine.made] == ["ai", "auto"]
     assert "today's AI limit is used up" in r.db.get("ggggggggggg").recipe
+
+
+def test_polish_shares_the_ai_budget(tmp_path):
+    r = _runner(tmp_path, _settings(ai_api_key="sk-ant-x", auto_ai_daily=1))
+    for vid in ("fffffffffff", "ggggggggggg"):
+        r.add_manual(f"https://youtu.be/{vid}")
+    r.process(r.db.next_due(NOW), r.load())
+    r.process(r.db.next_due(NOW), r.load())
+    assert [e.s.ai_polish for e in FakeEngine.made] == [True, False]
+    assert r.db.get("fffffffffff").recipe.endswith("· AI polish")
+    assert "no polish (today's AI limit is used up)" in r.db.get("ggggggggggg").recipe
+
+
+def test_no_polish_without_a_key_or_when_turned_off(tmp_path, monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    assert not settings_for(Job("a", "u"), _settings())[0].ai_polish
+    assert settings_for(Job("a", "u"), _settings(ai_api_key="k"))[0].ai_polish
+    assert not settings_for(Job("a", "u"), _settings(ai_api_key="k", auto_polish=False))[0].ai_polish
 
 
 def test_spacing_between_downloads(tmp_path):

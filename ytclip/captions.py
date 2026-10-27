@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from . import fonts, textlayout
 from .settings import Settings
-from .subtitles import Word, words_between
+from .subtitles import Word, censor, words_between
 
 _SENTENCE_END = (".", "!", "?", "…")
 
@@ -106,7 +106,8 @@ def caption_events(words: list[Word], clip_start: float, clip_end: float, s: Set
     out: list[CaptionEvent] = []
     clip_words = words_between(words, clip_start, clip_end)
     for group in _groups(clip_words, max(1, s.caption_words)):
-        texts = [w.text.upper() if s.caption_uppercase else w.text for w in group]
+        texts = [censor(w.text) if s.caption_censor else w.text for w in group]
+        texts = [t.upper() if s.caption_uppercase else t for t in texts]
         group_end = group[-1].end
         for i, w in enumerate(group):
             a = max(0.0, w.start - clip_start)

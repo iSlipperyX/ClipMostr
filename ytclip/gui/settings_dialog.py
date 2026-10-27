@@ -33,7 +33,9 @@ class SettingsDialog(QDialog):
             self._editors |= editors
             if group == "AI":
                 note = QLabel("The AI clip finder sends the video's transcript to Claude and asks it to pick "
-                              "self-contained moments. Get an API key at console.anthropic.com. "
+                              "self-contained moments. AI polish sends it each clip's words and one frame, "
+                              "and gets back hooks, caption fixes and where the speaker is. "
+                              "Get an API key at console.anthropic.com. "
                               "You can also set the ANTHROPIC_API_KEY environment variable instead.")
                 note.setWordWrap(True)
                 note.setProperty("muted", True)

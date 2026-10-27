@@ -133,6 +133,7 @@ def settings_for(job: Job, s: Settings) -> tuple[Settings, str]:
         overrides["burn_captions"] = True
     if s.auto_delete_sources:
         overrides["keep_source"] = False
+    overrides["ai_polish"] = s.auto_polish and bool(s.ai_api_key.strip() or os.environ.get("ANTHROPIC_API_KEY"))
     out = out.apply(overrides)
     label = " · ".join(x for x in (preset or "My settings", view) if x)
     if rule:
@@ -297,9 +298,15 @@ class Runner:
     def process(self, job: Job, s: Settings) -> None:
         now = self.now()
         settings, label = settings_for(job, s)
-        if settings.mode == "ai" and self.db.count("ai", now - DAY) >= s.auto_ai_daily:
+        used = self.db.count("ai", now - DAY)
+        if settings.mode == "ai" and used >= s.auto_ai_daily:
             settings = settings.apply({"mode": "auto"})
             label += " · smart signals (today's AI limit is used up)"
+        if settings.ai_polish and used + (settings.mode == "ai") >= s.auto_ai_daily:
+            settings = settings.apply({"ai_polish": False})
+            label += " · no polish (today's AI limit is used up)"
+        elif settings.ai_polish:
+            label += " · AI polish"
         self.db.update(job.id, now, status="working", stage="Starting", recipe=label, error="")
         self.db.set_meta("last_download", now)
         self.state(f"Clipping: {job.title or job.url}")
@@ -328,6 +335,8 @@ class Runner:
         try:
             engine.prepare(p)
             if settings.mode == "ai":
+                self.db.note("ai", self.now())
+            if p.polished:
                 self.db.note("ai", self.now())
             if not [c for c in p.clips if c.enabled]:
                 raise NoClips("No clips found in this video.")

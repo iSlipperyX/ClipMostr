@@ -41,20 +41,28 @@ Every second gets a score from up to five signals. You decide how much each one 
 | **Scene cuts** | Bursts of fast editing, which usually mean action |
 | **Keywords** | Mentions of words or phrases you choose |
 
-Clips grow outward from the peaks. When there's a transcript, their edges are aligned to whole sentences, so a clip never starts or ends mid-sentence; without one, they snap to natural pauses. Intros, credits and end screens count for less.
+Clips grow outward from the peaks. When there's a transcript, their edges are aligned to whole sentences, so a clip never starts or ends mid-sentence; without one, they snap to natural pauses. Intros, credits and end screens count for less. **Trim dead air** (on by default) then pulls each clip in so it starts a quarter of a second before the first word and ends half a second after the last, instead of opening on silence. Clips you've edited by hand are never trimmed.
 
 **Other clip finders** (pick one under *Find clips → Clip finder*):
 - **AI picks (Claude):** Claude reads the transcript, one sentence per line with exact times, and picks self-contained moments with a strong hook and payoff, plus a title and the reason for each. Add your Anthropic API key under *Settings → AI*, then click **Test key** to confirm it works (this uses no tokens). When you click **Re-detect clips**, a failure shows a message and leaves your clips untouched. In batch runs, a failure falls back to the signals above, and the video is flagged with the reason. Clips you've edited by hand are kept when you re-detect.
 - **YouTube chapters:** one clip per chapter.
+
+**AI polish** (*Settings → AI → Polish clips with AI*, off by default) makes one more Claude call per video, sending each clip's transcript and one small frame from it. It sends back:
+- a **hook** for each clip: a few honest, specific words that go in the top banner when it shows `{title}`, and into `clips.json` for your upload caption;
+- **caption fixes** for words the transcript misheard, mostly names and jargon ("Joe Rogen" becomes "Joe Rogan"), swapped word for word so the timing stays right;
+- where the **speaker** is, so *9:16 vertical cropped* and *1:1* keep them in shot;
+- whether the video **already has subtitles** in the picture. If it does, your captions are left off for that video (or kept, if you choose), so there aren't two sets of words on screen.
+
+Anything you've edited by hand is left alone, and if the call fails the clips simply go out unpolished. It uses Claude Sonnet 5.5 by default, which you can change.
 
 **No captions?** For local files, or videos without captions, ClipMonster transcribes speech on your PC with Whisper. The model is downloaded once on first use to `%LOCALAPPDATA%\ClipMonster\models`.
 
 ### Export options
 
 - **Formats:** original; 9:16 vertical with a blurred fill; 9:16 vertical cropped (reframe per clip); 1:1 square
-- **Animated captions:** word groups pop on screen with the spoken word highlighted. Font, size, colours, outline, position, words per screen and UPPERCASE are all adjustable. Sizes are letter heights in pixels on a 1080-wide video, so a size looks the same in every font. Optionally, the clip title appears as a banner at the top.
+- **Animated captions:** word groups pop on screen with the spoken word highlighted. Font, size, colours, outline, position, words per screen and UPPERCASE are all adjustable. Sizes are letter heights in pixels on a 1080-wide video, so a size looks the same in every font. Optionally, the clip title appears as a banner at the top. **Bleep strong swearing** writes f\*ck, sh\*t and the like in captions and `.srt` files, which TikTok is less likely to hold back.
 - **Banners:** a solid bar of text at the top, the bottom or both (the video sits between them), or the same text laid over the video. `{title}` fills in the clip title, long text wraps and shrinks to fit, and each clip can override the text or show none.
-- **Stacked layout:** your clip on one part of a 9:16 frame and a looping second video on the other. You choose which goes on top, how much room the clip gets, where the second video starts (a random spot per clip, or a fixed time) and how loud it is (silent by default). Captions set to *Middle* sit on the seam.
+- **Stacked layout:** your clip on one part of a 9:16 frame and a looping second video on the other. You choose which goes on top, how much room the clip gets, where the second video starts (a random spot per clip, or a fixed time) and how loud it is (silent by default). Captions set to *Middle* sit on the seam. Choose **a folder of second videos** instead of one, and each clip gets a different one: every video in the folder is used once before any repeats, and never the same one twice in a row, even across videos and restarts. `clips.json` notes which one each clip got.
 - **Fonts:** 13 free display fonts ship with the app and look the same on every PC: TikTok Sans Black, Montserrat Black/ExtraBold, Poppins Black/ExtraBold, Archivo Black, Anton, Bebas Neue, Bangers, Luckiest Guy, Lilita One, Titan One and Permanent Marker. Pick one for captions and one for banners. Any font installed on the PC works too. Licences are in `ytclip/fonts/licenses`.
 - **TikTok-ready output** (on by default): every clip comes out 9:16 at 1080×1920 (between 540×960 and 1080×1920 at other resolution settings). *Original* and *1:1* are fitted in with a blurred fill; turn this off to keep them. In 9:16 the banner text and captions stay out of the areas TikTok covers with its tabs, buttons and caption (the layout sketch shades them). Output is H.264 High with AAC 44.1 kHz audio, at most 60 fps and 20 Mbps, and at least 540×960. The log warns about any clip over 10 minutes, or over 287 MB (the phone-app limit; computers can upload up to 4 GB).
 - **Encoding:** GPU encoding on AMD (AMF), NVIDIA (NVENC) or Intel (Quick Sync), detected automatically, with x264 as the fallback
@@ -155,7 +163,8 @@ The **Automation** tab runs the whole job without you: it checks Research on you
 | Always burn in captions | on | Word-by-word captions on every clip |
 | Work from / until | any time | Hours in which downloads and encodes may start, e.g. 1 to 7 overnight |
 | Minutes between downloads | 10 | Spacing that keeps YouTube from flagging the PC |
-| AI clip finder runs per day | 10 | Over this, videos use the smart signals, so Claude costs stay predictable |
+| Polish clips with AI | on | [AI polish](#how-clips-are-found) for every video, when there's an Anthropic key |
+| AI calls per day | 10 | The AI clip finder and AI polish each count as one. Over this, videos use the smart signals and skip polishing, so Claude costs stay predictable |
 | Tries per video | 3 | Before a video is marked failed |
 | Delete full downloads after clipping | on | Keeps the disk from filling up |
 | Clear cached analysis after | 14 days | Removes transcripts and measurements of finished videos |
@@ -199,10 +208,11 @@ ytclip "C:\Videos\podcast.mp4" --mode ai --captions -f vertical_crop
 ytclip "https://youtu.be/VIDEO" --keywords "goal, penalty" --dry-run
 ytclip "C:\Videos\stream.mp4" --layout "Gameplay below + title" --captions
 ytclip "C:\Videos\stream.mp4" --stack "C:\Videos\parkour.mp4" --top-text "{title}" --bottom-text "Follow for part 2" --captions
+ytclip "https://youtu.be/VIDEO" --stack "C:\Videos\Gameplay" --polish --captions --bleep
 ytclip --list-presets
 ```
 
-Main options: `-n` number of clips · `--min/--max` length in seconds · `--mode auto|ai|chapters` · `-f original|vertical_blur|vertical_crop|square` · `--captions` · `--keywords` · `-q` max download resolution · `--encoder` · `--limit` videos per playlist · `-o` output folder · `--dry-run` analyse without exporting · `--cookies-from-browser chrome` for age-restricted videos.
+Main options: `-n` number of clips · `--min/--max` length in seconds · `--mode auto|ai|chapters` · `-f original|vertical_blur|vertical_crop|square` · `--captions` · `--polish` AI hooks and caption fixes · `--bleep` mask swearing · `--stack VIDEO|FOLDER` · `--keywords` · `-q` max download resolution · `--encoder` · `--limit` videos per playlist · `-o` output folder · `--dry-run` analyse without exporting · `--cookies-from-browser chrome` for age-restricted videos.
 
 ## Updates
 
@@ -255,6 +265,8 @@ Run the tests with `pip install -e .[test]` and then `pytest`. They need no netw
 | `ytclip/engine.py` | Pipeline: open → measure (cached) → transcribe → find clips → export |
 | `ytclip/analyze.py` | Signals, scoring and clip picking |
 | `ytclip/ai.py` | Claude clip finder |
+| `ytclip/polish.py` | AI polish: hooks, caption fixes, speaker crops, burned-in subtitle check |
+| `ytclip/stackpool.py` | Deals a different second video to each clip from a folder |
 | `ytclip/trending.py` | YouTube trending charts, replay checks, research history |
 | `ytclip/clipability.py` | Clip-ability score for trending videos |
 | `ytclip/research.py` | One research scan, shared by the Research tab and `ytclip research` |
