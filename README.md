@@ -163,6 +163,7 @@ The **Automation** tab runs the whole job without you: it checks Research on you
 | Style (preset) and Top/bottom view | Shorts / TikTok / Reels | How clips are found and exported |
 | Recipes | none | A different style per category or channel, one per line: `Gaming = Gaming / action \| Gameplay below`, `@somepodcast = Podcast moments \| Title on top`, `* = \| Title on top`. The first matching line wins |
 | Always burn in captions | on | Word-by-word captions on every clip |
+| Bleep strong swearing | on | Writes f\*ck, sh\*t and the like in captions and `.srt` files |
 | Work from / until | any time | Hours in which downloads and encodes may start, e.g. 1 to 7 overnight |
 | Minutes between downloads | 10 | Spacing that keeps YouTube from flagging the PC |
 | Check clips after export | on | The [quality check](#export-options); rejected clips go to `_rejected` and the queue shows them as "3 ✓ 1 ✗" |

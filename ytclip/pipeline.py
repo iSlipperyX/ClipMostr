@@ -131,6 +131,8 @@ def settings_for(job: Job, s: Settings) -> tuple[Settings, str]:
     overrides = {"output_dir": str(s.auto_output_path), "cache_dir": str(s.cache_path)}
     if s.auto_captions:
         overrides["burn_captions"] = True
+    if s.auto_bleep:
+        overrides["caption_censor"] = True
     if s.auto_delete_sources:
         overrides["keep_source"] = False
     overrides["qc_enabled"] = s.auto_qc

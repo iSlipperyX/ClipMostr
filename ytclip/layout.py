@@ -236,6 +236,8 @@ def banner_ass(p: Plan, s: Settings, top_text: str, bottom_text: str) -> str:
     outline = texts[0].outline if texts else 0
     shadow = texts[0].shadow if texts else 0
     size = fonts.ass_size(s.banner_font, s.banner_font_size * min(p.width, p.height) / 1080)
+    # Encoding -1 lets libass work out each line's text direction, so Arabic or Hebrew words read
+    # right to left in the right order (with 1, every line is laid out left to right).
     header = f"""[Script Info]
 ScriptType: v4.00+
 PlayResX: {p.width}
@@ -246,7 +248,7 @@ Kerning: no
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Banner,{s.banner_font},{size},{_ass_colour(s.banner_color)},&H000000FF,&H00000000,&H80000000,{fonts.ass_bold(s.banner_font)},0,0,0,100,100,0,0,1,{outline},{shadow},5,0,0,0,1
+Style: Banner,{s.banner_font},{size},{_ass_colour(s.banner_color)},&H000000FF,&H00000000,&H80000000,{fonts.ass_bold(s.banner_font)},0,0,0,100,100,0,0,1,{outline},{shadow},5,0,0,0,-1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

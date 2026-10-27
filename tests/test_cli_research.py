@@ -123,6 +123,25 @@ def test_picks_table(monkeypatch, capsys):
     assert "2 picked" in out and "your list" in out and "✓ On your channel list" in out
 
 
+def test_skipped_source_videos_are_listed_before_the_charts(monkeypatch, capsys):
+    """With nothing picked, a short list still shows the channel-list and Creative Commons videos,
+    so you can see why they were skipped."""
+    from ytclip.trending import video_from_api as vfa
+
+    chart = []
+    for i in range(5):
+        v = vfa(api_item(f"t{i}", hours_old=1, minutes=30, channel=f"T{i}"))
+        v.score, v.origins = 95 - i, ["chart"]
+        chart.append(v)
+    old_cc = vfa(api_item("cc", hours_old=24 * 10, minutes=30, channel="Old", license="creativeCommon"))
+    old_cc.score, old_cc.origins = 50, ["cc"]
+    monkeypatch.setattr(research, "scan", lambda *a, **kw: ScanResult(chart + [old_cc], NOW, ["US"]))
+    assert cli.main(["research", "--api-key", "k", "--picks", "--json", "--top", "3"]) == 0
+    rows = json.loads(capsys.readouterr().out)
+    assert [r["id"] for r in rows] == ["cc", "t0", "t1"]
+    assert not rows[0]["pick"]["picked"] and rows[0]["pick"]["reason"]
+
+
 def test_clip_with_picks_clips_only_picks_and_records_them(monkeypatch):
     from ytclip.policy import PickLog, picks_path
 

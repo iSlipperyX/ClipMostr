@@ -351,8 +351,12 @@ def run_research(argv: list[str]) -> int:
             top = result.videos[:max(1, args.top)]
             if decisions:
                 # Picks first, so they're on screen even when they aren't the highest scorers.
+                # Then videos from your channel list and Creative Commons searches, so you can see why
+                # they were skipped, then the charts.
                 chosen = [v for v in result.videos if decisions[v.id].picked]
-                top = chosen + [v for v in top if v not in chosen][:max(0, args.top - len(chosen))]
+                sourced = [v for v in result.videos if v not in chosen and set(v.origins) - {"chart"}]
+                rest = [v for v in top if v not in chosen and v not in sourced]
+                top = chosen + (sourced + rest)[:max(0, args.top - len(chosen))]
             stamp_now = time.strftime("%H:%M")
             if args.json:
                 keep = ("id", "url", "title", "channel", "score", "parts", "reasons", "moments", "regions",

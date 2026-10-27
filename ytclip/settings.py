@@ -156,6 +156,7 @@ class Settings:
     auto_layout: str = ""  # "" = the layout in your settings
     auto_recipes: str = ""  # lines of "match = preset | view"
     auto_captions: bool = True
+    auto_bleep: bool = True  # mask strong swearing in automation's captions
     auto_polish: bool = True
     auto_qc: bool = True
     auto_start_hour: int = 0  # the runner downloads and encodes between these hours (equal = any time)
@@ -635,6 +636,9 @@ SCHEMA: list[Field] = [
                "@handle, or * for everything else. The first matching line wins",
           placeholder="Gaming = Gaming / action | Gameplay below\n@somepodcast = Podcast moments | Title on top"),
     Field("auto_captions", "Always burn in captions", "Automation", "bool"),
+    Field("auto_bleep", "Bleep strong swearing", "Automation", "bool",
+          help="Writes f*ck, sh*t and the like in captions and .srt files, which TikTok is less likely to "
+               "hold back"),
     Field("auto_qc", "Check clips after export", "Automation", "bool",
           help="Clips that fail (silent, black, frozen, wrong length, or rated low by the AI polish) go to a "
                "_rejected folder instead of being ready to upload"),
