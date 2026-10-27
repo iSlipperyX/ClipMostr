@@ -2,15 +2,26 @@
 # broke real updates: File Explorer open on the app folder, programs whose working folder is
 # inside it, a file that stays locked, your own files kept in the app folder.
 #
-#   python -c "from ytclip.updater import SWAP_SCRIPT as s; open('apply-update.ps1','w',encoding='utf-8-sig').write(s)"
-#   powershell -NoProfile -ExecutionPolicy Bypass -File tests\windows\swap_test.ps1 -Swap .\apply-update.ps1
+#   powershell -NoProfile -ExecutionPolicy Bypass -File tests\windows\swap_test.ps1
 #
+# from the repository folder. It writes the script from this checkout's ytclip\updater.py
+# (using .venv's Python if there is one); -Swap runs an apply-update.ps1 you already have.
 # Everything happens in a temporary folder, which is removed at the end.
 
-param([Parameter(Mandatory)][string]$Swap, [switch]$NoExplorer)
+param([string]$Swap, [switch]$NoExplorer)
 $ErrorActionPreference = 'Stop'
+$base = Join-Path ([IO.Path]::GetFullPath($env:TEMP)) ("cm-swap-test-" + (Get-Random))
+if (-not $Swap) {
+  $repo = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
+  $python = Join-Path $repo '.venv\Scripts\python.exe'
+  if (-not (Test-Path -LiteralPath $python)) { $python = 'python' }
+  $Swap = Join-Path ([IO.Path]::GetFullPath($env:TEMP)) 'cm-swap-test-apply-update.ps1'
+  Push-Location $repo
+  try { & $python -c "import sys; from ytclip.updater import SWAP_SCRIPT as s; open(sys.argv[1], 'w', encoding='utf-8-sig').write(s)" $Swap }
+  finally { Pop-Location }
+  if ($LASTEXITCODE) { throw "Couldn't write the swap script with $python" }
+}
 $Swap = (Resolve-Path -LiteralPath $Swap).Path
-$base = Join-Path $env:TEMP ("cm-swap-test-" + (Get-Random))
 $failures = 0
 
 function Write-Build([string]$dir, [string]$tag) {
@@ -36,6 +47,10 @@ function New-Case([string]$name) {
   Write-Build $new 'new'
   @{ Root = $root; App = $app; New = $new; Log = (Join-Path $root 'update.log') }
 }
+
+# A program whose working folder is $dir, like a terminal open there.
+function Hold-Folder([string]$dir) { Start-Process ping.exe -WorkingDirectory $dir -ArgumentList '-n', '120', '127.0.0.1' -WindowStyle Hidden -PassThru }
+function Release($p) { Stop-Process -Id $p.Id -Force -ErrorAction SilentlyContinue; [void]$p.WaitForExit(5000) }
 
 function Exited-Pid {
   $p = Start-Process cmd.exe -ArgumentList '/c', 'exit' -WindowStyle Hidden -PassThru
@@ -113,8 +128,8 @@ try {
   Case 'folders held open by terminals and File Explorer' {
     $c = New-Case 'held'
     $holders = @(
-      (Start-Process cmd.exe -WorkingDirectory $c.App -ArgumentList '/c', 'ping -n 120 127.0.0.1 >nul' -WindowStyle Hidden -PassThru),
-      (Start-Process cmd.exe -WorkingDirectory (Join-Path $c.App '_internal\held') -ArgumentList '/c', 'ping -n 120 127.0.0.1 >nul' -WindowStyle Hidden -PassThru))
+      (Hold-Folder $c.App),
+      (Hold-Folder (Join-Path $c.App '_internal\held')))
     $shell = New-Object -ComObject Shell.Application
     if (-not $NoExplorer) {
       Start-Process explorer.exe -ArgumentList "`"$($c.App)`""
@@ -126,7 +141,7 @@ try {
       Check-Updated $c 'folders held open'
       Expect 'folders held open' 'held folder still in place' (Test-Path -LiteralPath (Join-Path $c.App '_internal\held')) $true
     } finally {
-      $holders | ForEach-Object { Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
+      $holders | ForEach-Object { Release $_ }
       foreach ($w in @($shell.Windows())) {
         try { if ($w.Document.Folder.Self.Path -like "$base*") { $w.Quit() } } catch { }
       }
@@ -147,10 +162,10 @@ try {
     $c = New-Case 'merge'
     # Holding the staged _internal makes the new version move in file by file, into folders
     # that are in the way when the old _internal moves back as a whole.
-    $holder = Start-Process cmd.exe -WorkingDirectory (Join-Path $c.New '_internal\held') -ArgumentList '/c', 'ping -n 120 127.0.0.1 >nul' -WindowStyle Hidden -PassThru
+    $holder = Hold-Folder (Join-Path $c.New '_internal\held')
     $lock = [IO.File]::Open((Join-Path $c.New '_internal\sub\deep\b.pyd'), 'Open', 'Read', 'None')
     try { Run-Swap $c (Exited-Pid) }
-    finally { $lock.Close(); Stop-Process -Id $holder.Id -Force -ErrorAction SilentlyContinue }
+    finally { $lock.Close(); Release $holder }
     Check-Untouched $c 'merge back'
   }
 
@@ -176,6 +191,7 @@ try {
 } finally {
   Start-Sleep -Seconds 1
   Remove-Item -LiteralPath $base -Recurse -Force -ErrorAction SilentlyContinue
+  if (Test-Path -LiteralPath $base) { Write-Host "Couldn't remove $base; delete it by hand" }
 }
 
 if ($failures) { Write-Host "$failures check(s) failed" -ForegroundColor Red; exit 1 }

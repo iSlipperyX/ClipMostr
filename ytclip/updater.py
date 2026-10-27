@@ -398,6 +398,9 @@ function Log([string]$m) {
     catch { Start-Sleep -Milliseconds 200 }
   }
 }
+# One spelling of each path (no 8.3 short names), so paths built from them line up.
+$NewDir = [System.IO.Path]::GetFullPath($NewDir).TrimEnd('\')
+$InstallDir = [System.IO.Path]::GetFullPath($InstallDir).TrimEnd('\')
 $staging = Split-Path -Parent $NewDir
 $parent = Split-Path -Parent $InstallDir
 $note = Join-Path $parent 'CLIPMONSTER-UPDATE-FAILED.txt'
@@ -435,7 +438,7 @@ function Move-File([string]$from, [string]$to, [string]$what) {
 # Moves the contents of folder $from into $to file by file (files can move out of a folder
 # that is held open), recreating its subfolders, empty ones included. The emptied folders stay.
 function Move-Contents([string]$from, [string]$to, [string]$what) {
-  $root = [System.IO.Path]::GetFullPath($from).TrimEnd('\') + '\'
+  $root = $from.TrimEnd('\') + '\'
   Ensure-Dir $to
   foreach ($d in [System.IO.Directory]::GetDirectories($from, '*', [System.IO.SearchOption]::AllDirectories)) {
     Ensure-Dir (Join-Path $to $d.Substring($root.Length))
@@ -542,7 +545,7 @@ try {
 
   $appItems = @('ClipMonster.exe', 'ytclip.exe', '_internal') + @(Get-ChildItem -LiteralPath $NewDir -Force | ForEach-Object { $_.Name })
   $appItems = @($appItems | Select-Object -Unique)
-  $nroot = [System.IO.Path]::GetFullPath($NewDir).TrimEnd('\') + '\'
+  $nroot = $NewDir + '\'
   foreach ($d in [System.IO.Directory]::GetDirectories($NewDir, '*', [System.IO.SearchOption]::AllDirectories)) { $newDirs[$d.Substring($nroot.Length)] = $true }
 
   if (Is-Complete $InstallDir) {
@@ -596,7 +599,10 @@ try {
   Log "Update finished"
 } catch {
   Log "Update failed: $($_.Exception.Message)"
-  if (Is-Complete $InstallDir) { Start-App }
+  try {  # unless it's open already (reopened while this waited)
+    $open = @(App-Processes | Where-Object { $_.Name -eq 'ClipMonster.exe' -and -not ($_.CommandLine -like '*--automation*') })
+    if ((Is-Complete $InstallDir) -and -not $open.Count) { Start-App }
+  } catch { }
 }
 """
 
