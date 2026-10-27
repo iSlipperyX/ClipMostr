@@ -18,7 +18,7 @@ from pathlib import Path
 
 from .organize import stamp
 from .settings import PICK_FROM, Settings, app_dir
-from .sources import split_entries, parse_channel
+from .sources import parse_channel, split_entries
 from .trending import CATEGORIES, TrendingVideo
 
 KEEP_DAYS = 120  # picks are remembered this long, so nothing is picked twice
