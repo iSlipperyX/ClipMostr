@@ -26,8 +26,9 @@ To give it to someone else, send them `dist/ClipMonster-windows.zip`. They unzip
 | **Find clips tab** | Weight sliders and length rules. Clips update live as you move them. Clips you've edited by hand are kept. |
 | **Layout tab** | Text banners above and below the video, and a second video stacked under (or over) your clip, such as gameplay or a satisfying loop. A to-scale sketch updates as you change things, and **Live frame** draws a real frame of the selected clip exactly as it will export. Each clip can have its own banner text. The **View** picker sets up a top/bottom view in one click (Title on top, Gameplay below, Gameplay above, Meme…), and **Save…** keeps your own. |
 | **Export tab** | Format, resolution, GPU encoding, captions, loudness and more. Then **Export N clips**. |
-| **Library** | Every exported clip with thumbnails. Double-click to play; right-click to show in Explorer. |
+| **Library** | Every exported clip with thumbnails. Double-click to play; right-click to show in Explorer. Automation's videos show their niche and TikTok account, and the filter shows one niche at a time. **🧹 Clean up…** clears out what nothing needs any more (see [Clean up](#clean-up)). |
 | **Research** | What's trending on YouTube in the countries you pick, scored for how well each video will cut into clips. Keeps checking in the background. Send the best ones to the studio with a double-click. See [Research](#research). |
+| **Niches** | One niche for each of your TikTok accounts: where its videos come from, how many it gets a day and how its clips look. See [Niches](#niches). |
 
 ### How clips are found
 
@@ -49,6 +50,7 @@ Clips grow outward from the peaks. When there's a transcript, their edges are al
 
 **AI polish** (*Settings → AI → Polish clips with AI*, off by default) makes one more Claude call per video, sending each clip's transcript and one small frame from it. It sends back:
 - a **hook** for each clip: a few honest, specific words that go in the top banner when it shows `{title}`, and into `clips.json` for your upload caption;
+- a **bottom line** for each clip with no part 2, when your bottom text promises one (see *Banners* under [Export options](#export-options));
 - **caption fixes** for words the transcript misheard, mostly names and jargon ("Joe Rogen" becomes "Joe Rogan"), swapped word for word so the timing stays right;
 - a 1-10 **rating** of how well each clip stands alone, used by the [quality check](#export-options);
 - where the **speaker** is, so *9:16 vertical cropped* and *1:1* keep them in shot;
@@ -62,7 +64,7 @@ Anything you've edited by hand is left alone, and if the call fails the clips si
 
 - **Formats:** original; 9:16 vertical with a blurred fill; 9:16 vertical cropped (reframe per clip); 1:1 square
 - **Animated captions:** word groups pop on screen with the spoken word highlighted. Font, size, colours, outline, position, words per screen and UPPERCASE are all adjustable. Sizes are letter heights in pixels on a 1080-wide video, so a size looks the same in every font. Optionally, the clip title appears as a banner at the top. **Bleep strong swearing** writes f\*ck, sh\*t and the like in captions and `.srt` files, which TikTok is less likely to hold back.
-- **Banners:** a solid bar of text at the top, the bottom or both (the video sits between them), or the same text laid over the video. `{title}` fills in the clip title, long text wraps and shrinks to fit, and each clip can override the text or show none.
+- **Banners:** a solid bar of text at the top, the bottom or both (the video sits between them), or the same text laid over the video. `{title}` fills in the clip title, long text wraps and shrinks to fit, and each clip can override the text or show none. Bottom text that promises more, like *Follow for part 2*, only shows on a clip that the next clip carries straight on from, and not when the quality check rejects that part 2. Other clips show **Bottom text when there's no part 2** (*Follow for more* to start with) or, with AI polish, a line Claude wrote for that clip. Claude's lines never promise a part 2, and they keep any @handle in your bottom text.
 - **Stacked layout:** your clip on one part of a 9:16 frame and a looping second video on the other. You choose which goes on top, how much room the clip gets, where the second video starts (a random spot per clip, or a fixed time) and how loud it is (silent by default). Captions set to *Middle* sit on the seam. Choose **a folder of second videos** instead of one, and each clip gets a different one: every video in the folder is used once before any repeats, and never the same one twice in a row, even across videos and restarts. `clips.json` notes which one each clip got.
 - **Fonts:** 13 free display fonts ship with the app and look the same on every PC: TikTok Sans Black, Montserrat Black/ExtraBold, Poppins Black/ExtraBold, Archivo Black, Anton, Bebas Neue, Bangers, Luckiest Guy, Lilita One, Titan One and Permanent Marker. Pick one for captions and one for banners. Any font installed on the PC works too. Licences are in `ytclip/fonts/licenses`.
 - **TikTok-ready output** (on by default): every clip comes out 9:16 at 1080×1920 (between 540×960 and 1080×1920 at other resolution settings). *Original* and *1:1* are fitted in with a blurred fill; turn this off to keep them. In 9:16 the banner text and captions stay out of the areas TikTok covers with its tabs, buttons and caption (the layout sketch shades them). Output is H.264 High with AAC 44.1 kHz audio, at most 60 fps and 20 Mbps, and at least 540×960. The log warns about any clip over 10 minutes, or over 287 MB (the phone-app limit; computers can upload up to 4 GB).
@@ -151,7 +153,7 @@ ytclip research --list-categories
 
 The **Automation** tab runs the whole job without you: it checks Research on your schedule, queues whatever your [picking rules](#picking-rules) pick, and clips one video at a time. Press **Start**. Automation runs as its own background process, so it keeps going after you close ClipMonster. Tick **Start with Windows** to have it start every time you sign in.
 
-- **The queue** shows every video, what it's doing now, how many clips it made and why it was picked. Right-click a video to show its clips, try it again or remove it, or paste a link above the queue to add one yourself. Finished clips go to an `Automation` folder in your output folder, and each video's `clips.json` records why it was picked and the style it was cut with.
+- **The queue** shows every video, what it's doing now, how many clips it made and why it was picked. Right-click a video to show its clips, try it again or remove it, or paste a link above the queue to add one yourself. Finished clips go to an `Automation` folder in your output folder, in a folder for each [niche](#niches) when you have them. Each video's `clips.json` records why it was picked, the style it was cut with, and its niche and TikTok account.
 - **It survives anything.** The queue lives in `%APPDATA%\ClipMonster\jobs.db`. If the PC restarts or the process is killed halfway through a video, that video starts again next time. Downloads and analysis are cached, so the second try is quick. No video is ever queued twice.
 - **It's gentle with YouTube.** It does one download at a time, 10 minutes apart. When YouTube asks the PC to "sign in to confirm you're not a bot", it pauses downloads for 6 hours instead of pushing harder. A video that fails is tried again after 15 minutes, then after 1 hour. Videos that can never work (private, removed, members-only) are marked failed straight away.
 - **Pause** finishes nothing new until you resume. **Stop** ends the run within a few seconds, and a video in progress goes back in the queue. Updating ClipMonster stops automation and starts it again afterwards.
@@ -172,6 +174,7 @@ The **Automation** tab runs the whole job without you: it checks Research on you
 | Tries per video | 3 | Before a video is marked failed |
 | Delete full downloads after clipping | on | Keeps the disk from filling up |
 | Clear cached analysis after | 14 days | Removes transcripts and measurements of finished videos |
+| Clean up by itself once a day | off | Runs [Clean up](#clean-up) once a day for the kinds ticked under *What to clear*, on things older than *Only things older than* (3 days) |
 
 The runner writes a log to `%APPDATA%\ClipMonster\automation.log`, which the tab shows too. From the command line:
 
@@ -180,17 +183,35 @@ ytclip auto                    # run in this console until Ctrl+C
 ytclip auto --once             # do what's due now, then exit
 ytclip auto --status           # the queue and what automation is doing
 ytclip auto --add "https://youtu.be/VIDEO"
+ytclip auto --add "https://youtu.be/VIDEO" --niche Gaming   # queue it for one niche
 ytclip auto --pause | --resume | --stop
 ytclip auto --retry ID         # try a failed video again
 ytclip auto --install          # start with Windows (--uninstall to undo)
 ```
+
+### Niches
+
+Run a TikTok account for each topic? Give each account a niche in the **🎯 Niches** tab. A niche has:
+
+- **The account:** a name, the TikTok account it's for, how many videos a day it gets (2 to start with), and a switch to pause it.
+- **Where its videos come from:** its own channel list and Creative Commons searches. Title words and YouTube categories catch videos from the trending charts.
+- **How its clips look:** its own style, top/bottom view and folder of second videos (blank ones use Settings → Automation), and a note telling Claude what makes a good clip for that account. AI picks and AI polish both read the note.
+
+Every picked video goes into one niche: the one that lists its channel, then the one whose search found it, then the first with a matching title word, then the first with its category. A video that fits no niche isn't picked, and its Pick tooltip says why. Research's **Niche** column shows where each video would go.
+
+- **Fair shares.** Each niche picks at most its own number of videos a day. **Videos picked per day** (Settings → Picking) is the limit for all of them together, handed out one pick at a time, and the niche with the fewest picks in the last day goes first. One busy niche can't take every pick.
+- **A paused niche** holds its own channels' and searches' videos back. They aren't handed to another account.
+- **Style.** A recipe for the video's channel or category comes first, then the niche's own style and view, then a catch-all (`*`) recipe, then Settings → Automation.
+- **Folders.** Each niche's clips go to `Automation\<niche>\`, and `clips.json` records the niche and its TikTok account, so TikTok Manager can stage each folder for its own account. Renaming a niche sends new clips to its new folder. Clips already made stay where they are.
+
+Making your first niche moves your channel list and Creative Commons searches into it. If you never make a niche, nothing changes. `ytclip niches` lists your niches with what each picked today, what's waiting and its clips in the last 7 days (`--json` for scripts).
 
 ### Learning from results
 
 TikTok Manager shares how your posted clips did: after each stats refresh it writes `%APPDATA%\ClipMonster\results.json`, with the views of every ClipMonster clip that has been up for two days, compared with the usual views on that TikTok account (so "2×" means twice your usual). With **Settings → Picking → Learn from how my clips do** on (the default), ClipMonster uses it in three ways:
 
 - **Picking.** Channels whose clips beat your usual views get up to 12 extra clip-ability points when ranking and checking the minimum score, and channels whose clips flop lose up to 12. One lucky clip counts for little; the effect grows as a channel gets more posts. Research shows why in the Pick tooltip and the video's details, e.g. "Your clips from Some Pod get 2.4× your usual views (5 posts): +8."
-- **AI polish.** Once six or more clips with hooks have results, the polish sees the hooks that worked and the ones that flopped, and writes new hooks more like the hits.
+- **AI polish.** Once six or more clips with hooks have results, the polish sees the hooks that worked and the ones that flopped, and writes new hooks more like the hits. Once a niche has six of its own, its videos learn from just those.
 - **Tips.** The Automation tab shows **What's working**: the best and worst channels, which clip length does best, and whether the AI rating predicts views (and so whether a higher quality-check minimum would help). Settings are never changed for you.
 
 `ytclip results` prints the same, with every channel's numbers (`--json` for scripts). Results older than 90 days are ignored.
@@ -209,7 +230,40 @@ Videos/ClipMonster/
         └── clips.json    ← the same, machine readable
 ```
 
+Automation's clips go to `<output>/Automation` in the same layout, inside a folder for each niche when you have niches: `Automation/Gaming/<channel>/<date> <title> [<id>]/`.
+
 Full downloads are cached in `<output>/.downloads`, so re-analysing or re-exporting never downloads a video twice. Your settings, presets and session live in `%APPDATA%\ClipMonster`.
+
+## Clean up
+
+Clips, downloads and previews pile up. **🧹 Clean up…**, in the Library and Automation tabs, clears out what nothing needs any more:
+
+| Kind | What it is | Ticked to start with |
+|---|---|---|
+| Unfinished downloads | Downloads that stopped part way and haven't been touched for half an hour | yes |
+| Preview renders | Clips made by Render preview and the Layout tab's preview, in the temp folder | yes |
+| Downloaded videos | Full videos kept after clipping. Clipping one again downloads it again | no |
+| Saved transcripts and analysis | A video opened again is measured again without them | no |
+| Clips the quality check rejected | The `_rejected` folders. TikTok Manager never takes these | yes |
+| Clips you've posted | Clips TikTok Manager says you've posted. Its post history and stats stay | yes |
+| Clips you removed in TikTok Manager | It never brings them back | yes |
+
+Nothing goes until you've seen it: the window lists every file and how much space it frees. You can untick whole kinds or single files, choose **Only things older than** (posted clips count from when you posted them), or send everything to the Recycle Bin instead. Each video's `clips.json` and `README.md` are updated to match. Some things always stay:
+
+- clips TikTok Manager still has waiting;
+- anything for a video that's queued, being clipped or in the Studio's list;
+- anything changed in the last 10 minutes;
+- anything that isn't ClipMonster's own.
+
+Tick **Do this by itself once a day while automation runs** and automation clears the ticked kinds once a day, at the age you chose (never less than a day).
+
+```
+ytclip clean                     # what would go, and how much space it frees
+ytclip clean --list              # every file, too
+ytclip clean --only posted,rejected --older-than 7 --delete
+```
+
+Nothing is removed without `--delete`. Without `--only`, it leaves downloaded videos and analysis alone.
 
 ## Command line (`ytclip.exe`)
 
@@ -225,6 +279,8 @@ ytclip "C:\Videos\stream.mp4" --stack "C:\Videos\parkour.mp4" --top-text "{title
 ytclip "https://youtu.be/VIDEO" --stack "C:\Videos\Gameplay" --polish --captions --bleep --qc
 ytclip qc "C:\Users\me\Videos\ClipMonster"      # check exported clips again
 ytclip results                                  # what's working, from TikTok Manager's stats
+ytclip niches                                   # your niches and how each is doing
+ytclip clean                                    # what Clean up would clear (--delete clears it)
 ytclip --list-presets
 ```
 
@@ -288,7 +344,9 @@ Run the tests with `pip install -e .[test]` and then `pytest`. They need no netw
 | `ytclip/clipability.py` | Clip-ability score for trending videos |
 | `ytclip/research.py` | One research scan, shared by the Research tab and `ytclip research` |
 | `ytclip/sources.py` | Channel list and Creative Commons searches for Research |
-| `ytclip/policy.py` | Picking rules and the log of picks |
+| `ytclip/policy.py` | Picking rules, each niche's share, and the log of picks |
+| `ytclip/niches.py` | Niches: each TikTok account's sources, look and folder, and which niche a video goes in |
+| `ytclip/cleanup.py` | Clean up: what nothing needs any more, and clearing it |
 | `ytclip/pipeline.py` | Automation: the unattended runner, recipes, pacing and retries |
 | `ytclip/jobs.py` | `jobs.db`, the automation queue shared by the runner and the app |
 | `ytclip/transcribe.py` | Whisper transcription |
