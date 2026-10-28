@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -39,7 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog='Example: ytclip "https://youtu.be/VIDEO" --preset "Shorts / TikTok / Reels"\n'
            "Trending research: ytclip research --help\nFind videos for a request: ytclip find --help\n"
            "Automation: ytclip auto --help\n"
-           "Quality check: ytclip qc --help\nWhat's working: ytclip results --help",
+           "Quality check: ytclip qc --help\nWhat's working: ytclip results --help\n"
+           "Upload to a storage server: ytclip upload --help\nClear out space: ytclip clean --help",
     formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("sources", nargs="*", help="video/playlist/channel URLs, video files or folders")
@@ -1061,6 +1063,66 @@ def run_whisper_test(argv: list[str]) -> int:
     return 0
 
 
+def run_upload(argv: list[str]) -> int:
+    from . import gdrive, pipeline, uploads
+    from .jobs import JobDB
+
+    p = argparse.ArgumentParser(
+        prog="ytclip upload", description="Upload finished clips to your storage server (Settings → Upload). "
+        "Automation and the app upload by themselves; this shows how it's going or does it now.")
+    p.add_argument("--sign-in", action="store_true", help="sign in to Google Drive (opens your browser)")
+    p.add_argument("--sign-out", action="store_true", help="forget the Google Drive sign-in")
+    p.add_argument("--now", action="store_true", help="upload everything waiting now, then exit")
+    p.add_argument("--retry", action="store_true", help="try failed uploads again")
+    args = p.parse_args(argv)
+    s = Settings.load()
+    if args.sign_out:
+        gdrive.sign_out()
+        console.print("Signed out of Google Drive. Nothing is uploaded there until you sign in again.")
+        return 0
+    if args.sign_in:
+        console.print("Your browser is opening Google's sign-in page. Sign in and allow ClipMonster to add files "
+                      "to your Drive…")
+        try:
+            account = gdrive.sign_in(s.gdrive_client_id, s.gdrive_client_secret)
+        except gdrive.DriveError as exc:
+            console.print(f"[red]✗ {escape(str(exc))}[/]")
+            return 1
+        if not s.upload_target:
+            s.copy(upload_target="gdrive").save()
+        console.print(f"[green]✓ Signed in to Google Drive as {escape(account.email or 'your account')}.[/] Clips "
+                      "upload by themselves from now on.")
+        return 0
+    db = JobDB()
+    try:
+        if args.retry:
+            n = uploads.retry_failed(db)
+            pipeline.request_uploads(db)
+            console.print(f"{n} failed upload{'s' if n != 1 else ''} will be tried again.")
+        target = uploads.target_for(s)
+        if target is None:
+            console.print("Uploading is off. Pick a server in Settings → Upload.")
+            return 0
+        problem = target.problem(s)
+        if problem:
+            console.print(f"[yellow]⚠ {escape(problem)}[/]")
+            return 1
+        if args.now:
+            uploads.sync(db, s)
+            db.set_meta("upload_hold", 0)
+            sent = 0
+            with Progress(TextColumn("[cyan]{task.description}"), BarColumn(), console=console, transient=True) as bar:
+                task = bar.add_task("Uploading", total=None)
+                while uploads.upload_next(db, s, f"{os.getpid()}:cli",
+                                          lambda m: (bar.update(task, description=escape(m)), console.print(escape(m)))):
+                    sent += 1
+            console.print(f"{sent} clip{'s' if sent != 1 else ''} uploaded.")
+        console.print(escape(uploads.status(db).text()))
+        return 0
+    finally:
+        db.close()
+
+
 def run_sign_in(argv: list[str], wait: float = 1800.0, poll: float = 2.0) -> int:
     from . import pipeline, youtube_login
     from .jobs import JobDB
@@ -1129,6 +1191,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_whisper_test(argv[1:])
     if argv[:1] == ["sign-in"]:
         return run_sign_in(argv[1:])
+    if argv[:1] == ["upload"]:
+        return run_upload(argv[1:])
     if argv[:1] == ["doctor"]:
         return run_doctor(argv[1:])
     if argv[:1] == ["results"]:

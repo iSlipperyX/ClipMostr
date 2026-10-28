@@ -108,4 +108,4 @@ jobs:
       - name: Update the build with its own helper
         run: python tests/windows/frozen_update.py dist/ClipMonster
       - name: Install, update and uninstall with ClipMonster-Setup.exe
-        run: python tests/windows/installer_test.py dist/ClipMonster-Setup.exe
+        run: python tests/windows/setup_exe.py dist/ClipMonster-Setup.exe

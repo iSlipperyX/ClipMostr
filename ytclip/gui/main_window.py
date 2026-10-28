@@ -7,7 +7,7 @@ import tempfile
 from dataclasses import asdict, fields, replace
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QObject, QSettings, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleS
                                QPushButton, QScrollArea, QSlider, QSplitter, QTableWidget, QTableWidgetItem,
                                QTabWidget, QTextEdit, QVBoxLayout, QWidget)
 
-from .. import __version__, compose, layout, series, updater, youtube_login
+from .. import __version__, compose, layout, pipeline, series, updater, uploads, youtube_login
 from ..analyze import SIGNAL_LABELS, Clip, clip_score
 from ..download import VIDEO_EXTS, expand_sources, is_url, needs_expansion
 from ..engine import Engine, Project
@@ -125,6 +125,12 @@ class QueueItem(QWidget):
             self.bar.setValue(int(frac * 1000))
 
 
+class _Relay(QObject):
+    """Hands lines from a worker thread to the window's log, on the window's own thread."""
+
+    line = Signal(str)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -156,6 +162,12 @@ class MainWindow(QMainWindow):
         self._restore()
         self.library.refresh()
         QTimer.singleShot(2500, self._startup_updates)
+        # Finished clips go up to the storage server (Settings → Upload), here while automation isn't running.
+        self._upload_log = _Relay(self)
+        self._upload_log.line.connect(self._log)
+        self.uploader = uploads.Uploader(lambda: self.settings, self._upload_log.line.emit,
+                                         idle_when=pipeline.runner_alive)
+        self.uploader.start()
 
     def _startup_updates(self) -> None:
         finished = updater.finished_update_message()
@@ -909,6 +921,7 @@ class MainWindow(QMainWindow):
         self._status_is_progress = False
 
     def _idle(self) -> None:
+        self.uploader.nudge()  # an export may have just finished
         self.progress.setVisible(False)
         self.cancel_btn.setVisible(False)
         if self._status_is_progress:
@@ -1456,6 +1469,7 @@ class MainWindow(QMainWindow):
         old = self.settings
         self.settings = new
         self.settings.save()
+        self.uploader.nudge()
         forms.refresh(self.tune_editors, new)
         forms.refresh(self.export_editors, new)
         self.research.settings_changed()
@@ -1497,6 +1511,9 @@ class MainWindow(QMainWindow):
                 self.banner.check(manual=False)  # a new channel: see what it has straight away
         elif dlg.signed_in:  # cancelled, but the sign-in just made still counts
             self._apply_settings(self.settings.copy(cookies_browser=youtube_login.CHOICE))
+        if dlg.drive_changed:
+            self.uploader.nudge()
+            pipeline.request_uploads(self.automation.db)
         if dlg.signed_in and self.settings.cookies_browser == youtube_login.CHOICE:
             self.automation.end_pause_after_sign_in()
 
@@ -1662,6 +1679,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e) -> None:
         self._closing = True
+        self.uploader.stop(wait=3)  # an upload cut off carries on next time, from where it stopped
         self.banner.shutdown()
         self.research.shutdown()
         self.niches.shutdown()

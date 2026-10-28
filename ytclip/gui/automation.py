@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QHeaderView, QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QSplitter,
                                QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
-from .. import learn, niches, pipeline, youtube_login
+from .. import learn, niches, pipeline, uploads, youtube_login
 from ..clipability import age_text
 from ..jobs import Job, JobDB
 from ..research import youtube_key
@@ -177,6 +177,10 @@ class Automation(QWidget):
         self.counts = QLabel()
         self.counts.setProperty("muted", True)
         uv.addWidget(self.counts)
+        self.uploads = QLabel()
+        self.uploads.setWordWrap(True)
+        self.uploads.setToolTip("Finished clips going up to your storage server (Settings → Upload)")
+        uv.addWidget(self.uploads)
         self.learned = QLabel()
         self.learned.setTextFormat(Qt.RichText)
         self.learned.setWordWrap(True)
@@ -275,11 +279,21 @@ class Automation(QWidget):
         self.pause_btn.setToolTip("Carry on" if paused else "Finish nothing new until you resume; a video in "
                                                             "progress carries on")
         self._fill_table()
+        self._show_uploads()
         self.niche_panel.refresh()
         self.request_panel.refresh()
         self._refresh_report()
         self._tail_log()
         self._show_lessons()
+
+    def _show_uploads(self) -> None:
+        if not self._settings().upload_target:
+            self.uploads.setVisible(False)
+            return
+        st = uploads.status(self.db)
+        colour = theme.WARN if st.problem or st.failed else theme.MUTED
+        self.uploads.setText(f"<span style='color:{colour}'>☁ {_esc(st.text())}</span>")
+        self.uploads.setVisible(True)
 
     def _show_lessons(self) -> None:
         """What's working, from TikTok Manager's results (re-read only when the file changes)."""

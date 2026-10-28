@@ -204,9 +204,16 @@ class Settings:
     disk_min_free_gb: int = 15  # automation cleans up, then pauses, before free space falls under this (0 = off)
     watchdog_minutes: int = 30  # a download or export that stops moving this long is stopped (0 = off)
     auto_prefetch: bool = True  # download the next video while this one is clipped
+    # Upload (uploads.py): finished clips go to a storage server too
+    upload_target: str = ""  # "" (off) | gdrive | folder (UPLOAD_TARGETS)
+    upload_what: str = "all"  # all | automation
+    gdrive_client_id: str = ""  # your own OAuth client (a "Desktop app" one), from console.cloud.google.com
+    gdrive_client_secret: str = ""
+    gdrive_folder: str = "ClipMonster"  # the folder in your Drive that clips go into
+    upload_folder: str = ""  # for "folder": a NAS share, mapped drive or synced folder
     # Clean up (cleanup.py): clear out downloads, rejected clips and clips TikTok Manager is done with
     cleanup_auto: bool = True  # automation does it once a day
-    cleanup_kinds: str = "partial, previews, rejected, posted, removed"
+    cleanup_kinds: str = "partial, previews, rejected, posted, removed, uploaded"
     cleanup_days: int = 3
     # 2 = text sizes are letter heights (1 = raw .ass sizes, which looked different in every font)
     text_units: int = 2
@@ -265,8 +272,10 @@ class Settings:
         if isinstance(data, dict) and data and "update_channel" not in data:
             # Saved before 2.8.0. "Include beta versions" is the Beta channel now, and Clean up runs by
             # itself every day: nothing ClipMonster is done with is left taking up space.
+            kinds = str(data.get("cleanup_kinds") or "")
             data = data | {"update_channel": "beta" if data.get("include_prereleases") else "stable",
-                           "cleanup_auto": True}
+                           "cleanup_auto": True,
+                           "cleanup_kinds": f"{kinds}, uploaded" if kinds and "uploaded" not in kinds else kinds}
         return cls().apply(migrate(data))
 
     def save(self, path: Path | None = None) -> None:
@@ -512,7 +521,10 @@ CLEANUP_KINDS = (
     ("rejected", "Clips the quality check rejected"),
     ("posted", "Clips you've posted (TikTok Manager)"),
     ("removed", "Clips you removed in TikTok Manager"),
+    ("uploaded", "Clips safely uploaded to your storage server"),
 )
+
+UPLOAD_TARGETS = (("", "Off"), ("gdrive", "Google Drive"), ("folder", "A folder (NAS, network share or synced folder)"))
 
 UPDATE_CHANNELS = (("stable", "Stable"), ("beta", "Beta (test versions)"), ("dev", "Dev (every change)"))
 
@@ -540,6 +552,21 @@ SCHEMA: list[Field] = [
           help="New versions download in the background, so updating is one click (Restart now). When the "
                "window is closed, automation installs them itself between videos and carries on. Off: you're "
                "told about new versions and download them yourself"),
+    Field("upload_target", "Upload finished clips to", "Upload", "choice", choices=UPLOAD_TARGETS,
+          help="Every clip that's exported and passes the quality check is copied to the server once, in the "
+               "same folders it has on this PC. It runs in the background and never holds up clipping"),
+    Field("upload_what", "Which clips", "Upload", "choice",
+          choices=(("all", "All finished clips"), ("automation", "Only automation's clips"))),
+    Field("gdrive_client_id", "Google OAuth client ID", "Upload", "str", placeholder="….apps.googleusercontent.com",
+          help="From your own Google Cloud project: Credentials → Create credentials → OAuth client ID → Desktop "
+               "app. Free. The guide linked above takes about 5 minutes"),
+    Field("gdrive_client_secret", "Google OAuth client secret", "Upload", "secret", placeholder="GOCSPX-…"),
+    Field("gdrive_folder", "Folder in your Drive", "Upload", "str",
+          help="Made in My Drive if it isn't there. ClipMonster can only see what it put in Drive itself"),
+    Field("upload_folder", "Folder to upload to", "Upload", "path",
+          help="For 'A folder': a NAS share (\\\\NAS\\clips), a mapped drive, or a folder Google Drive, Dropbox or "
+               "OneDrive syncs"),
+
     Field("update_repo", "Update source (GitHub owner/repo)", "Updates", "str",
           help="Leave blank to use the repository this build was published from"),
 

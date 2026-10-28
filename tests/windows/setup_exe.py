@@ -4,7 +4,7 @@ Run on a throwaway Windows machine after `python build.py --installer` (the Test
 frozen-update job does). It installs into this account's %LOCALAPPDATA%\\Programs\\ClipMonster and
 changes the Start with Windows entry, so it refuses to run anywhere but CI:
 
-    python tests/windows/installer_test.py dist/ClipMonster-Setup.exe
+    python tests/windows/setup_exe.py dist/ClipMonster-Setup.exe
 """
 
 import os

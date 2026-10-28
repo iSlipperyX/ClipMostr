@@ -23,14 +23,16 @@ from . import theme
 
 HELP = {
     "partial": "Downloads that stopped part way and haven't been touched for half an hour",
-    "previews": "Clips made by Render preview and the Layout tab's preview, in the temp folder",
+    "previews": "Clips made by Render preview and the Layout tab's preview, in ClipMonster's work folder",
     "downloads": "Full videos kept after clipping. Clipping one again downloads it again",
     "analysis": "Transcripts, captions and measurements. A video opened again is measured again without them",
     "rejected": "Clips the quality check moved to a _rejected folder. TikTok Manager never takes these",
     "posted": "Clips TikTok Manager says you've posted. Its post history and stats stay",
     "removed": "Clips you removed from TikTok Manager's library. It never brings them back",
+    "uploaded": "Clips that are safely on your storage server (Settings → Upload), unless TikTok Manager still "
+                "needs them. The uploaded copies stay",
 }
-ON_BY_DEFAULT = ("partial", "previews", "rejected", "posted", "removed")
+ON_BY_DEFAULT = ("partial", "previews", "rejected", "posted", "removed", "uploaded")
 ITEM_ROLE = Qt.UserRole + 1  # a file row's index in the plan
 
 

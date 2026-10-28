@@ -279,6 +279,7 @@ def test_cleanup_window_previews_then_cleans_what_is_ticked(app, tmp_path):
         return plan
 
     host = Host()
+    host.settings = host.settings.copy(cleanup_auto=False)  # the daily clean-up is off
     dlg = CleanupDialog(host.get, host.change, lambda: {"busyid"}, look=look)
     _wait(app, dlg)
     assert looked == [({"busyid"}, 0)]
@@ -310,7 +311,7 @@ def test_cleanup_window_previews_then_cleans_what_is_ticked(app, tmp_path):
     dlg.days.setValue(5)
     dlg.done(0)
     assert host.settings.cleanup_auto and host.settings.cleanup_days == 5
-    assert host.settings.cleanup_kinds == "previews, rejected, posted, removed"
+    assert host.settings.cleanup_kinds == "previews, rejected, posted, removed, uploaded"
     dlg.dispose()
 
 

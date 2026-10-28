@@ -30,6 +30,7 @@ from .policy import PickLog, Policy, decide, language_codes, picks_path
 from .procs import boot_time, process_alive, process_name  # noqa: F401 (tests patch them here)
 from .settings import Settings, all_layouts, all_presets, app_dir, find_layout
 from .trending import CATEGORIES, History, ResearchBlocked
+from .uploads import Uploader
 
 Log = Callable[[str], None]
 
@@ -1095,6 +1096,9 @@ class Runner:
         # reporting progress) never makes automation look stopped, or lets a second one take over.
         pulse = Pulse(lambda: self.beat(force=True), PULSE)
         pulse.start()
+        # Finished clips go up to the storage server alongside, never holding up clipping (uploads.py).
+        uploader = Uploader(self.load, lambda m: self.log(m), db_factory=lambda: JobDB(self.db.path))
+        uploader.start()
         stop = self._stop = stop or (lambda: False)
         try:
             self.health()
@@ -1122,6 +1126,7 @@ class Runner:
             pass
         finally:
             self.stop_prefetch()
+            uploader.stop()  # an upload cut off here carries on next time, from where it stopped
             pulse.stop()  # before release, so a last beat can't mark it running again
             self.log("Automation stopped.")
             self.release()
@@ -1358,6 +1363,13 @@ def request_scan(db: JobDB, niche_id: str = "") -> None:
     asked = db.meta("scan_now")
     db.set_meta("scan_now", niche_id if niche_id and asked in ("", niche_id) else "1")
     db.set_meta("nudge", "1")  # a running automation looks now, not after its wait
+
+
+def request_uploads(db: JobDB) -> None:
+    """Ask the uploader (in automation, or in the window) to look again now: the Upload settings
+    changed, Google Drive was signed in to, or failed uploads should be tried again."""
+    db.set_meta("upload_hold", 0)
+    db.set_meta("upload_nudge", "1")
 
 
 def is_app_process(pid: str | int) -> bool:

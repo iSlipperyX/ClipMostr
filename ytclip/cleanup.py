@@ -10,6 +10,7 @@ plan() only looks; apply() removes what a plan lists, for the kinds you pick (CL
 * rejected: clips the quality check rejected (TikTok Manager never takes those)
 * posted: clips TikTok Manager says you've posted
 * removed: clips you removed from TikTok Manager's library (it never brings those back)
+* uploaded: clips that are safely on your storage server (uploads.py), the same file that went up
 
 It never touches a video that's queued, being clipped or open in the Studio, a clip TikTok Manager
 still has (in its library, queued, failed or uploading), anything changed in the last few minutes,
@@ -44,8 +45,8 @@ KINDS = tuple(k for k, _ in CLEANUP_KINDS)
 LABELS = dict(CLEANUP_KINDS)
 NOUNS = {"partial": "unfinished download", "previews": "preview render", "downloads": "downloaded video",
          "analysis": "saved analysis file", "rejected": "rejected clip", "posted": "posted clip",
-         "removed": "removed clip"}
-CLIP_KINDS = ("rejected", "posted", "removed")
+         "removed": "removed clip", "uploaded": "uploaded clip"}
+CLIP_KINDS = ("rejected", "posted", "removed", "uploaded")
 CACHE_KINDS = ("partial", "downloads", "analysis")
 REJECTED_DIR = "_rejected"
 FRESH = 10 * 60  # anything changed this recently may still be in use
@@ -233,10 +234,13 @@ def studio_ids(session: Path | None = None) -> set[str]:
 
 def plan(s: Settings, now: float | None = None, busy: set[str] | frozenset = frozenset(),
          older_than_days: float = 0.0, kinds=KINDS, tm: TikTokManager | None = None,
-         temp_dir: Path | None = None) -> Plan:
-    """What a clean-up of these kinds would remove. Changes nothing."""
+         temp_dir: Path | None = None, uploaded: dict | None = None) -> Plan:
+    """What a clean-up of these kinds would remove. Changes nothing. `uploaded`: uploads.uploaded()
+    (read from jobs.db when it's needed and not given)."""
     now = time.time() if now is None else now
     kinds = set(kinds)
+    if "uploaded" in kinds and uploaded is None:
+        uploaded = _uploaded()
     cutoff = now - max(0.0, older_than_days) * DAY
     p = Plan()
     tm = tm if tm is not None else read_tiktok_manager()
@@ -253,7 +257,7 @@ def plan(s: Settings, now: float | None = None, busy: set[str] | frozenset = fro
         else:
             if not tm.found and kinds & {"posted", "removed"}:
                 p.notes.append("TikTok Manager isn't set up on this PC, so ClipMonster can't tell which clips "
-                               "you've posted or removed. Only rejected clips can be cleared.")
+                               "you've posted or removed. Only rejected and uploaded clips can be cleared.")
             elif tm.found and s.auto_output_path.is_dir() and not _watched(s.auto_output_path, tm.watch_folders):
                 p.notes.append("TikTok Manager isn't watching your Automation folder, so its clips never reach "
                                "it. Add the folder in TikTok Manager (Settings → Ready to upload).")
@@ -262,7 +266,7 @@ def plan(s: Settings, now: float | None = None, busy: set[str] | frozenset = fro
                 for folder, data in _video_folders(root, s):
                     if _key(folder) not in seen:
                         seen.add(_key(folder))
-                        _plan_folder(p, folder, data, tm, kinds, busy, cutoff, now)
+                        _plan_folder(p, folder, data, tm, kinds, busy, cutoff, now, uploaded or {})
     if kinds & set(CACHE_KINDS):
         _plan_cache(p, s.cache_path, kinds, busy, cutoff, now, own_folder=not s.cache_dir)
     if "previews" in kinds:
@@ -297,8 +301,25 @@ def _video_folders(root: Path, s: Settings):
             yield folder, data
 
 
+def _uploaded() -> dict:
+    from . import uploads
+    from .jobs import JobDB
+
+    try:
+        db = JobDB()
+    except Exception:
+        return {}
+    try:
+        return uploads.uploaded(db)
+    finally:
+        db.close()
+
+
 def _plan_folder(p: Plan, folder: Path, data: dict, tm: TikTokManager, kinds: set[str], busy, cutoff: float,
-                 now: float) -> None:
+                 now: float, uploaded: dict | None = None) -> None:
+    from .uploads import _norm
+
+    uploaded = uploaded or {}
     video = data.get("video") if isinstance(data.get("video"), dict) else {}
     if video.get("id") in busy:
         return  # being clipped again right now
@@ -324,6 +345,8 @@ def _plan_folder(p: Plan, folder: Path, data: dict, tm: TikTokManager, kinds: se
             kind, when = "posted", tm.posted[key] or mtime
         elif key in tm.removed:
             kind, when = "removed", mtime
+        elif (up := uploaded.get(_norm(path))) and up[0] == size and abs(up[1] - mtime) < 1:
+            kind, when = "uploaded", up[2]  # the very file that went up, as long ago as it went
         else:
             continue
         if kind not in kinds or when > cutoff or now - mtime < FRESH:
