@@ -100,7 +100,7 @@ class Report:
             out.append(f"…and {len(self.failed) - 5} more failed")
         if self.blocks:
             out.append(f"YouTube asked the PC to sign in {self.blocks} time{'s' if self.blocks != 1 else ''}, so "
-                       "automation paused itself (Settings → Download → Use browser login helps)")
+                       "automation paused itself (Sign in to YouTube in Automation helps)")
         if self.disk_pauses:
             out.append(f"Paused {self.disk_pauses} time{'s' if self.disk_pauses != 1 else ''} because the disk was "
                        "nearly full")

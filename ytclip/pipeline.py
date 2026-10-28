@@ -21,7 +21,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
-from . import learn, niches, orders, research
+from . import learn, niches, orders, research, youtube_login
 from .download import is_blocked
 from .engine import Cancelled, Engine, Project, timing_text
 from .jobs import SIGN_IN_WAIT, Job, JobDB
@@ -265,10 +265,18 @@ def record_block(db: JobDB, error: str, now: float, cookies: str = "") -> str:
     db.set_meta("blocked_cookies", cookies.strip())
     db.set_meta("gap_factor", factor)
     db.set_meta("last_error", error)
+    if cookies.strip() == youtube_login.CHOICE:
+        sooner = ("ClipMonster's YouTube sign-in may have run out: press Sign in to YouTube in Automation to sign "
+                  "in again, which also carries on now")
+    elif cookies.strip():
+        sooner = (f"{cookies.strip().title()}'s YouTube sign-in may have run out. Press Sign in to YouTube in "
+                  "Automation for a sign-in kept just for ClipMonster, which also carries on now")
+    else:
+        sooner = ("press Sign in to YouTube in Automation (it opens Firefox, once) so downloads are signed in, "
+                  "which also carries on now. Or press Try now")
     return (f"⚠ YouTube asked this PC to sign in, so ClipMonster stops asking it for anything until "
             f"{time.strftime('%H:%M', time.localtime(until))} and then spaces downloads {factor}x further "
-            f"apart for a day. It carries on by itself; to carry on sooner, pick a browser that's signed in to "
-            f"YouTube in Settings → Download → Use browser login, or press Try now in Automation. "
+            f"apart for a day. It carries on by itself; to carry on sooner, {sooner}. "
             f"(YouTube said: {youtube_said(error)})")
 
 

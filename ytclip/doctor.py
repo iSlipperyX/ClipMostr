@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import niches
+from . import niches, youtube_login
 from .cleanup import read_tiktok_manager, size_text, tiktok_manager_dir
 from .settings import Settings
 
@@ -237,10 +237,22 @@ def check(s: Settings, db=None, online: bool = False, now: float | None = None) 
     checks += _folders(s)
     checks.append(_tiktok_manager(s))
     checks += _niches_and_requests(s, db)
-    if not s.cookies_browser and db is not None and now - db.meta_float("blocked_at") < 7 * 86400:
-        checks.append(Check("Browser login", WARN, "YouTube asked this PC to sign in this week",
-                            "Settings → Download → Use browser login, with a spare Google account (Firefox works best)"))
+    checks += _youtube_sign_in(s, db, now)
     return checks
+
+
+def _youtube_sign_in(s: Settings, db, now: float) -> list[Check]:
+    fix = "Automation → Sign in to YouTube (opens Firefox; use a spare Google account)"
+    if s.cookies_browser == youtube_login.CHOICE:
+        got = youtube_login.read_sign_in(now=now)
+        if not got.signed_in:
+            return [Check("YouTube sign-in", WARN, "ClipMonster's Firefox isn't signed in to YouTube, so downloads "
+                                                   "aren't signed in", fix)]
+        until = f" until {datetime.fromtimestamp(got.expires):%d %b %Y}" if got.expires else ""
+        return [Check("YouTube sign-in", GOOD, f"Downloads are signed in with ClipMonster's Firefox{until}")]
+    if not s.cookies_browser and db is not None and now - db.meta_float("blocked_at") < 7 * 86400:
+        return [Check("YouTube sign-in", WARN, "YouTube asked this PC to sign in this week", fix)]
+    return []
 
 
 def problems(checks: list[Check]) -> list[Check]:

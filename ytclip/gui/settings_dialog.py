@@ -8,10 +8,11 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPushButton,
                                QScrollArea, QTabWidget, QVBoxLayout)
 
-from .. import __version__, niches, updater
+from .. import __version__, niches, updater, youtube_login
 from ..settings import SCHEMA, Settings, app_dir
 from ..trending import KEY_HELP_URL
 from . import forms, theme
+from .sign_in_dialog import SignInDialog
 
 GROUPS = ("General", "Download", "Clip finding", "Transcription", "AI", "Export", "Captions", "Layout",
           "Research", "Picking", "Automation", "Updates")
@@ -24,6 +25,7 @@ class SettingsDialog(QDialog):
         self.resize(640, 620)
         self.result_settings = settings.copy()
         self._editors: dict[str, forms.Editor] = {}
+        self.signed_in = False  # signed in to YouTube from here: the caller ends a sign-in pause
 
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
@@ -50,6 +52,15 @@ class SettingsDialog(QDialog):
                 test.clicked.connect(self._test_key)
                 row.addWidget(test)
                 row.addWidget(self._key_result, 1)
+                page.layout().addRow("", row)
+            if group == "Download":
+                row = QHBoxLayout()
+                sign_in = QPushButton("🔑  Sign in to YouTube…")
+                sign_in.setToolTip("Opens Firefox, just for ClipMonster, to sign in to YouTube once. Downloads then "
+                                   "use that sign-in")
+                sign_in.clicked.connect(self._sign_in)
+                row.addWidget(sign_in)
+                row.addStretch(1)
                 page.layout().addRow("", row)
             if group == "Updates":
                 repo = updater.configured_repo(self.result_settings.update_repo)
@@ -136,6 +147,19 @@ class SettingsDialog(QDialog):
             QApplication.restoreOverrideCursor()
         self._key_result.setText(msg if colour == theme.BAD else f"✓ {msg}")
         self._key_result.setStyleSheet(f"color:{colour};")
+
+    def _sign_in(self) -> None:
+        dlg = SignInDialog(self)
+        dlg.signed_in.connect(lambda: self._use_sign_in(True))
+        dlg.forgotten.connect(lambda: self._use_sign_in(False))
+        dlg.exec()
+
+    def _use_sign_in(self, on: bool) -> None:
+        self.signed_in = on
+        mine = self.result_settings.cookies_browser == youtube_login.CHOICE
+        if on != mine and (on or mine):
+            self.result_settings = self.result_settings.apply({"cookies_browser": youtube_login.CHOICE if on else ""})
+            forms.refresh(self._editors, self.result_settings)
 
     def _reset(self) -> None:
         # Niches are your content, edited in their own tab, not a setting to reset.

@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Callable
 
 from .ffmpeg import ffmpeg_exe, probe
+from .youtube_login import cookie_option
 
 Log = Callable[[str], None]
 Progress = Callable[[str, "float | None"], None]  # (stage message, 0-1 or None)
@@ -111,8 +112,9 @@ def _base_opts(log: Log | None, cookies_from_browser: str | None) -> dict:
     runtimes = {name: {} for name in ("deno", "node", "bun") if shutil.which(name)}
     if runtimes:
         opts["js_runtimes"] = runtimes
-    if cookies_from_browser:
-        opts["cookiesfrombrowser"] = (cookies_from_browser,)
+    cookies = cookie_option(cookies_from_browser)
+    if cookies:
+        opts["cookiesfrombrowser"] = cookies
     return opts
 
 

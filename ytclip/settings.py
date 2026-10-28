@@ -489,10 +489,12 @@ SCHEMA: list[Field] = [
     Field("quality", "Max download resolution", "Download", "choice",
           choices=((2160, "2160p (4K)"), (1440, "1440p"), (1080, "1080p"), (720, "720p"), (480, "480p"), (360, "360p"))),
     Field("cookies_browser", "Use browser login", "Download", "choice",
-          choices=(("", "None"), ("chrome", "Chrome"), ("edge", "Edge"), ("firefox", "Firefox"), ("brave", "Brave")),
-          help="Needed for age-restricted or members-only videos. Also makes YouTube much less likely to ask "
-               "this PC to sign in. Use a browser signed in to a spare Google account, not your main one; "
-               "Firefox works most reliably on Windows"),
+          choices=(("", "None"), ("clipmonster", "ClipMonster's own sign-in (Firefox)"), ("chrome", "Chrome"),
+                   ("edge", "Edge"), ("firefox", "Firefox"), ("brave", "Brave")),
+          help="Signed-in downloads are what keep YouTube from asking this PC to confirm it's not a bot, and they "
+               "also open age-restricted and members-only videos. Easiest: press Sign in to YouTube (Automation "
+               "tab, or below), which opens Firefox just for ClipMonster. Use a spare Google account, not your "
+               "main one"),
     Field("keep_source", "Keep full downloads", "Download", "bool"),
     Field("playlist_limit", "Max videos per playlist (0 = all)", "Download", "int", lo=0, hi=500),
 
