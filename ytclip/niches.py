@@ -66,6 +66,7 @@ class Niche:
     daily: int = DEFAULT_DAILY  # videos picked per day
     channels: str = ""  # channel list lines, as Settings.pick_channels
     searches: str = ""  # Creative Commons searches, one per line
+    finds: str = ""  # standing requests, one per line: "MW4 with good comedy" (lookup.py), run every few hours
     categories: str = ""  # YouTube category ids, "20, 24": trending videos in them fit this niche
     keywords: str = ""  # comma separated: trending videos with one in the title fit this niche
     preset: str = ""  # "" = Automation's style
@@ -137,6 +138,9 @@ class Niche:
     def search_list(self) -> list[str]:
         return parse_searches(self.searches)
 
+    def find_list(self) -> list[str]:
+        return parse_finds(self.finds)
+
     def category_ids(self) -> set[str]:
         return {c for c in re.split(r"[\s,;]+", self.categories) if c and c in CATEGORIES}
 
@@ -204,6 +208,27 @@ def unique_name(niches: list[Niche], base: str = "New niche") -> str:
 
 
 # ---------------------------------------------------------------- what a scan reads
+
+
+MAX_FINDS = 10  # standing requests per niche (each costs about 200 quota units a run)
+
+
+def parse_finds(text: str) -> list[str]:
+    """Standing requests, one per line; # starts a comment line. Each request once."""
+    out: dict[str, str] = {}
+    for line in (text or "").splitlines():
+        line = " ".join(line.split())
+        if line and not line.startswith("#"):
+            out.setdefault(line.lower(), line[:300])
+    return list(out.values())[:MAX_FINDS]
+
+
+def standing_requests(s) -> list[tuple[str, str]]:
+    """(niche id, request) for every standing request automation runs: each switched-on niche's,
+    or without niches the ones in Settings → Picking (niche id "")."""
+    if not load(s):
+        return [("", r) for r in parse_finds(getattr(s, "pick_finds", ""))]
+    return [(n.id, r) for n in active(s) for r in n.find_list()]
 
 
 def scan_sources(s) -> tuple[list[ChannelRef], list[str], list]:

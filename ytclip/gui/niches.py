@@ -180,6 +180,15 @@ class Niches(QWidget):
                                  "and runs at most every 6 hours")
         self.searches.textChanged.connect(lambda: self._set("searches", self.searches.toPlainText()))
         form.addRow("Creative Commons searches", self.searches)
+        self.finds = QPlainTextEdit()
+        self.finds.setFixedHeight(70)
+        self.finds.setPlaceholderText("Call of Duty MW4 with good comedy\nWarzone funny moments")
+        self.finds.setToolTip("Videos you want for this niche, one request per line, in your own words. Automation "
+                              "searches YouTube for each one every few hours (Settings → Picking) and picks the "
+                              "best new matches, within the niche's videos a day. Each run costs about 200 quota "
+                              "units")
+        self.finds.textChanged.connect(lambda: self._set("finds", self.finds.toPlainText()))
+        form.addRow("Standing requests", self.finds)
         self.keywords = QLineEdit()
         self.keywords.setPlaceholderText("minecraft, fortnite, speedrun")
         self.keywords.setToolTip("Comma separated. A trending or Creative Commons video with one of these in its "
@@ -313,13 +322,13 @@ class Niches(QWidget):
         self.split.setVisible(has)
         self.empty.setVisible(not has)
         s = self._settings()
-        moving = bool(s.pick_channels.strip() or s.pick_searches.strip())
+        moving = bool(s.pick_channels.strip() or s.pick_searches.strip() or s.pick_finds.strip())
         self.empty_text.setText(
             "<p style='font-size:13pt'><b>Sort your clips by niche, one TikTok account each</b></p>"
             "<p>A niche is the topic of one TikTok account: the channels and Creative Commons searches its "
             "videos come from, how many videos a day it gets, and how its clips look. Automation picks videos "
             "for every niche in turn and puts each niche's clips in a folder of its own.</p>"
-            + ("<p>Your channel list and Creative Commons searches (Settings → Picking) move into the first "
+            + ("<p>Your channel list, searches and standing requests (Settings → Picking) move into the first "
                "niche, so nothing is lost.</p>" if moving else ""))
 
     def _refresh_stats(self) -> None:
@@ -372,6 +381,7 @@ class Niches(QWidget):
             self.daily.setValue(n.daily)
             self.channels.setPlainText(n.channels)
             self.searches.setPlainText(n.searches)
+            self.finds.setPlainText(n.finds)
             self.keywords.setText(n.keywords)
             chosen = n.category_ids()
             for i in range(self.categories.count()):
@@ -498,11 +508,12 @@ class Niches(QWidget):
         s = self._settings()
         first = not self._niches
         n = Niche(id=niches.new_id(), name=niches.unique_name(self._niches, "My first niche" if first else "New niche"))
-        if first and (s.pick_channels.strip() or s.pick_searches.strip()):
-            n.channels, n.searches = s.pick_channels, s.pick_searches
+        if first and (s.pick_channels.strip() or s.pick_searches.strip() or s.pick_finds.strip()):
+            n.channels, n.searches, n.finds = s.pick_channels, s.pick_searches, s.pick_finds
             self._change("pick_channels", "")
             self._change("pick_searches", "")
-            self.notice.emit("Made your first niche. Your channel list and Creative Commons searches are in it now.")
+            self._change("pick_finds", "")
+            self.notice.emit("Made your first niche. Your channel list, searches and standing requests are in it now.")
         self._niches.append(n)
         self._current = n.id
         self._save()
@@ -522,15 +533,16 @@ class Niches(QWidget):
                 + (f"Its {waiting} video{'s' if waiting != 1 else ''} waiting to be clipped come"
                    f"{'s' if waiting == 1 else ''} out of the queue. " if waiting else "")
                 + f"Clips already made stay in {self._folder_of(n)}."
-                + ("\n\nIt's your last niche, so its channels and searches go back to the channel list in "
+                + ("\n\nIt's your last niche, so its channels, searches and standing requests go back to "
                    "Settings → Picking, and automation picks for everything again." if last else ""))
         if QMessageBox.question(self, "Delete niche", text) != QMessageBox.Yes:
             return
         self.db.drop_waiting(n.id)
-        if last and (n.channels.strip() or n.searches.strip()):
+        if last and (n.channels.strip() or n.searches.strip() or n.finds.strip()):
             s = self._settings()
             self._change("pick_channels", "\n".join(x for x in (s.pick_channels.strip(), n.channels.strip()) if x))
             self._change("pick_searches", "\n".join(x for x in (s.pick_searches.strip(), n.searches.strip()) if x))
+            self._change("pick_finds", "\n".join(x for x in (s.pick_finds.strip(), n.finds.strip()) if x))
         i = next(i for i, x in enumerate(self._niches) if x.id == n.id)
         self._niches.pop(i)
         self._current = self._niches[min(i, len(self._niches) - 1)].id if self._niches else ""

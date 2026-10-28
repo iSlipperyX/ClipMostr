@@ -153,6 +153,8 @@ class Settings:
     pick_languages: str = "en"  # only pick videos in these spoken languages (when YouTube knows it); "" = any
     pick_channels: str = ""
     pick_searches: str = ""
+    pick_finds: str = ""  # standing requests without niches, one per line (niches have their own)
+    pick_find_hours: int = 6  # how often automation runs each standing request
     pick_min_score: int = 65
     pick_min_minutes: float = 8.0
     pick_max_minutes: float = 180.0
@@ -706,6 +708,13 @@ SCHEMA: list[Field] = [
           help="One search per line, e.g. 'gaming highlights'. Each search costs 100 quota units and runs "
                "at most every 6 hours",
           placeholder="gaming highlights\nscience lecture"),
+    Field("pick_finds", "Standing requests", "Picking", "text",
+          help="Videos you want, one request per line, in your own words, e.g. 'Call of Duty MW4 with good "
+               "comedy'. Automation searches YouTube for each one every few hours and picks the best new "
+               "matches, within your limits (they count as permission to clip, like adding a link yourself). "
+               "Each run of a request costs about 200 quota units. With niches, each niche has its own",
+          placeholder="Call of Duty MW4 with good comedy\nMinecraft hardcore funny moments"),
+    Field("pick_find_hours", "Run standing requests every (hours)", "Picking", "int", lo=1, hi=72),
     Field("pick_languages", "Only pick videos in", "Picking", "str",
           help="Spoken language codes, comma separated (en, es, fr…). Empty = any language. Videos whose "
                "uploader didn't set a language are allowed. Creative Commons searches favour the first "

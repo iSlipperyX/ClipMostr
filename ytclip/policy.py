@@ -194,6 +194,8 @@ def _permission(v: TrendingVideo, notes: dict[str, str]) -> str | None:
     if "watchlist" in v.origins:
         note = notes.get(v.channel_id, "")
         return f"On your channel list{': ' + note if note else ''}"
+    if "request" in v.origins:  # you asked for videos like it (a standing request, or Research's Find)
+        return f"Found for your request ({v.match:.0f} match)" if v.match >= 0 else "Found for your request"
     if v.license == "creativeCommon":
         return "Creative Commons licence (credit the channel)"
     return None

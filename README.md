@@ -138,7 +138,7 @@ Type what you want into **Find videos** at the top of the Research tab, in your 
 - **Time limit.** The menu next to the box limits results to this week, this month or this year.
 - **What's left out.** The bar above the table says what was searched and how many videos were left out. **← Back to trending** returns to the charts. Your last request stays one click away, and the box suggests your earlier requests.
 - **Using the results.** Send them to the Studio, or use **Queue in Automation** (also on any trending video). Automation then clips them next, in their niche's style and with your clip length.
-- **Cost.** A request uses about 200 of the YouTube API's 10,000 free daily units, because each search costs 100. Claude's rating is one short call.
+- **Cost.** A request uses about 200 of the YouTube API's 10,000 free daily units, because each search costs 100. The AI's rating is one short call.
 
 ```
 ytclip find "Call of Duty MW4 with good comedy"            # the best 20, with why each matches
@@ -252,7 +252,7 @@ Below it, the **health check** looks at everything automation needs: ffmpeg, how
 Run a TikTok account for each topic? Give each account a niche in the **🎯 Niches** tab. A niche has:
 
 - **The account:** a name, the TikTok account it's for, how many videos a day it gets (2 to start with), and a switch to pause it.
-- **Where its videos come from:** its own channel list and Creative Commons searches. Title words and YouTube categories catch videos from the trending charts.
+- **Where its videos come from:** its own channel list and Creative Commons searches. Title words and YouTube categories catch videos from the trending charts. **Standing requests** add the videos you describe (see below).
 - **How its clips look:** its own style, top/bottom view and folder of second videos (blank ones use Settings → Automation), and a note telling the AI what makes a good clip for that account. AI picks and AI polish both read the note.
 
 Every picked video goes into one niche: the one that lists its channel, then the one whose search found it, then the first with a matching title word, then the first with its category. A video that fits no niche isn't picked, and its Pick tooltip says why. Research's **Niche** column shows where each video would go.
@@ -264,7 +264,17 @@ Every picked video goes into one niche: the one that lists its channel, then the
 - **Style.** A recipe for the video's channel or category comes first, then the niche's own style and view, then a catch-all (`*`) recipe, then Settings → Automation.
 - **Folders.** Each niche's clips go to `Automation\<niche>\`, and `clips.json` records the niche and its TikTok account, so TikTok Manager can stage each folder for its own account. Renaming a niche sends new clips to its new folder. Clips already made stay where they are.
 
-Making your first niche moves your channel list and Creative Commons searches into it. If you never make a niche, nothing changes. `ytclip niches` lists your niches with what each picked today, what's waiting and its clips in the last 7 days (`--json` for scripts).
+**Standing requests.**
+- **What they are.** A niche's standing requests are what you'd type into Research's **Find videos**, one per line, such as *Call of Duty MW4 with good comedy*. Automation runs each one every few hours (6 by default; set it under Settings → Picking → Run standing requests every). Each run looks at videos posted in the last month.
+- **What gets picked.** It picks the videos that match at least 60 out of 100, under the same rules and limits as everything else: the niche's videos a day, the channel limit, blocked words and the minimum clip-ability.
+- **Permission.** A video found for your request counts as permission to clip, like a link you add yourself. Picks say "Found for your request (90 match)". *Creative Commons only* still means only Creative Commons.
+- **The log.** It shows what each request found, and why good matches weren't picked.
+- **Cost.**
+  - **YouTube quota.** Each run of a request costs about 200 quota units, so four requests every 6 hours use about 3,200 of the 10,000 a day.
+  - **The AI.** With a Claude or Gemini key, the AI writes the searches and rates the matches. That's two calls a run, counted in *AI calls per day*. When the day's calls run out, the requests carry on matching by the words.
+- **Without niches.** The standing requests in Settings → Picking run instead.
+
+Making your first niche moves your channel list, Creative Commons searches and standing requests into it. If you never make a niche, nothing changes. `ytclip niches` lists your niches with what each picked today, what's waiting and its clips in the last 7 days (`--json` for scripts).
 
 ### Learning from results
 

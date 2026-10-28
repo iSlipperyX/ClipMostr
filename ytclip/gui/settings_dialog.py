@@ -32,7 +32,7 @@ class SettingsDialog(QDialog):
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
         # With niches, each niche has its own channels and searches (Niches tab).
-        per_niche = {"pick_channels", "pick_searches"} if niches.load(settings) else set()
+        per_niche = {"pick_channels", "pick_searches", "pick_finds"} if niches.load(settings) else set()
         for group in GROUPS:
             fields = [f for f in SCHEMA if f.group == group and f.name not in per_niche]
             page, editors = forms.build_form(fields, self.result_settings, self._changed)
