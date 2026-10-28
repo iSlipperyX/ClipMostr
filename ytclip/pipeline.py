@@ -37,6 +37,11 @@ CALM_DAY = DAY  # after this long with no sign-in request, downloads go back to 
 DEEP_PAUSE = 20.0  # seconds between automation's most-replayed checks
 HEARTBEAT_STALE = 180  # a runner silent for this long is gone
 IDLE = 300  # longest sleep between checks
+GB = 1024 ** 3
+DISK_RECHECK = 600  # seconds between free-space checks while the disk is too full
+DISK_CLEAN_EVERY = 3600  # at most one free-space clean-up an hour
+DISK_KINDS = ("partial", "previews", "downloads", "rejected")  # safe to clear when space runs out
+STUCK = "Stuck:"  # how a watchdog stop starts its error
 
 # Errors that won't change however often the video is tried.
 _PERMANENT = re.compile(r"video unavailable|private video|has been removed|no longer available|copyright|"
@@ -52,10 +57,13 @@ class NoClips(RuntimeError):
     pass
 
 
-def classify(error: str) -> str:
-    """'blocked' | 'permanent' | 'retry' for a failed video's error message."""
+def classify(error: str, previous: str = "") -> str:
+    """'blocked' | 'permanent' | 'retry' for a failed video's error message. A video the watchdog
+    stopped twice running is skipped rather than tried again."""
     if is_blocked(error):
         return "blocked"
+    if error.startswith(STUCK) and previous.startswith(STUCK):
+        return "permanent"
     if _PERMANENT.search(error):
         return "permanent"
     return "retry"
@@ -327,6 +335,10 @@ class Runner:
             if wait:
                 self.state(why)
                 return min(wait, next_scan - now, IDLE)
+            low = self.disk_guard(s, now)
+            if low:
+                self.state(low)
+                return min(DISK_RECHECK, max(1.0, next_scan - now))
             self.process(job, s)
             return 1.0
         upcoming = self.db.next_try()
@@ -359,6 +371,45 @@ class Runner:
 
     def block(self, error: str, now: float) -> None:
         self.log(record_block(self.db, error, now))
+        self.db.note("blocked", now)
+
+    # ------------------------------------------------------------ disk guard
+    def free_space(self, s: Settings) -> tuple[int, str]:
+        """The least free space on the drives the clips and downloads go to, and that drive."""
+        from .doctor import free_space
+
+        least: tuple[int, str] | None = None
+        for path in (s.auto_output_path, s.cache_path):
+            got = free_space(path)
+            if got and (least is None or got[0] < least[0]):
+                least = (got[0], got[1].anchor or str(got[1]))
+        return least or (1 << 62, "")
+
+    def disk_guard(self, s: Settings, now: float) -> str:
+        """'' when there's room to clip; otherwise why automation waits. Under the limit it first
+        clears what's safe to clear (at most once an hour), then pauses until there's room."""
+        limit = max(0, s.disk_min_free_gb) * GB
+        if not limit:
+            return ""
+        free, drive = self.free_space(s)
+        if free < limit and now - self.db.meta_float("last_disk_cleanup") >= DISK_CLEAN_EVERY:
+            self.db.set_meta("last_disk_cleanup", now)
+            self.log(f"Only {free / GB:.1f} GB free on {drive}, under the {s.disk_min_free_gb} GB to keep free: "
+                     "clearing downloads, unfinished downloads, previews and rejected clips.")
+            self.cleanup(s, kinds=list(DISK_KINDS), days=0)
+            free, drive = self.free_space(s)
+        if free >= limit:
+            if self.db.meta("disk_low") == "1":
+                self.db.set_meta("disk_low", "0")
+                self.log(f"There's room again ({free / GB:.1f} GB free on {drive}): carrying on.")
+            return ""
+        if self.db.meta("disk_low") != "1":
+            self.db.set_meta("disk_low", "1")
+            self.db.note("disk_low", now)
+            self.log(f"⚠ Paused: only {free / GB:.1f} GB free on {drive}, under the {s.disk_min_free_gb} GB to keep "
+                     "free. Make room (Clean up, or delete files) and automation carries on by itself.")
+        return (f"Paused: only {free / GB:.1f} GB free on {drive} (keeping {s.disk_min_free_gb} GB free). "
+                "It carries on when there's room")
 
     # ------------------------------------------------------------ research → queue
     def research(self, s: Settings) -> int:
@@ -589,6 +640,7 @@ class Runner:
             self._last_flag_check = t
             return self.stop_requested()
 
+        watch = Watchdog(s.watchdog_minutes * 60, lambda: (last["t"] or now), lambda: last["msg"], self.now)
         engine = self._engine(settings, log=self.log, progress=progress, cancelled=cancelled)
         p = Project(job.url)
         p.meta = {"automation": {"permission": job.permission, "origins": job.origins, "how": job.how,
@@ -599,6 +651,7 @@ class Runner:
         if order is not None:
             p.meta["automation"]["request"] = {"id": order.id, "count": order.count, "min_len": order.min_len,
                                                "max_len": order.max_len, "notes": order.notes}
+        watch.start()
         try:
             engine.prepare(p)
             mark_busy()
@@ -610,14 +663,22 @@ class Runner:
                 raise NoClips("No clips found in this video.")
             folder = engine.export(p)
         except Cancelled:
+            watch.stop()
             self.db.update(job.id, self.now(), status="queued", stage="Stopped; will start again")
             self.log(f"Stopped while clipping {job.title}; it'll start again next time.")
             raise Stopped()
         except Exception as exc:
-            self.failed(job, str(exc) or exc.__class__.__name__, s)
+            watch.stop()
+            error = str(exc) or exc.__class__.__name__
+            if watch.fired:
+                error = watch.reason()
+                self.db.note("watchdog", self.now())
+                self.log(f"⚠ {job.title or job.url}: {error}")
+            self.failed(job, error, s)
             if job.order:
                 self.order_progress(job.order)
             return
+        watch.stop()
         title = p.video.title if p.video else job.title
         made = len([c for c in p.clips if c.enabled])
         rejected = p.qc.get("rejected", 0) if p.qc else 0
@@ -632,7 +693,7 @@ class Runner:
 
     def failed(self, job: Job, error: str, s: Settings) -> None:
         now = self.now()
-        kind = classify(error)
+        kind = classify(error, job.error)
         attempts = job.attempts + 1
         if kind == "blocked":
             self.block(error, now)
@@ -640,12 +701,14 @@ class Runner:
                            error=error, next_try=self.db.meta_float("blocked_until"))
             return
         if kind == "permanent" or attempts >= s.auto_retries:
+            stuck = error.startswith(STUCK)
             self.db.update(job.id, now, status="failed", attempts=attempts, error=error,
-                           stage="Gave up" if kind == "retry" else "Can't be clipped")
+                           stage="Skipped: stuck twice" if stuck and kind == "permanent" else
+                           "Gave up" if kind == "retry" else "Can't be clipped")
             self.log(f"✗ {job.title or job.url}: {error}" + (" (gave up)" if kind == "retry" else ""))
             self.db.set_meta("last_error", error)
             return
-        wait = BACKOFF[min(attempts - 1, len(BACKOFF) - 1)]
+        wait = 60.0 if error.startswith(STUCK) else BACKOFF[min(attempts - 1, len(BACKOFF) - 1)]
         self.db.update(job.id, now, status="queued", attempts=attempts, error=error, next_try=now + wait,
                        stage=f"Try {attempts + 1} in {_span(wait)}")
         self.log(f"⚠ {job.title or job.url}: {error}. Trying again in {_span(wait)}.")
@@ -666,28 +729,51 @@ class Runner:
             self.db.update(job.id, job.updated, pruned=1)
         return removed
 
-    def cleanup(self, s: Settings) -> None:
+    def cleanup(self, s: Settings, kinds: list[str] | None = None, days: float | None = None) -> None:
         """The daily clean-up (Settings → Automation → Clean up by itself): what's ticked there and
         older than its days (at least one). Never a video that's queued, being clipped or in the
-        Studio, or a clip TikTok Manager still has waiting."""
+        Studio, or a clip TikTok Manager still has waiting. The disk guard passes its own kinds, of
+        any age."""
         from . import cleanup
 
         now = self.now()
-        self.db.set_meta("last_cleanup", now)
-        kinds = cleanup.parse_kinds(s.cleanup_kinds)
+        if kinds is None:
+            self.db.set_meta("last_cleanup", now)
+            kinds = cleanup.parse_kinds(s.cleanup_kinds)
+            days = max(1, s.cleanup_days)
         if not kinds:
             return
         try:
             busy = cleanup.busy_ids(self.db)
-            plan = cleanup.plan(s, now, busy=busy, older_than_days=max(1, s.cleanup_days), kinds=kinds)
+            plan = cleanup.plan(s, now, busy=busy, older_than_days=days or 0, kinds=kinds)
             result = cleanup.apply(plan, kinds)
         except Exception as exc:  # a clean-up problem must never stop the clipping
             self.log(f"⚠ Clean up failed: {exc}")
             return
+        if result.freed:
+            self.db.note(f"freed:{result.freed}", now)
         if result.removed:
             self.log(f"Cleaned up: {result.summary()}.")
         for path, error in result.failed[:5]:
             self.log(f"⚠ Couldn't remove {path}: {error}")
+
+    def health(self) -> None:
+        """The health check (doctor.py, offline) as automation starts: problems go in the log and in
+        jobs.db for the Automation tab."""
+        import json
+
+        from . import doctor
+
+        try:
+            found = doctor.problems(doctor.check(self.load(), self.db, now=self.now()))
+        except Exception as exc:  # the check must never keep automation from running
+            self.log(f"Health check couldn't run: {exc}")
+            return
+        self.db.set_meta("health", json.dumps([c.to_json() for c in found]))
+        self.db.set_meta("health_at", self.now())
+        for c in found:
+            self.log(f"{'✗' if c.level == doctor.BAD else '⚠'} Health check: {c.name}: {c.detail}"
+                     + (f". Fix: {c.fix}" if c.fix else ""))
 
     # ------------------------------------------------------------ the loop
     def run(self, stop: Callable[[], bool] | None = None, sleep: Callable[[float], None] = time.sleep,
@@ -697,6 +783,7 @@ class Runner:
             self.log(why)
             return 1
         self.log(f"Automation started (process {self.pid}).")
+        self.health()
         stop = self._stop = stop or (lambda: False)
         try:
             while True:
@@ -722,6 +809,58 @@ class Runner:
             self.log("Automation stopped.")
             self.release()
         return 0
+
+
+class Watchdog:
+    """Stops the ffmpeg work of a video that has made no progress for `limit` seconds: the call
+    waiting on it then fails, and the runner records why (and tries once more). Downloads time
+    out by themselves; this is for a stuck encode, measurement or check."""
+
+    def __init__(self, limit: float, last: Callable[[], float], stage: Callable[[], str],
+                 now: Callable[[], float] = time.time, every: float = 15.0):
+        self.limit, self._last, self._stage, self._now, self.every = limit, last, stage, now, every
+        self.fired = False
+        self._stage_at_fire = ""
+        self._done = None
+        self._thread = None
+
+    def start(self) -> None:
+        import threading
+
+        if self.limit <= 0:
+            return
+        self._done = threading.Event()
+        self._thread = threading.Thread(target=self._watch, daemon=True)
+        self._thread.start()
+
+    def _watch(self) -> None:
+        from .ffmpeg import kill_running
+
+        while not self._done.wait(self.every):
+            if self._now() - self._last() >= self.limit:
+                self._stage_at_fire = self._stage()
+                self.fired = True
+                kill_running()
+                return
+
+    def check(self) -> bool:
+        """One look (what the thread does every few seconds); True if it stopped the work."""
+        from .ffmpeg import kill_running
+
+        if self.limit > 0 and not self.fired and self._now() - self._last() >= self.limit:
+            self._stage_at_fire = self._stage()
+            self.fired = True
+            kill_running()
+        return self.fired
+
+    def stop(self) -> None:
+        if self._done is not None:
+            self._done.set()
+
+    def reason(self) -> str:
+        minutes = self.limit / 60
+        stage = re.sub(r"\s*\d+%$", "", self._stage_at_fire).strip() or "working"  # "Exporting clip 2/5 40%"
+        return f"{STUCK} no progress for {minutes:g} min while {stage[0].lower() + stage[1:]}, so it was stopped"
 
 
 def _span(seconds: float) -> str:

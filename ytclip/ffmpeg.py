@@ -6,6 +6,7 @@ import re
 import shutil
 import subprocess
 import threading
+from contextlib import contextmanager
 from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
@@ -31,9 +32,63 @@ def ffmpeg_exe() -> str:
         ) from exc
 
 
-def run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
-    result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, text=True,
+# Every ffmpeg this process has running, so automation's watchdog can stop one that's stuck.
+_live: set[subprocess.Popen] = set()
+_live_lock = threading.Lock()
+
+
+_killed: set[int] = set()  # ids of processes kill_running() stopped
+
+
+class Stopped(RuntimeError):
+    """kill_running() stopped this ffmpeg (automation's watchdog: it had stopped making progress)."""
+
+
+@contextmanager
+def tracked(proc: subprocess.Popen):
+    """Keep `proc` on the list kill_running() stops while the block runs. If it was stopped that
+    way, the block ends in Stopped, so half an answer (half a measurement) is never used."""
+    with _live_lock:
+        _live.add(proc)
+    try:
+        yield proc
+    finally:
+        with _live_lock:
+            _live.discard(proc)
+            killed = id(proc) in _killed
+            _killed.discard(id(proc))
+    if killed:
+        raise Stopped("ffmpeg was stopped because it had stopped making progress")
+
+
+def kill_running() -> int:
+    """Stop every ffmpeg this process is running (the call waiting on it then fails). How many."""
+    with _live_lock:
+        procs = list(_live)
+    n = 0
+    for proc in procs:
+        if proc.poll() is None:
+            try:
+                with _live_lock:
+                    _killed.add(id(proc))
+                proc.kill()
+                n += 1
+            except OSError:
+                pass
+    return n
+
+
+def communicate(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
+    """subprocess.run for ffmpeg (text output), tracked for the watchdog."""
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, text=True,
                             encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
+    with tracked(proc):
+        out, err = proc.communicate()
+    return subprocess.CompletedProcess(cmd, proc.returncode, out, err)
+
+
+def run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
+    result = communicate(cmd, cwd)
     if result.returncode != 0:
         tail = "\n".join(result.stderr.strip().splitlines()[-6:])
         raise RuntimeError(f"ffmpeg failed:\n{tail}")
@@ -60,12 +115,14 @@ def run_with_progress(cmd: list[str], duration: float, on_progress: Callable[[fl
     t.start()
     assert proc.stdout is not None
     try:
-        for line in proc.stdout:
-            if on_progress and duration > 0 and line.startswith("out_time_us="):
-                try:
-                    on_progress(min(1.0, int(line.split("=", 1)[1]) / 1e6 / duration))
-                except ValueError:
-                    pass
+        with tracked(proc):
+            for line in proc.stdout:
+                if on_progress and duration > 0 and line.startswith("out_time_us="):
+                    try:
+                        on_progress(min(1.0, int(line.split("=", 1)[1]) / 1e6 / duration))
+                    except ValueError:
+                        pass
+            proc.wait()
     except BaseException:
         # Cancelled (or anything else) mid-run: don't leave ffmpeg working in the background.
         proc.kill()

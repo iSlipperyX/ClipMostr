@@ -25,7 +25,10 @@ from ..research import youtube_key
 from ..settings import Settings
 from . import theme
 from .library import reveal
+from .overnight import OvernightPanel
 from .requests_panel import NichePanel, RequestDialog, RequestPanel
+
+REPORT_EVERY = 30.0  # seconds between refreshes of the Overnight page while it's showing
 
 COLUMNS = ("Video", "Channel", "Niche", "Status", "Clips", "Updated", "Why it was picked")
 NICHE_COLUMN = COLUMNS.index("Niche")
@@ -61,6 +64,7 @@ class Automation(QWidget):
         self.timer = QTimer(self, interval=3000)
         self.timer.timeout.connect(self.refresh)
         self.timer.start()
+        QTimer.singleShot(2000, self._while_away)
         if self.db.meta("resume_after_update") == "1":  # stopped so the app could update itself
             self.db.set_meta("resume_after_update", "0")
             self.start()
@@ -179,6 +183,10 @@ class Automation(QWidget):
         self.pages.addTab(queue, "Queue")
         self.pages.addTab(self.niche_panel, "Niches")
         self.pages.addTab(self.request_panel, "Requests")
+        self.overnight = OvernightPanel(self._settings, self.db)
+        self.pages.addTab(self.overnight, "Overnight report")
+        self._report_at = 0.0
+        self.pages.currentChanged.connect(lambda _i: self._refresh_report(force=True))
         upper = self.pages
 
         split = QSplitter(Qt.Vertical)
@@ -246,6 +254,7 @@ class Automation(QWidget):
         self._fill_table()
         self.niche_panel.refresh()
         self.request_panel.refresh()
+        self._refresh_report()
         self._tail_log()
         self._show_lessons()
 
@@ -376,6 +385,30 @@ class Automation(QWidget):
         self.notice.emit(f"Queued {added} video{'s' if added != 1 else ''}." if added else
                          "That video was queued before. Right-click it to try again.")
         self.refresh()
+
+    def _while_away(self) -> None:
+        """Opening the app after automation worked on its own: one line on what it did."""
+        from .. import report
+
+        now = time.time()
+        seen = self.db.meta_float("report_seen")
+        self.db.set_meta("report_seen", now)
+        if not seen:
+            return
+        try:
+            r = report.build(self.db, self._settings(), hours=min(24.0, max(0.0, now - seen) / 3600), now=now)
+        except Exception:
+            return
+        if r.videos or r.failed:
+            self.notice.emit(f"While you were away: {r.headline().split(': ', 1)[-1]} "
+                             "Automation → Overnight report has the details.")
+
+    def _refresh_report(self, force: bool = False) -> None:
+        if self.pages.currentWidget() is not self.overnight:
+            return
+        if force or time.time() - self._report_at >= REPORT_EVERY:
+            self._report_at = time.time()
+            self.overnight.refresh(force=force)
 
     def _niche_change(self, name: str, value) -> None:
         if self._change is not None:

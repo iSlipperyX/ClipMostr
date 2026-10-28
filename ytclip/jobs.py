@@ -260,6 +260,20 @@ class JobDB:
             self.con.execute("INSERT INTO events (time, kind) VALUES (?, ?)", (now, kind))
             self.con.execute("DELETE FROM events WHERE time < ?", (now - 30 * 86400,))
 
+    def events_since(self, since: float) -> list[tuple[float, str]]:
+        """(time, kind) of everything noted since `since`, oldest first."""
+        with self._lock:
+            rows = self.con.execute("SELECT time, kind FROM events WHERE time >= ? ORDER BY time",
+                                    (since,)).fetchall()
+        return [(r["time"], r["kind"]) for r in rows]
+
+    def jobs_since(self, since: float) -> list[Job]:
+        """Jobs that finished, failed or changed since `since`, newest first."""
+        with self._lock:
+            rows = self.con.execute("SELECT * FROM jobs WHERE updated >= ? ORDER BY updated DESC",
+                                    (since,)).fetchall()
+        return [Job.from_row(r) for r in rows]
+
     def count(self, kind: str, since: float) -> int:
         with self._lock:
             row = self.con.execute("SELECT COUNT(*) AS n FROM events WHERE kind = ? AND time >= ?",

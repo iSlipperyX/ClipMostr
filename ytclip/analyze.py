@@ -25,7 +25,7 @@ from typing import Callable
 
 import numpy as np
 
-from .ffmpeg import NO_WINDOW, ffmpeg_exe
+from .ffmpeg import NO_WINDOW, ffmpeg_exe, tracked
 from .subtitles import REACTION, Cue
 
 HOP = 0.5  # seconds per loudness frame
@@ -114,7 +114,7 @@ def loudness_db(path: Path, duration: float = 0, progress: Callable[[float], Non
     leftover = b""
     done = 0
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                          creationflags=NO_WINDOW) as proc:
+                          creationflags=NO_WINDOW) as proc, tracked(proc):
         assert proc.stdout is not None
         while data := proc.stdout.read(frame_bytes * 240):
             buf = leftover + data

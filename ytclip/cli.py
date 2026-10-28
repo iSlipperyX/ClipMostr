@@ -801,6 +801,64 @@ def run_request(argv: list[str]) -> int:
         db.close()
 
 
+def run_report(argv: list[str]) -> int:
+    from . import report
+    from .jobs import JobDB
+
+    p = argparse.ArgumentParser(prog="ytclip report", description="What automation did while you were away: "
+                                "clips per niche and request, rejected clips and why, failures, pauses.")
+    p.add_argument("--hours", type=float, default=12.0, help="how far back to look (default 12)")
+    p.add_argument("--json", action="store_true", help="print it as JSON")
+    args = p.parse_args(argv)
+    db = JobDB()
+    try:
+        r = report.build(db, Settings.load(), hours=args.hours)
+    finally:
+        db.close()
+    if args.json:
+        import json
+
+        print(json.dumps(r.to_json(), indent=1, ensure_ascii=False))
+        return 0
+    lines = r.lines()
+    console.print(f"[bold]{escape(lines[0])}[/]")
+    for line in lines[1:]:
+        colour = "red" if line.startswith("Failed") else "yellow" if line.startswith(("YouTube", "Paused",
+                                                                                     "Stopped")) else ""
+        console.print(f"  [{colour}]{escape(line)}[/]" if colour else f"  {escape(line)}")
+    return 0
+
+
+def run_doctor(argv: list[str]) -> int:
+    from . import doctor
+    from .jobs import JobDB
+
+    p = argparse.ArgumentParser(prog="ytclip doctor", description="Check that everything automation needs is in "
+                                "place: ffmpeg, the downloader, keys, folders, free space, TikTok Manager, niches.")
+    p.add_argument("--offline", action="store_true", help="don't test the keys online")
+    p.add_argument("--json", action="store_true", help="print the checks as JSON")
+    args = p.parse_args(argv)
+    db = JobDB()
+    try:
+        checks = doctor.check(Settings.load(), db, online=not args.offline)
+    finally:
+        db.close()
+    if args.json:
+        import json
+
+        print(json.dumps([c.to_json() for c in checks], indent=1, ensure_ascii=False))
+    else:
+        marks = {doctor.GOOD: "[green]✓[/]", doctor.WARN: "[yellow]⚠[/]", doctor.BAD: "[red]✗[/]"}
+        for c in checks:
+            console.print(f"{marks[c.level]} [bold]{escape(c.name)}[/]: {escape(c.detail)}"
+                          + (f"\n    [dim]Fix: {escape(c.fix)}[/]" if c.fix else ""))
+        bad = sum(c.level == doctor.BAD for c in checks)
+        warn = sum(c.level == doctor.WARN for c in checks)
+        console.print("All good." if not (bad or warn) else f"{bad} problem{'s' if bad != 1 else ''}, "
+                      f"{warn} warning{'s' if warn != 1 else ''}.")
+    return 1 if any(c.level == doctor.BAD for c in checks) else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["clean"]:
@@ -809,6 +867,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_niches(argv[1:])
     if argv[:1] == ["request"]:
         return run_request(argv[1:])
+    if argv[:1] == ["report"]:
+        return run_report(argv[1:])
+    if argv[:1] == ["doctor"]:
+        return run_doctor(argv[1:])
     if argv[:1] == ["results"]:
         return run_results(argv[1:])
     if argv[:1] == ["research"]:
