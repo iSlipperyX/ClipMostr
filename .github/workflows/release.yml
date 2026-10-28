@@ -36,6 +36,25 @@ jobs:
             exit 1
           fi
 
+      # Whisper for the graphics card. If this fails the app still ships, with Whisper on the CPU only.
+      - name: Cache the whisper.cpp build
+        id: whisper-cache
+        uses: actions/cache@v4
+        with:
+          path: build/whisper-cpp
+          key: whisper-cpp-vulkan-${{ hashFiles('packaging/build_whisper_cpp.py', 'packaging/install_vulkan_sdk.ps1') }}
+
+      - name: Vulkan SDK
+        if: steps.whisper-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        shell: pwsh
+        run: ./packaging/install_vulkan_sdk.ps1
+
+      - name: Build whisper.cpp for the graphics card
+        if: steps.whisper-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: python packaging/build_whisper_cpp.py build/whisper-cpp --vulkan
+
       - name: Build
         run: python build.py
 

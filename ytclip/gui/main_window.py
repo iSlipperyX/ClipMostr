@@ -721,12 +721,14 @@ class MainWindow(QMainWindow):
                 p.clips = [Clip(**{k: v for k, v in c.items() if k in CLIP_FIELDS}) for c in saved["clips"]]
                 p.mode_used = saved.get("mode", "auto")
                 eng.rescore(p)
+                eng.retype(p, p.clips)  # their own words, as they had; edges stay where they were
                 if saved.get("polish"):
                     p.meta["polish"] = saved["polish"]
                     p.polished, p.captions_off = True, bool(saved["polish"].get("captions_off"))
                     reapply_fixes(saved["polish"], p.words)
             else:
                 eng.find(p)
+                eng.retype(p)
                 if settings.ai_polish:
                     eng.polish(p)
             p.status = "ready"

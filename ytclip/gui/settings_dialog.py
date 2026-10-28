@@ -14,7 +14,7 @@ from ..trending import KEY_HELP_URL
 from . import forms, theme
 from .sign_in_dialog import SignInDialog
 
-GROUPS = ("General", "Download", "Clip finding", "Transcription", "AI", "Export", "Captions", "Layout",
+GROUPS = ("General", "Download", "Clip finding", "Transcription", "Speed", "AI", "Export", "Captions", "Layout",
           "Research", "Picking", "Automation", "Updates")
 
 
@@ -61,6 +61,28 @@ class SettingsDialog(QDialog):
                 sign_in.clicked.connect(self._sign_in)
                 row.addWidget(sign_in)
                 row.addStretch(1)
+                page.layout().addRow("", row)
+            if group == "Speed":
+                from .. import whisper_cpp
+
+                note = QLabel(f"This PC has {os.cpu_count() or '?'} CPU threads. Quiet and Balanced let automation "
+                              "step aside for whatever else you're doing; Full power doesn't. The Automation log "
+                              "says how long each step of each video took, so you can see the difference.")
+                note.setWordWrap(True)
+                note.setProperty("muted", True)
+                page.layout().insertRow(0, note)
+                why = whisper_cpp.unavailable()
+                self._gpu_state = QLabel("Graphics card: " + ("ready (it's tried on the next video)" if not why
+                                                              else f"not used: {why}"))
+                self._gpu_state.setWordWrap(True)
+                row = QHBoxLayout()
+                again = QPushButton("Try the graphics card again")
+                again.setToolTip("After a graphics driver update, say: Whisper tries the card on the next video")
+                again.setVisible(bool(why) and whisper_cpp.binary() is not None)
+                again.clicked.connect(lambda: (whisper_cpp.forget_gpu_check(), again.hide(),
+                                               self._gpu_state.setText("Graphics card: tried again on the next video")))
+                row.addWidget(self._gpu_state, 1)
+                row.addWidget(again)
                 page.layout().addRow("", row)
             if group == "Updates":
                 repo = updater.configured_repo(self.result_settings.update_repo)

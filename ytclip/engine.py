@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import time
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -11,14 +12,14 @@ from typing import Callable
 
 import numpy as np
 
-from . import cuts, layout, series
+from . import cuts, layout, series, speed
 from . import transcribe as whisper
 from .analyze import (SIGNAL_LABELS, Clip, Measurements, breathing_room, build_signals, chapter_clips, clip_score,
                       cap_length, combine, fit_to_sentences, loudness, pick_clips, quiet_frames, snap, trim_dead_air)
 from .download import Video, download, is_url, local_video
 from .export import export_clip, thumbnail, tiktok_warnings
 from .export import frame as export_frame
-from .ffmpeg import MediaInfo, probe
+from .ffmpeg import Cancelled, MediaInfo, probe
 from .organize import clip_filename, video_dir, write_index
 from .scenes import detect_scenes
 from .settings import Settings
@@ -28,10 +29,6 @@ from .subtitles import (Cue, Word, censor, parse_vtt, parse_vtt_words, sentences
 
 Log = Callable[[str], None]
 Progress = Callable[[str, "float | None"], None]
-
-
-class Cancelled(Exception):
-    pass
 
 
 @dataclass
@@ -46,7 +43,8 @@ class Project:
     media: MediaInfo | None = None
     measurements: Measurements | None = None
     words: list[Word] = field(default_factory=list)
-    transcript_source: str = ""
+    transcript_source: str = ""  # captions | whisper | "" (none); captions+whisper once the clips are typed out
+    typed: list = field(default_factory=list)  # (start, end) stretches Whisper typed out over the captions
     signals: dict[str, np.ndarray] = field(default_factory=dict)
     score: np.ndarray = field(default_factory=lambda: np.zeros(0))
     clips: list[Clip] = field(default_factory=list)
@@ -72,6 +70,8 @@ class Project:
     def transcript(self, clip: Clip) -> str:
         return text_between(self.cues, clip.start, clip.end)
 
+
+RETYPE_PAD = 3.0  # seconds either side of a clip Whisper types out too, so trimming has words to go by
 
 # The stages a video's time is reported in, in order (automation logs them per video).
 TIMED = (("download", "download"), ("audio", "audio"), ("scenes", "scene cuts"), ("transcript", "transcript"),
@@ -126,8 +126,11 @@ class Engine:
 
     def _open(self, p: Project) -> None:
         if is_url(p.source):
-            p.video = download(p.source, self.s.cache_path, self.s.quality, self.s.cookies_browser or None,
-                               self.log, self.progress)
+            if p.video is not None and p.video.path.exists():  # automation downloaded it early
+                self.progress("Downloaded already", None)
+            else:
+                p.video = download(p.source, self.s.cache_path, self.s.quality, self.s.cookies_browser or None,
+                                   self.log, self.progress)
         else:
             self.progress("Reading file", None)
             p.video = local_video(Path(p.source))
@@ -154,7 +157,7 @@ class Engine:
                 db, fine = loudness(v.path, v.duration, lambda f: self.progress("Measuring audio", f))
         if self.s.detect_scenes and not scenes_done:
             with timed(p, "scenes"):
-                scene_cuts = detect_scenes(v.path, v.duration, lambda f: self.progress("Detecting scene cuts", f))
+                scene_cuts = self._scenes(v)
             scenes_done = True
         self.s.cache_path.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(cache, db=db, fine=fine, cuts=np.array(scene_cuts, dtype=float), scenes_done=scenes_done)
@@ -169,6 +172,25 @@ class Engine:
         p.measurements = Measurements(duration=v.duration, db=db, heatmap=v.heatmap,
                                       scene_cuts=scene_cuts if self.s.detect_scenes else [], cues=cues, fine=fine)
 
+    def _scenes(self, v: Video) -> list[float]:
+        """Scene cuts, decoding the video on the graphics card unless Speed is Quiet (and on the
+        CPU if the card can't decode it)."""
+        def report(f: float) -> None:
+            self.progress("Detecting scene cuts", f)
+
+        if speed.hwaccel(self.s.speed):
+            try:
+                return detect_scenes(v.path, v.duration, report, hwaccel=True)
+            except RuntimeError:
+                pass
+        return detect_scenes(v.path, v.duration, report)
+
+    def _whisper(self, v: Video, spans: list[tuple[float, float]] | None = None,
+                 checkpoint: Path | None = None) -> tuple[list[Cue], list[Word]]:
+        return whisper.transcribe(v.path, self.s.whisper_model, self.s.whisper_language or v.language, v.duration,
+                                  self.progress, threads=speed.threads(self.s.speed), spans=spans,
+                                  checkpoint=checkpoint, gpu=speed.use_gpu(self.s), log=self.log)
+
     def _transcript(self, p: Project) -> tuple[list[Cue], list[Word], str]:
         v = p.video
         assert v is not None
@@ -180,10 +202,68 @@ class Engine:
         if cache.exists():
             data = json.loads(cache.read_text(encoding="utf-8"))
             return [Cue(**c) for c in data["cues"]], [Word(**w) for w in data["words"]], "whisper"
-        cues, words = whisper.transcribe(v.path, self.s.whisper_model, self.s.whisper_language or v.language,
-                                         v.duration, self.progress)
+        # Typing out a long video takes a while: a checkpoint lets a stopped run carry on from there.
+        checkpoint = cache.with_name(cache.name.replace(".json", ".partial.json"))
+        cues, words = self._whisper(v, checkpoint=checkpoint)
         cache.write_text(json.dumps({"cues": to_dicts(cues), "words": to_dicts(words)}), encoding="utf-8")
+        checkpoint.unlink(missing_ok=True)
         return cues, words, "whisper"
+
+    def retype(self, p: Project, clips: list[Clip] | None = None) -> int:
+        """Transcription → For the clips: YouTube's captions found the clips, now Whisper types out
+        just them (and a little either side) for their captions and titles. Stretches typed out
+        before are kept, here and in a cache, so only new clips cost anything. Returns how many
+        stretches were typed out now."""
+        v, m = p.video, p.measurements
+        if (self.s.transcribe != "clips" or v is None or m is None or not p.transcript_source.startswith("captions")
+                or not whisper.available()):
+            return 0
+        own = clips is None
+        clips = [c for c in (p.clips if own else clips) if c.enabled]
+        wanted = whisper.merge_spans([(c.start - RETYPE_PAD, c.end + RETYPE_PAD) for c in clips], v.duration)
+        new = [s for s in wanted if not any(a <= s[0] + 0.01 and s[1] - 0.01 <= b for a, b in p.typed)]
+        if not new:
+            return 0
+        cache = self.s.cache_path / f"{v.id}.whisper-{self.s.whisper_model}.clips.json"
+        saved: dict = {"spans": [], "cues": [], "words": []}
+        try:
+            saved = json.loads(cache.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+        have = [tuple(s) for s in saved.get("spans", [])]
+        todo = [s for s in new if not any(a <= s[0] + 0.01 and s[1] - 0.01 <= b for a, b in have)]
+        cues = [Cue(**c) for c in saved.get("cues", [])]
+        words = [Word(**w) for w in saved.get("words", [])]
+        if todo:
+            try:
+                got_cues, got_words = self._whisper(v, spans=todo)
+            except Cancelled:
+                raise
+            except Exception as exc:  # the clips still have YouTube's captions: carry on with those
+                self.log(f"Whisper couldn't type out the clips ({exc}), so their captions are YouTube's.")
+                return 0
+            for a, b in todo:  # replace anything saved for these stretches
+                cues = [c for c in cues if not a <= (c.start + c.end) / 2 < b] + whisper.inside(got_cues, a, b)
+                words = [w for w in words if not a <= (w.start + w.end) / 2 < b] + whisper.inside(got_words, a, b)
+            have = whisper.merge_spans(have + todo, v.duration, gap=0.0)
+            cues.sort(key=lambda c: c.start)
+            words.sort(key=lambda w: w.start)
+            self.s.cache_path.mkdir(parents=True, exist_ok=True)
+            cache.write_text(json.dumps({"spans": have, "cues": to_dicts(cues), "words": to_dicts(words)}),
+                             encoding="utf-8")
+        for a, b in new:  # Whisper's words take the captions' place in these stretches
+            p.words = ([w for w in p.words if not a <= (w.start + w.end) / 2 < b] + whisper.inside(words, a, b))
+            m.cues = ([c for c in m.cues if not a <= (c.start + c.end) / 2 < b] + whisper.inside(cues, a, b))
+        p.words.sort(key=lambda w: w.start)
+        m.cues.sort(key=lambda c: c.start)
+        p.typed = whisper.merge_spans(list(p.typed) + new, v.duration, gap=0.0)
+        p.transcript_source = "captions+whisper"
+        self.log(f"Whisper typed out {len(new)} clip stretch{'es' if len(new) != 1 else ''} "
+                 f"({clock_text(sum(b - a for a, b in new))}) for their captions; the captions found them.")
+        if own:  # edges go by Whisper's words now, which can sit a little apart from the captions'
+            self.trim(p)
+            self.clean_cuts(p)
+        return len(new)
 
     # ------------------------------------------------------------ stage 3: find clips
 
@@ -393,15 +473,65 @@ class Engine:
             names.insert(0, f"AI ({p.ai_model or self.s.ai_model})")
         return names
 
+    def overpick(self) -> int:
+        """How many clips to find beyond Clips per video, for polish's ratings to choose from."""
+        if not (self.s.ai_polish and self.s.polish_overpick and self.s.qc_min_rating):
+            return 0
+        return max(1, math.ceil(self.s.clip_count / 2))
+
+    def keep_best(self, p: Project, count: int) -> int:
+        """Keep the `count` best clips and switch the rest off (Find extra clips, keep the best the AI
+        rates): ones the AI rated too low go first, then the lowest rated, then the lowest scored. A
+        part series stays or goes whole. Returns how many were switched off."""
+        clips = [c for c in p.clips if c.enabled]
+        groups: dict[str, list[Clip]] = {}
+        for c, (sid, _, _) in zip(clips, series.labels(clips)):
+            groups.setdefault(sid or f"clip{id(c)}", []).append(c)
+        floor = self.s.qc_min_rating
+
+        def rank(group: list[Clip]) -> tuple:
+            rated = [c.rating for c in group if c.rating]
+            passes = all(not c.rating or not floor or c.rating >= floor for c in group)
+            return (passes, min(rated) if rated else 0, max(c.score for c in group))
+
+        kept = 0
+        dropped: list[Clip] = []
+        for group in sorted(groups.values(), key=rank, reverse=True):
+            fits = kept + len(group) <= count and rank(group)[0]
+            if fits:
+                kept += len(group)
+            else:
+                dropped += group
+        for c in dropped:
+            c.enabled = False
+        if dropped:
+            low = sorted(c.rating for c in dropped if c.rating)
+            self.log(f"Kept the {kept} best of {len(clips)} clips"
+                     + (f"; left out {len(dropped)} the AI rated {low[0]}–{low[-1]}/10 or that didn't fit"
+                        if low else f"; left out {len(dropped)}") + ".")
+        return len(dropped)
+
     def prepare(self, p: Project) -> None:
         p.status = "working"
         self.open(p)
         self.measure(p)
+        want, extra = self.s.clip_count, self.overpick()
         with timed(p, "find"):
-            self.find(p)
+            if extra:
+                self.s, wanted = self.s.copy(clip_count=want + extra), self.s
+                try:
+                    self.find(p)
+                finally:
+                    self.s = wanted
+            else:
+                self.find(p)
+        with timed(p, "transcript"):
+            self.retype(p)
         if self.s.ai_polish:
             with timed(p, "polish"):
                 self.polish(p)
+        if extra:
+            self.keep_best(p, want)
         p.status = "ready"
 
     # ------------------------------------------------------------ stage 4: export
@@ -419,6 +549,7 @@ class Engine:
         v, media = p.video, p.media
         assert v is not None and media is not None
         clips = [c for c in (clips if clips is not None else p.clips) if c.enabled]
+        self.retype(p, clips)  # clips added or moved since: their own words, before captions are made
         folder = video_dir(self.s.output_path, v, self.s.folder_template)
         thumbs = folder / "thumbnails"
         folder.mkdir(parents=True, exist_ok=True)

@@ -40,6 +40,10 @@ _live_lock = threading.Lock()
 _killed: set[subprocess.Popen] = set()  # processes kill_running() stopped, while still tracked
 
 
+class Cancelled(Exception):
+    """You (or automation's Stop) cancelled the work part way. engine.Cancelled is this."""
+
+
 class Stopped(RuntimeError):
     """kill_running() stopped this ffmpeg (automation's watchdog: it had stopped making progress)."""
 

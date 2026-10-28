@@ -66,9 +66,12 @@ class Settings:
     w_scenes: float = 0.10
     w_keywords: float = 0.30
     # Transcription
-    transcribe: str = "auto"
+    transcribe: str = "auto"  # auto | clips | always | never
     whisper_model: str = "base"
     whisper_language: str = ""
+    # Speed (speed.py): how much of the PC clipping may use
+    speed: str = "balanced"  # quiet | balanced | full
+    gpu_whisper: bool = True  # Full power: Whisper on the graphics card (whisper_cpp.py), when there is one
     # AI
     ai_api_key: str = ""
     ai_model: str = "claude-opus-5-5"
@@ -78,6 +81,7 @@ class Settings:
     )
     ai_polish: bool = False  # polish.py: one extra Claude call per video for hooks, caption fixes, crops
     ai_polish_model: str = "claude-sonnet-5-5"
+    polish_overpick: bool = True  # with polish: find extra clips, keep the best rated (engine.keep_best)
     polish_burned_subs: str = "off"  # off = turn our captions off when the video already has subtitles | keep
     polish_bottom_text: bool = True  # the polish writes a bottom line for each clip with no part 2
     # Export
@@ -175,6 +179,7 @@ class Settings:
     auto_keep_days: int = 14
     disk_min_free_gb: int = 15  # automation cleans up, then pauses, before free space falls under this (0 = off)
     watchdog_minutes: int = 30  # a download or export that stops moving this long is stopped (0 = off)
+    auto_prefetch: bool = True  # download the next video while this one is clipped
     # Clean up (cleanup.py): clear out downloads, rejected clips and clips TikTok Manager is done with
     cleanup_auto: bool = False  # automation does it once a day
     cleanup_kinds: str = "partial, previews, rejected, posted, removed"
@@ -229,6 +234,10 @@ class Settings:
                 if attempt == tries - 1:
                     return cls()
                 time.sleep(0.1)
+        if isinstance(data, dict) and data.get("transcribe") == "always" and "speed" not in data:
+            # Saved before 2.5.0, when "Always" was the only way to get Whisper's captions on clips that
+            # have YouTube captions: now only the clips are typed out (the captions still find them).
+            data = data | {"transcribe": "clips"}
         return cls().apply(migrate(data))
 
     def save(self, path: Path | None = None) -> None:
@@ -443,6 +452,8 @@ class Field:
     placeholder: str = ""
 
 
+SPEEDS = (("quiet", "Quiet (slowest, the PC stays free)"), ("balanced", "Balanced"),
+          ("full", "Full power (every core and the graphics card)"))
 MODES = (("auto", "Smart signals"), ("ai", "AI picks (Claude)"), ("chapters", "YouTube chapters"))
 ASPECTS = (("original", "Original"), ("vertical_blur", "9:16 vertical, blurred fill"),
            ("vertical_crop", "9:16 vertical, cropped"), ("square", "1:1 square"))
@@ -524,11 +535,23 @@ SCHEMA: list[Field] = [
     Field("w_keywords", "Weight: keywords", "Clip finding", "float", lo=0, hi=1, step=0.05),
 
     Field("transcribe", "Local transcription (Whisper)", "Transcription", "choice",
-          choices=(("auto", "Only when YouTube has no captions"), ("always", "Always"), ("never", "Never"))),
+          choices=(("auto", "Only when YouTube has no captions"),
+                   ("clips", "For the clips (captions find them, Whisper types them out)"),
+                   ("always", "Always, the whole video (slow)"), ("never", "Never")),
+          help="For the clips is much faster than Always: YouTube's captions find the clips, then Whisper "
+               "types out just the clips, for captions and titles. Videos with no captions are typed out whole"),
     Field("whisper_model", "Whisper model", "Transcription", "choice",
           choices=(("tiny", "tiny (fastest)"), ("base", "base"), ("small", "small"), ("medium", "medium"),
+                   ("large-v3-turbo", "large-v3-turbo (near-best, quicker than medium)"),
                    ("large-v3", "large-v3 (best, slow)")),
-          help="Downloaded once on first use"),
+          help="Downloaded once on first use. ytclip whisper-test VIDEO times each one on this PC"),
+
+    Field("speed", "How hard ClipMonster works", "Speed", "choice", choices=SPEEDS,
+          help="Quiet keeps the PC free for other things and works slowest. Balanced uses half the CPU and "
+               "steps aside for what you're doing. Full power uses every CPU core and the graphics card"),
+    Field("gpu_whisper", "Full power: Whisper on the graphics card", "Speed", "bool",
+          help="Types out speech on the graphics card (AMD, NVIDIA or Intel, through Vulkan), often several "
+               "times faster than the CPU. Downloads the model for it once. Falls back to the CPU if it fails"),
     Field("whisper_language", "Language code (blank = detect)", "Transcription", "str"),
 
     Field("ai_api_key", "Anthropic API key", "AI", "secret", help="Needed for the AI clip finder",
@@ -546,6 +569,10 @@ SCHEMA: list[Field] = [
                "a line the AI wrote for it, never promising one, instead of the same 'no part 2' text every time. "
                "It keeps any @handle in your bottom texts. Clips with a part 2 keep your bottom text. Off: clips "
                "with no part 2 show the 'no part 2' text (Settings → Layout)"),
+    Field("polish_overpick", "Find extra clips, keep the best the AI rates", "AI", "bool",
+          help="With polish on, half as many clips again are found and polished, and only the best rated ones "
+               "are exported. More of the clips you get pass the quality check, and none is made just to be "
+               "rejected. A little more text goes to the AI"),
     Field("ai_polish_model", "Model for polishing", "AI", "choice",
           choices=(("claude-opus-5-5", "Claude Opus 5.5 (best)"), ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
                    ("claude-haiku-5-5", "Claude Haiku 5.5 (cheapest)"))),
@@ -729,6 +756,9 @@ SCHEMA: list[Field] = [
     Field("watchdog_minutes", "Stop stuck work after (min, 0 = off)", "Automation", "int", lo=0, hi=600, step=5,
           help="An export, measurement or check that makes no progress for this long is stopped, tried once "
               "more, then skipped with the reason. Stalled downloads give up by themselves"),
+    Field("auto_prefetch", "Download the next video while clipping", "Automation", "bool",
+          help="The next video downloads while this one is being clipped, so it's ready to start straight "
+               "away. Still waits the minutes between downloads"),
     Field("cleanup_auto", "Clean up by itself once a day", "Automation", "bool",
           help="Automation clears out what's ticked below, without asking. Clean up… in the Library or "
                "Automation tab shows what would go, and how much space it frees, before anything is deleted"),
