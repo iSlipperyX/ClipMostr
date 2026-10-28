@@ -157,9 +157,10 @@ def video_layers(s: Settings, aspect: str, plan: Plan | None, width: int, height
 
 
 def compose(s: Settings, media: MediaInfo, clip: Clip | None = None, words: list[Word] | None = None,
-            second: tuple[int, int] | None = None, width: int | None = None, height: int | None = None) -> Composition:
+            second: tuple[int, int] | None = None, width: int | None = None, height: int | None = None,
+            next_part: bool = True) -> Composition:
     """Everything the export draws for `clip` (None = a clip with no title, text overrides or reframe).
-    `second` is the stacked video's size, when there is one to show."""
+    `second` is the stacked video's size, when there is one to show; next_part as for export_clip."""
     aspect, w, h = frame(s, media)
     if width and height:
         w, h = width, height
@@ -173,7 +174,7 @@ def compose(s: Settings, media: MediaInfo, clip: Clip | None = None, words: list
     title = clip.title if clip else ""
     if use_layout and plan is not None:
         top = layout.banner_text(s.banner_top_text, title, clip.top_text if clip else None) if plan.top else ""
-        bottom = layout.banner_text(s.banner_bottom_text, title, clip.bottom_text if clip else None) if plan.bottom else ""
+        bottom = layout.bottom_banner(s, title, clip.bottom_text if clip else None, next_part) if plan.bottom else ""
         c.banners = layout.banner_texts(plan, s, top, bottom)
     if (s.burn_captions and words) or s.title_overlay:
         area, side = (plan.caption_area, plan.side_margin) if plan is not None else (None, 0)

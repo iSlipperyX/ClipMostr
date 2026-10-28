@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPushButton,
                                QScrollArea, QTabWidget, QVBoxLayout)
 
-from .. import __version__, updater
+from .. import __version__, niches, updater
 from ..settings import SCHEMA, Settings, app_dir
 from ..trending import KEY_HELP_URL
 from . import forms, theme
@@ -27,8 +27,10 @@ class SettingsDialog(QDialog):
 
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
+        # With niches, each niche has its own channels and searches (Niches tab).
+        per_niche = {"pick_channels", "pick_searches"} if niches.load(settings) else set()
         for group in GROUPS:
-            fields = [f for f in SCHEMA if f.group == group]
+            fields = [f for f in SCHEMA if f.group == group and f.name not in per_niche]
             page, editors = forms.build_form(fields, self.result_settings, self._changed)
             self._editors |= editors
             if group == "AI":
@@ -75,7 +77,9 @@ class SettingsDialog(QDialog):
                               "Reposting other people's videos without permission can get clips removed and "
                               "accounts struck, so by default only channels on your list (creators who say clips "
                               "are welcome) and Creative Commons videos are picked. The Research tab's Pick column "
-                              "shows what the rules would pick, and why the rest were skipped.")
+                              "shows what the rules would pick, and why the rest were skipped."
+                              + (" You have niches, so each one's channels and Creative Commons searches are set "
+                                 "in the Niches tab; these rules apply to all of them." if per_niche else ""))
                 note.setWordWrap(True)
                 note.setProperty("muted", True)
                 page.layout().insertRow(0, note)
@@ -134,5 +138,6 @@ class SettingsDialog(QDialog):
         self._key_result.setStyleSheet(f"color:{colour};")
 
     def _reset(self) -> None:
-        self.result_settings = Settings()
+        # Niches are your content, edited in their own tab, not a setting to reset.
+        self.result_settings = Settings(niches=self.result_settings.niches)
         forms.refresh(self._editors, self.result_settings)

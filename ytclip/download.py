@@ -53,6 +53,15 @@ def is_url(text: str) -> bool:
     return text.strip().lower().startswith(("http://", "https://", "www."))
 
 
+_ID_IN_URL = re.compile(r"(?:v=|youtu\.be/|/shorts/|/live/|/embed/|/v/)([\w-]{11})")
+
+
+def video_id(url: str) -> str:
+    """The YouTube video id in a link, or the link itself when it has none."""
+    m = _ID_IN_URL.search(url)
+    return m.group(1) if m else url.strip()
+
+
 def needs_expansion(src: str) -> bool:
     """Playlists, channels and folders turn into many videos; plain videos don't."""
     if is_url(src):

@@ -9,9 +9,10 @@ from typing import Callable
 
 from PySide6.QtCore import QSize, Qt, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QIcon, QPixmap
-from PySide6.QtWidgets import (QApplication, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMenu,
+from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel, QListWidget, QListWidgetItem, QMenu,
                                QPushButton, QSplitter, QVBoxLayout, QWidget)
 
+from .. import niches
 from ..organize import stamp
 from ..settings import Settings
 
@@ -24,13 +25,20 @@ def reveal(path: Path) -> None:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
 
 
+ALL = "*"  # the niche filter's "every video"
+STUDIO = "studio"  # videos exported from the Studio (not by automation)
+
+
 class Library(QWidget):
     reopen = Signal(str)
+    clean_up = Signal()  # open the Clean up window
 
     def __init__(self, settings: Callable[[], Settings], parent=None):
         super().__init__(parent)
         self._settings = settings
-        self._videos: list[tuple[Path, dict]] = []
+        self._all: list[tuple[Path, dict]] = []
+        self._videos: list[tuple[Path, dict]] = []  # what the niche filter lets through
+        self._niche_names: dict[str, str] = {}
 
         top = QHBoxLayout()
         title = QLabel("Library")
@@ -44,9 +52,18 @@ class Library(QWidget):
             QUrl.fromLocalFile(str(self._settings().output_path))))
         self.reopen_btn = QPushButton("Re-open in Studio")
         self.reopen_btn.clicked.connect(self._reopen)
+        self.niche = QComboBox()
+        self.niche.setToolTip("Show one niche's videos")
+        self.niche.activated.connect(lambda _i: self._fill())
+        clean = QPushButton("🧹  Clean up…")
+        clean.setToolTip("Clear out downloads, rejected clips and clips TikTok Manager is done with. Shows what "
+                         "would go first")
+        clean.clicked.connect(self.clean_up.emit)
         top.addWidget(title)
         top.addWidget(self.summary, 1)
+        top.addWidget(self.niche)
         top.addWidget(self.reopen_btn)
+        top.addWidget(clean)
         top.addWidget(open_dir)
         top.addWidget(refresh)
 
@@ -82,36 +99,64 @@ class Library(QWidget):
         layout.addWidget(split, 1)
 
     def refresh(self) -> None:
-        root = self._settings().output_path
-        found: list[tuple[Path, dict]] = []
-        if root.exists():
-            for index in root.glob("**/clips.json"):
+        s = self._settings()
+        root = s.output_path
+        roots = [root] + ([s.auto_output_path] if not _inside(s.auto_output_path, root) else [])
+        found: list[tuple[Path, dict, float]] = []
+        for r in roots:
+            if not r.exists():
+                continue
+            for index in r.glob("**/clips.json"):
                 if ".downloads" in index.parts:
                     continue
                 try:
-                    found.append((index.parent, json.loads(index.read_text(encoding="utf-8"))))
+                    meta = json.loads(index.read_text(encoding="utf-8"))
+                    found.append((index.parent, meta if isinstance(meta, dict) else {}, index.stat().st_mtime))
                 except (OSError, ValueError):
                     continue
-        found.sort(key=lambda fv: (fv[0] / "clips.json").stat().st_mtime, reverse=True)
-        self._videos = found
+        found.sort(key=lambda fv: fv[2], reverse=True)
+        self._all = [(folder, meta) for folder, meta, _ in found]
+        self._fill_niches(s)
+        self._fill()
+
+    def _fill_niches(self, s: Settings) -> None:
+        all_niches = niches.load(s)
+        self._niche_names = {n.id: n.name for n in all_niches}
+        keep = self.niche.currentData()
+        self.niche.blockSignals(True)
+        self.niche.clear()
+        self.niche.addItem("Every video", ALL)
+        for n in all_niches:
+            self.niche.addItem(n.name, n.id)
+        self.niche.addItem("Studio exports", STUDIO)
+        self.niche.setCurrentIndex(max(0, self.niche.findData(keep)))
+        self.niche.blockSignals(False)
+        self.niche.setVisible(bool(all_niches))
+
+    def _fill(self) -> None:
+        root = self._settings().output_path
+        want = self.niche.currentData() if not self.niche.isHidden() else ALL
+        self._videos = [(f, m) for f, m in self._all if want in (ALL, None) or _niche_key(m) == want]
         self.videos.clear()
         total = 0
-        for folder, meta in found:
+        for folder, meta in self._videos:
             v = meta.get("video", {})
             n = len(meta.get("clips", []))
             total += n
             check = meta.get("qc") or {}
             count = (f"{check.get('passed', 0)} ready · {check['rejected']} rejected" if check.get("rejected")
                      else f"{n} clips")
-            item = QListWidgetItem(f"{v.get('title', folder.name)}\n{v.get('channel', '')} · {count}")
+            niche = self._niche_names.get(_niche_key(meta), "")
+            item = QListWidgetItem(f"{v.get('title', folder.name)}\n{v.get('channel', '')} · "
+                                   + (f"{niche} · " if niche else "") + count)
             thumb = folder / "thumbnails" / "01.jpg"
             if thumb.exists():
                 item.setIcon(QIcon(QPixmap(str(thumb)).scaled(96, 54, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
             item.setSizeHint(QSize(0, 62))
             self.videos.addItem(item)
         self.videos.setIconSize(QSize(96, 54))
-        self.summary.setText(f"   {len(found)} videos · {total} clips in {root}")
-        if found:
+        self.summary.setText(f"   {len(self._videos)} videos · {total} clips in {root}")
+        if self._videos:
             self.videos.setCurrentRow(0)
         else:
             self.clips.clear()
@@ -162,3 +207,19 @@ class Library(QWidget):
         menu.addAction("Show in Explorer", lambda: reveal(path))
         menu.addAction("Copy file path", lambda: QApplication.clipboard().setText(str(path)))
         menu.exec(self.clips.mapToGlobal(pos))
+
+
+def _niche_key(meta: dict) -> str:
+    """The niche id of an exported video, STUDIO for one exported by hand, "" for automation without a niche."""
+    auto = meta.get("automation")
+    if not isinstance(auto, dict):
+        return STUDIO
+    return str(auto.get("niche_id") or "")
+
+
+def _inside(path: Path, folder: Path) -> bool:
+    try:
+        path.resolve().relative_to(folder.resolve())
+        return True
+    except (ValueError, OSError):
+        return False

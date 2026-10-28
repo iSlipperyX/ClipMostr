@@ -41,6 +41,7 @@ class Job:
     rejected: int = 0  # moved to _rejected by the quality check
     recipe: str = ""
     pruned: int = 0  # cache files removed
+    niche: str = ""  # id of the niche it was picked for (niches.py), "" for none
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Job":
@@ -133,6 +134,23 @@ class JobDB:
         with self._lock:
             return self.con.execute("UPDATE jobs SET status = 'queued', stage = 'Interrupted; will start again' "
                                     "WHERE status = 'working'").rowcount
+
+    def drop_waiting(self, niche: str) -> int:
+        """Take a niche's waiting videos out of the queue (the niche was deleted)."""
+        with self._lock:
+            return self.con.execute("DELETE FROM jobs WHERE niche = ? AND status = 'queued'", (niche,)).rowcount
+
+    def niche_counts(self, since: float) -> dict[str, dict[str, int]]:
+        """Per niche id: videos waiting or working, done since `since`, and clips ready from those."""
+        with self._lock:
+            rows = self.con.execute(
+                "SELECT COALESCE(niche, '') AS niche, "
+                "SUM(status IN ('queued', 'working')) AS waiting, "
+                "SUM(status = 'done' AND updated >= ?) AS done, "
+                "SUM(CASE WHEN status = 'done' AND updated >= ? THEN clips ELSE 0 END) AS clips "
+                "FROM jobs GROUP BY COALESCE(niche, '')", (since, since)).fetchall()
+        return {r["niche"]: {"waiting": r["waiting"] or 0, "done": r["done"] or 0, "clips": r["clips"] or 0}
+                for r in rows}
 
     def counts(self) -> dict[str, int]:
         with self._lock:

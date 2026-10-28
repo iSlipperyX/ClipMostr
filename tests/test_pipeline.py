@@ -161,8 +161,9 @@ def test_research_queues_picks_once(tmp_path):
 
 
 def test_research_respects_the_rules(tmp_path):
-    r = _runner(tmp_path, scan=lambda *a, **k: _scan_result("a", "b"))
-    assert r.research(_settings(pick_from="watchlist")) == 0
+    s = _settings(pick_from="watchlist")
+    r = _runner(tmp_path, s, scan=lambda *a, **k: _scan_result("a", "b"))
+    assert r.research(s) == 0
     assert r.db.jobs() == []
 
 
@@ -474,3 +475,167 @@ def test_stop_interrupts_a_long_research_scan(tmp_path):
     r = _runner(tmp_path, scan=scan)
     with pytest.raises(pipeline.Stopped):
         r.research(r.load())
+
+
+# ---------------------------------------------------------------- niches
+
+GAMING = {"id": "game01", "name": "Gaming", "account": "@gameclips", "channels": "@C0", "preset": "Gaming / action",
+          "view": "Gameplay below", "stack_folder": "D:/gameplay", "instructions": "clutch plays only"}
+
+
+def test_a_niche_gives_its_style_and_its_own_folder(tmp_path):
+    s = _settings(niches=[GAMING], auto_output_dir=str(tmp_path / "out"), ai_instructions="Good moments.")
+    game, label = settings_for(Job("a", "u", niche="game01"), s)
+    assert game.output_path == tmp_path / "out" / "Gaming"
+    assert game.stack_enabled and game.stack_folder == "D:/gameplay" and game.clip_count == 8
+    assert game.ai_instructions == ("Good moments.\nThese clips are for a TikTok account about Gaming: "
+                                    "clutch plays only")
+    assert label == "Gaming / action · Gameplay below (niche: Gaming)"
+    plain, label = settings_for(Job("b", "u"), s)
+    assert plain.output_path == tmp_path / "out" and label == "Shorts / TikTok / Reels"
+    gone, _ = settings_for(Job("c", "u", niche="deleted"), s)  # its niche was deleted: Automation's style
+    assert gone.output_path == tmp_path / "out"
+
+
+def test_a_recipe_still_wins_over_the_niche_style(tmp_path):
+    s = _settings(niches=[GAMING], auto_recipes="@Pod = Podcast moments", auto_output_dir=str(tmp_path / "out"))
+    pod, label = settings_for(Job("a", "u", channel="Pod", niche="game01"), s)
+    assert pod.output_path == tmp_path / "out" / "Gaming"  # still the niche's folder
+    assert pod.min_len == 45 and label == "Podcast moments · Gameplay below (niche: Gaming, recipe: @Pod)"
+
+
+def test_research_queues_each_pick_for_its_niche(tmp_path):
+    history = History(None)
+    history.sources["channels"]["@c0"] = {"id": "UCC0"}
+    s = _settings(niches=[GAMING])
+    r = _runner(tmp_path, s, scan=lambda *a, **k: _scan_result("a", "b"), history=history)
+    assert r.research(s) == 1  # b (channel C1) fits no niche
+    job = r.db.get("a")
+    assert job.niche == "game01"
+    assert any("Picked for Gaming: Video a" in line for line in r.logs)
+    assert PickLog(tmp_path / "picks.json").picks[0]["niche"] == "game01"
+
+
+def test_a_niche_deleted_during_the_scan_gets_no_picks(tmp_path):
+    """A scan takes minutes; deleting a niche meanwhile keeps its videos out of the queue."""
+    history = History(None)
+    history.sources["channels"]["@c0"] = {"id": "UCC0"}
+    pods = {"id": "pod001", "name": "Podcasts", "channels": "@C1"}
+    s = _settings(niches=[GAMING, pods])
+    current = {"s": s}
+
+    def scan(*a, **k):
+        current["s"] = s.apply({"niches": [pods]})  # deleted in the Niches tab while the scan runs
+        return _scan_result("a", "b")
+
+    r = _runner(tmp_path, s, scan=scan, history=history)
+    r.load = lambda: current["s"]
+    history.sources["channels"]["@c1"] = {"id": "UCC1"}
+    assert r.research(s) == 1
+    assert r.db.get("a") is None and r.db.get("b").niche == "pod001"
+
+
+def test_a_queued_video_whose_niche_was_deleted_leaves_the_queue(tmp_path):
+    s = _settings(niches=[GAMING], auto_output_dir=str(tmp_path / "out"))
+    r = _runner(tmp_path, s)
+    r.add_manual("https://www.youtube.com/watch?v=abcdefghijk", niche="game01")
+    gone = s.apply({"niches": []})
+    r.process(r.db.next_due(NOW), gone)
+    assert r.db.get("abcdefghijk") is None and not FakeEngine.made
+    assert any("its niche was deleted" in line for line in r.logs)
+
+
+def test_a_catch_all_recipe_only_fills_in_what_the_niche_leaves_out(tmp_path):
+    s = _settings(niches=[GAMING | {"view": ""}], auto_recipes="* = Podcast moments | Title on top",
+                  auto_output_dir=str(tmp_path / "out"))
+    game, label = settings_for(Job("a", "u", niche="game01"), s)
+    assert label == "Gaming / action · Title on top (niche: Gaming, recipe: *)"
+    plain, label = settings_for(Job("b", "u"), s)  # no niche: the catch-all is the recipe, as before
+    assert label == "Podcast moments · Title on top (recipe: *)"
+    both, label = settings_for(Job("a", "u", niche="game01"), s.apply({"niches": [GAMING]}))
+    assert label == "Gaming / action · Gameplay below (niche: Gaming)"  # the niche has both: * isn't used
+
+
+def test_a_recipe_view_with_its_own_second_videos_keeps_them(tmp_path):
+    from ytclip.settings import LAYOUT_PRESETS, save_user_layout
+
+    parkour = Settings().apply(LAYOUT_PRESETS["Gameplay below"] | {"stack_folder": "C:/parkour"})
+    save_user_layout("Parkour below", parkour)
+    s = _settings(niches=[GAMING], auto_recipes="@Pod = Gaming / action | Parkour below")
+    pod, _ = settings_for(Job("a", "u", channel="Pod", niche="game01"), s)
+    assert pod.stack_folder == "C:/parkour"
+    other, _ = settings_for(Job("b", "u", channel="Else", niche="game01"), s)
+    assert other.stack_folder == "D:/gameplay"
+
+
+def test_the_runner_marks_the_video_it_is_clipping_as_busy(tmp_path):
+    from ytclip import cleanup
+
+    s = _settings()
+    r = _runner(tmp_path, s)
+    r.add_manual("https://www.youtube.com/embed/abcdefghijk")
+    assert r.db.get("abcdefghijk")  # embed links give the real id too
+    seen = []
+    FakeEngine.plan = {}
+    orig = FakeEngine.export
+
+    def export(self, p):
+        seen.append(cleanup.busy_ids(r.db))
+        return orig(self, p)
+
+    FakeEngine.export = export
+    try:
+        job = r.db.next_due(NOW)
+        r.db.update(job.id, NOW, url="https://example.com/watch?v=zzzzzzzzzzz")
+        r.process(r.db.get(job.id), s)
+    finally:
+        FakeEngine.export = orig
+    assert "zzzzzzzzzzz" in seen[0]
+
+
+def test_a_niche_video_carries_its_niche_into_clips_json(tmp_path):
+    s = _settings(niches=[GAMING], auto_output_dir=str(tmp_path / "out"))
+    r = _runner(tmp_path, s)
+    r.add_manual("https://www.youtube.com/watch?v=abcdefghijk", niche="game01")
+    r.process(r.db.next_due(NOW), s)
+    eng = FakeEngine.made[0]
+    meta = eng.exported.meta["automation"]
+    assert (meta["niche"], meta["niche_id"], meta["account"]) == ("Gaming", "game01", "@gameclips")
+    assert eng.s.output_path == tmp_path / "out" / "Gaming"
+    assert "(niche: Gaming)" in r.db.get("abcdefghijk").recipe
+
+
+def test_clean_up_runs_once_a_day_when_switched_on(tmp_path, monkeypatch):
+    from ytclip import cleanup
+
+    calls = []
+
+    def fake_plan(s, now, busy=(), older_than_days=0, kinds=()):
+        calls.append((set(busy), older_than_days, list(kinds)))
+        return cleanup.Plan()
+
+    def fake_apply(plan, kinds):
+        result = cleanup.Result(removed=2, freed=5_000_000, by_kind={"rejected": 2})
+        result.failed = [("x.mp4", "in use")]
+        return result
+
+    monkeypatch.setattr(cleanup, "plan", fake_plan)
+    monkeypatch.setattr(cleanup, "apply", fake_apply)
+    clock = Clock()
+    s = _settings(cleanup_auto=True, cleanup_kinds="rejected, posted", cleanup_days=3)
+    r = _runner(tmp_path, s, scan=lambda *a, **k: _scan_result(), clock=clock)
+    r.add_manual("https://youtu.be/aaaaaaaaaaa")
+    r.tick()
+    assert calls == [({"aaaaaaaaaaa"}, 3, ["rejected", "posted"])]
+    assert any("Cleaned up: 2 rejected clips (4.8 MB freed)." in line for line in r.logs)
+    assert any("Couldn't remove x.mp4: in use" in line for line in r.logs)
+    clock.t += 3600
+    r.tick()
+    assert len(calls) == 1  # once a day
+    clock.t += pipeline.DAY
+    r.tick()
+    assert len(calls) == 2
+    r.load = lambda: s.apply({"cleanup_auto": False})
+    clock.t += 2 * pipeline.DAY
+    r.tick()
+    assert len(calls) == 2

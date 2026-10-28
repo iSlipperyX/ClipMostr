@@ -132,7 +132,7 @@ def test_engine_polish_passes_hook_examples(monkeypatch):
     write([row(hook=f"Hook {i}", lift=lift) for i, lift in enumerate((5, 4, 1, 1, 0.2, 0.3))])
     seen = {}
 
-    def ask(title, clips, w, src, key, model, log=None, check=None, guide=""):
+    def ask(title, clips, w, src, key, model, log=None, check=None, guide="", bottom=""):
         seen["guide"] = guide
         return polish.Polish({}, False, model)
 

@@ -9,6 +9,7 @@ from typing import Callable
 
 import numpy as np
 
+from . import layout
 from . import transcribe as whisper
 from .analyze import (SIGNAL_LABELS, Clip, Measurements, breathing_room, build_signals, chapter_clips, clip_score,
                       combine, fit_to_sentences, loudness_db, pick_clips, quiet_frames, snap, trim_dead_air)
@@ -212,21 +213,27 @@ class Engine:
     def polish(self, p: Project) -> None:
         """Hooks, caption fixes, speaker crops and a burned-in subtitle check from one Claude call.
         Never fails the video: on any error the clips go out as they are (reason in p.polish_error)."""
-        from . import learn, polish
+        from . import learn, niches, polish
 
         p.polished, p.polish_error, p.captions_off = False, "", False
         clips = [c for c in p.clips if c.enabled]
         if not clips or p.video is None:
             return
         self.progress("AI is polishing the clips", None)
+        niche = niches.find(self.s, (p.meta.get("automation") or {}).get("niche_id", ""))
         lessons = learn.for_settings(self.s)
-        guide = lessons.prompt_text() if lessons else ""
+        guide = lessons.prompt_text(niche.id if niche else "") if lessons else ""
         if guide:
             self.log("The AI sees which of your earlier hooks worked.")
+        if niche:  # hooks that suit the account these clips are for
+            about = f"These clips are for a TikTok account about {niche.name}."
+            guide = "\n\n".join(x for x in (about + (f" {niche.instructions.strip()}" if niche.instructions.strip()
+                                                       else ""), guide) if x)
         try:
             result = polish.ask(p.video.title, clips, p.words, p.video.path, self.s.ai_api_key,
                                 self.s.ai_polish_model, self.log,
-                                check=lambda: self.progress("AI is polishing the clips", None), guide=guide)
+                                check=lambda: self.progress("AI is polishing the clips", None), guide=guide,
+                                bottom=self.s.banner_bottom_text if self.s.banner_bottom else "")
             self.progress("AI is polishing the clips", None)
         except Cancelled:
             raise
@@ -234,15 +241,17 @@ class Engine:
             p.polish_error = str(exc) or exc.__class__.__name__
             self.log(f"AI polish skipped: {p.polish_error}")
             return
-        summary = polish.apply(result, clips, p.words, self.s.banner_top_text, self.s.banner_top)
+        summary = polish.apply(result, clips, p.words, self.s.banner_top_text, self.s.banner_top,
+                               bottom_on=self.s.banner_bottom and self.s.polish_bottom_text)
         p.polished = True
         if result.burned_in_subtitles and self.s.polish_burned_subs == "off" and self.s.burn_captions:
             p.captions_off = True
             self.log("This video already has subtitles in the picture, so ClipMonster's captions are off for it.")
         summary["captions_off"] = p.captions_off
         p.meta["polish"] = summary
-        self.log(f"Polished: {summary['hooks']} hooks, {summary['caption_fixes']} caption fixes, "
-                 f"{summary['crops_moved']} crops moved.")
+        self.log(f"Polished: {summary['hooks']} hooks, "
+                 + (f"{summary['bottom_lines']} bottom lines, " if summary["bottom_lines"] else "")
+                 + f"{summary['caption_fixes']} caption fixes, {summary['crops_moved']} crops moved.")
 
     def _fit(self, clips: list[Clip], sents: list[Cue], m: Measurements, duration: float) -> list[Clip]:
         """Align edges to sentences (or pauses without a transcript), add a breath of room,
@@ -327,7 +336,8 @@ class Engine:
                 s = base.copy(stack_video=str(second))
                 extra["second_video"] = second.name
             export_clip(v.path, media, folder / name, clip, p.words, s,
-                        lambda f, i=i: self.progress(label, (i - 1 + f) / len(clips)))
+                        lambda f, i=i: self.progress(label, (i - 1 + f) / len(clips)),
+                        next_part=layout.has_next_part(clip, clips))
             if self.s.tiktok_ready:
                 for warning in tiktok_warnings(folder / name, clip.length):
                     self.log(f"TikTok: {warning}")

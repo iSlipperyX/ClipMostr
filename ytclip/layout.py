@@ -6,6 +6,7 @@ real export all share one plan. export.py turns a plan into an ffmpeg command.""
 from __future__ import annotations
 
 import random
+import re
 from dataclasses import dataclass
 
 from . import fonts, textlayout
@@ -168,6 +169,31 @@ def crop_ratio(s: Settings, width: int, height: int) -> float | None:
 
 
 # ---------------------------------------------------------------- banner text
+
+
+# Bottom text like "Follow for part 2" promises a next part; it's only true when one exists.
+_MORE = re.compile(r"\b(?:part|pt\.?)\s*(?:[2-9]|[1-9]\d+|two|three|four|ii+|iv)\b|\bnext (?:part|one|video)\b"
+                   r"|\bto be continued\b|\bpart\s*(?:\d+\s*)?(?:is\s+)?(?:coming|soon)\b", re.I)
+CARRIES_ON = 3.0  # seconds: a clip starting this soon after another ends is that clip's part 2
+
+
+def promises_more(text: str) -> bool:
+    """Whether banner text promises a part 2, a next part or a continuation."""
+    return bool(_MORE.search(text or ""))
+
+
+def has_next_part(clip, clips) -> bool:
+    """Whether another clip (switched on) picks up where this one stops: its part 2."""
+    return any(o is not clip and o.enabled and 0 <= o.start - clip.end <= CARRIES_ON for o in clips)
+
+
+def bottom_banner(s: Settings, title: str, override: str | None = None, next_part: bool = True) -> str:
+    """The bottom banner's words for a clip: its own text (the AI's or yours), else the bottom text,
+    unless that promises a part 2 the clip doesn't have; then the 'no part 2' text."""
+    text = banner_text(s.banner_bottom_text, title, override)
+    if override is None and not next_part and promises_more(text):
+        return banner_text(s.banner_bottom_alt, title)
+    return text
 
 
 def banner_text(template: str, title: str, override: str | None = None) -> str:

@@ -33,12 +33,16 @@ def test_jobs_show_in_the_table(app, tmp_path):
     db.add(Job("b", "https://youtu.be/b", title="Broken", status="failed", stage="Gave up", error="ffmpeg died"), NOW)
     db.add(Job("c", "https://youtu.be/c", title="Waiting one", stage="Waiting"), NOW)
     tab.refresh()
+    from ytclip.gui.automation import COLUMNS
+
+    col = {name: i for i, name in enumerate(COLUMNS)}
     rows = {tab.table.item(r, 0).text(): r for r in range(tab.table.rowCount())}
     assert tab.table.item(0, 0).text() == "Waiting one"  # waiting work is listed first
     r = rows["Done video"]
-    assert tab.table.item(r, 2).text() == "Done" and tab.table.item(r, 3).text() == "4"
-    assert tab.table.item(r, 5).text() == "On your channel list"
-    broken = tab.table.item(rows["Broken"], 2)
+    assert tab.table.item(r, col["Status"]).text() == "Done" and tab.table.item(r, col["Clips"]).text() == "4"
+    assert tab.table.item(r, col["Why it was picked"]).text() == "On your channel list"
+    assert tab.table.isColumnHidden(col["Niche"])  # no niches, so no Niche column
+    broken = tab.table.item(rows["Broken"], col["Status"])
     assert broken.text() == "Failed: Gave up" and "ffmpeg died" in broken.toolTip()
     assert tab.counts.text() == "1 waiting · 0 working · 1 done · 1 failed"
 

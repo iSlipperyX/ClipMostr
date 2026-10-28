@@ -61,6 +61,7 @@ class Outcome:
     score: float | None = None  # ClipMonster's clip score
     posted_at: float = 0.0
     account: str = ""
+    niche: str = ""  # id of the ClipMonster niche the clip was made for, when TikTok Manager knows it
 
     @classmethod
     def from_json(cls, d: dict) -> "Outcome | None":
@@ -76,7 +77,8 @@ class Outcome:
                    hook=str(d.get("hook") or "").strip(),
                    rating=int(rating) if isinstance(rating, (int, float)) else None,
                    score=float(score) if isinstance(score, (int, float)) else None,
-                   posted_at=float(d.get("posted_at") or 0), account=str(d.get("account") or ""))
+                   posted_at=float(d.get("posted_at") or 0), account=str(d.get("account") or ""),
+                   niche=str(d.get("niche") or ""))
 
 
 @dataclass
@@ -153,9 +155,14 @@ class Lessons:
 
     # --------------------------------------------------------------- for the AI polish
 
-    def hook_examples(self, count: int = 3) -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
-        """(hooks that worked, hooks that flopped) as (hook, lift), best and worst first."""
+    def hook_examples(self, count: int = 3,
+                      niche: str = "") -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
+        """(hooks that worked, hooks that flopped) as (hook, lift), best and worst first. For a niche,
+        its own posts once there are enough of them (what works differs between accounts), else all."""
         hooked = [o for o in self.outcomes if o.hook]
+        own = [o for o in hooked if niche and o.niche == niche]
+        if len(own) >= MIN_EXAMPLES:
+            hooked = own
         if len(hooked) < MIN_EXAMPLES:
             return [], []
         ranked = sorted(hooked, key=lambda o: o.lift, reverse=True)
@@ -163,9 +170,9 @@ class Lessons:
         bad = [(o.hook, o.lift) for o in reversed(ranked) if o.lift <= 0.6][:count]
         return good, bad
 
-    def prompt_text(self) -> str:
+    def prompt_text(self, niche: str = "") -> str:
         """A paragraph for the polish prompt, or "" when there isn't enough to go on."""
-        good, bad = self.hook_examples()
+        good, bad = self.hook_examples(niche=niche)
         if not good and not bad:
             return ""
         lines = ["How earlier hooks did on this TikTok account (views compared with the account's usual):"]

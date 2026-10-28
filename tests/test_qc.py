@@ -103,7 +103,7 @@ def test_measure_real_files(tmp_path):
 
 
 def test_engine_rejects_bad_clips_into_their_own_folder(tmp_path, monkeypatch):
-    def fake_export(src, media, dest, clip, words, s, prog=None):
+    def fake_export(src, media, dest, clip, words, s, prog=None, **kw):
         _make(dest, "color=black:s=1080x1920:r=15" if clip.title == "dud" else "testsrc2=s=1080x1920:r=15",
               seconds=clip.length, audio="silence" if clip.title == "dud" else "sine")
         if s.write_srt:

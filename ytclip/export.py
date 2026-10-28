@@ -101,9 +101,11 @@ def _audio_filters(s: Settings, dur: float) -> list[str]:
 
 
 def export_clip(src: Path, src_info: MediaInfo, dest: Path, clip: Clip, words: list[Word], s: Settings,
-                progress: Callable[[float], None] | None = None, still_at: float | None = None) -> None:
+                progress: Callable[[float], None] | None = None, still_at: float | None = None,
+                next_part: bool = True) -> None:
     """Render one clip. With `still_at` (seconds into the clip), write a single JPEG frame instead:
-    the layout and captions are drawn exactly as the export would draw them."""
+    the layout and captions are drawn exactly as the export would draw them. next_part: another
+    clip carries this one on (layout.has_next_part), so bottom text promising a part 2 is true."""
     dur = clip.length
     aspect, w, h = frame(s, src_info)
     reframed = aspect != "original"
@@ -146,7 +148,7 @@ def export_clip(src: Path, src_info: MediaInfo, dest: Path, clip: Clip, words: l
                 second_audio = info2.has_audio and s.stack_volume > 0 and src_info.has_audio
             graph, last = layout_graph(p, fps, length, clip.crop_x, s.banner_bg, has_second)
             top = layout.banner_text(s.banner_top_text, clip.title, clip.top_text) if p.top else ""
-            bottom = layout.banner_text(s.banner_bottom_text, clip.title, clip.bottom_text) if p.bottom else ""
+            bottom = layout.bottom_banner(s, clip.title, clip.bottom_text, next_part) if p.bottom else ""
             if top or bottom:
                 Path(tmp, "banners.ass").write_text(layout.banner_ass(p, s, top, bottom), encoding="utf-8")
                 graph += f";[{last}]subtitles=banners.ass{_fontsdir([s.banner_font], tmp)}[lb]"

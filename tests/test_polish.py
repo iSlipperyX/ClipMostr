@@ -82,7 +82,7 @@ def _export_project(tmp_path, words_=None):
 @pytest.fixture
 def fake_export(monkeypatch):
     calls = []
-    monkeypatch.setattr(engine_mod, "export_clip", lambda src, media, dest, clip, w, s, prog=None:
+    monkeypatch.setattr(engine_mod, "export_clip", lambda src, media, dest, clip, w, s, prog=None, **kw:
                         calls.append((dest.name, s)) or dest.write_bytes(b"clip"))
     return calls
 
@@ -214,6 +214,36 @@ def test_banner_left_alone_when_it_is_off_or_has_no_title():
     assert clips[0].top_text is None and clips[0].hook == "Hook"
 
 
+def test_parse_reads_the_bottom_line():
+    answer = json.dumps({"burned_in_subtitles": False, "clips": [
+        {"clip": 1, "hook": "h", "bottom_text": ' "Would you   have stayed?" #fyp ', "subject_x": 0.5, "fixes": [],
+         "rating": 8, "rating_note": ""}]})
+    assert parse(answer, 1).clips[0].bottom_text == "Would you have stayed?"
+
+
+def test_the_ai_writes_each_clips_bottom_line_but_never_a_part_2_that_doesnt_exist():
+    clips = [Clip(0, 10, 80), Clip(11, 20, 80), Clip(40, 50, 80), Clip(60, 70, 80, edited=True),
+             Clip(80, 90, 80, bottom_text="Mine")]
+    result = Polish({0: ClipPolish("a", bottom_text="Part 2 on my page"),  # clip 2 carries it on: true
+                     1: ClipPolish("b", bottom_text="Follow for part 2"),  # nothing after it
+                     2: ClipPolish("c", bottom_text="Would you do it?"),
+                     3: ClipPolish("d", bottom_text="Edited clip"), 4: ClipPolish("e", bottom_text="Not mine")})
+    summary = polish.apply(result, clips, [], "{title}", banner_on=True, bottom_on=True)
+    assert [c.bottom_text for c in clips] == ["Part 2 on my page", None, "Would you do it?", None, "Mine"]
+    assert summary["bottom_lines"] == 2
+    off = [Clip(0, 10, 80)]
+    polish.apply(Polish({0: ClipPolish("a", bottom_text="Would you?")}), off, [], "{title}", bottom_on=False)
+    assert off[0].bottom_text is None  # bottom banner (or the setting) off: your text stays
+
+
+def test_the_ai_is_told_the_usual_line_and_which_clips_carry_on(tmp_path):
+    blocks = polish.build_content("Title", [Clip(0, 10, 80), Clip(11, 20, 80), Clip(60, 70, 80)], [], [None] * 3,
+                                  bottom="Follow for part 2")
+    assert "usual bottom line: Follow for part 2" in blocks[0]["text"]
+    assert "carries on in clip 2" in blocks[1]["text"] and "carries on from clip 1" in blocks[2]["text"]
+    assert "carries on" not in blocks[3]["text"]
+
+
 def test_content_has_a_frame_per_clip_and_the_transcript(tmp_path):
     frame = tmp_path / "f.jpg"
     frame.write_bytes(b"\xff\xd8jpeg")
@@ -233,7 +263,7 @@ def _polish_project():
 def test_engine_polish_applies_the_answer(monkeypatch):
     seen = {}
 
-    def ask(title, clips, w, src, key, model, log=None, check=None, guide=""):
+    def ask(title, clips, w, src, key, model, log=None, check=None, guide="", bottom=""):
         seen.update(title=title, n=len(clips), model=model, guide=guide)
         return Polish({0: ClipPolish("Hook!", 0.7, [("joe rogen", "Joe Rogan")])}, True, model)
 
@@ -247,6 +277,34 @@ def test_engine_polish_applies_the_answer(monkeypatch):
     p2 = _polish_project()
     Engine(s.copy(polish_burned_subs="keep")).polish(p2)
     assert not p2.captions_off
+
+
+def test_engine_polish_writes_the_bottom_line_when_that_banner_is_on(monkeypatch):
+    seen = {}
+
+    def ask(title, clips, w, src, key, model, log=None, check=None, guide="", bottom=""):
+        seen["bottom"] = bottom
+        return Polish({0: ClipPolish("Hook!", bottom_text="Would you stay?")}, False, model)
+
+    monkeypatch.setattr(polish, "ask", ask)
+    s = Settings(ai_api_key="k", banner_bottom=True, banner_bottom_text="Follow for part 2")
+    p = _polish_project()
+    Engine(s).polish(p)
+    assert seen["bottom"] == "Follow for part 2" and p.clips[0].bottom_text == "Would you stay?"
+    p = _polish_project()
+    Engine(s.copy(polish_bottom_text=False)).polish(p)
+    assert p.clips[0].bottom_text is None
+
+
+def test_export_tells_each_clip_whether_a_part_2_follows(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(engine_mod, "export_clip", lambda src, media, dest, clip, w, s, prog=None, next_part=True:
+                        calls.append(next_part) or dest.write_bytes(b"clip"))
+    s = Settings(output_dir=str(tmp_path / "out"), thumbnails=False, tiktok_ready=False, write_srt=False)
+    p = _export_project(tmp_path)
+    p.clips = [Clip(0, 10, 80), Clip(11, 20, 70), Clip(50, 60, 60)]
+    Engine(s).export(p)
+    assert calls == [True, False, False]
 
 
 def test_engine_polish_failure_never_stops_the_video(monkeypatch):

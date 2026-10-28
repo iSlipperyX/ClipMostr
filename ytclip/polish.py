@@ -3,6 +3,8 @@
 Claude gets each clip's transcript and one frame from it, and sends back:
 
 * a hook per clip - a few punchy words for the top banner and the upload caption,
+* a bottom line per clip - the bottom banner's call to follow or comment, written for that clip,
+  so it never promises a part 2 that doesn't exist,
 * caption fixes - words the transcript misheard (names, slang, jargon), as exact
   "heard" -> "correct" swaps with the same number of words, so the word timings still fit,
 * where the speaker is across the frame, so vertical crops keep them in shot,
@@ -29,6 +31,7 @@ from .subtitles import Word, words_between
 
 FRAME_WIDTH = 512
 MAX_HOOK = 60  # characters
+MAX_BOTTOM = 50
 MAX_FIXES = 12  # per clip
 
 SCHEMA = {
@@ -45,6 +48,9 @@ SCHEMA = {
                 "properties": {
                     "clip": {"type": "integer", "description": "The clip number from the list"},
                     "hook": {"type": "string", "description": "2 to 7 punchy words that make people stop scrolling"},
+                    "bottom_text": {"type": "string",
+                                    "description": "2 to 6 words for the banner under the clip: a call to follow, "
+                                                   "comment or watch again that's true for this clip"},
                     "rating": {"type": "integer",
                                "description": "1-10: how well this works as a standalone short for someone who "
                                               "hasn't seen the video"},
@@ -68,7 +74,7 @@ SCHEMA = {
                         },
                     },
                 },
-                "required": ["clip", "hook", "rating", "rating_note", "subject_x", "fixes"],
+                "required": ["clip", "hook", "bottom_text", "rating", "rating_note", "subject_x", "fixes"],
                 "additionalProperties": False,
             },
         },
@@ -85,6 +91,11 @@ SYSTEM = (
     "honest (never promise something the clip doesn't deliver), with no emojis, hashtags or quotation marks. "
     "Write it as the person posting the clip would, to tease what happens, even for a weak clip: never call "
     "the clip dull, pointless or empty in the hook. Criticism goes in rating_note.\n"
+    "- bottom_text: 2 to 6 words for a banner under the clip that gets people to follow, comment or watch "
+    "again, written for this clip: a question about what happens, or what following brings. Keep the spirit "
+    "of the account's usual bottom line when one is given, and keep any @handle in it. Never promise a part 2, "
+    "a next part or a follow-up video, unless the clip is marked as carrying on in another clip. No emojis, "
+    "hashtags or quotation marks. Vary it from clip to clip.\n"
     "- fixes: only words the captions clearly got wrong, judged from context and the video title. 'heard' "
     "must be copied exactly from that clip's transcript, and 'correct' must have the same number of words. "
     "Don't fix grammar, filler words or the speaker's own slang. Usually there are none.\n"
@@ -108,6 +119,7 @@ class ClipPolish:
     fixes: list[tuple[str, str]] = field(default_factory=list)
     rating: int = 0
     rating_note: str = ""
+    bottom_text: str = ""  # the bottom banner's line
 
 
 @dataclass
@@ -132,12 +144,21 @@ def grab_frames(src: Path, clips: list[Clip], folder: Path) -> list[Path | None]
 
 
 def build_content(title: str, clips: list[Clip], words: list[Word], frames: list[Path | None],
-                  guide: str = "") -> list[dict]:
-    """The user message. `guide` is learn.Lessons.prompt_text(): how earlier hooks did."""
-    blocks: list[dict] = [{"type": "text", "text": (f"{guide}\n\n" if guide else "") + f"Video title: {title}\n\nClips:"}]
+                  guide: str = "", bottom: str = "") -> list[dict]:
+    """The user message. `guide` is learn.Lessons.prompt_text(): how earlier hooks did. `bottom` is
+    the account's usual bottom banner line (Settings → Layout), when that banner is on."""
+    from .layout import CARRIES_ON
+
+    head = (f"{guide}\n\n" if guide else "") + f"Video title: {title}\n"
+    if bottom.strip():
+        head += f"The account's usual bottom line: {bottom.strip()}\n"
+    blocks: list[dict] = [{"type": "text", "text": head + "\nClips:"}]
     for i, c in enumerate(clips, 1):
         said = " ".join(w.text for w in words_between(words, c.start, c.end)) or "(nobody speaks)"
-        blocks.append({"type": "text", "text": f"\nClip {i} ({c.length:.0f}s)\nTranscript: {said}"})
+        links = [f"carries on in clip {j}" for j, o in enumerate(clips, 1) if 0 <= o.start - c.end <= CARRIES_ON]
+        links += [f"carries on from clip {j}" for j, o in enumerate(clips, 1) if 0 <= c.start - o.end <= CARRIES_ON]
+        blocks.append({"type": "text", "text": f"\nClip {i} ({c.length:.0f}s{'; ' + ', '.join(links) if links else ''})"
+                                               f"\nTranscript: {said}"})
         frame = frames[i - 1] if i - 1 < len(frames) else None
         if frame:
             blocks.append({"type": "image", "source": {"type": "base64", "media_type": "image/jpeg",
@@ -158,9 +179,8 @@ def parse(text: str, count: int) -> Polish:
             continue
         if not 0 <= n < count or n in out.clips:
             continue
-        hook = re.sub(r"\s+", " ", str(item.get("hook") or "")).strip().strip('"“”').strip()
-        if len(hook) > MAX_HOOK:
-            hook = hook[:MAX_HOOK].rsplit(" ", 1)[0]
+        hook = _line(item.get("hook"), MAX_HOOK)
+        bottom = _line(item.get("bottom_text"), MAX_BOTTOM)
         try:
             x = min(1.0, max(0.0, float(item.get("subject_x"))))
         except (TypeError, ValueError):
@@ -175,13 +195,22 @@ def parse(text: str, count: int) -> Polish:
         except (TypeError, ValueError):
             rating = 0
         note = re.sub(r"\s+", " ", str(item.get("rating_note") or "")).strip()[:120] if rating and rating < 7 else ""
-        out.clips[n] = ClipPolish(hook, x, fixes, rating, note)
+        out.clips[n] = ClipPolish(hook, x, fixes, rating, note, bottom)
     return out
+
+
+def _line(value, limit: int) -> str:
+    """One tidy banner line: no quotes, hashtags or runs of spaces, cut at a word under the limit."""
+    text = re.sub(r"#\w+", "", str(value or ""))
+    text = re.sub(r"\s+", " ", text).strip().strip('"“”').strip()
+    if len(text) > limit:
+        text = text[:limit].rsplit(" ", 1)[0]
+    return text
 
 
 def ask(title: str, clips: list[Clip], words: list[Word], src: Path, api_key: str, model: str,
         log: Callable[[str], None] | None = None, check: Callable[[], None] | None = None,
-        guide: str = "") -> Polish:
+        guide: str = "", bottom: str = "") -> Polish:
     """Send the clips to Claude and read back its polish. Raises PolishError."""
     if not ((api_key or "").strip() or os.environ.get("ANTHROPIC_API_KEY")):
         raise PolishError("No Anthropic API key set (Settings → AI).")
@@ -191,7 +220,7 @@ def ask(title: str, clips: list[Clip], words: list[Word], src: Path, api_key: st
 
     with tempfile.TemporaryDirectory(prefix="ytclip-polish-") as tmp:
         frames = grab_frames(src, clips, Path(tmp))
-        content = build_content(title, clips, words, frames, guide)
+        content = build_content(title, clips, words, frames, guide, bottom)
     if log:
         log(f"Asking {model} to polish {len(clips)} clip{'s' if len(clips) != 1 else ''}…")
     try:
@@ -246,9 +275,13 @@ def fix_words(words: list[Word], start: float, end: float, heard: str, correct: 
 
 
 def apply(polish: Polish, clips: list[Clip], words: list[Word], banner_template: str = "",
-          banner_on: bool = False) -> dict:
-    """Write the polish into the clips and words. Returns a summary for clips.json."""
-    hooks = moved = 0
+          banner_on: bool = False, bottom_on: bool = False) -> dict:
+    """Write the polish into the clips and words. Returns a summary for clips.json. bottom_on: the
+    AI's bottom line becomes each clip's bottom banner text (unless it promises a part 2 the clip
+    doesn't have; then the bottom text rules in layout.bottom_banner apply)."""
+    from .layout import has_next_part, promises_more
+
+    hooks = moved = bottoms = 0
     fixes: list[dict] = []
     for i, c in enumerate(clips):
         cp = polish.clips.get(i)
@@ -260,6 +293,10 @@ def apply(polish: Polish, clips: list[Clip], words: list[Word], banner_template:
             hooks += 1
             if banner_on and not c.edited and c.top_text is None and "{title}" in banner_template:
                 c.top_text = banner_template.replace("{title}", cp.hook)
+        if (bottom_on and cp.bottom_text and not c.edited and c.bottom_text is None
+                and not (promises_more(cp.bottom_text) and not has_next_part(c, clips))):
+            c.bottom_text = cp.bottom_text
+            bottoms += 1
         if cp.subject_x is not None and not c.edited and abs(c.crop_x - 0.5) < 1e-6:
             c.crop_x = round(cp.subject_x, 3)
             moved += abs(cp.subject_x - 0.5) > 0.05
@@ -267,7 +304,8 @@ def apply(polish: Polish, clips: list[Clip], words: list[Word], banner_template:
             for heard, correct in cp.fixes:
                 if fix_words(words, c.start, c.end, heard, correct):
                     fixes.append({"start": c.start, "end": c.end, "heard": heard, "correct": correct})
-    return {"model": polish.model, "hooks": hooks, "caption_fixes": len(fixes), "crops_moved": int(moved),
+    return {"model": polish.model, "hooks": hooks, "bottom_lines": bottoms, "caption_fixes": len(fixes),
+            "crops_moved": int(moved),
             "burned_in_subtitles": polish.burned_in_subtitles, "fixes": fixes}
 
 

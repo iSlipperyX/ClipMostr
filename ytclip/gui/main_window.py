@@ -32,6 +32,8 @@ from .layout_tab import LayoutTab
 from .library import Library, reveal
 from .player import Preview
 from .automation import Automation
+from .cleanup_dialog import CleanupDialog
+from .niches import Niches
 from .research import Research
 from .settings_dialog import SettingsDialog
 from .tasks import Task, TaskQueue
@@ -189,13 +191,42 @@ class MainWindow(QMainWindow):
         self.research.hits_changed.connect(self._research_hits)
         self.research.open_settings.connect(self._open_settings)
         self.research_tab = self.tabs.addTab(self.research, RESEARCH_TAB)
+        self.niches = Niches(lambda: self.settings, self._setting_changed)
+        self.niches.notice.connect(self._notice)
+        self.niches.changed.connect(self._niches_changed)
+        self.tabs.addTab(self.niches, "🎯  Niches")
         self.automation = Automation(lambda: self.settings)
         self.automation.notice.connect(self._notice)
         self.automation.open_settings.connect(self._open_settings)
+        self.automation.clean_up.connect(self._clean_up)
+        self.library.clean_up.connect(self._clean_up)
         self.tabs.addTab(self.automation, "🤖  Automation")
         outer.addWidget(self.tabs, 1)
         outer.addWidget(self._build_footer())
         self.setCentralWidget(root)
+
+    def _niches_changed(self) -> None:
+        """A niche was added, edited or removed: everything that shows niches follows."""
+        self.research.settings_changed()
+        self.automation.niches_changed()
+        if self.tabs.currentWidget() is self.library:  # otherwise it refreshes when it's opened
+            self.library.refresh()
+
+    def _clean_up(self) -> None:
+        def busy() -> set[str]:
+            from ..cleanup import busy_ids
+            from ..download import is_url, video_id
+
+            # Every video in the Studio's list, opened yet or not (restored ones load when clicked).
+            studio = {p.video.id if p.video is not None else video_id(p.source) for p in self.projects
+                      if p.video is not None or is_url(p.source)}
+            return studio | busy_ids(self.automation.db)
+
+        dlg = CleanupDialog(lambda: self.settings, self._setting_changed, busy, self)
+        dlg.cleaned.connect(self._notice)
+        dlg.exec()
+        dlg.dispose()
+        self.library.refresh()
 
     def _research_send(self, urls: list[str]) -> None:
         self.add_sources(urls)
@@ -1034,7 +1065,8 @@ class MainWindow(QMainWindow):
         """The selected clip changed (picked, retimed, reframed, retitled): refresh what shows it."""
         p = self._ready()
         if p and 0 <= self.sel < len(p.clips):
-            self.layout_tab.set_clip(p.clips[self.sel], p.video.path, p.media, p.words)
+            self.layout_tab.set_clip(p.clips[self.sel], p.video.path, p.media, p.words,
+                                     next_part=layout.has_next_part(p.clips[self.sel], p.clips))
         self._refresh_export_view()
 
     def _second_media(self, path: str) -> MediaInfo | None:
@@ -1063,7 +1095,8 @@ class MainWindow(QMainWindow):
         stack_video = preview_video(s)
         second = self._second_media(stack_video) if s.stack_enabled else None
         size = (second.width, second.height) if second and second.width else None
-        comp = compose.compose(s, media, clip, p.words if p else None, second=size)
+        comp = compose.compose(s, media, clip, p.words if p else None, second=size,
+                               next_part=layout.has_next_part(clip, p.clips) if p and clip else True)
         self.preview.set_composition(comp, clip.start if clip else 0.0, clip.end if clip else 0.0)
         self.preview.set_second(str(Path(stack_video).expanduser()) if size else "", clip.start if clip else 0.0,
                                 clip.length if clip else 0.0, s.stack_start, s.stack_offset, s.stack_volume)
@@ -1368,6 +1401,8 @@ class MainWindow(QMainWindow):
         forms.refresh(self.tune_editors, new)
         forms.refresh(self.export_editors, new)
         self.research.settings_changed()
+        self.niches.reload()
+        self.automation.niches_changed()
         self.layout_tab.set_settings(new, refresh_editors=True)
         self._update_preview_frame()
         self._update_out_label()
@@ -1393,6 +1428,7 @@ class MainWindow(QMainWindow):
         self._notice(f"Layout applied: {name}")
 
     def _open_settings(self, tab: str = "") -> None:
+        self.niches.commit()  # a niche name still being typed would be lost when the dialog's copy comes back
         dlg = SettingsDialog(self.settings, self, tab)
         if dlg.exec():
             self._apply_settings(dlg.result_settings)
@@ -1475,9 +1511,11 @@ class MainWindow(QMainWindow):
         out_dir.mkdir(exist_ok=True)
         dest = out_dir / f"preview_{p.video.id}_{int(clip.start)}.mp4"
 
+        next_part = layout.has_next_part(p.clips[self.sel], p.clips)
+
         def run(t: Task):
             export_clip(p.video.path, p.media, dest, clip, p.words, settings,
-                        lambda f: t.progress.emit("Rendering preview", f))
+                        lambda f: t.progress.emit("Rendering preview", f), next_part=next_part)
             return dest
 
         task = Task("Rendering preview", run, owner=None)
@@ -1558,6 +1596,7 @@ class MainWindow(QMainWindow):
         self._closing = True
         self.banner.shutdown()
         self.research.shutdown()
+        self.niches.shutdown()
         self.automation.shutdown()
         self._save_session()
         self.settings.save()
@@ -1570,6 +1609,8 @@ class MainWindow(QMainWindow):
             self.tasks.current.wait(4000)
             if self.tasks.current and self.tasks.current.isRunning():
                 self.tasks.current.terminate()
+        for dlg in self.findChildren(CleanupDialog):  # a clean-up window still looking at the folders
+            dlg.wait_for_look()
         super().closeEvent(e)
 
 

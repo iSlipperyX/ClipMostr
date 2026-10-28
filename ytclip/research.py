@@ -14,11 +14,12 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import clipability
+from . import clipability, niches
 from .download import is_blocked
 from .policy import language_codes
+from .niches import Niche
 from .settings import Settings, app_dir
-from .sources import ChannelRef, Gathered, gather, parse_channels, parse_searches
+from .sources import ChannelRef, Gathered, gather
 from .trending import (CATEGORIES, ChartUnavailable, DeepInfo, History, ResearchError, TrendingVideo, deep_check,
                        fetch_chart, parse_regions)
 
@@ -41,20 +42,21 @@ class ScanOptions:
     cookies: str | None = None
     channels: list[ChannelRef] = field(default_factory=list)  # the channel list (Settings → Picking)
     searches: list[str] = field(default_factory=list)  # Creative Commons searches
-    unreadable: list[str] = field(default_factory=list)  # channel list lines that aren't a channel
+    unreadable: list = field(default_factory=list)  # channel list lines that aren't a channel, or (where, line)
     language: str = ""  # Creative Commons searches favour this spoken language (the first of Picking's)
     deep_workers: int = 4  # most-replayed checks at once
     deep_pause: float = 0.0  # seconds between them (automation spaces them out)
+    niches: list[Niche] = field(default_factory=list)  # every niche (switched off too), to sort the videos into
 
     @classmethod
     def from_settings(cls, s: Settings) -> "ScanOptions":
-        channels, bad = parse_channels(s.pick_channels)
+        channels, searches, bad = niches.scan_sources(s)
         return cls(api_key=youtube_key(s), regions=parse_regions(s.research_regions) or ["US"],
                    category=s.research_category, per_region=s.research_per_region,
                    min_minutes=s.research_min_minutes, deep_count=s.research_deep_count,
                    cookies=s.cookies_browser or None, channels=channels,
-                   searches=parse_searches(s.pick_searches), unreadable=bad,
-                   language=next(iter(language_codes(s.pick_languages)), ""))
+                   searches=searches, unreadable=bad,
+                   language=next(iter(language_codes(s.pick_languages)), ""), niches=niches.load(s))
 
     @property
     def quota(self) -> int:
@@ -138,7 +140,8 @@ def scan(opts: ScanOptions, history: History, log: Log | None = None, progress: 
         extra = sources(opts.api_key, opts.channels, opts.searches, history, now, log, language=opts.language)
         quota += extra.quota
         problems += extra.problems
-    problems += [f"Channel list: \"{x}\" isn't a channel link, @handle or id." for x in opts.unreadable]
+    problems += [f"{x[0] if isinstance(x, tuple) else 'Channel list'}: \"{x[1] if isinstance(x, tuple) else x}\" "
+                 "isn't a channel link, @handle or id." for x in opts.unreadable]
     for v in extra.videos:
         if v.id in merged:
             merged[v.id].origins = sorted(set(merged[v.id].origins) | set(v.origins))
@@ -153,6 +156,7 @@ def scan(opts: ScanOptions, history: History, log: Log | None = None, progress: 
                                            or v.live == "live")]
     if merged and len(videos) < len(merged):
         log(f"Skipped {len(merged) - len(videos)} video(s) shorter than {opts.min_minutes:g} min or not yet live.")
+    niches.assign(videos, opts.niches, history)
     first = not history.videos
     for v in videos:
         history.record(v, now)

@@ -129,6 +129,7 @@ class TrendingVideo:
     license: str = ""  # "creativeCommon" or "youtube" (standard licence), per the API
     language: str = ""  # two-letter code of the spoken language, when the uploader set one
     origins: list[str] = field(default_factory=list)  # chart | watchlist | cc: where the scan found it
+    niche: str = ""  # id of the niche it fits (niches.py), "" for none
     # Filled in by the scan:
     velocity: float = 0.0  # views per hour
     recent: bool = False  # velocity measured between two checks rather than since upload

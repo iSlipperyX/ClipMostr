@@ -51,6 +51,24 @@ def test_banner_text_override_and_template():
     assert layout.banner_text("odd {brace", "x") == "odd {brace"
 
 
+def test_part_2_only_shows_when_a_clip_carries_this_one_on():
+    from ytclip.analyze import Clip
+
+    for text in ("Follow for part 2", "PART 2 in comments", "pt. 3 tomorrow", "Part two soon", "Next part on my page",
+                 "To be continued", "Part II"):
+        assert layout.promises_more(text), text
+    for text in ("Follow for more", "Wait for the end", "Departure 2", "The best part", "{title}"):
+        assert not layout.promises_more(text), text
+    a, b, c = Clip(0, 10, 80), Clip(12, 20, 80), Clip(60, 70, 80)
+    assert layout.has_next_part(a, [a, b, c]) and not layout.has_next_part(b, [a, b, c])
+    assert not layout.has_next_part(a, [a, Clip(12, 20, 80, enabled=False)])
+    s = Settings(banner_bottom_text="Follow for part 2", banner_bottom_alt="Follow for more")
+    assert layout.bottom_banner(s, "T", None, next_part=True) == "Follow for part 2"
+    assert layout.bottom_banner(s, "T", None, next_part=False) == "Follow for more"
+    assert layout.bottom_banner(s, "T", "My own part 2 text", next_part=False) == "My own part 2 text"  # yours stays
+    assert layout.bottom_banner(s.copy(banner_bottom_text="Like it?"), "T", None, False) == "Like it?"
+
+
 def test_wrap_shrinks_long_text_to_fit():
     box = layout.Box(0, 0, 1080, 200)
     font = "TikTok Sans Black"
