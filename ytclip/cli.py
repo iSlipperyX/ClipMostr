@@ -750,7 +750,7 @@ def run_request(argv: list[str]) -> int:
     p.add_argument("--length", default="", metavar="SECONDS", help="clip length, e.g. 30-45 (default: the niche's "
                    "or Automation's style)")
     p.add_argument("--niche", default="", metavar="NAME", help="the niche they're for")
-    p.add_argument("--link", nargs="+", default=[], metavar="URL", help="videos to clip (default: automation picks "
+    p.add_argument("--link", nargs="+", action="extend", default=[], metavar="URL", help="videos to clip (default: automation picks "
                    "videos for the niche)")
     p.add_argument("--notes", default="", metavar="TEXT", help="special requests for the AI, in plain words")
     p.add_argument("--list", action="store_true", help="show your requests and how far along they are")

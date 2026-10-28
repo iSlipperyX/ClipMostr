@@ -50,6 +50,8 @@ class Spec:
     language: str = "en"
     burned_text: bool = False
     scene_every: float = 8.0
+    gap: tuple[float, float] = GAP  # silence between sentences
+    auto_captions: bool = False  # like YouTube's: no punctuation, lines that run across sentences
 
 
 SPECS = [
@@ -65,6 +67,7 @@ SPECS = [
     Spec("indonesian-6", 6, language="id"),
     Spec("quiet-8", 8, moments=0),
     Spec("gaming-10", 10, moments=5, scene_every=3),
+    Spec("fast-auto-8", 8, gap=(0.12, 0.3), auto_captions=True),  # a fast talker with auto-captions: the hard case
 ]
 QUICK = [s for s in SPECS if s.name in ("talk-short", "talk-10", "series-12", "vertical-8")]
 
@@ -77,6 +80,7 @@ class Truth:
     sentences: list[tuple[float, float]] = field(default_factory=list)  # (speech start, speech end)
     moments: list[tuple[float, float]] = field(default_factory=list)
     series: list[tuple[float, float]] = field(default_factory=list)
+    gaps: list[tuple[float, float]] = field(default_factory=list)  # silences between words inside sentences
 
 
 def speak(text: str, tmp: Path) -> np.ndarray:
@@ -89,6 +93,25 @@ def speak(text: str, tmp: Path) -> np.ndarray:
     # flite pads each line with a little silence: keep only the speech, so the truth is exact
     loud = np.nonzero(np.abs(data) > 0.01)[0]
     return data[loud[0]:loud[-1] + 1] if len(loud) else data
+
+
+def silences(voice: np.ndarray, frame: float = 0.01, shortest: float = 0.03) -> list[tuple[float, float]]:
+    """The silent stretches inside one spoken line (between its words), in seconds from its start."""
+    step = int(RATE * frame)
+    n = len(voice) // step
+    quiet = np.sqrt(np.mean(voice[:n * step].reshape(n, step) ** 2, axis=1)) < 0.004
+    out, i = [], 0
+    while i < n:
+        if quiet[i]:
+            j = i
+            while j < n and quiet[j]:
+                j += 1
+            if (j - i) * frame >= shortest:
+                out.append((i * frame, j * frame))
+            i = j
+        else:
+            i += 1
+    return out
 
 
 def sentence(rng: random.Random) -> str:
@@ -156,7 +179,8 @@ def build(spec: Spec, out: Path, tmp: Path, seed: int = 7) -> Truth:
             text = "[Laughter] " + line
         cues.append((start, end, text, stamps))
         truth.sentences.append((round(start, 3), round(end, 3)))
-        t = end + rng.uniform(*GAP)
+        truth.gaps += [(round(start + a, 3), round(start + b, 3)) for a, b in silences(voice)]
+        t = end + rng.uniform(*spec.gap)
     # Excitement under the good moments: crowd-like noise between the words
     for s, e, kind in slots:
         a, b = int(s * RATE), int(e * RATE)
@@ -173,7 +197,14 @@ def build(spec: Spec, out: Path, tmp: Path, seed: int = 7) -> Truth:
 
     vtt = out / f"{spec.name}.{spec.language}.vtt"
     lines = ["WEBVTT", "Kind: captions", f"Language: {spec.language}", ""]
-    for start, end, text, stamps in cues:
+    if spec.auto_captions:  # every word timed, no punctuation, 7 words a line whatever the sentences
+        said = [(at, w.strip(".,?!").lower()) for _, _, _, stamps in cues for at, w in stamps]
+        for k in range(0, len(said), 7):
+            line = said[k:k + 7]
+            until = said[k + 7][0] if k + 7 < len(said) else line[-1][0] + 1.0
+            tagged = "".join(f"<{stamp(at)}><c> {w}</c>" if j else w for j, (at, w) in enumerate(line))
+            lines += [f"{stamp(line[0][0])} --> {stamp(until)}", tagged, ""]
+    for start, end, text, stamps in [] if spec.auto_captions else cues:
         tagged = "".join(f"<{stamp(at)}><c> {w}</c>" if k else w for k, (at, w) in enumerate(stamps))
         if text.startswith("[Laughter]"):
             tagged = "[Laughter] " + tagged

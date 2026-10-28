@@ -9,10 +9,10 @@ from typing import Callable
 
 import numpy as np
 
-from . import layout, series
+from . import cuts, layout, series
 from . import transcribe as whisper
 from .analyze import (SIGNAL_LABELS, Clip, Measurements, breathing_room, build_signals, chapter_clips, clip_score,
-                      combine, fit_to_sentences, loudness_db, pick_clips, quiet_frames, snap, trim_dead_air)
+                      combine, fit_to_sentences, loudness, pick_clips, quiet_frames, snap, trim_dead_air)
 from .download import Video, download, is_url, local_video
 from .export import export_clip, thumbnail, tiktok_warnings
 from .export import frame as export_frame
@@ -103,25 +103,30 @@ class Engine:
         v = p.video
         assert v is not None
         cache = self.s.cache_path / f"{v.id}.analysis.npz"
-        db, cuts, scenes_done = None, [], False
+        db, fine, scene_cuts, scenes_done = None, None, [], False
         if cache.exists():
             try:
                 data = np.load(cache)
-                db, cuts, scenes_done = data["db"], list(data["cuts"]), bool(data["scenes_done"])
+                db, scene_cuts, scenes_done = data["db"], list(data["cuts"]), bool(data["scenes_done"])
+                fine = data["fine"] if "fine" in data.files else None  # caches before 2.4.0 have no fine loudness
             except Exception:
                 db = None
-        if db is None:
-            db = loudness_db(v.path, v.duration, lambda f: self.progress("Measuring audio", f))
+        if db is None or fine is None:
+            db, fine = loudness(v.path, v.duration, lambda f: self.progress("Measuring audio", f))
         if self.s.detect_scenes and not scenes_done:
-            cuts = detect_scenes(v.path, v.duration, lambda f: self.progress("Detecting scene cuts", f))
+            scene_cuts = detect_scenes(v.path, v.duration, lambda f: self.progress("Detecting scene cuts", f))
             scenes_done = True
         self.s.cache_path.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(cache, db=db, cuts=np.array(cuts, dtype=float), scenes_done=scenes_done)
+        np.savez_compressed(cache, db=db, fine=fine, cuts=np.array(scene_cuts, dtype=float), scenes_done=scenes_done)
 
         cues, words, source = self._transcript(p)
+        if words and source == "captions" and not cuts.punctuated(words):
+            n = cuts.refine_words(words, cuts.Pauses(fine))  # auto-captions: find the pauses by listening
+            if n:
+                self.log(f"Found {n} pauses in the speech to cut at (the captions have no punctuation).")
         p.words, p.transcript_source = words, source
         p.measurements = Measurements(duration=v.duration, db=db, heatmap=v.heatmap,
-                                      scene_cuts=cuts if self.s.detect_scenes else [], cues=cues)
+                                      scene_cuts=scene_cuts if self.s.detect_scenes else [], cues=cues, fine=fine)
 
     def _transcript(self, p: Project) -> tuple[list[Cue], list[Word], str]:
         v = p.video
@@ -149,7 +154,9 @@ class Engine:
         m, v = p.measurements, p.video
         assert m is not None and v is not None
         self.rescore(p)
-        sents = sentences(p.words) if p.words else m.cues
+        # Without punctuation, a breath the audio shows (cuts.refine_words) ends a sentence.
+        sents = (sentences(p.words, pause=0.9 if cuts.punctuated(p.words) else cuts.BREATH - 0.01) if p.words
+                 else m.cues)
         mode = self.s.mode
         p.ai_error = ""
         if mode == "chapters" and not v.chapters:
@@ -171,6 +178,7 @@ class Engine:
                 p.clips, p.mode_used, p.ai_model = clips, "ai", model
                 self.parts(p, sents)
                 self.trim(p)
+                self.clean_cuts(p)
                 return
             except Cancelled:
                 raise
@@ -198,7 +206,17 @@ class Engine:
             self.parts(p, sents)
         p.mode_used = mode
         self.trim(p)
+        self.clean_cuts(p)
         self.label(p)
+
+    def clean_cuts(self, p: Project) -> None:
+        """The last word on clip edges: none starts or ends part-way through a word (cuts.py)."""
+        m = p.measurements
+        if m is None or not len(m.fine) or not self.s.snap_to_pauses:
+            return
+        n = cuts.clean_edges(p.clips, cuts.Pauses(m.fine), m.duration, self.s.min_len, self.s.max_len)
+        if n:
+            self.log(f"Moved the edges of {n} clip{'s' if n != 1 else ''} into a pause, so no word is cut off.")
 
     def parts(self, p: Project, sents: list[Cue]) -> None:
         """Part series (series.py): a great moment longer than one clip carries on in Part 2, 3..."""
