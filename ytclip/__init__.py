@@ -1,3 +1,3 @@
 """ClipMonster (ytclip) - download YouTube videos and cut them into their most interesting clips."""
 
-__version__ = "2.2.3"
+__version__ = "2.3.0"
