@@ -301,6 +301,37 @@ def cap_length(start: float, end: float, sents: list[Cue], min_len: float, max_l
     return float(min(fits[-1] + 0.3, max(fits[-1], nxt - 0.05)))
 
 
+def reach_length(start: float, end: float, sents: list[Cue], min_len: float, max_len: float, lo: float = 0.0,
+                 hi: float = float("inf"), grow_start: bool = True, grow_end: bool = True) -> tuple[float, float] | None:
+    """Edges that make a clip at least `min_len` long, staying between `lo` and `hi` (the video, or
+    the clips either side) and within `max_len`: the end goes on to the end of a later sentence, else
+    the start goes back to the start of an earlier one, else the clip just grows. None when there's
+    no room. A part of a series may only grow away from the part next to it (grow_start/grow_end)."""
+    if end - start >= min_len - 0.01:
+        return start, end
+    longest = max(max_len, min_len)
+    if grow_end:
+        ends = [s.end for s in sents if s.end - start >= min_len and s.end - start <= longest and s.end <= hi]
+        if ends:
+            e = min(ends)
+            nxt = min((s.start for s in sents if s.start >= e - 0.01), default=e + 0.3)
+            return start, float(min(hi, e + 0.3, max(e, nxt - 0.05)))
+    if grow_start:
+        starts = [s.start for s in sents if end - s.start >= min_len and end - s.start <= longest and s.start >= lo]
+        if starts:
+            b = max(starts)
+            prev = max((s.end for s in sents if s.end <= b + 0.01), default=b - 0.15)
+            return float(max(lo, b - 0.15, min(b, prev + 0.05))), end
+    # No sentence edge in reach: just make it long enough, the end first.
+    if grow_end and start + min_len <= hi:
+        return start, start + min_len
+    if grow_start and end - min_len >= lo:
+        return end - min_len, end
+    if grow_start and grow_end and hi - lo >= min_len:
+        return max(lo, hi - min_len), min(hi, max(lo, hi - min_len) + min_len)
+    return None
+
+
 def breathing_room(start: float, end: float, sents: list[Cue], lead: float, tail: float) -> tuple[float, float]:
     """Pad a sentence-aligned clip without catching a syllable of the neighbouring sentences."""
     prev_end = max((s.end for s in sents if s.end <= start + 0.01), default=start - lead)
@@ -368,7 +399,7 @@ def pick_clips(score: np.ndarray, db: np.ndarray, count: int, min_len: float, ma
             else:
                 a -= 1
 
-        if b - a + 1 < min_len_i * 0.6:  # squeezed between earlier clips
+        if b - a + 1 < min_len_i:  # squeezed between earlier clips: too short to post
             taken[a : b + 1] = True
             continue
 

@@ -1277,6 +1277,11 @@ class MainWindow(QMainWindow):
     # ================================================================== settings & re-detect
     def _setting_changed(self, name: str, value) -> None:
         self.settings = self.settings.apply({name: value})
+        if name in ("min_len", "max_len") and self.settings.min_len > self.settings.max_len:
+            other = "max_len" if name == "min_len" else "min_len"  # the other end follows along
+            self.settings = self.settings.apply({other: value})
+            if other in self.tune_editors:
+                forms.refresh({other: self.tune_editors[other]}, self.settings)
         self._save_timer.start()
         self.layout_tab.set_settings(self.settings)
         self._update_preview_frame()

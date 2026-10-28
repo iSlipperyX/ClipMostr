@@ -23,7 +23,7 @@ from .layout import CARRIES_ON
 
 FULL = 0.9  # a clip at least this share of the longest length ran out of room
 KEEP_UP = 0.75  # the next stretch must be at least this interesting, relative to the clip
-MIN_PART = 0.75  # a next part shorter than this share of the shortest length isn't worth posting
+MIN_PART = 1.0  # a next part is at least the shortest length, like every clip
 LEAD, TAIL = 0.15, 0.3  # seconds of room before a part's first sentence and after its last
 OVERLAP = 0.05  # seconds two clips may share (rounding) without overlapping
 WINDOW = 5  # seconds of dull video that end a moment
@@ -66,7 +66,7 @@ def _next_part(part: Clip, sents: list, score: np.ndarray, bar: float, min_len: 
         end = over
     else:
         ends = [s.end for s in sents if s.start >= first.start and s.end + TAIL <= limit + 0.01]
-        fits = [e for e in ends if e <= over] or [e for e in ends if e - start >= min_len][:1]
+        fits = [e for e in ends if e <= over and e - start >= min_len] or [e for e in ends if e - start >= min_len][:1]
         if not fits:
             return None
         last = fits[-1]

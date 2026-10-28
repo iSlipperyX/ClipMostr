@@ -152,6 +152,11 @@ class SettingsDialog(QDialog):
 
     def _changed(self, name: str, value) -> None:
         self.result_settings = self.result_settings.apply({name: value})
+        s = self.result_settings
+        if name in ("min_len", "max_len") and s.min_len > s.max_len:  # the other end follows along
+            other = "max_len" if name == "min_len" else "min_len"
+            self.result_settings = s.apply({other: value})
+            forms.refresh({other: self._editors[other]}, self.result_settings)
 
     def _test_key(self) -> None:
         from ..ai import check_key

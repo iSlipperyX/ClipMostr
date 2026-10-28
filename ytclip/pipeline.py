@@ -145,7 +145,10 @@ def settings_for(job: Job, s: Settings, order: "orders.Order | None" = None,
     The niche's own clip count and length go on top of the style, and a clip request's (`order`,
     asking this video for `clips` clips) on top of those, into the request's own folder. Special
     requests (the niche's and the request's) go to the AI, and with an AI key they make the AI
-    pick the clips, since only it can follow them."""
+    pick the clips, since only it can follow them.
+
+    Clip length is never the style's: it's Min/Max clip length from Settings, unless the niche or the
+    request asks for its own, so a preset made for 15-second clips can't undercut what you set."""
     recipes, _ = parse_recipes(s.auto_recipes)
     niche = niches.find(s, job.niche)
     matching = [r for r in recipes if r.matches(job)]
@@ -167,12 +170,14 @@ def settings_for(job: Job, s: Settings, order: "orders.Order | None" = None,
     folder = s.auto_output_path / niche.folder if niche else s.auto_output_path
     if order is not None:
         folder = folder / "Requests" / order.folder
-    overrides = {"output_dir": str(folder), "cache_dir": str(s.cache_path)}
+    overrides = {"output_dir": str(folder), "cache_dir": str(s.cache_path),
+                 "min_len": s.min_len, "max_len": max(s.max_len, s.min_len)}
     if niche:
-        overrides |= niche.clip_overrides()
-        lo, hi = overrides.get("min_len", out.min_len), overrides.get("max_len", out.max_len)
-        if lo > hi:  # the niche's shortest passes the style's longest (or the other way): the niche's wins
-            if "max_len" in overrides:
+        own_len = niche.clip_overrides()
+        overrides |= own_len
+        lo, hi = overrides["min_len"], overrides["max_len"]
+        if lo > hi:  # the niche's shortest passes Settings' longest (or the other way): the niche's wins
+            if "max_len" in own_len and "min_len" not in own_len:
                 overrides["min_len"] = hi
             else:
                 overrides["max_len"] = lo
@@ -774,7 +779,7 @@ class Runner:
         now = self.now()
         self.db.update(job.id, now, status="working", stage="Starting", recipe=label, error="")
         self.state(f"Clipping: {job.title or job.url}")
-        self.log(f"Clipping {job.title or job.url} with {label}")
+        self.log(f"Clipping {job.title or job.url} with {label}; clips {settings.min_len:g}–{settings.max_len:g} s")
 
         last = {"t": 0.0, "msg": "", "video": ""}
         self.db.set_meta("working_video", "")

@@ -7,11 +7,11 @@ finding and ffmpeg export run, and every clip is checked:
 * its file exists, plays for as long as clips.json says, and is 1080x1920 for a vertical style;
 * it starts and ends in the gap between two sentences or, failing that, in the silence between two
   words (truth.json "gaps"), never in a word;
-* its length is inside what was asked for;
+* its length is inside what was asked for (Min/Max clip length, --min/--max): never shorter;
 * the good moments in each video were found (recall);
 * long good stretches came out as Part 1, 2, 3 in order (once part series exist).
 
-    python tests/medialab/run.py LAB_DIR OUT_DIR [--only NAME ...] [--json report.json]
+    python tests/medialab/run.py LAB_DIR OUT_DIR [--only NAME ...] [--json report.json] [--min S --max S]
 
 Exit code 1 when any hard check fails. Soft numbers (recall, lengths) are in the report, so two
 runs can be compared.
@@ -96,6 +96,9 @@ def check_folder(folder: Path, truth: dict, s) -> dict:
             cuts_inside += 1
             hard.append(f"{c['file']}: {edge} {c[edge]:.2f}s cuts a word in the sentence {hit[0]:.2f}-{hit[1]:.2f}s")
         lengths.append(c["length"])
+        shortest = min(s.min_len, truth["duration"])
+        if c["length"] < shortest - 0.35 or c["length"] > max(s.max_len, s.min_len) + 1.5:
+            hard.append(f"{c['file']}: {c['length']:.1f}s long, asked for {s.min_len:g}-{s.max_len:g}s")
     kept = [c for c in clips if not c["file"].startswith("_rejected/")]
     found = sum(1 for m in truth["moments"] if any(overlap(m, (c["start"], c["end"])) >= 3 for c in kept))
     series = truth.get("series") or []
@@ -107,7 +110,8 @@ def check_folder(folder: Path, truth: dict, s) -> dict:
         "clips": len(clips), "kept": len(kept), "rejected": len(clips) - len(kept),
         "hard": hard, "cuts_inside_speech": cuts_inside, "cuts_between_words": between_words,
         "min_len": min(lengths, default=0), "max_len": max(lengths, default=0),
-        "outside_length": sum(1 for x in lengths if x < s.min_len * 0.75 - 0.01 or x > s.max_len + 1.5),
+        "outside_length": sum(1 for x in lengths if x < min(s.min_len, truth["duration"]) - 0.35
+                              or x > s.max_len + 1.5),
         "moments": len(truth["moments"]), "moments_found": found,
         "series_covered": round(covered / len(series), 2) if series else None,
         "parts": [(c.get("series", ""), c["part"], c.get("parts")) for c in parts],
@@ -152,12 +156,14 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("out", type=Path)
     ap.add_argument("--only", nargs="*")
     ap.add_argument("--json", type=Path)
+    ap.add_argument("--min", type=float, default=20.0, help="Min clip length")
+    ap.add_argument("--max", type=float, default=60.0, help="Max clip length")
     args = ap.parse_args(argv)
     truths = json.loads((args.lab / "truth.json").read_text())
     names = args.only or list(truths)
     server, base = serve(args.lab)
     try:
-        report = run_engine(args.lab, args.out, names, base)
+        report = run_engine(args.lab, args.out, names, base, min_len=args.min, max_len=args.max)
     finally:
         server.shutdown()
     total = {
@@ -170,6 +176,8 @@ def main(argv: list[str] | None = None) -> int:
         "cuts_between_words": sum(r.get("cuts_between_words", 0) for r in report.values()),
         "moments_found": sum(r.get("moments_found", 0) for r in report.values()),
         "moments": sum(r.get("moments", 0) for r in report.values()),
+        "outside_length": sum(r.get("outside_length", 0) for r in report.values()),
+        "shortest": min((r["min_len"] for r in report.values() if r.get("clips")), default=0),
     }
     print(json.dumps(total))
     if args.json:

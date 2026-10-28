@@ -15,7 +15,8 @@ import numpy as np
 from . import cuts, layout, series, speed
 from . import transcribe as whisper
 from .analyze import (SIGNAL_LABELS, Clip, Measurements, breathing_room, build_signals, chapter_clips, clip_score,
-                      cap_length, combine, fit_to_sentences, loudness, pick_clips, quiet_frames, snap, trim_dead_air)
+                      cap_length, combine, fit_to_sentences, loudness, pick_clips, quiet_frames, reach_length, snap,
+                      trim_dead_air)
 from .download import Video, download, is_url, local_video
 from .export import export_clip, thumbnail, tiktok_warnings
 from .export import frame as export_frame
@@ -262,6 +263,7 @@ class Engine:
                  f"({clock_text(sum(b - a for a, b in new))}) for their captions; the captions found them.")
         if own:  # edges go by Whisper's words now, which can sit a little apart from the captions'
             self.trim(p)
+            self.hold_length(p)
             self.clean_cuts(p)
         return len(new)
 
@@ -275,9 +277,7 @@ class Engine:
         m, v = p.measurements, p.video
         assert m is not None and v is not None
         self.rescore(p)
-        # Without punctuation, a breath the audio shows (cuts.refine_words) ends a sentence.
-        sents = (sentences(p.words, pause=0.9 if cuts.punctuated(p.words) else cuts.BREATH - 0.01) if p.words
-                 else m.cues)
+        sents = self._sentences(p)
         mode = self.s.mode
         p.ai_error = ""
         if mode == "chapters" and not v.chapters:
@@ -289,7 +289,7 @@ class Engine:
             self.progress("AI is picking clips", None)
             try:
                 clips, model = find_clips_ai(
-                    v.title, v.duration, sents, p.score, self.s.clip_count, self.s.min_len, self.s.max_len,
+                    v.title, v.duration, sents, p.score, self.s.clip_count, *self.lengths(v.duration),
                     self.s.ai_instructions, self.s.ai_api_key, self.s.ai_model, self.log,
                     check=lambda: self.progress("AI is picking clips", None))
                 self.progress("AI is picking clips", None)  # a cancel during the call discards its result
@@ -299,6 +299,7 @@ class Engine:
                 p.clips, p.mode_used, p.ai_model = clips, "ai", model
                 self.parts(p, sents)
                 self.trim(p)
+                self.hold_length(p, sents)
                 self.clean_cuts(p)
                 return
             except Cancelled:
@@ -317,7 +318,7 @@ class Engine:
             align = bool(sents) and self.s.snap_to_pauses
 
             def pick(count: int) -> list[Clip]:
-                return pick_clips(p.score, m.db, count, self.s.min_len, self.s.max_len,
+                return pick_clips(p.score, m.db, count, *self.lengths(v.duration),
                                   self.s.min_gap, self.s.quality_floor, self.s.snap_to_pauses and not align,
                                   0.0 if align else self.s.pad_start, 0.0 if align else self.s.pad_end)
 
@@ -336,15 +337,63 @@ class Engine:
             self.parts(p, sents, spares)
         p.mode_used = mode
         self.trim(p)
+        if mode != "chapters":  # a chapter is as long as the video made it
+            self.hold_length(p, sents)
         self.clean_cuts(p)
         self.label(p)
+
+    def _sentences(self, p: Project) -> list[Cue]:
+        # Without punctuation, a breath the audio shows (cuts.refine_words) ends a sentence.
+        if p.words:
+            return sentences(p.words, pause=0.9 if cuts.punctuated(p.words) else cuts.BREATH - 0.01)
+        return p.measurements.cues if p.measurements else []
+
+    def lengths(self, duration: float = 0.0) -> tuple[float, float]:
+        """The shortest and longest a clip may be: Min/Max clip length, or the whole video when it's
+        shorter, and never a longest under the shortest."""
+        shortest = min(self.s.min_len, duration) if duration else self.s.min_len
+        return shortest, max(self.s.max_len, self.s.min_len)
+
+    def hold_length(self, p: Project, sents: list[Cue] | None = None) -> int:
+        """The last word on clip length: every clip is at least Min clip length (unless the video is
+        shorter). A short one grows to a sentence's end, or back to a sentence's start, within Max clip
+        length and without running into the clips beside it; one with no room to grow is dropped.
+        Clips you edited stay as they are. Returns how many were dropped."""
+        if p.video is None or not p.clips:
+            return 0
+        sents = self._sentences(p) if sents is None else sents
+        shortest, longest = self.lengths(p.video.duration)
+        grown, dropped = 0, []
+        on = sorted((c for c in p.clips if c.enabled), key=lambda c: c.start)
+        labels = dict(zip(map(id, p.clips), series.labels(p.clips)))
+        for i, c in enumerate(on):
+            if c.edited or c.length >= shortest - 0.01:
+                continue
+            _, part, parts = labels[id(c)]
+            lo = max((o.end for o in on[:i] if o.end <= c.start + 0.01 and o not in dropped), default=0.0)
+            hi = min((o.start for o in on[i + 1:] if o.start >= c.end - 0.01), default=p.video.duration)
+            where = reach_length(c.start, c.end, sents, shortest, longest, lo, hi,
+                                 grow_start=part <= 1, grow_end=not (part and part < parts))
+            if where is None:
+                dropped.append(c)
+                continue
+            c.start, c.end = round(where[0], 2), round(where[1], 2)
+            grown += 1
+        for c in dropped:
+            p.clips.remove(c)
+        if grown:
+            self.log(f"Made {grown} clip{'s' if grown != 1 else ''} longer, to at least {shortest:.0f} s.")
+        if dropped:
+            self.log(f"Dropped {len(dropped)} clip{'s' if len(dropped) != 1 else ''} that couldn't be made "
+                     f"{shortest:.0f} s long without running into another clip.")
+        return len(dropped)
 
     def clean_cuts(self, p: Project) -> None:
         """The last word on clip edges: none starts or ends part-way through a word (cuts.py)."""
         m = p.measurements
         if m is None or not len(m.fine) or not self.s.snap_to_pauses:
             return
-        n = cuts.clean_edges(p.clips, cuts.pauses_in(m.fine), m.duration, self.s.min_len, self.s.max_len)
+        n = cuts.clean_edges(p.clips, cuts.pauses_in(m.fine), m.duration, *self.lengths(m.duration))
         if n:
             self.log(f"Moved the edges of {n} clip{'s' if n != 1 else ''} into a pause, so no word is cut off.")
 
@@ -352,7 +401,7 @@ class Engine:
         """Part series (series.py): a great moment longer than one clip carries on in Part 2, 3..."""
         if self.s.series_parts < 2 or p.video is None:
             return
-        n = series.extend(p.clips, p.score, sents, self.s.min_len, self.s.max_len, self.s.clip_count,
+        n = series.extend(p.clips, p.score, sents, *self.lengths(p.video.duration), self.s.clip_count,
                           self.s.series_parts, p.video.duration, spares)
         if not n and any(sid for sid, _, _ in series.labels(p.clips)):  # the finder's own clips carry on
             series.keep(p.clips, len(p.clips))  # list them together, in order
@@ -363,7 +412,7 @@ class Engine:
         """Pull clip edges in to the speech (Trim dead air), leaving hand-edited clips alone."""
         if not (self.s.trim_silence and p.words):
             return
-        floor = min(self.s.min_len, p.video.duration if p.video else self.s.min_len) * 0.75
+        floor = self.lengths(p.video.duration if p.video else 0.0)[0]  # never shorter than Min clip length
         n = 0
         for c, (_, part, parts) in zip(p.clips, series.labels(p.clips)):
             if c.edited:
@@ -432,20 +481,23 @@ class Engine:
         """Align edges to sentences (or pauses without a transcript), add a breath of room,
         enforce the minimum length and drop overlaps - best-scoring clips win."""
         quiet = quiet_frames(m.db) if self.s.snap_to_pauses and not sents else np.zeros(0, bool)
-        min_len = min(self.s.min_len, duration)
+        min_len, max_len = self.lengths(duration)
         kept: list[Clip] = []
         dropped = 0
         for c in sorted(clips, key=lambda c: c.score, reverse=True):
             if sents and self.s.snap_to_pauses:
-                c.start, c.end = fit_to_sentences(c.start, c.end, sents, self.s.min_len, self.s.max_len)
+                c.start, c.end = fit_to_sentences(c.start, c.end, sents, min_len, max_len)
                 c.start, c.end = breathing_room(c.start, c.end, sents, 0.15, 0.3)
-                c.end = cap_length(c.start, c.end, sents, self.s.min_len, self.s.max_len)
+                c.end = cap_length(c.start, c.end, sents, min_len, max_len)
             elif len(quiet):
                 c.start, c.end = snap(c.start, quiet, -1.5, 0.5), snap(c.end, quiet, -0.5, 1.5)
             # pad_start/pad_end are deliberate user choices, so they may reach into neighbours.
             c.start = max(0.0, c.start - self.s.pad_start)
             c.end = min(duration, c.end + self.s.pad_end)
-            if c.length < min_len * 0.75 or any(c.start < k.end and c.end > k.start for k in kept):
+            where = reach_length(c.start, c.end, sents, min_len, max_len, 0.0, duration)  # too short: grow it
+            if where is not None:
+                c.start, c.end = where
+            if c.length < min_len - 0.01 or any(c.start < k.end and c.end > k.start for k in kept):
                 dropped += 1
                 continue
             kept.append(c)
