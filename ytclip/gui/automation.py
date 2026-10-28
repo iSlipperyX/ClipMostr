@@ -317,7 +317,7 @@ class Automation(QWidget):
         busy = bool(st.uploading and not st.problem)
         self.upload_bar.setVisible(busy)
         if busy:
-            self.upload_bar.set_fraction(st.progress, f"{st.progress:.0%} of {st.current}" if st.current else "")
+            self.upload_bar.set_fraction(st.progress)
             self.upload_bar.setToolTip(f"Uploading {st.current}")
 
     def _show_now(self) -> None:

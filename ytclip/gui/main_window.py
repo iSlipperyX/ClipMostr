@@ -108,7 +108,9 @@ class QueueItem(QWidget):
         if p.status == "error":
             text = f"Failed: {p.error[:80]}"
         elif status is not None and p.status in ("working", "exporting"):
-            text = (f"Step {status.index}/{status.count} · " if status.step else "") + status.detail()
+            # The list is narrow: the step and its progress here, the full message in the tooltip
+            pct = f" {status.step_frac:.0%}" if status.step_frac is not None else ""
+            text = f"Step {status.index}/{status.count} · {status.label}{pct}" if status.step else status.detail()
         elif msg and p.status in ("working", "exporting"):
             text = msg
         elif p.status in ("ready", "done") and p.clips:
@@ -116,7 +118,8 @@ class QueueItem(QWidget):
         if p.ai_error and p.status in ("ready", "done"):
             text, colour = f"{text} · AI failed, used signals", theme.WARN
         self.sub.setText(text)
-        self.sub.setToolTip(f"AI clip finder: {p.ai_error}" if p.ai_error else "")
+        self.sub.setToolTip(f"AI clip finder: {p.ai_error}" if p.ai_error else
+                            status.summary() if status is not None and p.status in ("working", "exporting") else "")
         self.sub.setStyleSheet(f"color:{colour}; font-size:9pt;")
         busy = p.status in ("working", "exporting", "queued")
         self.bar.setVisible(busy)
@@ -817,7 +820,7 @@ class MainWindow(QMainWindow):
         self.projects.append(p)
         item = QListWidgetItem()
         widget = QueueItem(p)
-        item.setSizeHint(QSize(0, 64))
+        item.setSizeHint(QSize(0, 72))
         self.queue.addItem(item)
         self.queue.setItemWidget(item, widget)
         self.items[id(p)] = (item, widget)

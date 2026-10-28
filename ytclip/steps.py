@@ -15,7 +15,7 @@ from typing import Callable
 
 # (key, label), in the order a video goes through them
 STEPS: tuple[tuple[str, str], ...] = (
-    ("download", "Download"), ("analyse", "Listen"), ("transcript", "Transcribe"), ("find", "Find clips"),
+    ("download", "Download"), ("analyse", "Analyse"), ("transcript", "Transcribe"), ("find", "Find clips"),
     ("polish", "AI polish"), ("export", "Export"), ("check", "Quality check"),
 )
 LABELS = dict(STEPS)
@@ -23,7 +23,7 @@ ORDER = {key: i for i, (key, _) in enumerate(STEPS)}
 # Seconds each step takes on a typical 20-minute video, until a real one has been timed.
 DEFAULT_SECONDS = {"download": 60.0, "analyse": 25.0, "transcript": 120.0, "find": 20.0, "polish": 30.0,
                    "export": 150.0, "check": 15.0}
-# engine.TIMED keys -> steps (audio and scene cuts are both "Listen")
+# engine.TIMED keys -> steps (audio and scene cuts are both "Analyse")
 TIMED_STEPS = {"download": "download", "audio": "analyse", "scenes": "analyse", "transcript": "transcript",
                "find": "find", "polish": "polish", "export": "export", "check": "check"}
 

@@ -68,7 +68,7 @@ def test_the_overall_bar_moves_through_the_steps_by_their_weights():
     assert (st.step, st.index, st.count, st.step_frac) == ("download", 1, 3, 0.5)
     assert st.overall == pytest.approx(0.05) and st.done == [] and st.plan == plan
     st = t.update("Measuring audio", 1.0)
-    assert st.overall == pytest.approx(0.2) and st.done == ["download"] and st.label == "Listen"
+    assert st.overall == pytest.approx(0.2) and st.done == ["download"] and st.label == "Analyse"
     st = t.update("Exporting clip 1/4", 0.25)
     assert st.overall == pytest.approx(0.4) and st.done == ["download", "analyse"]
     st = t.update("Transcribing the clips", 0.5)  # Whisper typing out clips during export: still exporting
@@ -207,7 +207,7 @@ def test_automation_tab_shows_the_video_now_its_steps_and_a_bar_in_its_row(app, 
     tab.refresh()
     assert not tab.now.isHidden() and "Big podcast" in tab.now.title.text()
     assert tab.now.right.text() == "Step 3 of 5 · Transcribe"
-    assert tab.now.chips.texts()[:4] == ["✓ Download", "✓ Listen", "● Transcribe 40%", "Find clips"]
+    assert tab.now.chips.texts()[:4] == ["✓ Download", "✓ Analyse", "● Transcribe 40%", "Find clips"]
     assert tab.now.bar.value() == int(status.overall * 1000) and tab.now.detail.text() == "Transcribing speech 40%"
     col = COLUMNS.index("Status")
     row = next(r for r in range(tab.table.rowCount()) if tab.table.item(r, 0).text() == "Big podcast")
@@ -243,7 +243,7 @@ def test_uploads_get_a_bar_while_one_goes_up(app, tmp_path):
     db.set_meta("upload_progress", 0.37)
     tab.refresh()
     assert not tab.upload_bar.isHidden() and tab.upload_bar.value() == 370
-    assert tab.upload_bar.format() == "37% of clip 01.mp4"
+    assert tab.upload_bar.format() == "37%" and "clip 01.mp4" in tab.upload_bar.toolTip()
     tab.shutdown()
 
 
@@ -258,7 +258,7 @@ def test_studio_queue_items_show_the_step_and_bar(app):
     p.status = "working"
     item = QueueItem(p)
     item.show_state(p, "Measuring audio", 0.5, status)
-    assert item.sub.text() == "Step 2/3 · Measuring audio 50%"
+    assert item.sub.text() == "Step 2/3 · Analyse 50%" and "Measuring audio 50%" in item.sub.toolTip()
     assert item.bar.value() == int(status.overall * 1000) and not item.bar.isHidden()
     p.status = "queued"
     item.show_state(p)
