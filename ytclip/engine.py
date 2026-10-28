@@ -229,6 +229,9 @@ class Engine:
             about = f"These clips are for a TikTok account about {niche.name}."
             guide = "\n\n".join(x for x in (about + (f" {niche.instructions.strip()}" if niche.instructions.strip()
                                                        else ""), guide) if x)
+        notes = str(((p.meta.get("automation") or {}).get("request") or {}).get("notes") or "").strip()
+        if notes:  # a clip request's special requests shape the hooks and bottom lines too
+            guide = "\n\n".join(x for x in (f"Special requests for these clips: {notes}", guide) if x)
         # Bottom lines stand in for the 'no part 2' text on clips with no part 2 (layout.bottom_banner).
         bottom_on = layout.uses_ai_bottom(self.s)
         usual = " ".join(layout.own_words(self.s.banner_bottom_alt).split()) if bottom_on else ""

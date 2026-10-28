@@ -198,7 +198,7 @@ def busy_ids(db, session: Path | None = None) -> set[str]:
     """Videos automation has queued or is clipping, and videos in the Studio (their downloads,
     analysis and folders stay)."""
     jobs = [j for j in db.jobs(limit=5000) if j.status in ("queued", "working")]
-    ids = {j.id for j in jobs}
+    ids = {j.id for j in jobs} | {j.video_id for j in jobs}  # a request's copy is <id>~<request>
     working = db.meta("working_video")  # the real id of a video queued by an unusual link
     if working and any(j.status == "working" for j in jobs):
         ids.add(working)

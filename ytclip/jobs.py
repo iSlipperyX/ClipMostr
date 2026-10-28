@@ -42,12 +42,19 @@ class Job:
     recipe: str = ""
     pruned: int = 0  # cache files removed
     niche: str = ""  # id of the niche it was picked for (niches.py), "" for none
+    order: str = ""  # id of the clip request it's for (orders.py), "" for none
+
+    @property
+    def video_id(self) -> str:
+        """The YouTube id: a request's own copy of a video is queued as <id>~<request>."""
+        return self.id.split("~", 1)[0]
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> "Job":
         d = dict(row)
         d["origins"] = json.loads(d.get("origins") or "[]")
-        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__})
+        # a column added by a later version is NULL in older rows: those get the default
+        return cls(**{k: v for k, v in d.items() if k in cls.__dataclass_fields__ and v is not None})
 
 
 _COLUMNS = {f.name: ("REAL" if f.type in ("float",) else "INTEGER" if f.type in ("int",) else "TEXT")
@@ -64,14 +71,16 @@ class JobDB:
             self.con.execute("PRAGMA journal_mode=WAL")
         except sqlite3.DatabaseError:
             pass
-        cols = ", ".join(f"{name} {kind}{' PRIMARY KEY' if name == 'id' else ''}" for name, kind in _COLUMNS.items())
+        # "order" is an SQL word, so column names are always quoted
+        cols = ", ".join(f'"{name}" {kind}{" PRIMARY KEY" if name == "id" else ""}' for name, kind in _COLUMNS.items())
         self.con.execute(f"CREATE TABLE IF NOT EXISTS jobs ({cols})")
         have = {r["name"] for r in self.con.execute("PRAGMA table_info(jobs)")}
         for name, kind in _COLUMNS.items():  # columns added by later versions
             if name not in have:
-                self.con.execute(f"ALTER TABLE jobs ADD COLUMN {name} {kind}")
+                self.con.execute(f'ALTER TABLE jobs ADD COLUMN "{name}" {kind}')
         self.con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
         self.con.execute("CREATE TABLE IF NOT EXISTS events (time REAL, kind TEXT)")
+        self.con.execute("CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, created REAL, data TEXT)")
 
     def close(self) -> None:
         self.con.close()
@@ -85,8 +94,8 @@ class JobDB:
         d = asdict(job)
         d["origins"] = json.dumps(d["origins"])
         with self._lock:
-            cur = self.con.execute(f"INSERT OR IGNORE INTO jobs ({', '.join(d)}) VALUES ({', '.join('?' * len(d))})",
-                                   list(d.values()))
+            cur = self.con.execute(f"INSERT OR IGNORE INTO jobs ({', '.join(f'{chr(34)}{k}{chr(34)}' for k in d)}) "
+                                   f"VALUES ({', '.join('?' * len(d))})", list(d.values()))
             return cur.rowcount == 1
 
     def get(self, job_id: str) -> Job | None:
@@ -102,10 +111,16 @@ class JobDB:
                 "CASE status WHEN 'queued' THEN created END ASC, updated DESC LIMIT ?", (limit,)).fetchall()
         return [Job.from_row(r) for r in rows]
 
-    def next_due(self, now: float) -> Job | None:
+    def next_due(self, now: float, skip_niches: set[str] | frozenset = frozenset()) -> Job | None:
+        """The oldest waiting job that's due, leaving out the niches in `skip_niches` (paused).
+        A clip request's videos go first: you asked for those."""
+        skip = sorted(skip_niches)
+        marks = ", ".join("?" * len(skip))
+        where = f" AND COALESCE(niche, '') NOT IN ({marks})" if skip else ""
         with self._lock:
-            row = self.con.execute("SELECT * FROM jobs WHERE status = 'queued' AND next_try <= ? "
-                                   "ORDER BY created LIMIT 1", (now,)).fetchone()
+            row = self.con.execute(f"SELECT * FROM jobs WHERE status = 'queued' AND next_try <= ?{where} "
+                                   "ORDER BY COALESCE(\"order\", '') = '', created LIMIT 1",
+                                   (now, *skip)).fetchone()
         return Job.from_row(row) if row else None
 
     def next_try(self) -> float | None:
@@ -118,7 +133,7 @@ class JobDB:
         changes["updated"] = now or time.time()
         if "origins" in changes:
             changes["origins"] = json.dumps(changes["origins"])
-        sets = ", ".join(f"{k} = ?" for k in changes)
+        sets = ", ".join(f'"{k}" = ?' for k in changes)
         with self._lock:
             self.con.execute(f"UPDATE jobs SET {sets} WHERE id = ?", [*changes.values(), job_id])
 
@@ -156,6 +171,70 @@ class JobDB:
         with self._lock:
             rows = self.con.execute("SELECT status, COUNT(*) AS n FROM jobs GROUP BY status").fetchall()
         return {s: 0 for s in STATUSES} | {r["status"]: r["n"] for r in rows}
+
+    def order_jobs(self, order_id: str) -> list[Job]:
+        with self._lock:
+            rows = self.con.execute('SELECT * FROM jobs WHERE "order" = ? ORDER BY created', (order_id,)).fetchall()
+        return [Job.from_row(r) for r in rows]
+
+    # ------------------------------------------------------------ clip requests (orders.py)
+    def add_order(self, order) -> None:
+        from .orders import dumps
+
+        with self._lock:
+            self.con.execute("INSERT OR REPLACE INTO orders (id, created, data) VALUES (?, ?, ?)",
+                             (order.id, order.created, dumps(order)))
+
+    def orders(self, open_only: bool = False) -> list:
+        """Newest first."""
+        from .orders import Order
+
+        with self._lock:
+            rows = self.con.execute("SELECT data FROM orders ORDER BY created DESC").fetchall()
+        out = []
+        for r in rows:
+            try:
+                o = Order.from_json(json.loads(r["data"]))
+            except ValueError:
+                continue
+            if o and (o.is_open or not open_only):
+                out.append(o)
+        return out
+
+    def get_order(self, order_id: str):
+        from .orders import Order
+
+        with self._lock:
+            row = self.con.execute("SELECT data FROM orders WHERE id = ?", (order_id,)).fetchone()
+        try:
+            return Order.from_json(json.loads(row["data"])) if row else None
+        except ValueError:
+            return None
+
+    def update_order(self, order_id: str, now: float | None = None, **changes):
+        """Change a request's fields and return it (None when it's gone). Read and written under one
+        lock and one transaction, so the runner and the app can't lose each other's change."""
+        from .orders import Order, dumps
+
+        with self._lock:
+            self.con.execute("BEGIN IMMEDIATE")
+            try:
+                row = self.con.execute("SELECT data FROM orders WHERE id = ?", (order_id,)).fetchone()
+                order = Order.from_json(json.loads(row["data"])) if row else None
+                if order is not None:
+                    for k, v in changes.items():
+                        setattr(order, k, v)
+                    order.updated = now or time.time()
+                    self.con.execute("UPDATE orders SET data = ? WHERE id = ?", (dumps(order), order_id))
+                self.con.execute("COMMIT")
+            except BaseException:
+                self.con.execute("ROLLBACK")
+                raise
+        return order
+
+    def remove_order(self, order_id: str) -> None:
+        with self._lock:
+            self.con.execute("DELETE FROM orders WHERE id = ?", (order_id,))
 
     # ------------------------------------------------------------ meta (runner state, flags)
     def meta(self, key: str, default: str = "") -> str:
