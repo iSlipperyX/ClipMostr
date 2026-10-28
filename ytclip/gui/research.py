@@ -573,7 +573,7 @@ class Research(QWidget):
 
             db = JobDB()
             try:
-                self.log.emit(record_block(db, result.blocked, time.time()))
+                self.log.emit(record_block(db, result.blocked, time.time(), self._settings().cookies_browser))
             finally:
                 db.close()
         self._show_result(result)
