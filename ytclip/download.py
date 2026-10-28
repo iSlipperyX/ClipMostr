@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import shutil
+import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -76,6 +78,14 @@ class _Logger:
         self.log(f"✗ {msg}")
 
 
+# yt-dlp errors that mean YouTube is pushing back on this PC, not on one video.
+BLOCKED = re.compile(r"sign in to confirm|not a bot|http error 429|too many requests|rate.?limit", re.I)
+
+
+def is_blocked(error: str) -> bool:
+    return bool(BLOCKED.search(error or ""))
+
+
 def _base_opts(log: Log | None, cookies_from_browser: str | None) -> dict:
     opts: dict = {
         "logger": _Logger(log),
@@ -83,6 +93,9 @@ def _base_opts(log: Log | None, cookies_from_browser: str | None) -> dict:
         "no_warnings": False,
         "noprogress": True,
         "ffmpeg_location": ffmpeg_exe(),
+        # A pause between the requests behind each video page, as a person browsing would make
+        # them: bursts of requests are what gets a PC asked to sign in.
+        "sleep_interval_requests": 1,
     }
     # YouTube needs a JavaScript runtime to solve its player challenges.
     # yt-dlp only enables Deno by default, so also allow Node/Bun if installed.
@@ -215,8 +228,6 @@ def download(url: str, cache_dir: Path, max_height: int, cookies: str | None = N
 
 def _download_captions(info: dict, cache_dir: Path, cookies: str | None, log: Log | None) -> Path | None:
     """Captions are optional: they improve clip naming, captions and reaction detection."""
-    import yt_dlp
-
     choice = _pick_caption_lang(info)
     if not choice:
         return None
@@ -226,23 +237,48 @@ def _download_captions(info: dict, cache_dir: Path, cookies: str | None, log: Lo
     target = cache_dir / f"{info['id']}.{lang}.vtt"
     if target.exists():
         return target
-    opts = _base_opts(None, cookies) | {
-        "skip_download": True,
-        "writesubtitles": not is_auto,
-        "writeautomaticsub": is_auto,
-        "subtitleslangs": [lang],
-        "subtitlesformat": "vtt",
-        "outtmpl": str(cache_dir / "%(id)s.%(ext)s"),
-        "noplaylist": True,
-    }
-    try:
-        with yt_dlp.YoutubeDL(opts) as ydl:
-            ydl.extract_info(info.get("webpage_url") or info["id"], download=True)
-    except Exception as exc:
+    # The track's address came with the video's info, so this is one request; asking yt-dlp
+    # again would load the whole video page a second time.
+    tracks = (info.get("automatic_captions") if is_auto else info.get("subtitles")) or {}
+    track = next((t for t in tracks.get(lang) or [] if t.get("ext") == "vtt" and t.get("url")), None)
+    if not track:
         if log:
-            log(f"Captions unavailable ({exc.__class__.__name__}); continuing without them.")
+            log("Captions unavailable (no WebVTT version); continuing without them.")
         return None
-    return target if target.exists() else None
+    try:
+        data = _fetch(track["url"], cookies)
+        if not data.lstrip(b"\xef\xbb\xbf").startswith(b"WEBVTT"):
+            raise ValueError("not a WebVTT file")
+        part = target.with_name(target.name + ".part")
+        part.write_bytes(data)
+        part.replace(target)
+    except Exception as exc:
+        if is_blocked(str(exc)):
+            raise  # YouTube is pushing back on the PC: the whole video waits, see pipeline.classify
+        if log:
+            log(f"Captions unavailable ({exc.__class__.__name__}: {exc}); continuing without them.")
+        return None
+    return target
+
+
+def _fetch(url: str, cookies: str | None, tries: int = 3, sleep: Callable[[float], None] = time.sleep) -> bytes:
+    """One small download through yt-dlp (its cookies and headers), tried again after a dropped
+    connection or a server error."""
+    import yt_dlp
+    from yt_dlp.networking.exceptions import HTTPError, TransportError
+
+    for attempt in range(tries):
+        try:
+            with yt_dlp.YoutubeDL(_base_opts(None, cookies)) as ydl:
+                return ydl.urlopen(url).read()
+        except HTTPError as exc:
+            if not 500 <= exc.status < 600 or attempt == tries - 1:
+                raise
+        except TransportError:
+            if attempt == tries - 1:
+                raise
+        sleep((2, 5)[min(attempt, 1)])
+    raise AssertionError("unreachable")
 
 
 def local_video(path: Path) -> Video:

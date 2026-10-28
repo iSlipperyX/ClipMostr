@@ -450,7 +450,9 @@ SCHEMA: list[Field] = [
           choices=((2160, "2160p (4K)"), (1440, "1440p"), (1080, "1080p"), (720, "720p"), (480, "480p"), (360, "360p"))),
     Field("cookies_browser", "Use browser login", "Download", "choice",
           choices=(("", "None"), ("chrome", "Chrome"), ("edge", "Edge"), ("firefox", "Firefox"), ("brave", "Brave")),
-          help="Needed for age-restricted or members-only videos"),
+          help="Needed for age-restricted or members-only videos. Also makes YouTube much less likely to ask "
+               "this PC to sign in. Use a browser signed in to a spare Google account, not your main one; "
+               "Firefox works most reliably on Windows"),
     Field("keep_source", "Keep full downloads", "Download", "bool"),
     Field("playlist_limit", "Max videos per playlist (0 = all)", "Download", "int", lo=0, hi=500),
 
@@ -654,7 +656,8 @@ SCHEMA: list[Field] = [
           help="Downloads and encodes only start between these hours. The same hour twice means any time"),
     Field("auto_end_hour", "Work until (hour)", "Automation", "int", lo=0, hi=23),
     Field("auto_gap_minutes", "Minutes between downloads", "Automation", "int", lo=0, hi=240, step=5,
-          help="Spacing downloads out makes YouTube less likely to ask the PC to sign in"),
+          help="Spacing downloads out makes YouTube less likely to ask the PC to sign in. If it asks anyway, "
+               "automation pauses for 6 hours, then spaces downloads out 2x (4x if it asks again) for a day"),
     Field("auto_ai_daily", "AI calls per day", "Automation", "int", lo=0, hi=500,
           help="Finding clips with AI and polishing each count as one. Over the limit, videos use the smart "
                "signals and skip polishing, so Claude costs stay predictable"),

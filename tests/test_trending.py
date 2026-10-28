@@ -225,7 +225,8 @@ def test_history_deep_cache_expires():
     assert h.cached_deep("v", NOW + 60).chapters == 2
     assert h.cached_deep("v", NOW + trending.DEEP_FRESH + 1) is None
     h.store_deep("v", DeepInfo(checked=NOW, error="blocked"))
-    assert h.cached_deep("v", NOW + 60) is None  # failures are retried next scan
+    assert h.cached_deep("v", NOW + 60).error  # a failure isn't retried on every scan...
+    assert h.cached_deep("v", NOW + trending.DEEP_RETRY + 1) is None  # ...only after an hour
 
 
 def test_history_saves_loads_and_forgets(tmp_path):

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import learn, research
+from .download import is_blocked
 from .engine import Cancelled, Engine, Project
 from .jobs import Job, JobDB
 from .policy import PickLog, Policy, decide, picks_path
@@ -32,11 +33,11 @@ Log = Callable[[str], None]
 DAY = 86400.0
 BACKOFF = (15 * 60, 3600, 4 * 3600)  # wait before the 2nd, 3rd, 4th... try
 BLOCK_PAUSE = 6 * 3600  # how long downloads pause after YouTube asks the PC to sign in
+CALM_DAY = DAY  # after this long with no sign-in request, downloads go back to the usual spacing
+DEEP_PAUSE = 20.0  # seconds between automation's most-replayed checks
 HEARTBEAT_STALE = 180  # a runner silent for this long is gone
 IDLE = 300  # longest sleep between checks
 
-# yt-dlp errors that mean YouTube is pushing back on this PC: stop downloading for a while.
-_BLOCKED = re.compile(r"sign in to confirm|not a bot|http error 429|too many requests|rate.?limit", re.I)
 # Errors that won't change however often the video is tried.
 _PERMANENT = re.compile(r"video unavailable|private video|has been removed|no longer available|copyright|"
                         r"members[- ]only|join this channel|age[- ]restricted|confirm your age|"
@@ -53,7 +54,7 @@ class NoClips(RuntimeError):
 
 def classify(error: str) -> str:
     """'blocked' | 'permanent' | 'retry' for a failed video's error message."""
-    if _BLOCKED.search(error):
+    if is_blocked(error):
         return "blocked"
     if _PERMANENT.search(error):
         return "permanent"
@@ -147,6 +148,35 @@ def settings_for(job: Job, s: Settings) -> tuple[Settings, str]:
 # ---------------------------------------------------------------- the runner
 
 
+def paused_until(db: JobDB, now: float) -> float:
+    """When requests to YouTube may start again after it asked this PC to sign in (0 = not paused)."""
+    until = db.meta_float("blocked_until")
+    return until if now < until else 0.0
+
+
+def gap_factor(db: JobDB, now: float) -> int:
+    """Downloads are spaced out twice as much after each sign-in request (up to 4 times), until a
+    day passes without one."""
+    if now - db.meta_float("blocked_at") > BLOCK_PAUSE + CALM_DAY:
+        return 1
+    return max(1, min(4, int(db.meta_float("gap_factor") or 1)))
+
+
+def record_block(db: JobDB, error: str, now: float) -> str:
+    """YouTube asked this PC to sign in: stop all requests to it for a while, and slow down after.
+    Shared by automation and the Research tab. Returns the line to log."""
+    recent = now - db.meta_float("blocked_at") <= BLOCK_PAUSE + CALM_DAY
+    factor = min(4, gap_factor(db, now) * 2) if recent else 2
+    until = now + BLOCK_PAUSE
+    db.set_meta("blocked_until", until)
+    db.set_meta("blocked_at", now)
+    db.set_meta("gap_factor", factor)
+    db.set_meta("last_error", error)
+    return (f"⚠ YouTube asked this PC to sign in, so ClipMonster stops asking it for anything until "
+            f"{time.strftime('%H:%M', time.localtime(until))} and then spaces downloads {factor}x further "
+            f"apart for a day. Nothing needs doing; it carries on by itself. ({error})")
+
+
 class Runner:
     def __init__(self, db: JobDB | None = None, load: Callable[[], Settings] = Settings.load,
                  log: Log | None = None, now: Callable[[], float] = time.time,
@@ -162,6 +192,7 @@ class Runner:
         self._picks = picks or (lambda: PickLog(picks_path()))
         self.pid = os.getpid()
         self._last_beat = 0.0
+        self._stop: Callable[[], bool] = lambda: False  # run()'s stop check, so a long scan can be stopped
         self._last_flag_check = 0.0
 
     # ------------------------------------------------------------ bookkeeping
@@ -233,18 +264,30 @@ class Runner:
         self.state("Waiting for the next check" if research.youtube_key(s) else "Waiting for videos")
         return max(1.0, min(next_scan - now, (upcoming - now) if upcoming else IDLE, IDLE))
 
+    def blocked(self, now: float) -> float:
+        return paused_until(self.db, now)
+
+    def gap_factor(self, now: float) -> int:
+        return gap_factor(self.db, now)
+
     def wait_reason(self, s: Settings, now: float) -> tuple[float, str]:
-        blocked = self.db.meta_float("blocked_until")
-        if now < blocked:
+        blocked = self.blocked(now)
+        if blocked:
             until = time.strftime("%H:%M", time.localtime(blocked))
-            return blocked - now, f"Downloads paused until {until}: YouTube asked this PC to sign in"
+            return blocked - now, (f"Paused until {until} because YouTube asked this PC to sign in. "
+                                   "Nothing is wrong; it carries on by itself")
         wait = hours_wait(now, s.auto_start_hour, s.auto_end_hour)
         if wait:
             return wait, f"Outside working hours ({s.auto_start_hour}:00–{s.auto_end_hour}:00)"
-        gap = self.db.meta_float("last_download") + s.auto_gap_minutes * 60 - now
+        factor = self.gap_factor(now)
+        gap = self.db.meta_float("last_download") + s.auto_gap_minutes * 60 * factor - now
         if gap > 0:
-            return gap, f"Spacing downloads out: next in {max(1, round(gap / 60))} min"
+            return gap, (f"Spacing downloads out: next in {max(1, round(gap / 60))} min"
+                         + (f" (slowed down {factor}x after YouTube asked this PC to sign in)" if factor > 1 else ""))
         return 0.0, ""
+
+    def block(self, error: str, now: float) -> None:
+        self.log(record_block(self.db, error, now))
 
     # ------------------------------------------------------------ research → queue
     def research(self, s: Settings) -> int:
@@ -260,10 +303,23 @@ class Runner:
                 self.log("Using the Research tab's last check.")
             else:
                 scan = self._scan or research.scan
-                result = scan(research.ScanOptions.from_settings(s), history, self.log, now=now)
+                stop = self._stop
+                opts = research.ScanOptions.from_settings(s)
+                # Most-replayed checks load YouTube pages: one at a time, spaced out, and none at
+                # all while YouTube has asked this PC to sign in. (The charts use the API.)
+                opts.deep_workers, opts.deep_pause = 1, DEEP_PAUSE
+                if self.blocked(now):
+                    opts.deep_count = 0
+                # Spaced-out checks take minutes: keep the heartbeat going so the runner isn't taken for dead.
+                result = scan(opts, history, self.log, progress=lambda m, f: self.beat(),
+                              cancelled=lambda: stop() or self.stop_requested(), now=now)
                 self.log(f"Checked {len(result.videos)} videos ({result.quota} quota units).")
                 for p in result.problems:
                     self.log(f"Research: {p}")
+                if getattr(result, "blocked", ""):
+                    self.block(result.blocked, self.now())
+        except research.ScanCancelled:
+            raise Stopped()
         except Exception as exc:
             self.log(f"⚠ Research failed: {exc}")
             self.db.set_meta("last_error", f"Research: {exc}")
@@ -368,13 +424,9 @@ class Runner:
         kind = classify(error)
         attempts = job.attempts + 1
         if kind == "blocked":
-            until = now + BLOCK_PAUSE
-            self.db.set_meta("blocked_until", until)
+            self.block(error, now)
             self.db.update(job.id, now, status="queued", stage="Waiting: YouTube asked this PC to sign in",
-                           error=error, next_try=until)
-            self.log(f"⚠ YouTube is asking this PC to sign in. Downloads are paused for "
-                     f"{BLOCK_PAUSE // 3600} hours. ({error})")
-            self.db.set_meta("last_error", error)
+                           error=error, next_try=self.db.meta_float("blocked_until"))
             return
         if kind == "permanent" or attempts >= s.auto_retries:
             self.db.update(job.id, now, status="failed", attempts=attempts, error=error,
@@ -411,7 +463,7 @@ class Runner:
             self.log(why)
             return 1
         self.log(f"Automation started (process {self.pid}).")
-        stop = stop or (lambda: False)
+        stop = self._stop = stop or (lambda: False)
         try:
             while True:
                 try:
