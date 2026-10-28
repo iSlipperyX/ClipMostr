@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import asdict, fields, replace
 from pathlib import Path
 
@@ -177,6 +178,8 @@ class MainWindow(QMainWindow):
             else:
                 self._warn(msg)
         self._offer_old_copies()
+        if self._offer_install():
+            return
         # Only packaged builds update themselves; from source you'd use git.
         if self.settings.check_updates and updater.install_dir() and \
                 updater.due_for_check(updater.CHECK_HOURS[updater.channel_setting(self.settings)]):
@@ -203,6 +206,74 @@ class MainWindow(QMainWindow):
             else:
                 updater.keep_copy(folder)
         self.old_copies = []
+
+    INSTALL_ASK_AGAIN = 7 * 86400
+
+    def _offer_install(self) -> bool:
+        """A copy unzipped by hand, from before the installer: offer to install ClipMonster properly
+        (again a week after "Not now"). True when it's installing and this window is closing."""
+        asked = updater.load_state().get("install_offer")
+        if not updater.needs_installing() or asked == "never" or \
+                isinstance(asked, (int, float)) and time.time() - asked < self.INSTALL_ASK_AGAIN:
+            return False
+        box = QMessageBox(QMessageBox.Question, APP_NAME,
+                          "ClipMonster now installs like other Windows apps: into your user folder "
+                          "(%LOCALAPPDATA%\\Programs\\ClipMonster), out of OneDrive and the Desktop, with a Start "
+                          "menu entry and its own Uninstall. Updates are smoother there.\n\n"
+                          f"This copy, in {updater.install_dir()}, was unzipped by hand. Install ClipMonster "
+                          "now? Your settings, niches, history and clips stay exactly as they are, and "
+                          "automation carries on. This window closes, and the installed ClipMonster opens by "
+                          "itself (in about a minute) and offers to remove this copy.", parent=self)
+        install = box.addButton("Install now", QMessageBox.AcceptRole)
+        later = box.addButton("Not now", QMessageBox.RejectRole)
+        box.addButton("Keep using this copy", QMessageBox.DestructiveRole)
+        box.setDefaultButton(install)
+        box.exec()
+        if box.clickedButton() is not install:
+            updater.save_state(install_offer=time.time() if box.clickedButton() is later else "never")
+            return False
+        updater.save_state(install_offer=time.time())  # if it fails, ask again next week
+        setup = self._download_setup()
+        if setup is None:
+            return False
+        try:
+            updater.run_setup(setup, stop_from=updater.install_dir())
+        except updater.UpdateError as exc:
+            self._warn(str(exc))
+            return False
+        self.banner.ready = None  # the installer brings the newest version: no update on closing
+        QTimer.singleShot(0, self.close)
+        return True
+
+    def _download_setup(self) -> Path | None:
+        from PySide6.QtWidgets import QProgressDialog
+
+        s = self.settings
+        wait = QProgressDialog("Downloading ClipMonster-Setup.exe…", "Cancel", 0, 100, self)
+        wait.setWindowTitle(f"Install {APP_NAME}")
+        wait.setMinimumDuration(0)
+
+        def fetch(t: Task) -> Path:
+            rel = updater.setup_release(updater.configured_repo(s.update_repo), updater.channel_setting(s))
+            return updater.download(rel, progress=lambda f: t.progress.emit("", f), setup=True,
+                                    cancelled=lambda: t.cancel_requested)
+
+        task = Task("Downloading the installer", fetch)
+        done: dict = {}
+        wait.canceled.connect(lambda: setattr(task, "cancel_requested", True))
+        task.progress.connect(lambda _m, f: wait.setValue(int(f * 100)) if f >= 0 else None)
+        task.succeeded.connect(lambda path: done.update(path=path))
+        task.failed.connect(lambda msg: done.update(error=msg))
+        task.finished.connect(wait.reset)
+        self._setup_task = task  # kept alive while it runs
+        task.start()
+        wait.exec()
+        task.wait(5000)
+        if done.get("error") and not isinstance(done.get("path"), Path):
+            if "Cancel" not in done["error"]:
+                self._warn(f"Couldn't download the installer: {done['error']}")
+            return None
+        return done.get("path")
 
     # ================================================================== UI
     def _build(self) -> None:

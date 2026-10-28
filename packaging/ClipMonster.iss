@@ -8,7 +8,12 @@
 ; them. Your clips are never touched.
 ;
 ; Running it over an installed copy updates it: automation is stopped first (and started again after),
-; and an open ClipMonster window is closed, so it saves.
+; and an open ClipMonster window is closed, so it saves. On a first install, automation running from a
+; copy unzipped by hand is stopped the same way, and starts again from the installed copy.
+;
+; A copy unzipped by hand installs itself with (updater.run_setup):
+;   ClipMonster-Setup.exe /SILENT /SUPPRESSMSGBOXES /NORESTART /LAUNCH=1 /STOPFROM=<that copy's folder>
+; /LAUNCH=1 opens the installed ClipMonster afterwards, which a silent install otherwise doesn't.
 
 #ifndef AppVersion
   #define AppVersion "0.0.0"
@@ -80,6 +85,7 @@ Name: "{autodesktop}\ClipMonster"; Filename: "{app}\ClipMonster.exe"; Tasks: des
 ; Automation that was running before carries on, in the new version.
 Filename: "{app}\ClipMonster.exe"; Parameters: "--automation"; Flags: nowait runasoriginaluser; Check: AutomationWasRunning
 Filename: "{app}\ClipMonster.exe"; Description: "Start ClipMonster"; Flags: nowait postinstall skipifsilent runasoriginaluser
+Filename: "{app}\ClipMonster.exe"; Flags: nowait runasoriginaluser; Check: LaunchAfterSilentInstall
 
 [UninstallDelete]
 ; Left behind by the in-app updater when something held a file open.
@@ -92,6 +98,35 @@ var
 function AutomationWasRunning: Boolean;
 begin
   Result := WasRunning;
+end;
+
+function LaunchAfterSilentInstall: Boolean;
+begin
+  Result := WizardSilent and (ExpandConstant('{param:LAUNCH|0}') = '1');
+end;
+
+{ The ClipMonster whose ytclip.exe can stop automation: the installed one, else the copy that started
+  this install (/STOPFROM=), else the one Start with Windows runs ("<folder>\ClipMonster.exe" --automation). }
+function AutomationFolder: String;
+var
+  Cmd: String;
+  P: Integer;
+begin
+  Result := ExpandConstant('{app}');
+  if FileExists(Result + '\ytclip.exe') then
+    Exit;
+  Result := ExpandConstant('{param:STOPFROM|}');
+  if (Result <> '') and FileExists(Result + '\ytclip.exe') then
+    Exit;
+  Result := '';
+  if RegQueryStringValue(HKEY_CURRENT_USER, 'Software\Microsoft\Windows\CurrentVersion\Run',
+                         'ClipMonster Automation', Cmd) and (Copy(Cmd, 1, 1) = '"') then
+  begin
+    Delete(Cmd, 1, 1);
+    P := Pos('"', Cmd);
+    if P > 0 then
+      Result := ExtractFileDir(Copy(Cmd, 1, P - 1));
+  end;
 end;
 
 { Ask automation to stop and wait for it (`ytclip auto --stop --wait`), so it puts the video it's on
@@ -108,7 +143,7 @@ end;
 
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 begin
-  WasRunning := StopAutomation(ExpandConstant('{app}'));
+  WasRunning := StopAutomation(AutomationFolder);
   Result := '';
 end;
 

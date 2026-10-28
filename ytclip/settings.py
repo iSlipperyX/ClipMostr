@@ -560,8 +560,8 @@ SCHEMA: list[Field] = [
     Field("upload_what", "Which clips", "Upload", "choice",
           choices=(("all", "All finished clips"), ("automation", "Only automation's clips"))),
     Field("gdrive_client_id", "Google OAuth client ID", "Upload", "str", placeholder="….apps.googleusercontent.com",
-          help="From your own Google Cloud project: Credentials → Create credentials → OAuth client ID → Desktop "
-               "app. Free. The guide linked above takes about 5 minutes"),
+          help="From your own Google Cloud project: Google Auth Platform → Clients → Create client → Desktop "
+               "app. Free. The guide linked above takes about 10 minutes"),
     Field("gdrive_client_secret", "Google OAuth client secret", "Upload", "secret", placeholder="GOCSPX-…"),
     Field("gdrive_folder", "Folder in your Drive", "Upload", "str",
           help="Made in My Drive if it isn't there. ClipMonster can only see what it put in Drive itself"),

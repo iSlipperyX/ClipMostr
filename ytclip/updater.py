@@ -84,6 +84,9 @@ class Release:
     sums_url: str
     prerelease: bool
     commit: str = ""  # a dev build's commit
+    setup_url: str = ""  # ClipMonster-Setup.exe (releases from 2.8.0 on)
+    setup_size: int = 0
+    setup_sha256: str = ""
     switch: bool = False  # not newer: the channel picked in Settings is older than this version's (see check)
 
     @property
@@ -193,16 +196,22 @@ def _to_release(data: dict) -> Release | None:
     asset = assets.get(ASSET_NAME)
     if parse_version(version) is None or not asset or data.get("draft"):
         return None
-    digest = asset.get("digest") or ""  # GitHub reports "sha256:<hex>" for uploaded assets
     sums = assets.get(SUMS_NAME) or {}
+    setup = assets.get(SETUP_NAME) or {}
     commit = data.get("target_commitish") or ""
     return Release(
         version=version, tag=tag, name=data.get("name") or tag,
         notes=data.get("body") or "", page_url=data.get("html_url") or "",
         asset_url=asset["browser_download_url"], asset_size=int(asset.get("size") or 0),
-        sha256=digest.split(":", 1)[1].lower() if digest.startswith("sha256:") else "",
-        sums_url=sums.get("browser_download_url", ""), prerelease=bool(data.get("prerelease")),
-        commit=commit if re.fullmatch(r"[0-9a-f]{7,40}", commit) else "")
+        sha256=_digest(asset), sums_url=sums.get("browser_download_url", ""),
+        prerelease=bool(data.get("prerelease")), commit=commit if re.fullmatch(r"[0-9a-f]{7,40}", commit) else "",
+        setup_url=setup.get("browser_download_url", ""), setup_size=int(setup.get("size") or 0),
+        setup_sha256=_digest(setup))
+
+
+def _digest(asset: dict) -> str:
+    digest = asset.get("digest") or ""  # GitHub reports "sha256:<hex>" for uploaded assets
+    return digest.split(":", 1)[1].lower() if digest.startswith("sha256:") else ""
 
 
 def releases(repo: str, channel: str = "stable") -> list[Release]:
@@ -262,15 +271,16 @@ def previous_dir() -> Path:
     return updates_dir() / "previous"
 
 
-def _expected_sha(rel: Release) -> str:
-    if rel.sha256:
-        return rel.sha256
+def _expected_sha(rel: Release, name: str = ASSET_NAME) -> str:
+    known = rel.setup_sha256 if name == SETUP_NAME else rel.sha256
+    if known:
+        return known
     if rel.sums_url:
         try:
             with urllib.request.urlopen(_request(rel.sums_url, "application/octet-stream"), timeout=20) as resp:
                 for line in resp.read().decode("utf-8", "replace").splitlines():
                     parts = line.strip().split()
-                    if len(parts) == 2 and parts[1].lstrip("*") == ASSET_NAME:
+                    if len(parts) == 2 and parts[1].lstrip("*") == name:
                         return parts[0].lower()
         except (urllib.error.URLError, http.client.HTTPException, OSError) as exc:
             raise UpdateError("Couldn't download the update's checksum file.") from exc
@@ -285,12 +295,16 @@ def _need_space(folder: Path, needed: int, what: str) -> None:
 
 
 def download(rel: Release, progress: Callable[[float], None] | None = None,
-             cancelled: Callable[[], bool] | None = None) -> Path:
-    """Download the release zip and verify its SHA-256. Returns the zip path."""
-    expected = _expected_sha(rel)
+             cancelled: Callable[[], bool] | None = None, setup: bool = False) -> Path:
+    """Download the release zip (or, with `setup`, its ClipMonster-Setup.exe) and verify its SHA-256.
+    Returns where it was saved, in the updates folder."""
+    if setup and not rel.setup_url:
+        raise UpdateError(f"ClipMonster {rel.version} has no installer to download.")
+    expected = _expected_sha(rel, SETUP_NAME if setup else ASSET_NAME)
     folder = updates_dir()
-    _need_space(folder, rel.asset_size, "download the update")
-    dest = folder / f"{ASSET_NAME[:-4]}-{rel.version}.zip"
+    url, size = (rel.setup_url, rel.setup_size) if setup else (rel.asset_url, rel.asset_size)
+    _need_space(folder, size, "download the update")
+    dest = folder / (f"{SETUP_NAME[:-4]}-{rel.version}.exe" if setup else f"{ASSET_NAME[:-4]}-{rel.version}.zip")
     part = dest.with_suffix(".part")
     sha = hashlib.sha256()
     try:
@@ -298,8 +312,8 @@ def download(rel: Release, progress: Callable[[float], None] | None = None,
             out = open(part, "wb")
         except OSError as exc:
             raise UpdateError(f"Couldn't save the download in {folder} ({exc.strerror or exc}).") from exc
-        with out, urllib.request.urlopen(_request(rel.asset_url, "application/octet-stream"), timeout=30) as resp:
-            total = int(resp.headers.get("Content-Length") or rel.asset_size or 0)
+        with out, urllib.request.urlopen(_request(url, "application/octet-stream"), timeout=30) as resp:
+            total = int(resp.headers.get("Content-Length") or size or 0)
             done = 0
             while chunk := resp.read(1 << 18):
                 if cancelled and cancelled():
@@ -610,7 +624,9 @@ def tidy(target: Path | None = None) -> int:
     for f in files:
         try:
             stale_part = f.suffix == ".part" and now - f.stat().st_mtime > PART_STALE
-            if (f.name.startswith("ClipMonster-windows-") and f.suffix == ".zip") or stale_part:
+            download = (f.name.startswith("ClipMonster-windows-") and f.suffix == ".zip") or \
+                (f.name.startswith("ClipMonster-Setup-") and f.suffix == ".exe")  # still open while it runs
+            if download or stale_part:
                 f.unlink()
                 removed += 1
         except OSError:
@@ -678,18 +694,71 @@ def refresh_uninstall_entry() -> None:
         pass
 
 
+def installed_location() -> Path | None:
+    """Where ClipMonster-Setup.exe installed ClipMonster on this PC, or None if it never has."""
+    if sys.platform != "win32":
+        return None
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY) as key:
+            where, _ = winreg.QueryValueEx(key, "InstallLocation")
+    except OSError:
+        return None
+    return Path(where) if where and (Path(where) / EXE_NAME).is_file() else None
+
+
+def needs_installing() -> bool:
+    """This copy was unzipped by hand (before the installer), and no installed copy exists to use
+    instead: the window offers to install ClipMonster properly."""
+    target = install_dir()
+    return target is not None and sys.platform == "win32" and installed_location() is None
+
+
+def setup_release(repo: str, channel: str = "stable") -> Release:
+    """The release whose installer to run: the channel's newest, or this version's own when that's
+    newer (a beta with Stable picked)."""
+    found = [r for r in releases(repo, channel) if r.setup_url]
+    if CHANNEL_RANK.get(channel_of(__version__), 0) > CHANNEL_RANK.get(channel, 0):
+        found += [r for r in releases(repo, channel_of(__version__)) if r.setup_url]
+    found.sort(key=lambda r: parse_version(r.version), reverse=True)
+    if not found:
+        raise UpdateError("No release has ClipMonster-Setup.exe yet. Try again once ClipMonster 2.8.0 is out.")
+    return found[0]
+
+
+def run_setup(setup: Path, stop_from: Path | None = None) -> None:
+    """Start ClipMonster-Setup.exe without its questions: it shows its progress, installs into
+    %LOCALAPPDATA%\\Programs\\ClipMonster, stops automation in `stop_from` (this copy) and starts
+    it again from the installed one if it was running, then opens the installed ClipMonster, which
+    offers to remove this copy. The caller quits straight after."""
+    args = [str(setup), "/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/LAUNCH=1"]
+    if stop_from is not None:
+        args.append(f"/STOPFROM={stop_from}")
+    flags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+    breakaway = getattr(subprocess, "CREATE_BREAKAWAY_FROM_JOB", 0)
+    kwargs = dict(stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, close_fds=True,
+                  cwd=str(setup.parent))
+    try:
+        try:  # outlive this app, which quits now
+            subprocess.Popen(args, creationflags=flags | breakaway, **kwargs)
+        except OSError:
+            subprocess.Popen(args, creationflags=flags, **kwargs)
+    except OSError as exc:
+        raise UpdateError(f"Couldn't start the installer ({exc.strerror or exc}).") from exc
+
+
 def _is_app_folder(folder: Path) -> bool:
     return (folder / EXE_NAME).is_file() and (folder / "_internal").is_dir()
 
 
-def _old_copy_places(run_command: str = "") -> list[Path]:
+def _old_copy_places(run_command: str = "", last: str = "") -> list[Path]:
     """Where copies from before the installer usually are: wherever Start with Windows pointed, the
-    folder the last start ran from, and the folders people unzip into."""
+    folder the last start ran from (`last`), and the folders people unzip into."""
     places = []
     m = re.match(r'\s*"?([^"]+?)\\ClipMonster\.exe"?', run_command or "", re.I)
     if m:
         places.append(Path(m.group(1)))
-    last = load_state().get("install_dir")
     if last:
         places.append(Path(last))
     home = Path.home()
@@ -708,9 +777,14 @@ def old_copies(run_command: str = "") -> list[Path]:
     if target is None:
         return []
     state = load_state()
+    if not _same_folder(state.get("install_dir") or "", target):
+        save_state(install_dir=str(target))
+    installed = installed_location()
+    if installed is None or not _same_folder(installed, target):
+        return []  # this is the copy from before the installer (or there's no installed one yet)
     kept = state.get("kept_copies") or []
     found: list[Path] = []
-    for place in _old_copy_places(run_command):
+    for place in _old_copy_places(run_command, state.get("install_dir") or ""):
         if _same_folder(place, target) or any(_same_folder(place, k) for k in kept) or \
                 any(_same_folder(place, f) for f in found):
             continue
@@ -719,8 +793,6 @@ def old_copies(run_command: str = "") -> list[Path]:
                 found.append(place)
         except OSError:
             pass
-    if not _same_folder(state.get("install_dir") or "", target):
-        save_state(install_dir=str(target))
     return found
 
 

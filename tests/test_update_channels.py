@@ -59,12 +59,22 @@ class FakeGitHub:
         self.base = f"http://127.0.0.1:{self.server.server_port}"
         threading.Thread(target=self.server.serve_forever, daemon=True).start()
 
-    def add(self, tag: str, name: str = "", prerelease: bool = False, commit: str = "", zip_asset: bool = True):
+    def add(self, tag: str, name: str = "", prerelease: bool = False, commit: str = "", zip_asset: bool = True,
+            setup: bool = False):
         data = app_zip(name or tag)
         path = f"/dl/{tag}/{updater.ASSET_NAME}"
         self.files[path] = data
         assets = [{"name": updater.ASSET_NAME, "browser_download_url": self.base + path, "size": len(data),
                    "digest": "sha256:" + hashlib.sha256(data).hexdigest()}] if zip_asset else []
+        if setup:  # the installer, checked against SHA256SUMS.txt (no digest, as for older uploads)
+            exe = f"setup {tag}".encode()
+            self.files[f"/dl/{tag}/{updater.SETUP_NAME}"] = exe
+            self.files[f"/dl/{tag}/{updater.SUMS_NAME}"] = (
+                f"{hashlib.sha256(data).hexdigest()}  {updater.ASSET_NAME}\n"
+                f"{hashlib.sha256(exe).hexdigest()} *{updater.SETUP_NAME}\n").encode()
+            assets += [{"name": updater.SETUP_NAME, "browser_download_url": f"{self.base}/dl/{tag}/{updater.SETUP_NAME}",
+                        "size": len(exe)},
+                       {"name": updater.SUMS_NAME, "browser_download_url": f"{self.base}/dl/{tag}/{updater.SUMS_NAME}"}]
         # newest first, as GitHub lists them
         self.releases.insert(0, {"tag_name": tag, "name": name or f"ClipMonster {tag.lstrip('v')}",
                                  "body": "notes", "html_url": f"https://github.com/o/r/releases/{tag}",
@@ -329,3 +339,78 @@ def test_automation_leaves_updates_to_an_open_window_and_skipped_versions(publis
     with pytest.raises(pipeline.Stopped):
         runner.self_update(s)  # and with nothing in the way, it updates
     assert len(launched) == 1
+
+
+# ---------------------------------------------------------------- moving a copy unzipped by hand into the installer
+
+def test_the_installer_is_downloaded_and_checked(github, monkeypatch):
+    github.add("v2.7.0")
+    github.add("v2.8.0", setup=True)
+    github.add("v2.9.0-beta.1", prerelease=True, setup=True)
+    monkeypatch.setattr(updater, "__version__", "2.7.0")
+    rel = updater.setup_release("o/r", "stable")
+    assert rel.version == "2.8.0"
+    exe = updater.download(rel, setup=True)
+    assert exe.read_bytes() == b"setup v2.8.0" and exe.parent == updater.updates_dir()
+    assert updater.setup_release("o/r", "beta").version == "2.9.0-beta.1"
+    monkeypatch.setattr(updater, "__version__", "2.9.0-beta.1")  # a beta with Stable picked keeps its version
+    assert updater.setup_release("o/r", "stable").version == "2.9.0-beta.1"
+    updater.tidy()
+    assert not exe.exists()
+
+
+def test_a_tampered_installer_is_refused(github):
+    github.add("v2.8.0", setup=True)
+    github.files["/dl/v2.8.0/ClipMonster-Setup.exe"] = b"something else"
+    rel = updater.setup_release("o/r")
+    with pytest.raises(updater.UpdateError, match="checksum"):
+        updater.download(rel, setup=True)
+    assert not list(updater.updates_dir().glob("ClipMonster-Setup*"))
+
+
+def test_no_installer_before_2_8(github):
+    github.add("v2.7.0")
+    with pytest.raises(updater.UpdateError, match="No release has ClipMonster-Setup.exe"):
+        updater.setup_release("o/r")
+
+
+def test_the_installer_runs_silently_and_stops_automation_in_this_copy(tmp_path, monkeypatch):
+    started = []
+    monkeypatch.setattr(updater.subprocess, "Popen", lambda args, **kw: started.append((args, kw)))
+    updater.run_setup(tmp_path / "ClipMonster-Setup-2.8.0.exe", stop_from=Path(r"C:\Users\me\ClipMonster"))
+    args, kw = started[0]
+    assert args[1:] == ["/SILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/LAUNCH=1", r"/STOPFROM=C:\Users\me\ClipMonster"]
+    assert kw["cwd"] == str(tmp_path)
+
+
+def fake_copy(folder: Path) -> Path:
+    (folder / "_internal").mkdir(parents=True)
+    (folder / "ClipMonster.exe").write_bytes(b"exe")
+    return folder
+
+
+def test_only_the_installed_copy_offers_to_remove_the_old_one(tmp_path, monkeypatch):
+    unzipped = fake_copy(tmp_path / "home" / "ClipMonster")
+    installed = fake_copy(tmp_path / "local" / "Programs" / "ClipMonster")
+    monkeypatch.setattr(updater.Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    monkeypatch.setattr(updater, "installed_location", lambda: None)
+    monkeypatch.setattr(updater, "install_dir", lambda: unzipped)
+    assert updater.old_copies() == []  # running the unzipped copy, nothing installed yet
+    assert updater.load_state()["install_dir"] == str(unzipped)
+    monkeypatch.setattr(updater, "installed_location", lambda: installed)
+    assert updater.old_copies() == []  # the unzipped copy, run again after installing, leaves the installed one be
+    monkeypatch.setattr(updater, "install_dir", lambda: installed)
+    assert updater.old_copies() == [unzipped]
+    updater.keep_copy(unzipped)
+    assert updater.old_copies() == []
+
+
+def test_needs_installing(tmp_path, monkeypatch):
+    monkeypatch.setattr(updater.sys, "platform", "win32")
+    monkeypatch.setattr(updater, "install_dir", lambda: tmp_path)
+    monkeypatch.setattr(updater, "installed_location", lambda: None)
+    assert updater.needs_installing()
+    monkeypatch.setattr(updater, "installed_location", lambda: tmp_path / "elsewhere")
+    assert not updater.needs_installing()  # installed already: the old-copy offer handles this one
+    monkeypatch.setattr(updater, "install_dir", lambda: None)
+    assert not updater.needs_installing()  # from source

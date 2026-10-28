@@ -215,7 +215,8 @@ def _post(url: str, form: dict, timeout: float = 30) -> dict:
         code, message = _reason(status, body)
         if code in ("invalid_client", "unauthorized_client"):
             raise DriveError("Google doesn't accept the OAuth client ID and secret in Settings → Upload. Copy "
-                             "them again from your Google Cloud project's Credentials page.", "setup")
+                             "them again from Google Auth Platform → Clients in your Google Cloud project (it must "
+                             "be a Desktop app client).", "setup")
         if code == "invalid_grant":
             raise DriveError("Google has signed ClipMonster out of your Drive (the sign-in expired or was "
                              "removed). Sign in again in Settings → Upload.", "sign_in")
