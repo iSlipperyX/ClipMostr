@@ -1,17 +1,18 @@
 """Clean up window: shows what would go and how much space it frees, then clears what you tick.
 
 The look happens on a worker thread (a big output folder takes a moment to read). Every kind is a
-row you can open to see, and untick, single files; a file you untick stays unticked when the window
-looks again. Nothing is removed until Clean up is pressed.
+row you can open to see, tick and untick single files; a file you tick or untick keeps that when the
+window looks again. Nothing is removed until Clean up is pressed.
 """
 
 from __future__ import annotations
 
+import threading
 import time
 from pathlib import Path
 from typing import Any, Callable
 
-from PySide6.QtCore import QSettings, Qt, QThread, QTimer, Signal
+from PySide6.QtCore import QSettings, Qt, QTimer, Signal
 from PySide6.QtGui import QColor
 from PySide6.QtWidgets import (QApplication, QCheckBox, QDialog, QHBoxLayout, QHeaderView, QLabel, QPushButton,
                                QSpinBox, QTreeWidget, QTreeWidgetItem, QVBoxLayout)
@@ -33,19 +34,26 @@ ON_BY_DEFAULT = ("partial", "previews", "rejected", "posted", "removed")
 ITEM_ROLE = Qt.UserRole + 1  # a file row's index in the plan
 
 
-class _Look(QThread):
-    done = Signal(object)
-    failed = Signal(str)
+class _Look:
+    """One look, on a plain background thread that never touches Qt (the window checks on it), so
+    closing the window or quitting while it runs just leaves it behind. A QThread still running
+    when the app closes would bring the whole app down."""
 
     def __init__(self, fn: Callable[[], cleanup.Plan]):
-        super().__init__()
-        self._fn = fn
+        self.plan: cleanup.Plan | None = None
+        self.error = ""
+        self._thread = threading.Thread(target=self._run, args=(fn,), name="Clean up look", daemon=True)
+        self._thread.start()
 
-    def run(self) -> None:
+    def _run(self, fn: Callable[[], cleanup.Plan]) -> None:
         try:
-            self.done.emit(self._fn())
+            self.plan = fn()
         except Exception as exc:  # shown in the window
-            self.failed.emit(str(exc) or exc.__class__.__name__)
+            self.error = str(exc) or exc.__class__.__name__
+
+    @property
+    def running(self) -> bool:
+        return self._thread.is_alive()
 
 
 def move_to_trash(path: Path) -> None:
@@ -78,9 +86,11 @@ class CleanupDialog(QDialog):
         s = settings()
         chosen = set(cleanup.parse_kinds(s.cleanup_kinds)) if s.cleanup_auto else set(ON_BY_DEFAULT)
         self._chosen = chosen or set(ON_BY_DEFAULT)
-        self._kept: set[str] = set()  # files you unticked, by path: a new look keeps them unticked
+        self._picked: dict[str, bool] = {}  # files you ticked or unticked, by path: a new look keeps that
         self._recount = QTimer(self, singleShot=True, interval=0)  # one recount for a whole kind's ticks
         self._recount.timeout.connect(self._update_button)
+        self._poll = QTimer(self, interval=50)  # is the look done?
+        self._poll.timeout.connect(self._check_look)
 
         layout = QVBoxLayout(self)
         intro = QLabel("Clears out what nothing needs any more. Clips TikTok Manager still has waiting, and "
@@ -162,18 +172,21 @@ class CleanupDialog(QDialog):
             return
         s, days, busy = self._settings(), self.days.value(), set(self._busy())
         now = time.time()
-        self._job = _Look(lambda: self._look_fn(s, now, busy=busy, older_than_days=days))
-        self._job.done.connect(self._show)
-        self._job.failed.connect(lambda msg: self.status.setText(f"Couldn't look: {msg}"))
-        self._job.finished.connect(self._looked)
         self.status.setText("Looking…")
         self.clean_btn.setEnabled(False)
-        self._job.start()
+        self._job = _Look(lambda: self._look_fn(s, now, busy=busy, older_than_days=days))
+        self._poll.start()
 
-    def _looked(self) -> None:
-        job, self._job = self._job, None
-        if job:
-            job.deleteLater()
+    def _check_look(self) -> None:
+        job = self._job
+        if job is None or job.running:
+            return
+        self._poll.stop()
+        self._job = None
+        if job.error:
+            self.status.setText(f"Couldn't look: {job.error}")
+        elif job.plan is not None:
+            self._show(job.plan)
         if self._again:
             self._again = False
             self.look()
@@ -204,7 +217,7 @@ class CleanupDialog(QDialog):
                 child.setData(0, ITEM_ROLE, index)
                 child.setToolTip(0, str(it.path))
                 child.setFlags(child.flags() | Qt.ItemIsUserCheckable)
-                ticked = kind in self._chosen and str(it.path) not in self._kept
+                ticked = self._picked.get(str(it.path), kind in self._chosen)
                 child.setCheckState(0, Qt.Checked if ticked else Qt.Unchecked)
                 child.setTextAlignment(2, Qt.AlignRight | Qt.AlignVCenter)
                 top.addChild(child)
@@ -223,20 +236,16 @@ class CleanupDialog(QDialog):
     def _ticked(self, item: QTreeWidgetItem, column: int) -> None:
         if column != 0:
             return
-        if item.parent() is None:
-            kind = item.data(0, Qt.UserRole)
-            if item.checkState(0) == Qt.Unchecked:
-                self._chosen.discard(kind)
-            else:
+        if item.parent() is None:  # a whole kind; ticking some of its files doesn't tick the files to come
+            kind, state = item.data(0, Qt.UserRole), item.checkState(0)
+            if state == Qt.Checked:
                 self._chosen.add(kind)
+            elif state == Qt.Unchecked:
+                self._chosen.discard(kind)
         else:
             index = item.data(0, ITEM_ROLE)
             if self.plan and isinstance(index, int) and 0 <= index < len(self.plan.items):
-                path = str(self.plan.items[index].path)
-                if item.checkState(0) == Qt.Unchecked:
-                    self._kept.add(path)
-                else:
-                    self._kept.discard(path)
+                self._picked[str(self.plan.items[index].path)] = item.checkState(0) == Qt.Checked
         self._recount.start()
 
     def selected(self) -> list[cleanup.Item]:
@@ -294,31 +303,33 @@ class CleanupDialog(QDialog):
         if on != s.cleanup_auto:
             self._change("cleanup_auto", on)
         if on:
-            kinds = ", ".join(k for k in cleanup.KINDS if k in self._chosen)
+            kinds = ", ".join(k for k in cleanup.KINDS if self._kind_ticked(k))
             if kinds != s.cleanup_kinds:
                 self._change("cleanup_kinds", kinds)
             days = max(1, self.days.value())
             if days != s.cleanup_days:
                 self._change("cleanup_days", days)
 
+    def _kind_ticked(self, kind: str) -> bool:
+        """Whether a kind's row shows ticked (all or some of its files), as the daily run will take it."""
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            if top.data(0, Qt.UserRole) == kind:
+                return top.checkState(0) != Qt.Unchecked
+        return kind in self._chosen  # not shown (TikTok Manager isn't on this PC)
+
     def done(self, r: int) -> None:
         self._save_auto()
         super().done(r)
 
     def dispose(self) -> None:
-        """Delete the window, once a look that's still running has finished (a running thread can't
-        be deleted). Closing never waits for a look."""
+        """Delete the window. A look still running finishes on its own and is dropped."""
         self._closing = True
         self._debounce.stop()
+        self._poll.stop()
         self._again = False
-        if self._job is not None:
-            self._job.finished.connect(self.deleteLater)
-        else:
-            self.deleteLater()
-
-    def wait_for_look(self, ms: int = 3000) -> None:
-        if self._job is not None:
-            self._job.wait(ms)
+        self._job = None
+        self.deleteLater()
 
 
 def _describe(it: cleanup.Item) -> str:

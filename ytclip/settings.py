@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 
@@ -213,17 +214,34 @@ class Settings:
 
     # ------------------------------------------------------------ persistence
     @classmethod
-    def load(cls, path: Path | None = None) -> "Settings":
+    def load(cls, path: Path | None = None, tries: int = 3) -> "Settings":
         path = path or app_dir() / "settings.json"
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return cls()
+        for attempt in range(tries):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                break
+            except FileNotFoundError:
+                return cls()
+            except (OSError, ValueError):  # held for a moment by another program (a virus scanner), or broken
+                if attempt == tries - 1:
+                    return cls()
+                time.sleep(0.1)
         return cls().apply(migrate(data))
 
     def save(self, path: Path | None = None) -> None:
+        """Write settings.json whole or not at all: automation reads it while you type in the app."""
         path = path or app_dir() / "settings.json"
-        path.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
+        text = json.dumps(asdict(self), indent=2)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:  # Windows: open in another program for a moment
+                time.sleep(0.05)
+        tmp.unlink(missing_ok=True)
+        path.write_text(text, encoding="utf-8")
 
 
 # ---------------------------------------------------------------- old files
@@ -702,7 +720,7 @@ SCHEMA: list[Field] = [
                "Automation tab shows what would go, and how much space it frees, before anything is deleted"),
     Field("cleanup_kinds", "What to clear", "Automation", "multi", choices=CLEANUP_KINDS,
           help="Clips TikTok Manager still has waiting are never cleared, and nor is anything for a video "
-               "that's queued or being clipped"),
+               "that's queued, being clipped or in the Studio's list"),
     Field("cleanup_days", "Only things older than (days)", "Automation", "int", lo=1, hi=365,
           help="Posted clips count from when you posted them; everything else from when it was made"),
 ]

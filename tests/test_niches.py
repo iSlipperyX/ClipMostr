@@ -76,6 +76,22 @@ def test_niches_round_trip_through_settings_json(tmp_path):
     assert back[0].to_json() == Niche.from_json(GAMING).to_json()
 
 
+def test_settings_are_saved_whole_and_a_half_read_is_tried_again(tmp_path, monkeypatch):
+    """Automation reads settings.json while the Niches tab saves it: a read never sees half a file."""
+    import ytclip.settings as settings_mod
+
+    path = tmp_path / "settings.json"
+    _s(GAMING).save(path)
+    assert [p.name for p in tmp_path.iterdir()] == ["settings.json"]  # the temporary file is gone
+    whole = path.read_text(encoding="utf-8")
+    path.write_text(whole[: len(whole) // 2], encoding="utf-8")  # caught while a program writes it
+    monkeypatch.setattr(settings_mod.time, "sleep", lambda t: path.write_text(whole, encoding="utf-8"))
+    assert niches.load(Settings.load(path))[0].name == "Gaming"  # the next try reads it whole
+    path.write_text("{ broken", encoding="utf-8")
+    monkeypatch.setattr(settings_mod.time, "sleep", lambda t: None)
+    assert Settings.load(path).niches == []  # still broken: the defaults, as before
+
+
 # ---------------------------------------------------------------- what a scan reads
 
 
@@ -137,12 +153,24 @@ def test_a_switched_off_niche_keeps_its_own_channels_videos():
     assert ds["a"].rule == "niche" and "switched off" in ds["a"].reason and ds["b"].picked
 
 
+def test_a_channel_a_switched_on_niche_lists_too_is_that_niches():
+    """A switched-off niche higher up the list doesn't hold back a channel another niche still uses."""
+    s = _s(GAMING | {"enabled": False}, PODS | {"channels": "@GameChan"}, pick_from="any")
+    videos = [vid("a", channel="GameChan", title="Fortnite")]
+    niches.assign_from_settings(videos, s, _history())
+    assert videos[0].niche == "pod001" and _decide(videos, s)["a"].picked
+
+
 def test_title_words_in_scripts_without_spaces_and_odd_spacing():
     index = Index.build(niches.load(_s({"id": "jp", "name": "JP", "keywords": "マイクラ, 小猫, call of duty"})), None)
     assert index.niche_for(vid("a", title="マイクラ実況プレイ")) == "jp"
     assert index.niche_for(vid("b", title="可爱的小猫视频")) == "jp"
     assert index.niche_for(vid("c", title="Call of  Duty\u00a0Warzone")) == "jp"
     assert index.niche_for(vid("d", title="call of dutyish")) == ""
+    latin = Index.build(niches.load(_s({"id": "jp", "name": "JP", "keywords": "minecraft, fortnite, cat"})), None)
+    assert latin.niche_for(vid("e", title="Minecraftで建築してみた")) == "jp"  # an English name right by kana
+    assert latin.niche_for(vid("f", title="Fortnite実況")) == "jp"
+    assert latin.niche_for(vid("g", title="concatenate minecrafts")) == ""
 
 
 def test_assign_fills_in_every_video():
@@ -292,6 +320,23 @@ def test_hook_examples_come_from_the_niche_once_it_has_enough():
     good, _ = lessons.hook_examples(niche="pod001")  # only 3 of its own: all posts are used
     assert good[0][0].startswith("pod")
     assert "game hook" in lessons.prompt_text("game01") and "pod hook" not in lessons.prompt_text("game01")
+
+
+def test_each_posts_niche_comes_from_what_it_was_picked_for():
+    """TikTok Manager's results don't say which niche a post was for; picks.json does."""
+    from ytclip.policy import picks_path
+
+    rows = [{"lift": 3.0, "hook": f"game hook {i}", "video_id": f"g{i}", "channel": "G"} for i in range(6)]
+    rows += [{"lift": 4.0, "hook": f"pod hook {i}", "video_id": f"p{i}", "channel": "P"} for i in range(3)]
+    learn.results_path().parent.mkdir(parents=True, exist_ok=True)
+    learn.results_path().write_text(json.dumps({"outcomes": rows}), encoding="utf-8")
+    picks = [{"id": f"g{i}", "niche": "game01"} for i in range(6)] + [{"id": "p0", "niche": "pod001"}]
+    picks_path().parent.mkdir(parents=True, exist_ok=True)
+    picks_path().write_text(json.dumps({"picks": picks}), encoding="utf-8")
+    lessons = learn.for_settings(Settings())
+    game, pods = lessons.prompt_text("game01"), lessons.prompt_text("pod001")
+    assert "game hook" in game and "pod hook" not in game and "on this TikTok account" in game
+    assert "on your TikTok accounts" in pods  # only one post of its own so far: every account's are shown
 
 
 # ---------------------------------------------------------------- the command line

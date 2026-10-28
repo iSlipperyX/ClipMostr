@@ -216,7 +216,8 @@ def test_library_filters_by_niche(app, tmp_path):
     from ytclip.gui.library import Library
 
     out = tmp_path / "out"
-    for name, auto in (("a", {"niche_id": "g", "niche": "Gaming"}), ("b", None), ("c", {"permission": "x"})):
+    for name, auto in (("a", {"niche_id": "g", "niche": "Gaming", "account": "@gameclips"}), ("b", None),
+                       ("c", {"permission": "x"}), ("d", {"niche_id": "old", "niche": "Cooking"})):
         folder = out / name
         folder.mkdir(parents=True)
         meta = {"video": {"title": name.upper(), "channel": "Chan"}, "clips": [{"rank": 1, "file": "01.mp4"}]}
@@ -226,8 +227,9 @@ def test_library_filters_by_niche(app, tmp_path):
     host = Host(output_dir=str(out), niches=[{"id": "g", "name": "Gaming"}])
     lib = Library(host.get)
     lib.refresh()
-    assert lib.videos.count() == 3 and any("Chan · Gaming · 1 clips" in lib.videos.item(i).text()
-                                           for i in range(3))
+    lines = [lib.videos.item(i).text() for i in range(lib.videos.count())]
+    assert len(lines) == 4 and "A\nChan · Gaming (@gameclips) · 1 clips" in lines
+    assert "D\nChan · Cooking · 1 clips" in lines  # a deleted niche: the name it had
     lib.niche.setCurrentIndex(lib.niche.findData("g"))
     lib._fill()
     assert lib.videos.count() == 1 and lib.videos.item(0).text().startswith("A\n")
@@ -310,3 +312,100 @@ def test_cleanup_window_previews_then_cleans_what_is_ticked(app, tmp_path):
     assert host.settings.cleanup_auto and host.settings.cleanup_days == 5
     assert host.settings.cleanup_kinds == "previews, rejected, posted, removed"
     dlg.dispose()
+
+
+def _rows(dlg):
+    return {dlg.tree.topLevelItem(i).data(0, Qt.UserRole): dlg.tree.topLevelItem(i)
+            for i in range(dlg.tree.topLevelItemCount())}
+
+
+def test_cleanup_window_keeps_single_ticks_and_saves_what_it_shows(app, tmp_path):
+    from ytclip.gui.cleanup_dialog import CleanupDialog
+
+    files = []
+    for name in ("v1.mp4", "v2.mp4", "v3.mp4", "r1.mp4", "r2.mp4"):
+        files.append(tmp_path / name)
+        files[-1].write_bytes(b"x" * 1024)
+    downloads = [cleanup.Item("downloads", f, 1024, title=f.name) for f in files[:3]]
+    rejected = [cleanup.Item("rejected", f, 1024, title=f.name) for f in files[3:]]
+    plans = [cleanup.Plan(items=downloads + rejected, tm_found=False)]
+    host = Host()
+    dlg = CleanupDialog(host.get, host.change, set, look=lambda s, now, busy=(), older_than_days=0: plans[-1])
+    _wait(app, dlg)
+    rows = _rows(dlg)
+    assert rows["downloads"].checkState(0) == Qt.Unchecked  # off to start with
+    rows["downloads"].child(0).setCheckState(0, Qt.Checked)  # just the biggest download
+    rows["rejected"].child(1).setCheckState(0, Qt.Unchecked)  # and keep one rejected clip
+    app.processEvents()
+    assert dlg.clean_btn.text() == "Clean up 2 items (2 KB)"
+    dlg.look()  # say the age changed: the window looks again
+    _wait(app, dlg)
+    rows = _rows(dlg)
+    assert [rows["downloads"].child(i).checkState(0) for i in range(3)] == [Qt.Checked, Qt.Unchecked, Qt.Unchecked]
+    assert {it.path for it in dlg.selected()} == {files[0], files[3]}  # the other downloads stay unticked
+    dlg.trash.setChecked(False)
+    plans.append(cleanup.Plan(items=downloads[1:] + rejected[1:], tm_found=False))  # what's left after
+    dlg.clean()
+    _wait(app, dlg)
+    rows = _rows(dlg)
+    assert dlg.selected() == [] and not dlg.clean_btn.isEnabled()
+    assert rows["rejected"].checkState(0) == Qt.Unchecked  # only the clip you kept is left
+    dlg.auto.setChecked(True)
+    dlg.done(0)
+    assert "rejected" not in host.settings.cleanup_kinds  # the daily run doesn't take the clip you kept
+    assert "downloads" not in host.settings.cleanup_kinds
+    dlg.dispose()
+
+
+def test_closing_the_cleanup_window_never_waits_for_a_look(app):
+    import threading
+
+    from ytclip.gui.cleanup_dialog import CleanupDialog
+
+    release, finished = threading.Event(), threading.Event()
+
+    def slow(s, now, busy=(), older_than_days=0):
+        release.wait(5)
+        finished.set()
+        return cleanup.Plan(tm_found=False)
+
+    host = Host()
+    dlg = CleanupDialog(host.get, host.change, set, look=slow)
+    start = time.time()
+    dlg.done(0)
+    dlg.dispose()
+    app.processEvents()
+    assert time.time() - start < 1
+    release.set()  # the look ends after the window is gone: nothing is left to tell
+    assert finished.wait(5)
+    for _ in range(5):
+        app.processEvents()
+        time.sleep(0.06)
+
+
+def test_quitting_while_the_cleanup_window_still_looks_doesnt_crash(tmp_path):
+    """A look running when ClipMonster quits is left behind; a running QThread would abort the app."""
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = tmp_path / "quit.py"
+    script.write_text(
+        "import sys, time\n"
+        f"sys.path.insert(0, {str(Path(__file__).resolve().parents[1])!r})\n"
+        "from PySide6.QtWidgets import QApplication\n"
+        "from ytclip import cleanup\n"
+        "from ytclip.gui.cleanup_dialog import CleanupDialog\n"
+        "from ytclip.settings import Settings\n"
+        "app = QApplication([])\n"
+        "def slow(s, now, busy=(), older_than_days=0):\n"
+        "    time.sleep(5)\n"
+        "    return cleanup.Plan()\n"
+        "dlg = CleanupDialog(Settings, lambda name, value: None, set, look=slow)\n"
+        "dlg.dispose()\n"
+        "app.processEvents()\n"
+        "sys.exit(0)\n", encoding="utf-8")
+    env = os.environ | {"QT_QPA_PLATFORM": "offscreen", "APPDATA": str(tmp_path), "LOCALAPPDATA": str(tmp_path),
+                        "XDG_CONFIG_HOME": str(tmp_path)}
+    done = subprocess.run([sys.executable, str(script)], env=env, capture_output=True, text=True, timeout=60)
+    assert done.returncode == 0, done.stderr

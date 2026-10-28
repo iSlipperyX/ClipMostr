@@ -290,12 +290,19 @@ def _fetch(url: str, cookies: str | None, tries: int = 3, sleep: Callable[[float
     raise AssertionError("unreachable")
 
 
+def local_id(path: Path) -> str:
+    """The id a video file on this PC goes by: its cached transcript and analysis are named after it.
+    Raises OSError when the file isn't there."""
+    path = path.resolve()
+    st = path.stat()
+    return hashlib.sha1(f"{path}|{st.st_size}|{st.st_mtime_ns}".encode()).hexdigest()[:11]
+
+
 def local_video(path: Path) -> Video:
     path = path.resolve()
     if not path.exists():
         raise FileNotFoundError(path)
-    st = path.stat()
-    vid = hashlib.sha1(f"{path}|{st.st_size}|{st.st_mtime_ns}".encode()).hexdigest()[:11]
+    vid = local_id(path)
     info = probe(path)
     subs = next((p for p in (path.with_suffix(".vtt"), path.with_suffix(".en.vtt")) if p.exists()), None)
     return Video(id=vid, title=path.stem, channel="Local files", upload_date="", duration=info.duration,

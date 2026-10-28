@@ -146,7 +146,10 @@ class Library(QWidget):
             check = meta.get("qc") or {}
             count = (f"{check.get('passed', 0)} ready · {check['rejected']} rejected" if check.get("rejected")
                      else f"{n} clips")
-            niche = self._niche_names.get(_niche_key(meta), "")
+            auto = meta.get("automation") if isinstance(meta.get("automation"), dict) else {}
+            niche = self._niche_names.get(_niche_key(meta)) or str(auto.get("niche") or "")  # a deleted one: its name
+            account = str(auto.get("account") or "").strip()  # the TikTok account the clips are for
+            niche = f"{niche} ({account})" if niche and account else niche or account
             item = QListWidgetItem(f"{v.get('title', folder.name)}\n{v.get('channel', '')} · "
                                    + (f"{niche} · " if niche else "") + count)
             thumb = folder / "thumbnails" / "01.jpg"

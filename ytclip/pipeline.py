@@ -143,11 +143,17 @@ def settings_for(job: Job, s: Settings) -> tuple[Settings, str]:
             out = out.apply(all_layouts()[name])
     folder = s.auto_output_path / niche.folder if niche else s.auto_output_path
     overrides = {"output_dir": str(folder), "cache_dir": str(s.cache_path)}
-    # The niche's second videos, unless a channel or category recipe's own view brings its own.
+    # The niche's second videos, unless a channel or category recipe's own preset or view brings its own.
     own = ""
-    if rule is not None and view_from is rule:
-        own = str(all_layouts().get(find_layout(view) or "", {}).get("stack_folder") or "").strip()
-    if niche and niche.stack_folder.strip() and not own:
+    if rule is not None:
+        mine = (presets.get(preset) if preset_from is rule else None,
+                all_layouts().get(find_layout(view) or "") if view_from is rule else None)
+        for values in mine:  # the view goes on after the preset
+            if values and "stack_folder" in values:
+                own = str(values["stack_folder"] or "").strip()
+    if own:
+        overrides["stack_folder"] = own
+    elif niche and niche.stack_folder.strip():
         overrides["stack_folder"] = niche.stack_folder.strip()
     if niche and niche.instructions.strip():
         overrides["ai_instructions"] = (f"{out.ai_instructions.strip()}\nThese clips are for a TikTok account about "
@@ -273,6 +279,7 @@ class Runner:
         next_scan = self.db.meta_float("last_scan") + max(10, s.research_interval) * 60
         if research.youtube_key(s) and now >= next_scan:
             self.research(s)
+            s = self.load()  # a scan takes minutes: niches made meanwhile count (see research)
             now = self.now()
             next_scan = now + max(10, s.research_interval) * 60
         elif not research.youtube_key(s) and not self.db.meta("warned_key"):
@@ -391,10 +398,12 @@ class Runner:
     # ------------------------------------------------------------ one video
     def process(self, job: Job, s: Settings) -> None:
         now = self.now()
-        if job.niche and niches.find(s, job.niche) is None:  # deleted while it waited (or mid-scan)
-            self.db.remove(job.id)
-            self.log(f"Took {job.title or job.url} out of the queue: its niche was deleted.")
-            return
+        if job.niche and niches.find(s, job.niche) is None:
+            s = self.load()  # the settings we were given may be older than the niche
+            if niches.find(s, job.niche) is None:  # deleted while it waited (or mid-scan)
+                self.db.remove(job.id)
+                self.log(f"Took {job.title or job.url} out of the queue: its niche was deleted.")
+                return
         settings, label = settings_for(job, s)
         used = self.db.count("ai", now - DAY)
         if settings.mode == "ai" and used >= s.auto_ai_daily:

@@ -215,13 +215,11 @@ class MainWindow(QMainWindow):
 
     def _clean_up(self) -> None:
         def busy() -> set[str]:
-            from ..cleanup import busy_ids
-            from ..download import is_url, video_id
+            from ..cleanup import busy_ids, source_id
 
             # Every video in the Studio's list, opened yet or not (restored ones load when clicked).
-            studio = {p.video.id if p.video is not None else video_id(p.source) for p in self.projects
-                      if p.video is not None or is_url(p.source)}
-            return studio | busy_ids(self.automation.db)
+            studio = {p.video.id if p.video is not None else source_id(p.source) for p in self.projects}
+            return (studio - {""}) | busy_ids(self.automation.db)
 
         dlg = CleanupDialog(lambda: self.settings, self._setting_changed, busy, self)
         dlg.cleaned.connect(self._notice)
@@ -1567,7 +1565,8 @@ class MainWindow(QMainWindow):
             saved = getattr(p, "_saved", None)
             clips = [asdict(c) for c in p.clips] if p.clips else (saved or {}).get("clips", [])
             polish = p.meta.get("polish") or (saved or {}).get("polish")
-            data.append({"source": p.source, "clips": clips, "mode": p.mode_used or (saved or {}).get("mode", ""),
+            data.append({"source": p.source, "id": p.video.id if p.video else (saved or {}).get("id", ""),
+                         "clips": clips, "mode": p.mode_used or (saved or {}).get("mode", ""),
                          "title": p.video.title if p.video else (saved or {}).get("title", ""),
                          **({"polish": polish} if polish else {})})
         try:
@@ -1610,8 +1609,6 @@ class MainWindow(QMainWindow):
             self.tasks.current.wait(4000)
             if self.tasks.current and self.tasks.current.isRunning():
                 self.tasks.current.terminate()
-        for dlg in self.findChildren(CleanupDialog):  # a clean-up window still looking at the folders
-            dlg.wait_for_look()
         super().closeEvent(e)
 
 

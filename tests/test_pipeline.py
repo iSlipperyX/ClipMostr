@@ -540,9 +540,38 @@ def test_a_queued_video_whose_niche_was_deleted_leaves_the_queue(tmp_path):
     r = _runner(tmp_path, s)
     r.add_manual("https://www.youtube.com/watch?v=abcdefghijk", niche="game01")
     gone = s.apply({"niches": []})
+    r.load = lambda: gone
     r.process(r.db.next_due(NOW), gone)
     assert r.db.get("abcdefghijk") is None and not FakeEngine.made
     assert any("its niche was deleted" in line for line in r.logs)
+
+
+def test_settings_older_than_the_niche_never_take_its_video_out(tmp_path):
+    """The runner was handed settings from before the niche was made (or read mid-save): it looks again."""
+    s = _settings(niches=[GAMING], auto_output_dir=str(tmp_path / "out"))
+    r = _runner(tmp_path, s)
+    r.add_manual("https://www.youtube.com/watch?v=abcdefghijk", niche="game01")
+    r.process(r.db.next_due(NOW), _settings(auto_output_dir=str(tmp_path / "out")))
+    assert r.db.get("abcdefghijk").status == "done" and not any("deleted" in line for line in r.logs)
+    assert Path(FakeEngine.made[-1].s.output_dir).name == "Gaming"  # clipped with the niche's own settings
+
+
+def test_a_niche_made_during_the_scan_keeps_its_first_pick(tmp_path):
+    """Making the first niche while a scan runs: its pick is clipped, not dropped as 'deleted'."""
+    history = History(None)
+    history.sources["channels"]["@c0"] = {"id": "UCC0"}
+    s = _settings(auto_output_dir=str(tmp_path / "out"))
+    current = {"s": s}
+
+    def scan(*a, **k):
+        current["s"] = s.apply({"niches": [GAMING]})  # made in the Niches tab while the scan runs
+        return _scan_result("a")
+
+    r = _runner(tmp_path, s, scan=scan, history=history)
+    r.load = lambda: current["s"]
+    r.tick()
+    assert r.db.get("a").status == "done" and r.db.get("a").niche == "game01"
+    assert not any("deleted" in line for line in r.logs)
 
 
 def test_a_catch_all_recipe_only_fills_in_what_the_niche_leaves_out(tmp_path):
@@ -556,14 +585,17 @@ def test_a_catch_all_recipe_only_fills_in_what_the_niche_leaves_out(tmp_path):
     assert label == "Gaming / action · Gameplay below (niche: Gaming)"  # the niche has both: * isn't used
 
 
-def test_a_recipe_view_with_its_own_second_videos_keeps_them(tmp_path):
-    from ytclip.settings import LAYOUT_PRESETS, save_user_layout
+def test_a_recipes_own_second_videos_beat_the_niches(tmp_path):
+    from ytclip.settings import LAYOUT_PRESETS, save_user_layout, save_user_preset
 
     parkour = Settings().apply(LAYOUT_PRESETS["Gameplay below"] | {"stack_folder": "C:/parkour"})
     save_user_layout("Parkour below", parkour)
-    s = _settings(niches=[GAMING], auto_recipes="@Pod = Gaming / action | Parkour below")
+    save_user_preset("Parkour preset", parkour)
+    s = _settings(niches=[GAMING], auto_recipes="@Pod = Gaming / action | Parkour below\n@Cast = Parkour preset")
     pod, _ = settings_for(Job("a", "u", channel="Pod", niche="game01"), s)
-    assert pod.stack_folder == "C:/parkour"
+    assert pod.stack_folder == "C:/parkour"  # from the recipe's view
+    cast, _ = settings_for(Job("c", "u", channel="Cast", niche="game01"), s)
+    assert cast.stack_folder == "C:/parkour"  # from the recipe's saved preset
     other, _ = settings_for(Job("b", "u", channel="Else", niche="game01"), s)
     assert other.stack_folder == "D:/gameplay"
 

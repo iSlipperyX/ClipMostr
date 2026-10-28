@@ -15,7 +15,8 @@ It never touches a video that's queued, being clipped or open in the Studio, a c
 still has (in its library, queued, failed or uploading), anything changed in the last few minutes,
 or anything that isn't ClipMonster's own: a clip must be listed in a clips.json, a cache file must
 be named after a video (in a download cache folder you picked yourself, one ClipMonster saved the
-details of). A download goes with its details (.video.json); a clip goes with its .srt and
+details of, or named as only ClipMonster or yt-dlp would). Unfinished downloads keep to the age
+picked too. A download goes with its details (.video.json); a clip goes with its .srt and
 thumbnail, and leaves its clips.json (its counts and README follow); a video
 folder with no clips left goes altogether, and so do folders it leaves empty (not the Automation
 folder or a niche's folder, which TikTok Manager may be watching).
@@ -35,7 +36,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import niches
-from .download import VIDEO_EXTS, is_url, video_id
+from .download import VIDEO_EXTS, is_url, local_id, video_id
 from .settings import APP_NAME, CLEANUP_KINDS, Settings, app_dir
 
 DAY = 86400.0
@@ -55,6 +56,7 @@ _PARTIAL = re.compile(r"\.(part|ytdl)$|\.part-Frag\d+|\.f\d+(?:-\w+)*\.\w+$|\.te
 _ANALYSIS = re.compile(r"\.(analysis\.npz|video\.json|whisper-[\w.-]+\.json|[\w-]+\.vtt)$", re.I)
 _OWN = re.compile(r"\.(analysis\.npz|whisper-[\w.-]+\.json)$", re.I)  # names only ClipMonster gives files
 _DOWNLOAD_BITS = re.compile(r"f\d+(?:-\w+)*|part|part-frag\d+|ytdl|temp", re.I)
+_YTDLP_ONLY = re.compile(r"\.f\d+(?:-\w+)*\.|\.temp\.|\.ytdl$|\.part-Frag\d+", re.I)  # not a browser's .part
 MEDIA_EXTS = VIDEO_EXTS | {".m4a", ".mp3", ".opus", ".ogg", ".aac", ".wav"}
 
 
@@ -203,6 +205,17 @@ def busy_ids(db, session: Path | None = None) -> set[str]:
     return ids | studio_ids(session)
 
 
+def source_id(source: str) -> str:
+    """The id of the video a Studio source (a link or a file) is cached under, or "" when it can't
+    be told without opening it."""
+    if is_url(source):
+        return video_id(source)
+    try:
+        return local_id(Path(source))
+    except (OSError, ValueError):
+        return ""
+
+
 def studio_ids(session: Path | None = None) -> set[str]:
     """The videos in the Studio's list, opened yet or not (from its saved session)."""
     try:
@@ -211,8 +224,11 @@ def studio_ids(session: Path | None = None) -> set[str]:
         return set()
     if not isinstance(data, list):
         return set()
-    return {video_id(e["source"]) for e in data
-            if isinstance(e, dict) and isinstance(e.get("source"), str) and is_url(e["source"])}
+    ids = set()
+    for e in data:
+        if isinstance(e, dict) and isinstance(e.get("source"), str):
+            ids |= {str(e.get("id") or ""), source_id(e["source"])}  # "id": the video's own, once it was opened
+    return ids - {""}
 
 
 def plan(s: Settings, now: float | None = None, busy: set[str] | frozenset = frozenset(),
@@ -343,7 +359,7 @@ def _plan_cache(p: Plan, cache: Path, kinds: set[str], busy, cutoff: float, now:
                 own_folder: bool = True) -> None:
     """own_folder: the cache is ClipMonster's own .downloads folder. A folder picked in Settings
     may hold other files too, so there a file must be one ClipMonster saved the details of, or one
-    only ClipMonster or yt-dlp would name that way."""
+    only ClipMonster or yt-dlp would name that way (a browser leaves "<name>.mp4.part" too)."""
     if not cache.is_dir():
         return
     try:
@@ -362,8 +378,8 @@ def _plan_cache(p: Plan, cache: Path, kinds: set[str], busy, cutoff: float, now:
             continue
         size, mtime = st
         known = f"{vid}.video.json" in names
-        if not known and not (_YOUTUBE_ID.fullmatch(vid) and (own_folder or _OWN.search(f.name)
-                                                              or _download_part(f.name))):
+        if not known and not (_YOUTUBE_ID.fullmatch(vid) and (own_folder or _OWN.search(f.name) or (
+                _download_part(f.name) and _YTDLP_ONLY.search(f.name)))):
             continue  # not ClipMonster's
         companions: list[Path] = []
         if _download_part(f.name):
@@ -378,7 +394,7 @@ def _plan_cache(p: Plan, cache: Path, kinds: set[str], busy, cutoff: float, now:
             kind, idle = "analysis", FRESH
         else:
             continue
-        if kind not in kinds or now - mtime < idle or (kind != "partial" and mtime > cutoff):
+        if kind not in kinds or now - mtime < idle or mtime > cutoff:
             continue
         size += sum((_stat(c) or (0, 0))[0] for c in companions)
         p.items.append(Item(kind, f, size, companions, when=mtime, title=f.name))

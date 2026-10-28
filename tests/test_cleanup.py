@@ -118,11 +118,17 @@ def test_busy_videos_include_the_studios_list_and_the_real_id_being_clipped(tmp_
     db.add(Job("done1234567", "u", status="done"))
     db.set_meta("working_video", "realid12345")
     session = tmp_path / "session.json"
-    session.write_text(json.dumps([{"source": "https://youtu.be/studio12345"}, {"source": "C:/videos/mine.mp4"},
+    mine = tmp_path / "my talk.mp4"
+    mine.write_bytes(b"video")
+    session.write_text(json.dumps([{"source": "https://youtu.be/studio12345"}, {"source": str(mine)},
+                                   {"source": str(tmp_path / "gone.mp4")},
+                                   {"source": "https://vimeo.com/123", "id": "vimeo123"},
                                    {"source": "https://www.youtube.com/embed/embedded123"}, "junk"]),
                        encoding="utf-8")
+    from ytclip.download import local_id
+
     assert cleanup.busy_ids(db, session) == {"https://example.com/v/odd", "realid12345", "studio12345",
-                                             "embedded123"}
+                                             "embedded123", local_id(mine), "vimeo123", "https://vimeo.com/123"}
     db.update("https://example.com/v/odd", status="done")
     assert cleanup.busy_ids(db, tmp_path / "none.json") == set()  # nothing is being clipped now
 
@@ -239,12 +245,21 @@ def test_in_a_cache_folder_you_picked_only_clipmonsters_files_count(tmp_path):
     mine = {n: _write(cache / n) for n in ("12345.mp4", "12345.video.json", "aaaaaaaaaaa.analysis.npz",
                                             "bbbbbbbbbbb.f137.mp4.part", "ccccccccccc.whisper-base.json")}
     theirs = {n: _write(cache / n) for n in ("Holiday2023.mp4", "Tax_returns.pdf.part", "lecture_001.en.vtt",
-                                              "family_trip.mkv")}
+                                              "family_trip.mkv", "Holiday2024.mp4.part")}  # a paused browser download
     p = cleanup.plan(s, tm=TikTokManager(), kinds=cleanup.CACHE_KINDS)
     assert {it.path.name for it in p.items} == {"12345.mp4", "aaaaaaaaaaa.analysis.npz", "bbbbbbbbbbb.f137.mp4.part",
                                                 "ccccccccccc.whisper-base.json"}
     cleanup.apply(p, cleanup.CACHE_KINDS)
     assert all(f.exists() for f in theirs.values()) and not mine["12345.video.json"].exists()
+
+
+def test_unfinished_downloads_keep_to_the_age_you_pick(tmp_path):
+    """The daily run only takes things at least a day old, unfinished downloads too."""
+    cache = tmp_path / "out" / ".downloads"
+    s = Settings().apply({"output_dir": str(tmp_path / "out")})
+    stopped = _write(cache / "aaaaaaaaaaa.f137.mp4.part", when=time.time() - 2 * 3600)  # two hours ago
+    assert cleanup.plan(s, tm=TikTokManager(), kinds=["partial"], older_than_days=1).items == []
+    assert [it.path for it in cleanup.plan(s, tm=TikTokManager(), kinds=["partial"]).items] == [stopped]
 
 
 def test_preview_renders(tmp_path):

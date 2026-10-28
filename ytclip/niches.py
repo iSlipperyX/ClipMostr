@@ -27,8 +27,9 @@ DEFAULT_DAILY = 2
 MAX_DAILY = 50
 _RESERVED = re.compile(r"con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$", re.I)  # Windows device names
 # Scripts written without spaces between words: a title word there is found anywhere in the title.
-_NO_SPACES = re.compile("[\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff"  # Thai, Lao, Burmese, Khmer
-                        "\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")  # Japanese kana, Chinese
+_NO_SPACES_RANGES = ("\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff"  # Thai, Lao, Burmese, Khmer
+                     "\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff")  # Japanese kana, Chinese
+_NO_SPACES = re.compile(f"[{_NO_SPACES_RANGES}]")
 
 
 def new_id() -> str:
@@ -194,8 +195,9 @@ class Index:
     """Everything needed to sort videos into niches, built once per scan or rules change.
 
     Every niche, switched off or not, claims the channels and searches it lists, so a switched-off
-    niche's videos are held back rather than handed to another account. Title words and categories
-    only count for switched-on niches."""
+    niche's videos are held back rather than handed to another account; a channel or search that a
+    switched-on niche lists too is that niche's. Title words and categories only count for
+    switched-on niches."""
 
     niches: list[Niche]
     by_channel: dict[str, str]  # YouTube channel id -> niche id
@@ -211,7 +213,7 @@ class Index:
             with history.lock:
                 known_channels = {k: dict(v) for k, v in history.sources.get("channels", {}).items()}
                 known_searches = {k: dict(v) for k, v in history.sources.get("searches", {}).items()}
-        for n in niches:
+        for n in sorted(niches, key=lambda n: not n.enabled):  # switched on first, otherwise in list order
             refs, _ = n.channel_refs()
             for ref in refs:
                 cid = ref.value if ref.kind == "id" else (known_channels.get(ref.key) or {}).get("id", "")
@@ -246,7 +248,9 @@ class Index:
 def _has_words(text: str, phrase: str) -> bool:
     if _NO_SPACES.search(phrase):
         return phrase in text
-    return bool(re.search(rf"(?<!\w){re.escape(phrase)}(?!\w)", text))
+    # A word ends at a space, a mark or a letter of a language written without spaces ("Minecraftで建築").
+    edge = rf"[^\W{_NO_SPACES_RANGES}]"
+    return bool(re.search(rf"(?<!{edge}){re.escape(phrase)}(?!{edge})", text))
 
 
 def assign(videos: list[TrendingVideo], niches: list[Niche], history: History | None) -> None:
