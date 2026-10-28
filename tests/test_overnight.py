@@ -81,7 +81,7 @@ def test_the_health_check_finds_what_automation_needs(tmp_path, monkeypatch):
     assert got["YouTube Data API key"] == doctor.WARN and got["Anthropic key"] == doctor.WARN
     assert got["Automation folder"] == doctor.GOOD and not out.exists()  # checking makes no folders
     assert got["Niche Gaming"] == doctor.WARN and got["Paused niches"] == doctor.WARN
-    assert got["Clip requests"] == doctor.BAD and got["Browser login"] == doctor.WARN
+    assert got["Clip requests"] == doctor.BAD and got["YouTube sign-in"] == doctor.WARN
     assert got["TikTok Manager"] == doctor.WARN
 
 

@@ -18,7 +18,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QHeaderView, QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QSplitter,
                                QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
-from .. import learn, niches, pipeline
+from .. import learn, niches, pipeline, youtube_login
 from ..clipability import age_text
 from ..jobs import Job, JobDB
 from ..research import youtube_key
@@ -27,6 +27,7 @@ from . import theme
 from .library import reveal
 from .overnight import OvernightPanel
 from .requests_panel import NichePanel, RequestDialog, RequestPanel
+from .sign_in_dialog import SignInDialog
 
 REPORT_EVERY = 30.0  # seconds between refreshes of the Overnight page while it's showing
 
@@ -36,6 +37,7 @@ STATUS_COLUMN = COLUMNS.index("Status")
 STATUS_COLOURS = {"working": theme.ACCENT_2, "queued": theme.TEXT, "done": theme.GOOD, "failed": theme.BAD}
 STATUS_WORDS = {"working": "Working", "queued": "Waiting", "done": "Done", "failed": "Failed"}
 LOG_LINES = 300
+SIGN_IN_CHECK = 60.0  # seconds between looks at whether ClipMonster's YouTube sign-in is still there
 
 
 class Automation(QWidget):
@@ -58,6 +60,8 @@ class Automation(QWidget):
         self._windows_checked = False
         self._lessons_sig: tuple | None = None
         self._niche_names: dict[str, str] = {}
+        self._sign_in_checked = -SIGN_IN_CHECK
+        self._signed_in = False
         self._build()
         self.niches_changed()
         self.refresh()
@@ -90,11 +94,13 @@ class Automation(QWidget):
         self.pause_btn.clicked.connect(self.toggle_pause)
         self.try_btn = QPushButton("↻  Try now")
         self.try_btn.setToolTip("End the sign-in pause and try YouTube again now. If it asks again, the next pause "
-                                "is longer, so sign in to YouTube in a browser and pick it in Settings → Download → "
-                                "Use browser login first")
+                                "is longer, so press Sign in to YouTube first")
         self.try_btn.clicked.connect(self.try_now)
+        self.sign_in_btn = QPushButton()
+        self.sign_in_btn.clicked.connect(self.sign_in)
         top.addWidget(title)
         top.addWidget(self.status, 1)
+        top.addWidget(self.sign_in_btn)
         top.addWidget(self.try_btn)
         top.addWidget(self.pause_btn)
         top.addWidget(self.stop_btn)
@@ -257,6 +263,7 @@ class Automation(QWidget):
             text += (f"   <span style='color:{theme.WARN}'>YouTube asked this PC to sign in: no downloads until "
                      f"{until}</span>")
         self.try_btn.setVisible(bool(blocked))
+        self._show_sign_in(bool(blocked))
         if not youtube_key(self._settings()):
             text += (f"   <span style='color:{theme.WARN}'>No YouTube API key, so nothing new is picked "
                      f"(Settings → Research)</span>")
@@ -385,6 +392,45 @@ class Automation(QWidget):
         self.notice.emit("Trying YouTube again now" + (f" with {n} waiting video{'s' if n != 1 else ''}." if n else ".")
                          + ("" if self.running() else " Press Start to run automation."))
         self.refresh()
+
+    def _show_sign_in(self, blocked: bool) -> None:
+        now = time.monotonic()
+        if now - self._sign_in_checked >= SIGN_IN_CHECK:
+            self._sign_in_checked = now
+            self._signed_in = youtube_login.read_sign_in().signed_in
+        using = self._settings().cookies_browser == youtube_login.CHOICE and self._signed_in
+        self.sign_in_btn.setText("✓  Signed in to YouTube" if using else "🔑  Sign in to YouTube")
+        self.sign_in_btn.setObjectName("" if using or not blocked else "primary")
+        self.sign_in_btn.style().polish(self.sign_in_btn)
+        self.sign_in_btn.setToolTip("Downloads are signed in with ClipMonster's own Firefox. Press to sign in again "
+                                    "or forget it" if using else
+                                    "Opens Firefox, just for ClipMonster, to sign in to YouTube once. Signed-in "
+                                    "downloads are what keep YouTube from asking this PC to confirm it's not a bot")
+
+    def sign_in(self) -> None:
+        dlg = SignInDialog(self)
+        dlg.signed_in.connect(self._signed_in_now)
+        dlg.forgotten.connect(self._sign_in_forgotten)
+        dlg.exec()
+        self._sign_in_checked = -SIGN_IN_CHECK
+        self.refresh()
+
+    def _signed_in_now(self) -> None:
+        if self._change and self._settings().cookies_browser != youtube_login.CHOICE:
+            self._change("cookies_browser", youtube_login.CHOICE)
+        # The setting is saved a moment after it changes; end a pause once automation can read it.
+        QTimer.singleShot(1500, self.end_pause_after_sign_in)
+
+    def end_pause_after_sign_in(self) -> None:
+        n = pipeline.end_pause(self.db, time.time()) if pipeline.paused_until(self.db, time.time()) else 0
+        self.notice.emit("Signed in to YouTube: downloads use ClipMonster's sign-in now"
+                         + (f", and {n} waiting video{'s carry' if n != 1 else ' carries'} on." if n else "."))
+        self.refresh()
+
+    def _sign_in_forgotten(self) -> None:
+        if self._change and self._settings().cookies_browser == youtube_login.CHOICE:
+            self._change("cookies_browser", "")
+        self.notice.emit("ClipMonster's YouTube sign-in is gone, so downloads aren't signed in now.")
 
     def toggle_pause(self) -> None:
         paused = self.db.meta("paused") == "1"

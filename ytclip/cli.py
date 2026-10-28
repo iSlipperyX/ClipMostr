@@ -76,7 +76,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, help="max videos to take from each playlist/channel")
     p.add_argument("--delete-source", action="store_true", help="delete the full video once clips are cut")
     p.add_argument("--dry-run", action="store_true", help="analyse and print the clip plan without exporting")
-    p.add_argument("--cookies-from-browser", metavar="BROWSER", help="use your browser login (chrome, edge, firefox...)")
+    p.add_argument("--cookies-from-browser", metavar="BROWSER",
+                   help="a browser's login to download with: clipmonster (its own, from ytclip sign-in), chrome, "
+                        "edge, firefox...")
     p.add_argument("--check-update", action="store_true", help="check GitHub for a newer ClipMonster release")
     p.add_argument("--update", action="store_true", help="download and install the newest release (packaged app only)")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
@@ -872,6 +874,56 @@ def run_doctor(argv: list[str]) -> int:
     return 1 if any(c.level == doctor.BAD for c in checks) else 0
 
 
+def run_sign_in(argv: list[str], wait: float = 1800.0, poll: float = 2.0) -> int:
+    from . import pipeline, youtube_login
+    from .jobs import JobDB
+
+    p = argparse.ArgumentParser(prog="ytclip sign-in", description="Sign ClipMonster in to YouTube: opens Firefox "
+                                "with a profile kept just for ClipMonster. Sign in (a spare Google account is "
+                                "best), then close that Firefox; downloads use the sign-in from then on.")
+    p.add_argument("--status", action="store_true", help="only say whether it's signed in")
+    p.add_argument("--forget", action="store_true", help="delete ClipMonster's sign-in and stop using it")
+    args = p.parse_args(argv)
+    s = Settings.load()
+    if args.forget:
+        try:
+            youtube_login.forget()
+        except OSError as exc:
+            console.print(f"[red]✗ {escape(str(exc))}[/]")
+            return 1
+        if s.cookies_browser == youtube_login.CHOICE:
+            s.copy(cookies_browser="").save()
+        console.print("ClipMonster's YouTube sign-in is gone; downloads aren't signed in now.")
+        return 0
+    if not args.status:
+        try:
+            youtube_login.open_sign_in()
+        except FileNotFoundError:
+            console.print(f"[red]✗ Firefox isn't installed.[/] Get it from {youtube_login.GET_FIREFOX_URL} and run "
+                          "this again.")
+            return 1
+        console.print("Firefox is open on Google's sign-in page. Sign in to YouTube, then close that Firefox window.")
+        end = time.monotonic() + wait
+        time.sleep(poll * 2)  # Firefox takes a moment to lock its profile
+        while youtube_login.firefox_open() and time.monotonic() < end:
+            time.sleep(poll)
+    got = youtube_login.read_sign_in()
+    if not got.signed_in:
+        console.print("[yellow]⚠ ClipMonster's Firefox isn't signed in to YouTube.[/] Run [bold]ytclip sign-in[/] "
+                      "to sign in.")
+        return 1
+    if s.cookies_browser != youtube_login.CHOICE:
+        s.copy(cookies_browser=youtube_login.CHOICE).save()
+    db = JobDB()
+    try:
+        n = pipeline.end_pause(db, time.time()) if pipeline.paused_until(db, time.time()) else 0
+    finally:
+        db.close()
+    console.print("[green]✓ Signed in to YouTube.[/] Downloads use this sign-in"
+                  + (f", and {n} waiting video{'s carry' if n != 1 else ' carries'} on now." if n else "."))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["--apply-update"]:  # the updater's install step, run from the unpacked new version
@@ -886,6 +938,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_request(argv[1:])
     if argv[:1] == ["report"]:
         return run_report(argv[1:])
+    if argv[:1] == ["sign-in"]:
+        return run_sign_in(argv[1:])
     if argv[:1] == ["doctor"]:
         return run_doctor(argv[1:])
     if argv[:1] == ["results"]:

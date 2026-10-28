@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleS
                                QPushButton, QScrollArea, QSlider, QSplitter, QTableWidget, QTableWidgetItem,
                                QTabWidget, QTextEdit, QVBoxLayout, QWidget)
 
-from .. import __version__, compose, layout, series, updater
+from .. import __version__, compose, layout, series, updater, youtube_login
 from ..analyze import SIGNAL_LABELS, Clip, clip_score
 from ..download import VIDEO_EXTS, expand_sources, is_url, needs_expansion
 from ..engine import Engine, Project
@@ -1444,6 +1444,10 @@ class MainWindow(QMainWindow):
         dlg = SettingsDialog(self.settings, self, tab)
         if dlg.exec():
             self._apply_settings(dlg.result_settings)
+        elif dlg.signed_in:  # cancelled, but the sign-in just made still counts
+            self._apply_settings(self.settings.copy(cookies_browser=youtube_login.CHOICE))
+        if dlg.signed_in and self.settings.cookies_browser == youtube_login.CHOICE:
+            self.automation.end_pause_after_sign_in()
 
     # ================================================================== export
     def _update_export_btn(self) -> None:
