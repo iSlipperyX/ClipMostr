@@ -291,7 +291,7 @@ def _check(v: TrendingVideo, p: Policy, log: PickLog, now: float, notes: dict[st
     if p.use_niches and v.niche not in p.niche_daily:
         return skip("niche", "Fits none of your niches. Add its channel, a word from its title or its category "
                              "to a niche (Niches tab)." if not v.niche else
-                             "Its niche is switched off.")
+                             "Its niche is switched off or paused.")
 
     minutes = v.duration / 60
     if p.min_minutes and minutes < p.min_minutes:

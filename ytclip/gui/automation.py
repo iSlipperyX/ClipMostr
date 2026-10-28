@@ -1,7 +1,8 @@
 """Automation tab: watch and steer the unattended runner (pipeline.py) through jobs.db.
 
 The runner is its own process, so it keeps going when this window closes. This tab starts it,
-stops or pauses it, queues links by hand, and shows the queue and the runner's log.
+stops or pauses it, queues links by hand, and shows the queue, each niche, clip requests and the
+runner's log.
 """
 
 from __future__ import annotations
@@ -9,13 +10,13 @@ from __future__ import annotations
 import os
 import time
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QHBoxLayout, QHeaderView,
-                               QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QSplitter, QTableWidget,
-                               QTableWidgetItem, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QDialog, QHBoxLayout,
+                               QHeaderView, QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QSplitter,
+                               QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
 from .. import learn, niches, pipeline
 from ..clipability import age_text
@@ -24,6 +25,10 @@ from ..research import youtube_key
 from ..settings import Settings
 from . import theme
 from .library import reveal
+from .overnight import OvernightPanel
+from .requests_panel import NichePanel, RequestDialog, RequestPanel
+
+REPORT_EVERY = 30.0  # seconds between refreshes of the Overnight page while it's showing
 
 COLUMNS = ("Video", "Channel", "Niche", "Status", "Clips", "Updated", "Why it was picked")
 NICHE_COLUMN = COLUMNS.index("Niche")
@@ -37,11 +42,14 @@ class Automation(QWidget):
     notice = Signal(str)
     open_settings = Signal(str)
     clean_up = Signal()  # open the Clean up window
+    niches_edited = Signal()  # a niche was paused or resumed here
 
     def __init__(self, settings: Callable[[], Settings], db: JobDB | None = None,
-                 launch: Callable[[], None] = pipeline.launch_background, parent=None):
+                 launch: Callable[[], None] = pipeline.launch_background,
+                 change: Callable[[str, Any], None] | None = None, parent=None):
         super().__init__(parent)
         self._settings = settings
+        self._change = change
         self.db = db or JobDB()
         self._launch = launch
         self._starting_until = 0.0  # just launched: show "Starting…" until its first heartbeat
@@ -56,6 +64,7 @@ class Automation(QWidget):
         self.timer = QTimer(self, interval=3000)
         self.timer.timeout.connect(self.refresh)
         self.timer.start()
+        QTimer.singleShot(2000, self._while_away)
         if self.db.meta("resume_after_update") == "1":  # stopped so the app could update itself
             self.db.set_meta("resume_after_update", "0")
             self.start()
@@ -154,9 +163,9 @@ class Automation(QWidget):
         self.log_view.setObjectName("panel")
         self.log_view.setMaximumBlockCount(LOG_LINES)
 
-        upper = QWidget()
-        uv = QVBoxLayout(upper)
-        uv.setContentsMargins(0, 0, 0, 0)
+        queue = QWidget()
+        uv = QVBoxLayout(queue)
+        uv.setContentsMargins(0, 6, 0, 0)
         uv.addWidget(self.table, 1)
         uv.addWidget(self.empty, 1)
         self.counts = QLabel()
@@ -169,6 +178,23 @@ class Automation(QWidget):
                                 "Learn from how my clips do). Details: ytclip results")
         uv.addWidget(self.learned)
 
+        self.niche_panel = NichePanel(self._settings, self._niche_change, self.db)
+        self.niche_panel.notice.connect(self.notice.emit)
+        self.niche_panel.request.connect(self.new_request)
+        self.request_panel = RequestPanel(self._settings, self.db)
+        self.request_panel.notice.connect(self.notice.emit)
+        self.request_panel.new.connect(lambda: self.new_request(""))
+        self.pages = QTabWidget()
+        self.pages.setDocumentMode(True)
+        self.pages.addTab(queue, "Queue")
+        self.pages.addTab(self.niche_panel, "Niches")
+        self.pages.addTab(self.request_panel, "Requests")
+        self.overnight = OvernightPanel(self._settings, self.db)
+        self.pages.addTab(self.overnight, "Overnight report")
+        self._report_at = 0.0
+        self.pages.currentChanged.connect(lambda _i: self._refresh_report(force=True))
+        upper = self.pages
+
         split = QSplitter(Qt.Vertical)
         split.addWidget(upper)
         split.addWidget(self.log_view)
@@ -179,7 +205,8 @@ class Automation(QWidget):
         hint = QLabel("Automation checks Research on your schedule, queues what your picking rules pick, and clips "
                       "one video at a time with the style in Automation settings. It runs on its own, so it keeps "
                       "going after you close ClipMonster. Clips go to the Automation folder; right-click a video "
-                      "to open its clips, try it again or remove it.")
+                      "to open its clips, try it again or remove it. Requests ask for a number of clips of a "
+                      "length, and go ahead of everything else.")
         hint.setProperty("muted", True)
         hint.setWordWrap(True)
         layout.addWidget(hint)
@@ -199,6 +226,9 @@ class Automation(QWidget):
         self.niche.blockSignals(False)
         self.niche.setVisible(bool(all_niches))
         self._sig = None  # redraw the table with the new names
+        self.niche_panel._sig = self.request_panel._sig = None
+        self.niche_panel.refresh()
+        self.request_panel.refresh()
 
     def running(self) -> bool:
         return pipeline.runner_alive(self.db)
@@ -234,6 +264,9 @@ class Automation(QWidget):
         self.pause_btn.setToolTip("Carry on" if paused else "Finish nothing new until you resume; a video in "
                                                             "progress carries on")
         self._fill_table()
+        self.niche_panel.refresh()
+        self.request_panel.refresh()
+        self._refresh_report()
         self._tail_log()
         self._show_lessons()
 
@@ -369,6 +402,45 @@ class Automation(QWidget):
         self.link.clear()
         self.notice.emit(f"Queued {added} video{'s' if added != 1 else ''}." if added else
                          "That video was queued before. Right-click it to try again.")
+        self.refresh()
+
+    def _while_away(self) -> None:
+        """Opening the app after automation worked on its own: one line on what it did."""
+        from .. import report
+
+        now = time.time()
+        seen = self.db.meta_float("report_seen")
+        self.db.set_meta("report_seen", now)
+        if not seen:
+            return
+        try:
+            r = report.build(self.db, self._settings(), hours=min(24.0, max(0.0, now - seen) / 3600), now=now)
+        except Exception:
+            return
+        if r.videos or r.failed:
+            self.notice.emit(f"While you were away: {r.headline().split(': ', 1)[-1]} "
+                             "Automation → Overnight report has the details.")
+
+    def _refresh_report(self, force: bool = False) -> None:
+        if self.pages.currentWidget() is not self.overnight:
+            return
+        if force or time.time() - self._report_at >= REPORT_EVERY:
+            self._report_at = time.time()
+            self.overnight.refresh(force=force)
+
+    def _niche_change(self, name: str, value) -> None:
+        if self._change is not None:
+            self._change(name, value)
+            self.niches_edited.emit()
+
+    def new_request(self, niche_id: str = "") -> None:
+        dlg = RequestDialog(self._settings(), niche_id or "", self)
+        if dlg.exec() != QDialog.DialogCode.Accepted or dlg.order is None:
+            return
+        order = pipeline.Runner(self.db, load=self._settings, log=pipeline.file_logger()).place(dlg.order)
+        self.notice.emit(f"Requested {order.count} clips of {order.length_text()}. {order.message}."
+                         + ("" if self.running() else " Press Start to begin."))
+        self.pages.setCurrentWidget(self.request_panel)
         self.refresh()
 
     def _toggle_windows(self, on: bool) -> None:

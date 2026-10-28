@@ -9,10 +9,10 @@ from typing import Callable
 
 import numpy as np
 
-from . import layout
+from . import cuts, layout, series
 from . import transcribe as whisper
 from .analyze import (SIGNAL_LABELS, Clip, Measurements, breathing_room, build_signals, chapter_clips, clip_score,
-                      combine, fit_to_sentences, loudness_db, pick_clips, quiet_frames, snap, trim_dead_air)
+                      cap_length, combine, fit_to_sentences, loudness, pick_clips, quiet_frames, snap, trim_dead_air)
 from .download import Video, download, is_url, local_video
 from .export import export_clip, thumbnail, tiktok_warnings
 from .export import frame as export_frame
@@ -103,25 +103,30 @@ class Engine:
         v = p.video
         assert v is not None
         cache = self.s.cache_path / f"{v.id}.analysis.npz"
-        db, cuts, scenes_done = None, [], False
+        db, fine, scene_cuts, scenes_done = None, None, [], False
         if cache.exists():
             try:
                 data = np.load(cache)
-                db, cuts, scenes_done = data["db"], list(data["cuts"]), bool(data["scenes_done"])
+                db, scene_cuts, scenes_done = data["db"], list(data["cuts"]), bool(data["scenes_done"])
+                fine = data["fine"] if "fine" in data.files else None  # caches before 2.4.0 have no fine loudness
             except Exception:
                 db = None
-        if db is None:
-            db = loudness_db(v.path, v.duration, lambda f: self.progress("Measuring audio", f))
+        if db is None or fine is None:
+            db, fine = loudness(v.path, v.duration, lambda f: self.progress("Measuring audio", f))
         if self.s.detect_scenes and not scenes_done:
-            cuts = detect_scenes(v.path, v.duration, lambda f: self.progress("Detecting scene cuts", f))
+            scene_cuts = detect_scenes(v.path, v.duration, lambda f: self.progress("Detecting scene cuts", f))
             scenes_done = True
         self.s.cache_path.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(cache, db=db, cuts=np.array(cuts, dtype=float), scenes_done=scenes_done)
+        np.savez_compressed(cache, db=db, fine=fine, cuts=np.array(scene_cuts, dtype=float), scenes_done=scenes_done)
 
         cues, words, source = self._transcript(p)
+        if words and source == "captions" and not cuts.punctuated(words):
+            n = cuts.refine_words(words, cuts.pauses_in(fine))  # auto-captions: find the pauses by listening
+            if n:
+                self.log(f"Found {n} pauses in the speech to cut at (the captions have no punctuation).")
         p.words, p.transcript_source = words, source
         p.measurements = Measurements(duration=v.duration, db=db, heatmap=v.heatmap,
-                                      scene_cuts=cuts if self.s.detect_scenes else [], cues=cues)
+                                      scene_cuts=scene_cuts if self.s.detect_scenes else [], cues=cues, fine=fine)
 
     def _transcript(self, p: Project) -> tuple[list[Cue], list[Word], str]:
         v = p.video
@@ -149,7 +154,9 @@ class Engine:
         m, v = p.measurements, p.video
         assert m is not None and v is not None
         self.rescore(p)
-        sents = sentences(p.words) if p.words else m.cues
+        # Without punctuation, a breath the audio shows (cuts.refine_words) ends a sentence.
+        sents = (sentences(p.words, pause=0.9 if cuts.punctuated(p.words) else cuts.BREATH - 0.01) if p.words
+                 else m.cues)
         mode = self.s.mode
         p.ai_error = ""
         if mode == "chapters" and not v.chapters:
@@ -169,7 +176,9 @@ class Engine:
                 if not clips:
                     raise AIError("None of Claude's clips were long enough once aligned to sentences.")
                 p.clips, p.mode_used, p.ai_model = clips, "ai", model
+                self.parts(p, sents)
                 self.trim(p)
+                self.clean_cuts(p)
                 return
             except Cancelled:
                 raise
@@ -185,26 +194,65 @@ class Engine:
             # With a transcript, edges are aligned to sentences afterwards (better than
             # pauses alone), so skip pause-snapping and padding inside pick_clips.
             align = bool(sents) and self.s.snap_to_pauses
-            clips = pick_clips(p.score, m.db, self.s.clip_count, self.s.min_len, self.s.max_len,
-                               self.s.min_gap, self.s.quality_floor, self.s.snap_to_pauses and not align,
-                               0.0 if align else self.s.pad_start, 0.0 if align else self.s.pad_end)
+
+            def pick(count: int) -> list[Clip]:
+                return pick_clips(p.score, m.db, count, self.s.min_len, self.s.max_len,
+                                  self.s.min_gap, self.s.quality_floor, self.s.snap_to_pauses and not align,
+                                  0.0 if align else self.s.pad_start, 0.0 if align else self.s.pad_end)
+
+            clips = pick(self.s.clip_count)
+            # The picks after those, for the places a part series may free up (series.extend)
+            chosen = {(c.start, c.end) for c in clips}
+            spares = ([c for c in pick(self.s.clip_count + self.s.series_parts - 1) if (c.start, c.end) not in chosen]
+                      if self.s.series_parts >= 2 else [])
             if align:
                 clips = self._fit(clips, sents, m, v.duration)
-                for c in clips:
+                spares = self._fit(spares, sents, m, v.duration, silent=True)
+                for c in clips + spares:
                     c.score = clip_score(p.score, c.start, c.end)
                 clips.sort(key=lambda c: c.score, reverse=True)
             p.clips = clips
+            self.parts(p, sents, spares)
         p.mode_used = mode
         self.trim(p)
+        self.clean_cuts(p)
         self.label(p)
+
+    def clean_cuts(self, p: Project) -> None:
+        """The last word on clip edges: none starts or ends part-way through a word (cuts.py)."""
+        m = p.measurements
+        if m is None or not len(m.fine) or not self.s.snap_to_pauses:
+            return
+        n = cuts.clean_edges(p.clips, cuts.pauses_in(m.fine), m.duration, self.s.min_len, self.s.max_len)
+        if n:
+            self.log(f"Moved the edges of {n} clip{'s' if n != 1 else ''} into a pause, so no word is cut off.")
+
+    def parts(self, p: Project, sents: list[Cue], spares: list[Clip] = ()) -> None:
+        """Part series (series.py): a great moment longer than one clip carries on in Part 2, 3..."""
+        if self.s.series_parts < 2 or p.video is None:
+            return
+        n = series.extend(p.clips, p.score, sents, self.s.min_len, self.s.max_len, self.s.clip_count,
+                          self.s.series_parts, p.video.duration, spares)
+        if not n and any(sid for sid, _, _ in series.labels(p.clips)):  # the finder's own clips carry on
+            series.keep(p.clips, len(p.clips))  # list them together, in order
+        if n:
+            self.log(f"Added {n} next part{'s' if n != 1 else ''}: a great moment ran longer than one clip.")
 
     def trim(self, p: Project) -> None:
         """Pull clip edges in to the speech (Trim dead air), leaving hand-edited clips alone."""
         if not (self.s.trim_silence and p.words):
             return
         floor = min(self.s.min_len, p.video.duration if p.video else self.s.min_len) * 0.75
-        n = sum(trim_dead_air(c, p.words, max(0.25, self.s.pad_start), max(0.5, self.s.pad_end), min_len=floor)
-                for c in p.clips if not c.edited)
+        n = 0
+        for c, (_, part, parts) in zip(p.clips, series.labels(p.clips)):
+            if c.edited:
+                continue
+            was = c.start, c.end
+            if trim_dead_air(c, p.words, max(0.25, self.s.pad_start), max(0.5, self.s.pad_end), min_len=floor):
+                # where one part meets the next stays put, so the series holds together
+                c.start = was[0] if part > 1 else c.start
+                c.end = was[1] if part and part < parts else c.end
+                n += (c.start, c.end) != was
         if n:
             self.log(f"Trimmed dead air from {n} clip{'s' if n != 1 else ''}.")
 
@@ -229,6 +277,9 @@ class Engine:
             about = f"These clips are for a TikTok account about {niche.name}."
             guide = "\n\n".join(x for x in (about + (f" {niche.instructions.strip()}" if niche.instructions.strip()
                                                        else ""), guide) if x)
+        notes = str(((p.meta.get("automation") or {}).get("request") or {}).get("notes") or "").strip()
+        if notes:  # a clip request's special requests shape the hooks and bottom lines too
+            guide = "\n\n".join(x for x in (f"Special requests for these clips: {notes}", guide) if x)
         # Bottom lines stand in for the 'no part 2' text on clips with no part 2 (layout.bottom_banner).
         bottom_on = layout.uses_ai_bottom(self.s)
         usual = " ".join(layout.own_words(self.s.banner_bottom_alt).split()) if bottom_on else ""
@@ -255,7 +306,8 @@ class Engine:
                  + (f"{summary['bottom_lines']} bottom lines, " if summary["bottom_lines"] else "")
                  + f"{summary['caption_fixes']} caption fixes, {summary['crops_moved']} crops moved.")
 
-    def _fit(self, clips: list[Clip], sents: list[Cue], m: Measurements, duration: float) -> list[Clip]:
+    def _fit(self, clips: list[Clip], sents: list[Cue], m: Measurements, duration: float,
+             silent: bool = False) -> list[Clip]:
         """Align edges to sentences (or pauses without a transcript), add a breath of room,
         enforce the minimum length and drop overlaps - best-scoring clips win."""
         quiet = quiet_frames(m.db) if self.s.snap_to_pauses and not sents else np.zeros(0, bool)
@@ -266,6 +318,7 @@ class Engine:
             if sents and self.s.snap_to_pauses:
                 c.start, c.end = fit_to_sentences(c.start, c.end, sents, self.s.min_len, self.s.max_len)
                 c.start, c.end = breathing_room(c.start, c.end, sents, 0.15, 0.3)
+                c.end = cap_length(c.start, c.end, sents, self.s.min_len, self.s.max_len)
             elif len(quiet):
                 c.start, c.end = snap(c.start, quiet, -1.5, 0.5), snap(c.end, quiet, -0.5, 1.5)
             # pad_start/pad_end are deliberate user choices, so they may reach into neighbours.
@@ -275,7 +328,7 @@ class Engine:
                 dropped += 1
                 continue
             kept.append(c)
-        if dropped:
+        if dropped and not silent:
             self.log(f"Skipped {dropped} clip(s) that were too short or overlapped another clip.")
         return kept
 
@@ -357,6 +410,11 @@ class Engine:
         if self.s.qc_enabled and clips:
             self.check(p, folder, clips, files, details, base)
             self._unpromise(p, folder, clips, files, made)
+        from .qc import REJECTED
+
+        # Number the parts of each series from what will be posted (the check may have rejected some).
+        for extra, label in zip(details, series.labels(clips, [not f.startswith(f"{REJECTED}/") for f in files])):
+            extra.update(series.details(label))
         write_index(folder, v, clips, files, self.signal_names(p), p.mode_used or self.s.mode, p.meta, details)
         if not self.s.keep_source and not v.is_local:
             v.path.unlink(missing_ok=True)

@@ -1,4 +1,6 @@
 import json
+import os
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -472,13 +474,37 @@ def test_without_a_key_queued_videos_still_run(tmp_path):
 
 
 def test_only_one_runner_at_a_time(tmp_path):
+    import subprocess
+    import sys
+
     clock = Clock()
     r = _runner(tmp_path, clock=clock)
-    r.db.set_meta("runner_pid", "99999")
-    r.db.set_meta("heartbeat", clock.t - 30)
-    assert "already running" in r.claim()
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        r.db.set_meta("runner_pid", str(other.pid))
+        r.db.set_meta("heartbeat", clock.t - 30)
+        assert "already running" in r.claim()
+    finally:
+        other.kill()
+        other.wait()
+    assert not pipeline.process_alive(other.pid)
+    assert r.claim() == "" and any("ended without stopping" in line for line in r.logs)  # it crashed: take over
+    r.db.set_meta("runner_pid", str(other.pid))
     r.db.set_meta("heartbeat", clock.t - pipeline.HEARTBEAT_STALE - 1)  # that one died
     assert r.claim() == ""
+
+
+def test_a_heartbeat_from_before_the_pc_started_is_from_a_runner_thats_gone(tmp_path, monkeypatch):
+    clock = Clock()
+    r = _runner(tmp_path, clock=clock)
+    r.db.set_meta("runner_pid", str(os.getpid()))  # a live process has its id now (ids are reused)
+    r.db.set_meta("heartbeat", clock.t - 30)
+    r.pid = os.getpid() + 1
+    monkeypatch.setattr(pipeline, "boot_time", lambda: clock.t - 10)  # a fast restart
+    assert not pipeline.runner_alive(r.db, clock.t)
+    assert r.claim() == ""
+    monkeypatch.undo()  # and the real one answers
+    assert 0 <= pipeline.boot_time() < time.time()
 
 
 def test_run_resumes_interrupted_work_and_stops_cleanly(tmp_path):

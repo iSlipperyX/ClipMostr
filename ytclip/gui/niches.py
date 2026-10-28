@@ -14,13 +14,13 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout, QLabel,
-                               QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton,
-                               QScrollArea, QSpinBox, QSplitter, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout, QFrame, QHBoxLayout,
+                               QLabel, QLineEdit, QListWidget, QListWidgetItem, QMessageBox, QPlainTextEdit,
+                               QPushButton, QScrollArea, QSpinBox, QSplitter, QVBoxLayout, QWidget)
 
 from .. import niches
 from ..jobs import JobDB
-from ..niches import MAX_DAILY, Niche
+from ..niches import MAX_CLIPS, MAX_DAILY, MAX_LEN, Niche
 from ..policy import PickLog, picks_path
 from ..research import youtube_key
 from ..settings import PRESETS, Settings, all_layouts, all_presets
@@ -221,13 +221,41 @@ class Niches(QWidget):
         row.addWidget(self.stack_folder, 1)
         row.addWidget(browse)
         form.addRow("Second videos", box)
+        self.per_video = QSpinBox()
+        self.per_video.setRange(0, MAX_CLIPS)
+        self.per_video.setSpecialValueText("As the style says")
+        self.per_video.setSuffix(" clips")
+        self.per_video.setToolTip("How many clips each of this niche's videos gives")
+        self.per_video.valueChanged.connect(lambda v: self._set("clips_per_video", int(v)))
+        form.addRow("Clips per video", self.per_video)
+        lengths = QWidget()
+        lrow = QHBoxLayout(lengths)
+        lrow.setContentsMargins(0, 0, 0, 0)
+        self.min_len = QDoubleSpinBox()
+        self.max_len = QDoubleSpinBox()
+        for box_, key in ((self.min_len, "min_len"), (self.max_len, "max_len")):
+            box_.setRange(0, MAX_LEN)
+            box_.setDecimals(0)
+            box_.setSingleStep(5)
+            box_.setSuffix(" s")
+            box_.setSpecialValueText("Style's")
+            box_.setKeyboardTracking(False)  # typing 45 doesn't save 4 on the way
+            box_.valueChanged.connect(lambda v, key=key: self._set(key, float(v)))
+        lrow.addWidget(self.min_len)
+        lrow.addWidget(QLabel("to"))
+        lrow.addWidget(self.max_len)
+        lrow.addStretch(1)
+        lengths.setToolTip("How long this niche's clips are, shortest to longest. Leave at Style's to use the style's")
+        form.addRow("Clip length", lengths)
         self.instructions = QPlainTextEdit()
         self.instructions.setFixedHeight(70)
-        self.instructions.setPlaceholderText("e.g. clutch plays and funny fails; skip menus and loading screens")
-        self.instructions.setToolTip("Told to Claude when it picks clips (AI picks) and writes hooks (AI polish) "
-                                     "for this niche")
+        self.instructions.setPlaceholderText("e.g. clutch plays and funny fails, skip menus and loading screens, "
+                                             "no swearing in the hook")
+        self.instructions.setToolTip("Plain words for the AI. With an Anthropic key, the AI picks this niche's "
+                                     "clips so it can follow them, and it writes the hooks and bottom text to "
+                                     "suit. Each video then counts towards AI calls per day")
         self.instructions.textChanged.connect(lambda: self._set("instructions", self.instructions.toPlainText()))
-        form.addRow("What makes a good clip here", self.instructions)
+        form.addRow("Special requests", self.instructions)
         note("A recipe in Settings → Automation for a channel or category still wins over the niche's style.")
 
         buttons = QHBoxLayout()
@@ -321,9 +349,10 @@ class Niches(QWidget):
                 sources.append("trending")
             line2 = " · ".join([n.account or "no account set"] + (sources or ["no sources yet"]))
             line3 = (f"Today {today}/{n.daily} · {c.get('waiting', 0)} waiting · {c.get('clips', 0)} clips this week"
-                     if n.enabled else "Off: nothing new is picked")
+                     if n.on else "Off: nothing new is picked" if not n.enabled else
+                     "Paused in Automation: nothing is picked or clipped")
             it.setText(f"{n.name}\n{line2}\n{line3}")
-            it.setForeground(QColor(theme.TEXT if n.enabled else theme.MUTED))
+            it.setForeground(QColor(theme.TEXT if n.on else theme.MUTED))
             it.setToolTip(str(self._folder_of(n)))
         on = [n for n in self._niches if n.enabled]
         self.summary.setText(f"   {len(self._niches)} niche{'s' if len(self._niches) != 1 else ''}"
@@ -355,6 +384,9 @@ class Niches(QWidget):
                     i = combo.count() - 1
                 combo.setCurrentIndex(i)
             self.stack_folder.setText(n.stack_folder)
+            self.per_video.setValue(n.clips_per_video)
+            self.min_len.setValue(n.min_len)
+            self.max_len.setValue(n.max_len)
             self.instructions.setPlainText(n.instructions)
         finally:
             self._filling = False

@@ -25,10 +25,11 @@ from typing import Callable
 
 import numpy as np
 
-from .ffmpeg import NO_WINDOW, ffmpeg_exe
+from .ffmpeg import NO_WINDOW, ffmpeg_exe, tracked
 from .subtitles import REACTION, Cue
 
 HOP = 0.5  # seconds per loudness frame
+FINE = 0.02  # seconds per fine loudness frame, for cut points (cuts.py)
 SAMPLE_RATE = 8000
 
 SIGNAL_LABELS = {
@@ -48,7 +49,7 @@ class Clip:
     title: str = ""
     enabled: bool = True
     crop_x: float = 0.5  # horizontal crop centre for vertical/square exports
-    origin: str = "auto"  # auto | ai | chapter | manual
+    origin: str = "auto"  # auto | ai | chapter | manual | part (a next part, series.py)
     reason: str = ""
     edited: bool = False  # touched by the user, so re-detection keeps it
     top_text: str | None = None  # banner text for this clip; None = the template in settings, "" = no words
@@ -70,6 +71,7 @@ class Measurements:
     heatmap: list[dict] = field(default_factory=list)
     scene_cuts: list[float] = field(default_factory=list)
     cues: list[Cue] = field(default_factory=list)
+    fine: np.ndarray = field(default_factory=lambda: np.zeros(0))  # loudness (dBFS) per FINE seconds
 
     @property
     def seconds(self) -> int:
@@ -105,16 +107,20 @@ def _minmax(x: np.ndarray) -> np.ndarray | None:
 # ---------------------------------------------------------------- measurement
 
 
-def loudness_db(path: Path, duration: float = 0, progress: Callable[[float], None] | None = None) -> np.ndarray:
-    """RMS loudness in dBFS for every HOP-second frame, streamed through ffmpeg."""
+def loudness(path: Path, duration: float = 0,
+             progress: Callable[[float], None] | None = None) -> tuple[np.ndarray, np.ndarray]:
+    """RMS loudness in dBFS for every HOP-second frame, and for every FINE-second frame (the short
+    pauses between sentences and words, see cuts.py), in one pass through ffmpeg."""
     cmd = [ffmpeg_exe(), "-v", "error", "-i", str(path), "-vn", "-ac", "1",
            "-ar", str(SAMPLE_RATE), "-f", "s16le", "-"]
     frame_bytes = int(SAMPLE_RATE * HOP) * 2
+    per = int(round(HOP / FINE))
     chunks: list[np.ndarray] = []
+    fine: list[np.ndarray] = []
     leftover = b""
     done = 0
     with subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                          creationflags=NO_WINDOW) as proc:
+                          creationflags=NO_WINDOW) as proc, tracked(proc):
         assert proc.stdout is not None
         while data := proc.stdout.read(frame_bytes * 240):
             buf = leftover + data
@@ -122,11 +128,14 @@ def loudness_db(path: Path, duration: float = 0, progress: Callable[[float], Non
             frames = np.frombuffer(buf[:usable], dtype=np.int16).astype(np.float32).reshape(-1, frame_bytes // 2)
             rms = np.sqrt(np.mean(frames**2, axis=1)) + 1e-6
             chunks.append(20 * np.log10(rms / 32768))
+            small = frames.reshape(-1, frame_bytes // 2 // per)
+            fine.append((20 * np.log10(np.sqrt(np.mean(small**2, axis=1)) / 32768 + 1e-9)).astype(np.float32))
             leftover = buf[usable:]
             done += len(frames)
             if progress and duration:
                 progress(min(1.0, done * HOP / duration))
-    return np.concatenate(chunks) if chunks else np.zeros(0)
+    return (np.concatenate(chunks) if chunks else np.zeros(0),
+            np.concatenate(fine) if fine else np.zeros(0, np.float32))
 
 
 # ---------------------------------------------------------------- signals
@@ -278,6 +287,18 @@ def fit_to_sentences(start: float, end: float, sents: list[Cue], min_len: float,
         new_end = float(ends[k])
         k += 1
     return new_start, new_end
+
+
+def cap_length(start: float, end: float, sents: list[Cue], min_len: float, max_len: float) -> float:
+    """An end that keeps the clip within max_len: rounding out to whole sentences can run a few
+    seconds over, so the end comes back to the last sentence that fits (if the clip stays long enough)."""
+    if end - start <= max_len + 0.01:
+        return end
+    fits = [s.end for s in sents if start < s.end and s.end + 0.3 - start <= max_len and s.end - start >= min_len]
+    if not fits:
+        return end
+    nxt = min((s.start for s in sents if s.start >= fits[-1] - 0.01), default=fits[-1] + 0.3)
+    return float(min(fits[-1] + 0.3, max(fits[-1], nxt - 0.05)))
 
 
 def breathing_room(start: float, end: float, sents: list[Cue], lead: float, tail: float) -> tuple[float, float]:

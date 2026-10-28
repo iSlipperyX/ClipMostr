@@ -32,6 +32,18 @@ _NO_SPACES_RANGES = ("\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff"  # Thai, Lao, Bur
 _NO_SPACES = re.compile(f"[{_NO_SPACES_RANGES}]")
 
 
+MAX_CLIPS = 30
+MAX_LEN = 600.0
+
+
+def _number(value, kind, lo, hi):
+    """A hand-edited number: the wrong type is the default (lo), out of range is clamped."""
+    try:
+        return max(lo, min(hi, kind(value)))
+    except (TypeError, ValueError):
+        return lo
+
+
 def new_id() -> str:
     return uuid.uuid4().hex[:8]
 
@@ -59,7 +71,11 @@ class Niche:
     preset: str = ""  # "" = Automation's style
     view: str = ""  # "" = Automation's top/bottom view
     stack_folder: str = ""  # "" = the second-video folder in Settings → Layout
-    instructions: str = ""  # what makes a good clip for this account, added to the AI's instructions
+    instructions: str = ""  # special requests: what makes a good clip for this account, told to the AI
+    clips_per_video: int = 0  # 0 = Automation's style decides
+    min_len: float = 0.0  # clip length in seconds; 0 = Automation's style decides
+    max_len: float = 0.0
+    paused: bool = False  # paused in the Automation tab: nothing new is picked and its waiting videos wait
 
     @classmethod
     def from_json(cls, d) -> "Niche | None":
@@ -77,6 +93,11 @@ class Niche:
             n.daily = max(1, min(MAX_DAILY, int(n.daily)))
         except (TypeError, ValueError):
             n.daily = DEFAULT_DAILY
+        n.clips_per_video = _number(n.clips_per_video, int, 0, MAX_CLIPS)
+        n.min_len = _number(n.min_len, float, 0.0, MAX_LEN)
+        n.max_len = _number(n.max_len, float, 0.0, MAX_LEN)
+        if n.min_len and n.max_len and n.max_len < n.min_len:
+            n.min_len, n.max_len = n.max_len, n.min_len
         n.name = " ".join(n.name.split())
         # A hand-written niche with no id gets one made from its name, so every read agrees on it.
         n.id = re.sub(r"[^\w-]", "", n.id) or hashlib.sha1(n.folder.lower().encode()).hexdigest()[:8]
@@ -89,6 +110,22 @@ class Niche:
     def folder(self) -> str:
         """The niche's folder inside the Automation folder."""
         return folder_name(self.name)
+
+    @property
+    def on(self) -> bool:
+        """Picking and clipping for it: switched on and not paused."""
+        return self.enabled and not self.paused
+
+    def clip_overrides(self) -> dict:
+        """The niche's own clip count and length, for the settings its videos are clipped with."""
+        out: dict = {}
+        if self.clips_per_video:
+            out["clip_count"] = self.clips_per_video
+        if self.min_len:
+            out["min_len"] = self.min_len
+        if self.max_len:
+            out["max_len"] = self.max_len
+        return out
 
     @property
     def label(self) -> str:
@@ -132,8 +169,13 @@ def load(s) -> list[Niche]:
 
 
 def active(s) -> list[Niche]:
-    """The niches that pick videos (switched on)."""
-    return [n for n in load(s) if n.enabled]
+    """The niches that pick videos (switched on, and not paused in the Automation tab)."""
+    return [n for n in load(s) if n.on]
+
+
+def paused_ids(s) -> set[str]:
+    """Niches paused in the Automation tab: their waiting videos wait too."""
+    return {n.id for n in load(s) if n.paused}
 
 
 def find(s, niche_id: str) -> Niche | None:
@@ -213,7 +255,7 @@ class Index:
             with history.lock:
                 known_channels = {k: dict(v) for k, v in history.sources.get("channels", {}).items()}
                 known_searches = {k: dict(v) for k, v in history.sources.get("searches", {}).items()}
-        for n in sorted(niches, key=lambda n: not n.enabled):  # switched on first, otherwise in list order
+        for n in sorted(niches, key=lambda n: not n.on):  # switched on first, otherwise in list order
             refs, _ = n.channel_refs()
             for ref in refs:
                 cid = ref.value if ref.kind == "id" else (known_channels.get(ref.key) or {}).get("id", "")
@@ -234,7 +276,7 @@ class Index:
             return self.by_channel[v.channel_id]
         if v.id in self.by_search:
             return self.by_search[v.id]
-        on = [n for n in self.niches if n.enabled]
+        on = [n for n in self.niches if n.on]
         text = " ".join(f"{v.title} {v.channel}".lower().split())
         for n in on:
             if any(_has_words(text, k) for k in n.keyword_list()):

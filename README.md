@@ -44,6 +44,10 @@ Every second gets a score from up to five signals. You decide how much each one 
 
 Clips grow outward from the peaks. When there's a transcript, their edges are aligned to whole sentences, so a clip never starts or ends mid-sentence; without one, they snap to natural pauses. Intros, credits and end screens count for less. **Trim dead air** (on by default) then pulls each clip in so it starts a quarter of a second before the first word and ends half a second after the last, instead of opening on silence. Clips you've edited by hand are never trimmed.
 
+**Clean cut points.** As a last step, ClipMonster listens to the audio around each clip edge. An edge that would land in the middle of a word moves into the nearest pause, preferring the longer pause between sentences, without making the clip longer than your maximum or running into the next clip. This matters most for YouTube's auto-generated captions, which have no punctuation: the pauses the audio shows are used to find where sentences end. A clip is never longer than *Max clip length* either: when rounding out to a whole sentence would run over, it ends on the last sentence that fits.
+
+**Part series.** When a great moment runs longer than one clip, it carries on in **Part 2** (and Part 3), each starting on the next sentence where the last part stopped and ending when the moment does. Parts count towards *Clips per video*, so a series takes the place of the weakest stand-alone clips, and a weak last part never pushes out a better clip. Every part except the last shows your "Follow for part 2" bottom text; if the quality check rejects a part, the part before it is made again without the promise. The clip list marks parts (P1, P2…), and `clips.json` records each clip's `series`, `part` and `parts`, counting only the parts that passed the quality check. Set the most parts in *Find clips → Part series* (3 to start with; 1 turns it off).
+
 **Other clip finders** (pick one under *Find clips → Clip finder*):
 - **AI picks (Claude):** Claude reads the transcript, one sentence per line with exact times, and picks self-contained moments with a strong hook and payoff, plus a title and the reason for each. Add your Anthropic API key under *Settings → AI*, then click **Test key** to confirm it works (this uses no tokens). When you click **Re-detect clips**, a failure shows a message and leaves your clips untouched. In batch runs, a failure falls back to the signals above, and the video is flagged with the reason. Clips you've edited by hand are kept when you re-detect.
 - **YouTube chapters:** one clip per chapter.
@@ -156,6 +160,7 @@ The **Automation** tab runs the whole job without you: it checks Research on you
 - **The queue** shows every video, what it's doing now, how many clips it made and why it was picked. Right-click a video to show its clips, try it again or remove it, or paste a link above the queue to add one yourself. Finished clips go to an `Automation` folder in your output folder, in a folder for each [niche](#niches) when you have them. Each video's `clips.json` records why it was picked, the style it was cut with, and its niche and TikTok account.
 - **It survives anything.** The queue lives in `%APPDATA%\ClipMonster\jobs.db`. If the PC restarts or the process is killed halfway through a video, that video starts again next time. Downloads and analysis are cached, so the second try is quick. No video is ever queued twice.
 - **It's gentle with YouTube.** It does one download at a time, 10 minutes apart. When YouTube asks the PC to "sign in to confirm you're not a bot", it stops asking YouTube for anything for 2 hours (6 if it asks again within a day) instead of pushing harder. Press **Try now** in the Automation tab (or run `ytclip auto --try-now`) to end the pause early. Picking a browser in **Settings → Download → Use browser login** ends it by itself. A video that fails is tried again after 15 minutes, then after 1 hour. Videos that can never work (private, removed, members-only) are marked failed straight away.
+- **It looks after itself overnight.** Before free space falls under **Keep this much disk free** (15 GB to start with), it clears unfinished and finished downloads, previews and rejected clips (at most once an hour), and pauses until there's room if that isn't enough. Work that makes no progress for **Stop stuck work after** (30 minutes), such as an export that hangs, is stopped and tried once more, then skipped with the reason. If automation crashes or the PC loses power, pressing Start again takes over straight away.
 - **Pause** finishes nothing new until you resume. **Stop** ends the run within a few seconds, and a video in progress goes back in the queue. Updating ClipMonster stops automation and starts it again afterwards.
 
 **Settings → Automation** chooses the style and the pace:
@@ -174,6 +179,8 @@ The **Automation** tab runs the whole job without you: it checks Research on you
 | Tries per video | 3 | Before a video is marked failed |
 | Delete full downloads after clipping | on | Keeps the disk from filling up |
 | Clear cached analysis after | 14 days | Removes transcripts and measurements of finished videos |
+| Keep this much disk free | 15 GB | Below this, automation clears what's safe to clear, then pauses until there's room. 0 turns it off |
+| Stop stuck work after | 30 min | An export, measurement or check with no progress for this long is stopped and tried once more. 0 turns it off |
 | Clean up by itself once a day | off | Runs [Clean up](#clean-up) once a day for the kinds ticked under *What to clear*, on things older than *Only things older than* (3 days) |
 
 The runner writes a log to `%APPDATA%\ClipMonster\automation.log`, which the tab shows too. From the command line:
@@ -187,7 +194,29 @@ ytclip auto --add "https://youtu.be/VIDEO" --niche Gaming   # queue it for one n
 ytclip auto --pause | --resume | --stop | --try-now
 ytclip auto --retry ID         # try a failed video again
 ytclip auto --install          # start with Windows (--uninstall to undo)
+ytclip request 10 --length 30-45 --niche Gaming --notes "only the funniest reactions"
+ytclip request 3 --link "https://youtu.be/VIDEO" "https://youtu.be/OTHER"
+ytclip request --list | --cancel ID
+ytclip report                  # what automation did in the last 12 hours (--hours 24, --json)
+ytclip doctor                  # the health check (--offline skips checking the keys online)
 ```
+
+### Clip requests
+
+Want a set number of clips? **Automation → Requests → New request** asks for:
+
+- **How many** clips, and **how long** each should be, e.g. 10 clips of 30 to 45 seconds;
+- **which niche** they're for (their folder, style and TikTok account), or none;
+- **where from:** let automation pick videos for it (with your picking rules and a YouTube Data API key), or paste the links to clip;
+- **special requests** in plain words, e.g. "only the funniest reactions, end on the punchline". With an Anthropic key, the AI clip finder and the AI polish follow them.
+
+A request goes ahead of everything else in the queue, and its videos don't count against the daily limits. The Requests page shows each one's progress ("4 of 10 ready"); it's done when enough clips passed the quality check, or "finished short" when its links had no more good moments of that length. Its clips go to `Automation\Requests\<date> <N clips a-b s>\`. A video you already clipped is clipped again for a request.
+
+### The overnight report and the health check
+
+**Automation → Overnight report** tells you what happened while you were away: clips made per niche and per request, how many the quality check rejected and the usual reasons, videos that failed and why, and any pauses (YouTube sign-in requests, a full disk, stuck work stopped), for the last 12 hours, 24 hours or 7 days. The tab tells you when there's something new to read. `ytclip report` prints the same.
+
+Below it, the **health check** looks at everything automation needs: ffmpeg, how old the downloader is, your YouTube and Anthropic keys (**Check now** tries them online), the folders and free space, whether TikTok Manager watches your Automation folder, niches with nothing to find videos with, and requests that can't be filled. Each problem comes with the fix. Automation runs the offline part every time it starts and puts what it finds in the log. `ytclip doctor` runs it from the command line.
 
 ### Niches
 
@@ -201,6 +230,8 @@ Every picked video goes into one niche: the one that lists its channel, then the
 
 - **Fair shares.** Each niche picks at most its own number of videos a day. **Videos picked per day** (Settings → Picking) is the limit for all of them together, handed out one pick at a time, and the niche with the fewest picks in the last day goes first. One busy niche can't take every pick.
 - **A paused niche** holds its own channels' and searches' videos back. They aren't handed to another account.
+- **Run from the Automation tab.** **Automation → Niches** shows each niche's picks today against its limit, its videos waiting and its clips today. Pause or resume it there, press **Find videos now** to check its sources straight away, or **Request clips for it**.
+- **Its own clips.** A niche can set its own **clips per video** and **clip length**, over its style's. Its **special requests** note tells the AI clip finder and the AI polish what makes a good clip for that account; with an Anthropic key, a niche with a note uses the AI clip finder (within *AI calls per day*).
 - **Style.** A recipe for the video's channel or category comes first, then the niche's own style and view, then a catch-all (`*`) recipe, then Settings → Automation.
 - **Folders.** Each niche's clips go to `Automation\<niche>\`, and `clips.json` records the niche and its TikTok account, so TikTok Manager can stage each folder for its own account. Renaming a niche sends new clips to its new folder. Clips already made stay where they are.
 
@@ -230,7 +261,7 @@ Videos/ClipMonster/
         └── clips.json    ← the same, machine readable
 ```
 
-Automation's clips go to `<output>/Automation` in the same layout, inside a folder for each niche when you have niches: `Automation/Gaming/<channel>/<date> <title> [<id>]/`.
+Automation's clips go to `<output>/Automation` in the same layout, inside a folder for each niche when you have niches: `Automation/Gaming/<channel>/<date> <title> [<id>]/`. A clip request's clips go to `Automation/Requests/<date> <N clips a-b s>/` (inside the niche's folder when it's for one).
 
 Full downloads are cached in `<output>/.downloads`, so re-analysing or re-exporting never downloads a video twice. Your settings, presets and session live in `%APPDATA%\ClipMonster`.
 

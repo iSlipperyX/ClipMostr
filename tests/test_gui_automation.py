@@ -1,3 +1,5 @@
+import os
+
 import pytest
 from conftest import NOW
 
@@ -51,7 +53,7 @@ def test_running_state_pause_and_stop(app, tmp_path):
     import time
 
     tab, db, _ = _make(app, tmp_path, youtube_api_key="k")
-    db.set_meta("runner_pid", "123")
+    db.set_meta("runner_pid", str(os.getpid()))  # a process that is running
     db.set_meta("heartbeat", time.time())
     db.set_meta("state", "Clipping: Big video")
     tab.refresh()

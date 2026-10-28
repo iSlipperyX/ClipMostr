@@ -51,6 +51,7 @@ class Settings:
     clip_count: int = 5
     min_len: float = 20.0
     max_len: float = 60.0
+    series_parts: int = 3  # a great moment longer than one clip carries on in up to this many parts (1 = off)
     min_gap: float = 5.0
     quality_floor: float = 0.45
     snap_to_pauses: bool = True
@@ -172,6 +173,8 @@ class Settings:
     auto_retries: int = 3
     auto_delete_sources: bool = True
     auto_keep_days: int = 14
+    disk_min_free_gb: int = 15  # automation cleans up, then pauses, before free space falls under this (0 = off)
+    watchdog_minutes: int = 30  # a download or export that stops moving this long is stopped (0 = off)
     # Clean up (cleanup.py): clear out downloads, rejected clips and clips TikTok Manager is done with
     cleanup_auto: bool = False  # automation does it once a day
     cleanup_kinds: str = "partial, previews, rejected, posted, removed"
@@ -497,6 +500,9 @@ SCHEMA: list[Field] = [
     Field("clip_count", "Clips per video", "Clip finding", "int", lo=1, hi=50),
     Field("min_len", "Min clip length (s)", "Clip finding", "float", lo=3, hi=600, step=1),
     Field("max_len", "Max clip length (s)", "Clip finding", "float", lo=5, hi=1800, step=1),
+    Field("series_parts", "Part series: up to this many parts", "Clip finding", "int", lo=1, hi=5,
+          help="When a great moment runs longer than one clip, it carries on in Part 2 (and 3...), each starting "
+               "where the last stopped. Parts count towards Clips per video. 1 = off"),
     Field("min_gap", "Min gap between clips (s)", "Clip finding", "float", lo=0, hi=120, step=1),
     Field("quality_floor", "Drop clips weaker than (x best)", "Clip finding", "float", lo=0, hi=1, step=0.05,
           help="0 keeps everything; 0.5 drops clips scoring under half the best clip"),
@@ -715,6 +721,12 @@ SCHEMA: list[Field] = [
     Field("auto_delete_sources", "Delete full downloads after clipping", "Automation", "bool"),
     Field("auto_keep_days", "Clear cached analysis after (days)", "Automation", "int", lo=1, hi=365,
           help="Transcripts and measurements of finished videos are removed from the download cache"),
+    Field("disk_min_free_gb", "Keep this much disk free (GB, 0 = off)", "Automation", "int", lo=0, hi=2000,
+          help="Before free space falls under this, automation runs a safe clean-up (unfinished and finished "
+              "downloads, rejected clips, previews) and pauses if that isn't enough"),
+    Field("watchdog_minutes", "Stop stuck work after (min, 0 = off)", "Automation", "int", lo=0, hi=600, step=5,
+          help="An export, measurement or check that makes no progress for this long is stopped, tried once "
+              "more, then skipped with the reason. Stalled downloads give up by themselves"),
     Field("cleanup_auto", "Clean up by itself once a day", "Automation", "bool",
           help="Automation clears out what's ticked below, without asking. Clean up… in the Library or "
                "Automation tab shows what would go, and how much space it frees, before anything is deleted"),

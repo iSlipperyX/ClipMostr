@@ -722,12 +722,168 @@ def run_niches(argv: list[str]) -> int:
     return 0
 
 
+def _niche_by_name(name: str):
+    """(niche id, error message) for a niche name typed on the command line."""
+    from . import niches
+
+    if not name:
+        return "", ""
+    mine = niches.load(Settings.load())
+    found = next((n for n in mine if n.name.lower() == " ".join(name.split()).lower()), None)
+    if found:
+        return found.id, ""
+    return "", f"No niche called {name} (yours: {', '.join(n.name for n in mine) or 'none yet'})."
+
+
+def run_request(argv: list[str]) -> int:
+    from . import niches, orders, pipeline
+    from .jobs import Job, JobDB
+    from .research import youtube_key
+
+    p = argparse.ArgumentParser(
+        prog="ytclip request",
+        description="Ask automation for clips: how many, how long, for which niche, from your links or from videos "
+                    "it picks, with special requests for the AI. Automation fills it and shows its progress.",
+        epilog='Example: ytclip request 10 --length 30-45 --niche Gaming --notes "only clutch plays, no swearing '
+               'in the hook"')
+    p.add_argument("count", nargs="?", type=int, help="how many clips you want")
+    p.add_argument("--length", default="", metavar="SECONDS", help="clip length, e.g. 30-45 (default: the niche's "
+                   "or Automation's style)")
+    p.add_argument("--niche", default="", metavar="NAME", help="the niche they're for")
+    p.add_argument("--link", nargs="+", action="extend", default=[], metavar="URL", help="videos to clip (default: automation picks "
+                   "videos for the niche)")
+    p.add_argument("--notes", default="", metavar="TEXT", help="special requests for the AI, in plain words")
+    p.add_argument("--list", action="store_true", help="show your requests and how far along they are")
+    p.add_argument("--cancel", nargs="+", metavar="ID", help="cancel requests (ids from --list)")
+    args = p.parse_args(argv)
+    db = JobDB()
+    try:
+        if args.cancel:
+            for oid in args.cancel:
+                if not db.get_order(oid):
+                    console.print(f"[red]No request {escape(oid)}.[/]")
+                    return 1
+                n = pipeline.Runner(db).cancel(oid)
+                console.print(f"Cancelled {escape(oid)}" + (f"; {n} waiting video{'s' if n != 1 else ''} left the queue."
+                                                             if n else "."))
+            return 0
+        if args.list or args.count is None:
+            names = {n.id: n.name for n in niches.load(Settings.load())}
+            mine = db.orders()
+            if not mine:
+                console.print("No requests yet. Example: ytclip request 10 --length 30-45 --niche Gaming")
+                return 0
+            table = Table(show_edge=False, header_style="bold")
+            for col in ("Id", "Request", "Status", "Ready", "Special requests"):
+                table.add_column(col, overflow="fold")
+            colours = {"open": "cyan", "done": "green", "short": "yellow", "cancelled": "dim"}
+            for o in mine:
+                table.add_row(o.id, escape(o.title(names.get(o.niche, ""))),
+                              f"[{colours[o.status]}]{orders.STATUS_WORDS[o.status]}[/]\n[dim]{escape(o.message)}[/]",
+                              f"{o.made}/{o.count}", escape(o.notes))
+            console.print(table)
+            return 0
+        niche, err = _niche_by_name(args.niche)
+        if err:
+            console.print(f"[red]{escape(err)}[/]")
+            return 2
+        s = Settings.load()
+        try:
+            if args.length:
+                lo, hi = orders.parse_length(args.length)
+            else:  # the niche's length, else Automation's style
+                job = Job(id="", url="", niche=niche)
+                style = pipeline.settings_for(job, s)[0]
+                lo, hi = style.min_len, style.max_len
+            order = orders.make(args.count, lo, hi, niche=niche, links=args.link, notes=args.notes)
+        except ValueError as exc:
+            console.print(f"[red]{escape(str(exc))}[/]")
+            return 2
+        order = pipeline.Runner(db, log=pipeline.file_logger()).place(order)
+        console.print(f"Request {order.id}: {escape(order.title(niches.name_of(s, niche)))}. {escape(order.message)}.")
+        if order.notes and not pipeline.has_ai_key(s):
+            console.print("[yellow]Special requests need an Anthropic key (Settings → AI): without one the clips are "
+                          "picked by smart signals.[/]")
+        if order.picks and not youtube_key(s):
+            console.print("[yellow]Automation needs a YouTube Data API key to pick videos for it (Settings → "
+                          "Research), or give it links with --link.[/]")
+        if not pipeline.runner_alive(db):
+            console.print("[dim]Automation isn't running: start it in the app or with ytclip auto.[/]")
+        return 0
+    finally:
+        db.close()
+
+
+def run_report(argv: list[str]) -> int:
+    from . import report
+    from .jobs import JobDB
+
+    p = argparse.ArgumentParser(prog="ytclip report", description="What automation did while you were away: "
+                                "clips per niche and request, rejected clips and why, failures, pauses.")
+    p.add_argument("--hours", type=float, default=12.0, help="how far back to look (default 12)")
+    p.add_argument("--json", action="store_true", help="print it as JSON")
+    args = p.parse_args(argv)
+    db = JobDB()
+    try:
+        r = report.build(db, Settings.load(), hours=args.hours)
+    finally:
+        db.close()
+    if args.json:
+        import json
+
+        print(json.dumps(r.to_json(), indent=1, ensure_ascii=False))
+        return 0
+    lines = r.lines()
+    console.print(f"[bold]{escape(lines[0])}[/]")
+    for line in lines[1:]:
+        colour = "red" if line.startswith("Failed") else "yellow" if line.startswith(("YouTube", "Paused",
+                                                                                     "Stopped")) else ""
+        console.print(f"  [{colour}]{escape(line)}[/]" if colour else f"  {escape(line)}")
+    return 0
+
+
+def run_doctor(argv: list[str]) -> int:
+    from . import doctor
+    from .jobs import JobDB
+
+    p = argparse.ArgumentParser(prog="ytclip doctor", description="Check that everything automation needs is in "
+                                "place: ffmpeg, the downloader, keys, folders, free space, TikTok Manager, niches.")
+    p.add_argument("--offline", action="store_true", help="don't test the keys online")
+    p.add_argument("--json", action="store_true", help="print the checks as JSON")
+    args = p.parse_args(argv)
+    db = JobDB()
+    try:
+        checks = doctor.check(Settings.load(), db, online=not args.offline)
+    finally:
+        db.close()
+    if args.json:
+        import json
+
+        print(json.dumps([c.to_json() for c in checks], indent=1, ensure_ascii=False))
+    else:
+        marks = {doctor.GOOD: "[green]✓[/]", doctor.WARN: "[yellow]⚠[/]", doctor.BAD: "[red]✗[/]"}
+        for c in checks:
+            console.print(f"{marks[c.level]} [bold]{escape(c.name)}[/]: {escape(c.detail)}"
+                          + (f"\n    [dim]Fix: {escape(c.fix)}[/]" if c.fix else ""))
+        bad = sum(c.level == doctor.BAD for c in checks)
+        warn = sum(c.level == doctor.WARN for c in checks)
+        console.print("All good." if not (bad or warn) else f"{bad} problem{'s' if bad != 1 else ''}, "
+                      f"{warn} warning{'s' if warn != 1 else ''}.")
+    return 1 if any(c.level == doctor.BAD for c in checks) else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["clean"]:
         return run_clean(argv[1:])
     if argv[:1] == ["niches"]:
         return run_niches(argv[1:])
+    if argv[:1] == ["request"]:
+        return run_request(argv[1:])
+    if argv[:1] == ["report"]:
+        return run_report(argv[1:])
+    if argv[:1] == ["doctor"]:
+        return run_doctor(argv[1:])
     if argv[:1] == ["results"]:
         return run_results(argv[1:])
     if argv[:1] == ["research"]:

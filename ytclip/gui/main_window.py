@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleS
                                QPushButton, QScrollArea, QSlider, QSplitter, QTableWidget, QTableWidgetItem,
                                QTabWidget, QTextEdit, QVBoxLayout, QWidget)
 
-from .. import __version__, compose, layout, updater
+from .. import __version__, compose, layout, series, updater
 from ..analyze import SIGNAL_LABELS, Clip, clip_score
 from ..download import VIDEO_EXTS, expand_sources, is_url, needs_expansion
 from ..engine import Engine, Project
@@ -196,7 +196,8 @@ class MainWindow(QMainWindow):
         self.niches.notice.connect(self._notice)
         self.niches.changed.connect(self._niches_changed)
         self.tabs.addTab(self.niches, "🎯  Niches")
-        self.automation = Automation(lambda: self.settings)
+        self.automation = Automation(lambda: self.settings, change=self._setting_changed)
+        self.automation.niches_edited.connect(lambda: (self.niches.reload(), self.research.settings_changed()))
         self.automation.notice.connect(self._notice)
         self.automation.open_settings.connect(self._open_settings)
         self.automation.clean_up.connect(self._clean_up)
@@ -456,7 +457,7 @@ class MainWindow(QMainWindow):
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         hh = self.table.horizontalHeader()
-        for col, w in ((0, 28), (1, 30), (2, 58), (3, 44), (4, 48)):
+        for col, w in ((0, 28), (1, 44), (2, 58), (3, 44), (4, 48)):
             hh.setSectionResizeMode(col, QHeaderView.Fixed)
             self.table.setColumnWidth(col, w)
         hh.setSectionResizeMode(5, QHeaderView.Stretch)
@@ -945,17 +946,28 @@ class MainWindow(QMainWindow):
         if 0 <= self.sel < len(clips):
             self.table.selectRow(self.sel)
 
+    def _fill_rows(self) -> None:
+        """Every row's text again: moving or switching off one clip can change its neighbours' part numbers."""
+        clips = self.current.clips if self._ready() else []
+        for r, c in enumerate(clips[:self.table.rowCount()]):
+            self._fill_row(r, c)
+
     def _fill_row(self, r: int, c: Clip) -> None:
         was = self._filling
         self._filling = True
         origin = {"ai": "✨ ", "manual": "✎ ", "chapter": "§ "}.get(c.origin, "")
-        cells = [str(r + 1), stamp(c.start), f"{c.length:.0f}s", f"{c.score:.0f}", f"{origin}{c.title}"]
+        clips = self.current.clips if self.current else []
+        _, part, parts = series.labels(clips)[r] if r < len(clips) else ("", 0, 0)
+        cells = [f"{r + 1}" + (f" P{part}" if part else ""), stamp(c.start), f"{c.length:.0f}s", f"{c.score:.0f}",
+                 f"{origin}{c.title}"]
+        tips = {1: f"Part {part} of {parts}: " + ("the next part starts where this one stops" if part < parts
+                                                   else "the last part") if part else "", 5: c.reason}
         for col, text in enumerate(cells, 1):
             item = self.table.item(r, col) or QTableWidgetItem()
             item.setText(text)
             flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable | (Qt.ItemIsEditable if col == 5 else Qt.NoItemFlags)
             item.setFlags(flags)
-            item.setToolTip(c.reason if col == 5 else "")  # cells are reused, so always reset it
+            item.setToolTip(tips.get(col, ""))  # cells are reused, so always reset it
             self.table.setItem(r, col, item)
         self._filling = was
 
@@ -1015,6 +1027,7 @@ class MainWindow(QMainWindow):
         c = p.clips[item.row()]
         if item.column() == 0:
             c.enabled = item.checkState() == Qt.Checked
+            self._fill_rows()  # a switched-off part breaks its series
             self.timeline.update()
             self._update_export_btn()
         elif item.column() == 5:
@@ -1112,7 +1125,7 @@ class MainWindow(QMainWindow):
     def _clip_dragging(self, i: int) -> None:
         p = self._ready()
         if p and 0 <= i < len(p.clips):
-            self._fill_row(i, p.clips[i])
+            self._fill_rows()
             if i == self.sel:
                 self._refresh_export_view()
 
@@ -1122,11 +1135,11 @@ class MainWindow(QMainWindow):
             return
         c = p.clips[i]
         c.edited = True  # hand-tuned clips (including AI picks) survive re-detection
-        if c.origin == "auto":
+        if c.origin in ("auto", "part"):
             c.origin = "manual"
         if c.origin != "ai":
             c.score = clip_score(p.score, c.start, c.end)
-        self._fill_row(i, c)
+        self._fill_rows()
         if i == self.sel:
             self._fill_inspector()
         self.timeline.update()

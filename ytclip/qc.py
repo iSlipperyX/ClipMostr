@@ -15,13 +15,12 @@ from __future__ import annotations
 import json
 import re
 import shutil
-import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 from .analyze import Clip
-from .ffmpeg import NO_WINDOW, ffmpeg_exe, probe
+from .ffmpeg import communicate, ffmpeg_exe, probe
 from .subtitles import Word, words_between
 
 REJECTED = "_rejected"
@@ -85,8 +84,7 @@ def measure(path: Path) -> FileStats:
     audio = ["-af", "volumedetect"] if info.has_audio else ["-an"]
     cmd = [ffmpeg_exe(), "-hide_banner", "-nostats", "-v", "info", "-i", str(path),
            "-vf", "scale=240:-2,blackdetect=d=0.5:pix_th=0.10,freezedetect=n=-50dB:d=2", *audio, "-f", "null", "-"]
-    out = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding="utf-8",
-                         errors="replace", creationflags=NO_WINDOW).stderr
+    out = communicate(cmd).stderr
     return parse_stats(out, stats)
 
 
