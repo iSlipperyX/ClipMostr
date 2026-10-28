@@ -11,7 +11,8 @@ a backup folder inside it, file by file when a whole folder can't move, and the 
 copied in (this program runs from them, so they can't move). Anything else in the folder (your own
 files) is left alone. If anything fails, everything is put back.
 
-Keep the command line stable: an older version starts the newer version's helper with it.
+Keep the command line stable: an older version starts the newer version's helper with it. The
+replaced version is kept as the previous one (--keep-previous), for going back to it.
 """
 
 from __future__ import annotations
@@ -268,15 +269,45 @@ def hide(folder: Path) -> None:
             pass
 
 
-def start_app(install: Path, relaunch: str, log: Callable[[str], None]) -> None:
+def start_app(install: Path, relaunch: str, log: Callable[[str], None], args: tuple[str, ...] = ()) -> None:
     if not relaunch:
         return
     flags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     try:  # not from the app folder, so nothing pins it during the next update
-        subprocess.Popen([str(install / relaunch)], cwd=str(Path.home()), creationflags=flags, close_fds=True,
-                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        subprocess.Popen([str(install / relaunch), *args], cwd=str(Path.home()), creationflags=flags,
+                         close_fds=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                         stderr=subprocess.DEVNULL)
     except OSError as exc:
         log(f"Could not restart ClipMonster: {exc}")
+
+
+def keep_previous(backup: Path, previous: Path, version: str, log: Callable[[str], None]) -> bool:
+    """Keep the replaced version (the backup folder) as `previous`\\ClipMonster, with its version in
+    `previous`\\version.txt, in place of the one kept before. False (and the backup is left for
+    removing) when it can't be."""
+    if not is_complete(backup):
+        return False
+    app = previous / "ClipMonster"
+    try:
+        remove_quietly(previous, log)
+        if previous.exists():
+            return False
+        previous.mkdir(parents=True)
+        try:
+            os.rename(backup, app)  # the same drive: instant
+        except OSError:
+            shutil.copytree(backup, app)  # another drive
+            remove_quietly(backup, log)
+        (previous / "version.txt").write_text(version or "", encoding="utf-8")
+        hidden = [p for p in app.iterdir() if p.name.startswith(BACKUP)]
+        for p in hidden:
+            remove_quietly(p, log)
+        log(f"Kept the previous version{' (' + version + ')' if version else ''} in {previous}")
+        return True
+    except OSError as exc:
+        log(f"Could not keep the previous version ({exc}); it's removed instead")
+        remove_quietly(previous, log)
+        return False
 
 
 def file_log(path: Path) -> Callable[[str], None]:
@@ -294,9 +325,11 @@ def file_log(path: Path) -> Callable[[str], None]:
 
 
 def apply(new_dir: Path, install: Path, wait_pid: int, relaunch: str, log: Callable[[str], None],
-          sleep: Callable[[float], None] = time.sleep, wait: float = 120.0, others: float = 60.0) -> bool:
-    """The whole update: wait for the app to exit, swap, restart it. Logs every outcome in the words
-    updater.last_attempt() reads. True if the new version is installed."""
+          sleep: Callable[[float], None] = time.sleep, wait: float = 120.0, others: float = 60.0,
+          relaunch_args: tuple[str, ...] = (), previous: Path | None = None, old_version: str = "") -> bool:
+    """The whole update: wait for the app to exit, swap, keep the replaced version in `previous` (when
+    given), restart the app. Logs every outcome in the words updater.last_attempt() reads. True if the
+    new version is installed."""
     install = Path(os.path.abspath(install))
     try:
         log(f"Update started: waiting for process {wait_pid} to exit")
@@ -313,29 +346,37 @@ def apply(new_dir: Path, install: Path, wait_pid: int, relaunch: str, log: Calla
         if still:
             raise SwapError("Close these first: " + ", ".join(f"{p.name} (process {pid})" for pid, p in still))
         swap = Swap(new_dir, install, log, sleep)
-        swap.run()
-        start_app(install, relaunch, log)
+        backup = swap.run()
+        if previous is not None:
+            keep_previous(backup, previous, old_version, log)
         for d in old_backups(install):
             remove_quietly(d, log)
         try:
             (install.parent / NOTE).unlink(missing_ok=True)
         except OSError:
             pass
-        log("Update finished")  # the unpacked update is removed by the new version (updater.tidy)
+        # Done before the restart: the new version removes the unpacked update (updater.tidy), and
+        # this helper runs from it.
+        log("Update finished")
+        start_app(install, relaunch, log, relaunch_args)
         return True
     except Exception as exc:
         log(f"Update failed: {exc}")
         try:  # unless it's open already (reopened while this waited)
             if is_complete(install) and not any(p.name.lower() == EXE_NAME.lower()
                                                 for _, p in app_processes(install)):
-                start_app(install, relaunch, log)
+                start_app(install, relaunch, log, relaunch_args)
         except Exception:
             pass
         return False
 
 
-def command(new_dir: Path, install: Path, wait_pid: int, log_file: Path, relaunch: str) -> list[str]:
-    """How updater.launch_swap starts this: the new version's ytclip.exe, or Python from source."""
+def command(new_dir: Path, install: Path, wait_pid: int, log_file: Path, relaunch: str,
+            relaunch_args: tuple[str, ...] = (), keep_previous: Path | None = None,
+            old_version: str = "") -> list[str]:
+    """How updater.launch_swap starts this: the new version's ytclip.exe, or Python from source.
+    Only 2.8.0 and later understand --relaunch-arg, --keep-previous and --old-version, so they're only
+    given to helpers of those versions (any version an update or going back installs from then on)."""
     if getattr(sys, "frozen", False):
         cmd = [str(new_dir / "ytclip.exe"), "--apply-update"]
     else:
@@ -344,6 +385,12 @@ def command(new_dir: Path, install: Path, wait_pid: int, log_file: Path, relaunc
             "--log-file", str(log_file)]
     if relaunch:  # an empty argument would be dropped by some callers and break the parameter list
         cmd += ["--relaunch", relaunch]
+        for arg in relaunch_args:
+            cmd.append(f"--relaunch-arg={arg}")  # one piece, so an argument starting with - isn't an option
+    if keep_previous is not None:
+        cmd += ["--keep-previous", str(keep_previous)]
+        if old_version:
+            cmd += ["--old-version", old_version]
     return cmd
 
 
@@ -354,8 +401,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--install-dir", type=Path, required=True)
     p.add_argument("--log-file", type=Path, required=True)
     p.add_argument("--relaunch", default="")
+    p.add_argument("--relaunch-arg", action="append", default=[], help="an argument for --relaunch (repeatable)")
+    p.add_argument("--keep-previous", type=Path, default=None, help="keep the replaced version in this folder")
+    p.add_argument("--old-version", default="", help="the replaced version's number, for --keep-previous")
     args = p.parse_args(argv)
-    ok = apply(args.new_dir, args.install_dir, args.wait_pid, args.relaunch, file_log(args.log_file))
+    ok = apply(args.new_dir, args.install_dir, args.wait_pid, args.relaunch, file_log(args.log_file),
+               relaunch_args=tuple(args.relaunch_arg), previous=args.keep_previous, old_version=args.old_version)
     return 0 if ok else 1
 
 

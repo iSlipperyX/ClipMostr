@@ -62,6 +62,9 @@ _PERMANENT = re.compile(r"video unavailable|private video|has been removed|no lo
                         r"premieres in|this live event|no clips", re.I)
 
 
+UPDATE_GAP = 5 * 60  # automation may update itself while it waits at least this long for the next video
+
+
 class Stopped(Exception):
     """The runner was asked to stop while working on a video."""
 
@@ -312,7 +315,7 @@ class Runner:
                  scan: Callable | None = None, engine: Callable[..., Engine] = Engine,
                  history: Callable[[], History] | None = None, picks: Callable[[], PickLog] | None = None,
                  priority: Callable[[str], str] | None = None,
-                 fetch: Callable[..., Video] = download):
+                 fetch: Callable[..., Video] = download, self_update: bool = False):
         self.db = db or JobDB()
         self.load = load
         self._log = log or (lambda m: None)
@@ -327,6 +330,7 @@ class Runner:
         self._last_flag_check = 0.0
         self._priority = priority  # speed.set_priority for the headless runner; None leaves the process alone
         self._fetch = fetch
+        self._self_update = self_update  # the headless runner installs updates itself (self_update())
         self.prefetch: Prefetch | None = None  # the next video, downloading while this one is clipped
 
     # ------------------------------------------------------------ bookkeeping
@@ -414,6 +418,8 @@ class Runner:
         job = self.db.next_due(now, paused)
         if job:
             wait, why = self.wait_reason(s, now, downloaded=self.prefetched(job))
+            if wait >= UPDATE_GAP and self._self_update and (self.prefetch is None or not self.prefetch.busy):
+                self.self_update(s)  # a long wait (working hours, a sign-in pause) is a good time
             if wait:
                 self.state(why)
                 return max(1.0, min(wait, scan_wait, IDLE))
@@ -423,6 +429,8 @@ class Runner:
                 return max(1.0, min(DISK_RECHECK, scan_wait))
             self.process(job, s)
             return 1.0
+        if self._self_update:
+            self.self_update(s)
         upcoming = self.db.next_try(paused)
         blocked = self.blocked(now)
         if blocked and upcoming:  # the videos waiting are waiting for the sign-in pause: say so
@@ -525,6 +533,44 @@ class Runner:
     def block(self, error: str, now: float, s: Settings | None = None) -> None:
         self.log(record_block(self.db, error, now, (s or self.load()).cookies_browser))
         self.db.note("blocked", now)
+
+    # ------------------------------------------------------------ updating itself
+    def self_update(self, s: Settings) -> None:
+        """With Get updates by themselves on and no ClipMonster window open, automation installs a
+        new version itself while it has nothing to clip: it downloads it, starts the install step
+        and stops (Stopped). The install step starts automation again in the new version."""
+        from . import updater
+
+        target = updater.install_dir()
+        if target is None or not (s.check_updates and s.auto_update):
+            return
+        channel = updater.channel_setting(s)
+        if not updater.due_for_check(updater.CHECK_HOURS[channel]):
+            return
+        repo = updater.configured_repo(s.update_repo)
+        try:
+            rel = updater.check(repo, channel) if repo else None
+            updater.save_state(last_check=time.time())
+            if rel is None or rel.switch or updater.load_state().get("skipped") == rel.version:
+                return  # a switch to an older channel's version is asked about in the window
+            if updater.other_instances(target):
+                self.log(f"ClipMonster {rel.version} is out: it's offered in the ClipMonster window that's open.")
+                return
+            self.state(f"Downloading ClipMonster {rel.version}")
+            self.log(f"ClipMonster {rel.label} is out: downloading it, to install it while there's nothing to clip.")
+            new_app = updater.prepare(rel, target, cancelled=self.stop_requested)
+            if self.stop_requested() or updater.other_instances(target):
+                return  # stopped, or the window was opened meanwhile (it offers the downloaded update)
+            updater.save_state(pending=rel.version)
+            updater.launch_swap(new_app, target, self.pid, relaunch=updater.EXE_NAME, relaunch_args=("--automation",))
+        except updater.UpdateCancelled:
+            return
+        except updater.UpdateError as exc:
+            self.log(f"Couldn't update ClipMonster by itself: {exc}")
+            return
+        self.log(f"Installing ClipMonster {rel.version}: automation stops now and starts again in the new version.")
+        self.state(f"Installing ClipMonster {rel.version}")
+        raise Stopped()
 
     # ------------------------------------------------------------ disk guard
     def free_space(self, s: Settings) -> tuple[int, str]:
@@ -1298,7 +1344,10 @@ def run_headless() -> int:
     """`ClipMonster.exe --automation`: the runner with no window, logging to automation.log."""
     from . import speed
 
-    return Runner(log=file_logger(), priority=speed.set_priority).run()
+    from . import updater
+
+    updater.tidy()  # after an update it installed itself: the download and the unpacked copy
+    return Runner(log=file_logger(), priority=speed.set_priority, self_update=True).run()
 
 
 def request_scan(db: JobDB, niche_id: str = "") -> None:

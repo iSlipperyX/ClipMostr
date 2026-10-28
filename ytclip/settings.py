@@ -21,12 +21,28 @@ def app_dir() -> Path:
     return path
 
 
-def models_dir() -> Path:
-    """Large downloaded models live in the local (non-roaming) profile."""
+def local_dir(*parts: str) -> Path:
+    """%LOCALAPPDATA%\\ClipMonster (or a folder in it): this PC's own big or short-lived files, never
+    synced or roamed: downloads, models, updates, the previous version and temporary work."""
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".cache")
-    path = Path(base) / APP_NAME / "models"
+    path = Path(base, APP_NAME, *parts)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def models_dir() -> Path:
+    """Large downloaded models live in the local (non-roaming) profile."""
+    return local_dir("models")
+
+
+def work_dir() -> Path:
+    """Where every step's temporary files go (cleanup.sweep_work empties what a crash left behind)."""
+    return local_dir("work")
+
+
+def downloads_dir() -> Path:
+    """The download cache when Settings → General leaves it empty (before 2.8.0: <output>/.downloads)."""
+    return local_dir("downloads")
 
 
 @dataclass
@@ -39,7 +55,8 @@ class Settings:
     auto_export: bool = False
     # Updates
     check_updates: bool = True
-    include_prereleases: bool = False
+    update_channel: str = "stable"  # stable | beta | dev (updater.CHANNELS)
+    auto_update: bool = True  # download updates by themselves; automation installs them when it's idle
     update_repo: str = ""  # "" = the GitHub repo this build was published from
     # Download
     quality: int = 1080
@@ -188,7 +205,7 @@ class Settings:
     watchdog_minutes: int = 30  # a download or export that stops moving this long is stopped (0 = off)
     auto_prefetch: bool = True  # download the next video while this one is clipped
     # Clean up (cleanup.py): clear out downloads, rejected clips and clips TikTok Manager is done with
-    cleanup_auto: bool = False  # automation does it once a day
+    cleanup_auto: bool = True  # automation does it once a day
     cleanup_kinds: str = "partial, previews, rejected, posted, removed"
     cleanup_days: int = 3
     # 2 = text sizes are letter heights (1 = raw .ass sizes, which looked different in every font)
@@ -245,6 +262,11 @@ class Settings:
             # Saved before 2.5.0, when "Always" was the only way to get Whisper's captions on clips that
             # have YouTube captions: now only the clips are typed out (the captions still find them).
             data = data | {"transcribe": "clips"}
+        if isinstance(data, dict) and data and "update_channel" not in data:
+            # Saved before 2.8.0. "Include beta versions" is the Beta channel now, and Clean up runs by
+            # itself every day: nothing ClipMonster is done with is left taking up space.
+            data = data | {"update_channel": "beta" if data.get("include_prereleases") else "stable",
+                           "cleanup_auto": True}
         return cls().apply(migrate(data))
 
     def save(self, path: Path | None = None) -> None:
@@ -492,6 +514,8 @@ CLEANUP_KINDS = (
     ("removed", "Clips you removed in TikTok Manager"),
 )
 
+UPDATE_CHANNELS = (("stable", "Stable"), ("beta", "Beta (test versions)"), ("dev", "Dev (every change)"))
+
 BANNER_MODES = (("bar", "Solid bar (video sits between)"), ("overlay", "Text over the video"))
 LAYOUT_FITS = (("auto", "Auto (from Format)"), ("crop", "Crop to fill"), ("blur", "Fit, blurred fill"),
                ("fit", "Fit, banner colour fill"))
@@ -508,7 +532,14 @@ SCHEMA: list[Field] = [
 
     Field("check_updates", "Check for updates automatically", "Updates", "bool",
           help="Looks for a new release on GitHub about once a day"),
-    Field("include_prereleases", "Include beta versions", "Updates", "bool"),
+    Field("update_channel", "Update channel", "Updates", "choice", choices=UPDATE_CHANNELS,
+          help="Stable: finished versions only. Beta: also test versions of the next one. Dev: a new build "
+               "every time ClipMonster's code changes, for trying things the moment they're made (least "
+               "tested). Picking a steadier channel offers its newest version straight away"),
+    Field("auto_update", "Get updates by themselves", "Updates", "bool",
+          help="New versions download in the background, so updating is one click (Restart now). When the "
+               "window is closed, automation installs them itself between videos and carries on. Off: you're "
+               "told about new versions and download them yourself"),
     Field("update_repo", "Update source (GitHub owner/repo)", "Updates", "str",
           help="Leave blank to use the repository this build was published from"),
 

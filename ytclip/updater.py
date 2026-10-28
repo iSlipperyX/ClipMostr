@@ -1,16 +1,24 @@
-"""Self-update from GitHub Releases.
+"""Self-update from GitHub Releases, on the channel picked in Settings → Updates.
 
-A release is a git tag like v1.2.0 whose GitHub Release carries ClipMonster-windows.zip
-and SHA256SUMS.txt (both made by .github/workflows/release.yml). Updating:
+Channels (settings.UPDATE_CHANNELS):
+* stable - releases made with `python release.py X.Y.Z` (tags vX.Y.Z)
+* beta   - those plus test versions (tags vX.Y.Z-beta.N, published as GitHub pre-releases)
+* dev    - those plus the newest build of main: the release workflow rebuilds it on every push to
+           main and publishes it as the pre-release tagged "dev", versioned "<last release>+dev.<N>"
+           (N = commits since that release), which sorts after the release it builds on.
 
-1. check()    - ask the GitHub API for the newest release and compare versions.
-2. download() - stream the zip to %LOCALAPPDATA%\\ClipMonster\\updates and verify SHA-256.
-3. extract()  - unpack next to the installed app (same drive, so the swap is a rename).
+A release carries ClipMonster-windows.zip (what updates install), ClipMonster-Setup.exe (what people
+download) and SHA256SUMS.txt, all made by .github/workflows/release.yml. Updating:
+
+1. check()    - ask the GitHub API for the newest release on the channel and compare versions.
+2. download() - stream the zip to %LOCALAPPDATA%\\ClipMonster\\updates and verify its SHA-256.
+3. extract()  - unpack it there too (updates\\next), out of the install folder and out of OneDrive.
 4. launch_swap() - the new version's own ytclip.exe (swap.py) waits for the app to exit, moves
    the app's own files into a backup folder inside the install folder (file by file if a folder
    is held open), copies the new files in, relaunches, and puts everything back if anything
-   fails. (A running app can't replace its own files on Windows.)
-5. tidy()       - the new version removes the unpacked update and old downloads.
+   fails. (A running app can't replace its own files on Windows.) The backup is then kept as the
+   previous version (updates\\previous), so Settings → Updates can go back to it.
+5. tidy()     - the new version removes the download and the unpacked copy.
 """
 
 from __future__ import annotations
@@ -34,13 +42,21 @@ from typing import Callable
 
 from . import __version__
 
-try:  # written by build.py: the GitHub repo this build was published from
+try:  # written by build.py: the GitHub repo this build was published from, and its commit
     from ._build_info import UPDATE_REPO
 except ImportError:  # running from source
     UPDATE_REPO = ""
+try:
+    from ._build_info import BUILD_COMMIT
+except ImportError:  # running from source, or built before 2.8.0
+    BUILD_COMMIT = ""
 
 ASSET_NAME = "ClipMonster-windows.zip"
+SETUP_NAME = "ClipMonster-Setup.exe"
 SUMS_NAME = "SHA256SUMS.txt"
+DEV_TAG = "dev"  # the rolling pre-release of main's newest build
+CHANNEL_RANK = {"stable": 0, "beta": 1, "dev": 2}
+CHECK_HOURS = {"stable": 20, "beta": 6, "dev": 2}  # how often each channel looks for something new
 APP_FOLDER = "ClipMonster"
 EXE_NAME = "ClipMonster.exe"
 # Test hook: point the updater at a local fake of the GitHub API.
@@ -67,27 +83,62 @@ class Release:
     sha256: str  # may be "" until download() reads SHA256SUMS.txt
     sums_url: str
     prerelease: bool
+    commit: str = ""  # a dev build's commit
+    switch: bool = False  # not newer: the channel picked in Settings is older than this version's (see check)
+
+    @property
+    def channel(self) -> str:
+        return channel_of(self.version)
+
+    @property
+    def label(self) -> str:
+        return build_label(self.version, self.commit)
 
 
 # ---------------------------------------------------------------- versions
 
-_VERSION = re.compile(r"^v?(\d+)\.(\d+)(?:\.(\d+))?(?:[-.]?(a|alpha|b|beta|rc|pre)\.?(\d*))?$", re.I)
+_VERSION = re.compile(r"^v?(\d+)\.(\d+)(?:\.(\d+))?(?:[-.]?(a|alpha|b|beta|rc|pre)\.?(\d*))?"
+                      r"(?:\+dev\.?(\d+))?$", re.I)
 _STAGE = {"a": 0, "alpha": 0, "pre": 0, "b": 1, "beta": 1, "rc": 2}
 
 
 def parse_version(text: str) -> tuple[int, ...] | None:
-    """'v1.2.3' -> (1, 2, 3, 3, 0); pre-releases sort before the final release."""
+    """'v1.2.3' -> (1, 2, 3, 3, 0, 0); pre-releases sort before the final release, and a dev build
+    ('1.2.3+dev.4': 4 changes after 1.2.3) after the release it builds on."""
     m = _VERSION.match(text.strip())
     if not m:
         return None
-    major, minor, patch, stage, num = m.groups()
+    major, minor, patch, stage, num, dev = m.groups()
     stage_rank = _STAGE[stage.lower()] if stage else 3
-    return int(major), int(minor), int(patch or 0), stage_rank, int(num or 0)
+    return int(major), int(minor), int(patch or 0), stage_rank, int(num or 0), int(dev or 0)
 
 
-def is_newer(candidate: str, current: str = __version__) -> bool:
-    a, b = parse_version(candidate), parse_version(current)
+def is_newer(candidate: str, current: str | None = None) -> bool:
+    a, b = parse_version(candidate), parse_version(__version__ if current is None else current)
     return a is not None and b is not None and a > b
+
+
+def channel_of(version: str) -> str:
+    """The channel a version is published on: 'dev', 'beta' (any pre-release) or 'stable'."""
+    v = parse_version(version)
+    if v is None:
+        return "stable"
+    return "dev" if v[5] else "beta" if v[3] < 3 else "stable"
+
+
+def build_label(version: str | None = None, commit: str | None = None) -> str:
+    """This build as people should see it: '2.8.0', '2.8.0-beta.1 (beta)', '2.8.0+dev.3 (dev build 1a2b3c4)'."""
+    version = __version__ if version is None else version
+    commit = BUILD_COMMIT if commit is None else commit
+    channel = channel_of(version)
+    if channel == "dev":
+        return f"{version} (dev build{' ' + commit[:7] if commit else ''})"
+    return f"{version} (beta)" if channel == "beta" else version
+
+
+def channel_setting(s) -> str:
+    """Settings.update_channel, sanitised."""
+    return s.update_channel if s.update_channel in CHANNEL_RANK else "stable"
 
 
 # ---------------------------------------------------------------- GitHub API
@@ -128,47 +179,87 @@ def _get_json(url: str, repo: str):
         raise UpdateError("GitHub sent a response ClipMonster couldn't read. Try again later.") from exc
 
 
+_DEV_NAME = re.compile(r"(\d+\.\d+\.\d+\S*\+dev\.?\d+)")
+
+
 def _to_release(data: dict) -> Release | None:
-    version = parse_version(data.get("tag_name", ""))
+    tag = data.get("tag_name", "")
+    if tag == DEV_TAG:  # the rolling dev build says its version in its title
+        m = _DEV_NAME.search(data.get("name") or "")
+        version = m.group(1) if m else ""
+    else:
+        version = tag.lstrip("vV")
     assets = {a.get("name"): a for a in data.get("assets") or []}
     asset = assets.get(ASSET_NAME)
-    if version is None or not asset or data.get("draft"):
+    if parse_version(version) is None or not asset or data.get("draft"):
         return None
     digest = asset.get("digest") or ""  # GitHub reports "sha256:<hex>" for uploaded assets
     sums = assets.get(SUMS_NAME) or {}
+    commit = data.get("target_commitish") or ""
     return Release(
-        version=data["tag_name"].lstrip("vV"), tag=data["tag_name"], name=data.get("name") or data["tag_name"],
+        version=version, tag=tag, name=data.get("name") or tag,
         notes=data.get("body") or "", page_url=data.get("html_url") or "",
         asset_url=asset["browser_download_url"], asset_size=int(asset.get("size") or 0),
         sha256=digest.split(":", 1)[1].lower() if digest.startswith("sha256:") else "",
-        sums_url=sums.get("browser_download_url", ""), prerelease=bool(data.get("prerelease")))
+        sums_url=sums.get("browser_download_url", ""), prerelease=bool(data.get("prerelease")),
+        commit=commit if re.fullmatch(r"[0-9a-f]{7,40}", commit) else "")
 
 
-def latest_release(repo: str, include_prereleases: bool = False) -> Release | None:
+def releases(repo: str, channel: str = "stable") -> list[Release]:
+    """The releases on `channel` (each channel includes the ones before it), newest first."""
     if not repo:
         raise UpdateError("Updates aren't set up: no GitHub repository is configured. "
                           "Enter it as owner/repo in Settings → Updates.")
-    if include_prereleases:
-        found = [_to_release(r) for r in _get_json(f"{API_BASE}/repos/{repo}/releases?per_page=20", repo)]
-    else:
+    rank = CHANNEL_RANK.get(channel, 0)
+    if rank == 0:
         found = [_to_release(_get_json(f"{API_BASE}/repos/{repo}/releases/latest", repo))]
-    found = [r for r in found if r]
-    return max(found, key=lambda r: parse_version(r.version)) if found else None
+    else:
+        found = [_to_release(r) for r in _get_json(f"{API_BASE}/repos/{repo}/releases?per_page=30", repo)]
+    found = [r for r in found if r and CHANNEL_RANK[r.channel] <= rank]
+    return sorted(found, key=lambda r: parse_version(r.version), reverse=True)
 
 
-def check(repo: str, include_prereleases: bool = False, current: str = __version__) -> Release | None:
-    """The newer release, or None when this version is already the latest."""
-    rel = latest_release(repo, include_prereleases)
-    return rel if rel and is_newer(rel.version, current) else None
+def latest_release(repo: str, channel: str = "stable") -> Release | None:
+    found = releases(repo, channel)
+    return found[0] if found else None
+
+
+def check(repo: str, channel: str = "stable", current: str | None = None) -> Release | None:
+    """What to offer: the newest release on `channel` when it's newer than this version, else None.
+    When this version is from a less tested channel than the one picked (a dev build, with Stable
+    picked), the channel's newest is offered as a switch (Release.switch) even though it's older."""
+    current = __version__ if current is None else current
+    rel = latest_release(repo, channel)
+    if rel is None:
+        return None
+    if is_newer(rel.version, current):
+        return rel
+    if CHANNEL_RANK[channel_of(current)] > CHANNEL_RANK.get(channel, 0) and parse_version(rel.version) != \
+            parse_version(current):
+        rel.switch = True
+        return rel
+    return None
 
 
 # ---------------------------------------------------------------- download & unpack
 
 def updates_dir() -> Path:
-    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".cache")
-    path = Path(base) / "ClipMonster" / "updates"
-    path.mkdir(parents=True, exist_ok=True)
-    return path
+    """%LOCALAPPDATA%\\ClipMonster\\updates: downloads, the unpacked next version, the previous version
+    and the update log. Never in the install folder, and never in OneDrive."""
+    from .settings import local_dir
+
+    return local_dir("updates")
+
+
+def staging_dir() -> Path:
+    """Where the next version is unpacked; its ytclip.exe installs it (swap.py)."""
+    return updates_dir() / "next"
+
+
+def previous_dir() -> Path:
+    """The version installed before this one (ClipMonster\\ plus version.txt), kept by the install
+    step so Settings → Updates can go back to it."""
+    return updates_dir() / "previous"
 
 
 def _expected_sha(rel: Release) -> str:
@@ -279,13 +370,11 @@ def _old_app_files(target: Path, names: set[str]) -> list[Path]:
 
 
 def extract(zip_path: Path, target: Path, cancelled: Callable[[], bool] | None = None) -> Path:
-    """Unpack next to the installed folder `target`; returns the new app folder."""
-    # A short name: unpacked paths are this much deeper than the final ones, and the app
-    # folder has some very deep files, so every character counts against MAX_PATH.
-    staging = target.parent / ".cm-up"
-    if not _writable(target.parent) or not _writable(target):
-        raise UpdateError(f"ClipMonster can't write to {target.parent}. Move the ClipMonster folder somewhere "
-                          "you own (e.g. Documents) or download the new version manually.")
+    """Unpack the update for the installed folder `target` in staging_dir(); returns the new app folder."""
+    staging = staging_dir()
+    if not _writable(target):
+        raise UpdateError(f"ClipMonster can't write to {target}. Install it again with {SETUP_NAME} from the "
+                          "release page, which puts it in a folder you own.")
     root = staging.resolve()
     try:
         with zipfile.ZipFile(zip_path) as zf:
@@ -327,13 +416,68 @@ def extract(zip_path: Path, target: Path, cancelled: Callable[[], bool] | None =
         raise UpdateError("The update archive is damaged.") from exc
     except OSError as exc:
         shutil.rmtree(staging, ignore_errors=True)
-        raise UpdateError(f"Couldn't unpack the update next to the ClipMonster folder "
-                          f"({exc.strerror or exc}).") from exc
+        raise UpdateError(f"Couldn't unpack the update in {staging} ({exc.strerror or exc}).") from exc
     new_app = staging / APP_FOLDER
     if not (new_app / EXE_NAME).exists():
         shutil.rmtree(staging, ignore_errors=True)
         raise UpdateError("The update archive doesn't contain ClipMonster.exe.")
     return new_app
+
+
+def prepare(rel: Release, target: Path, progress: Callable[[float], None] | None = None,
+            cancelled: Callable[[], bool] | None = None) -> Path:
+    """Download, verify and unpack `rel` (or reuse it, when it's unpacked already); returns the new
+    app folder. The zip is deleted as soon as it's unpacked."""
+    from .swap import is_complete
+
+    staged = staging_dir() / APP_FOLDER
+    if load_state().get("staged") == rel.version and is_complete(staged):
+        if progress:
+            progress(1.0)
+        return staged
+    save_state(staged="")
+    zip_path = download(rel, progress, cancelled)
+    try:
+        new_app = extract(zip_path, target, cancelled)
+    finally:
+        zip_path.unlink(missing_ok=True)
+    save_state(staged=rel.version)
+    return new_app
+
+
+def previous_version() -> str:
+    """The version Settings → Updates can go back to, or '' when there isn't one. Only versions
+    from 2.8.0 on are kept, and only those can be gone back to: their installer knows how."""
+    from .swap import is_complete
+
+    try:
+        version = (previous_dir() / "version.txt").read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+    if parse_version(version) is None or parse_version(version) == parse_version(__version__):
+        return ""
+    return version if is_complete(previous_dir() / APP_FOLDER) else ""
+
+
+def prepare_previous(target: Path) -> Path:
+    """Copy the previous version to staging_dir(), to install it from there (its own folder can't be
+    installed from: the install step keeps the version being replaced in it)."""
+    version = previous_version()
+    if not version:
+        raise UpdateError("There's no previous version to go back to.")
+    source = previous_dir() / APP_FOLDER
+    size = sum(f.stat().st_size for f in source.rglob("*") if f.is_file())
+    _need_space(updates_dir(), size, "go back to the previous version")
+    staged = staging_dir() / APP_FOLDER
+    save_state(staged="")
+    shutil.rmtree(staging_dir(), ignore_errors=True)
+    try:
+        shutil.copytree(source, staged)
+    except OSError as exc:
+        shutil.rmtree(staging_dir(), ignore_errors=True)
+        raise UpdateError(f"Couldn't copy the previous version ({exc.strerror or exc}).") from exc
+    save_state(staged=version)
+    return staged
 
 
 def other_instances(target: Path) -> list[str]:
@@ -399,12 +543,15 @@ def _log_line(text: str) -> None:
         pass
 
 
-def launch_swap(new_app: Path, target: Path, wait_pid: int, relaunch: str = EXE_NAME) -> None:
+def launch_swap(new_app: Path, target: Path, wait_pid: int, relaunch: str = EXE_NAME,
+                relaunch_args: tuple[str, ...] = ()) -> None:
     """Start the detached helper that installs `new_app` over `target` once `wait_pid` exits: the new
-    version's own ytclip.exe (swap.py), from the unpacked update."""
+    version's own ytclip.exe (swap.py), from the unpacked update. It keeps this version as the
+    previous one, and starts `relaunch` (with `relaunch_args`) when it's done."""
     from . import swap
 
-    cmd = swap.command(new_app, target, wait_pid, update_log(), relaunch)
+    cmd = swap.command(new_app, target, wait_pid, update_log(), relaunch, relaunch_args=relaunch_args,
+                       keep_previous=previous_dir(), old_version=__version__)
     # Marks this attempt, so an old failure isn't reported if the helper never gets to log.
     _log_line(f"Update requested: helper output goes to {updates_dir() / 'apply-update.out'}")
     # No window, in its own process group, so neither closing the app nor Ctrl+C in a terminal stops it.
@@ -419,26 +566,55 @@ def launch_swap(new_app: Path, target: Path, wait_pid: int, relaunch: str = EXE_
             subprocess.Popen(cmd, creationflags=flags, **kwargs)
 
 
+LOG_LIMIT = 1 << 20  # the update log and the helper's output are cut back to their end past this size
+PART_STALE = 3600.0  # a download nothing has written to for this long was abandoned
+
+
+def _trim(path: Path, keep: int = LOG_LIMIT // 2) -> None:
+    try:
+        if path.stat().st_size > LOG_LIMIT:
+            data = path.read_bytes()[-keep:]
+            path.write_bytes(data[data.find(b"\n") + 1:])
+    except OSError:
+        pass
+
+
+def _staged_is_next() -> bool:
+    """Whether the unpacked update is a newer version still waiting to be installed."""
+    staged = load_state().get("staged") or ""
+    return bool(staged) and is_newer(staged, __version__) and (staging_dir() / APP_FOLDER).is_dir()
+
+
 def tidy(target: Path | None = None) -> int:
-    """After an update: remove the unpacked update next to the app folder and the downloaded zips
-    (about 225 MB each, kept forever before 2.4.1). Returns how many were removed. Never fails."""
+    """After an update (and at each start): remove the unpacked update and the downloads (about 225 MB
+    each; before 2.4.1 they were kept forever), and keep the logs short. An update that's unpacked
+    and waiting to be installed stays. Returns how many were removed. Never fails."""
     removed = 0
     target = target or install_dir()
-    if target is not None:
-        staging = target.parent / ".cm-up"
-        if staging.is_dir():
-            shutil.rmtree(staging, ignore_errors=True)
-            removed += not staging.exists()
+    folders = [target.parent / ".cm-up"] if target is not None else []  # where versions before 2.8.0 unpacked
+    if not _staged_is_next():
+        folders.append(staging_dir())
+        if load_state().get("staged"):
+            save_state(staged="")
+    for folder in folders:
+        if folder.is_dir():
+            shutil.rmtree(folder, ignore_errors=True)
+            removed += not folder.exists()
     try:
-        zips = list(updates_dir().glob("ClipMonster-windows-*.zip"))
+        files = list(updates_dir().iterdir())
     except OSError:
-        zips = []
-    for z in zips:
+        files = []
+    now = time.time()
+    for f in files:
         try:
-            z.unlink()
-            removed += 1
+            stale_part = f.suffix == ".part" and now - f.stat().st_mtime > PART_STALE
+            if (f.name.startswith("ClipMonster-windows-") and f.suffix == ".zip") or stale_part:
+                f.unlink()
+                removed += 1
         except OSError:
             pass
+    for log in (update_log(), updates_dir() / "apply-update.out"):
+        _trim(log)
     return removed
 
 
@@ -466,7 +642,11 @@ def save_state(**changes) -> None:
 
 
 def due_for_check(hours: float = 20) -> bool:
-    return time.time() - float(load_state().get("last_check", 0)) > hours * 3600
+    try:
+        last = float(load_state().get("last_check", 0))
+    except (TypeError, ValueError):
+        last = 0.0
+    return time.time() - last > hours * 3600
 
 
 INSTALL_WINDOW = 300  # seconds: a helper that hasn't finished by then has died or given up
@@ -478,7 +658,7 @@ def finished_update_message() -> tuple[str, bool] | None:
     if not pending:
         return None
     if parse_version(pending) == parse_version(__version__):
-        save_state(pending="")
+        save_state(pending="", staged="")
         tidy()
         return f"Updated to ClipMonster {__version__}.", True
     state, reason = last_attempt()

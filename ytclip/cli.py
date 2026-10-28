@@ -84,30 +84,45 @@ def build_parser() -> argparse.ArgumentParser:
                         "edge, firefox...")
     p.add_argument("--check-update", action="store_true", help="check GitHub for a newer ClipMonster release")
     p.add_argument("--update", action="store_true", help="download and install the newest release (packaged app only)")
+    p.add_argument("--channel", choices=("stable", "beta", "dev"),
+                   help="with --check-update/--update: this update channel instead of Settings → Updates'")
+    p.add_argument("--go-back", action="store_true",
+                   help="install the version you had before the last update again (packaged app only)")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return p
 
 
-def run_update(install: bool) -> int:
+def run_update(install: bool, channel: str = "", go_back: bool = False) -> int:
     import os
     import time
 
     from . import updater
 
     s = Settings.load()
-    repo = updater.configured_repo(s.update_repo)
-    try:
-        rel = updater.check(repo, s.include_prereleases)
-    except updater.UpdateError as exc:
-        console.print(f"[red]{escape(str(exc))}[/]")
-        return 1
-    updater.save_state(last_check=time.time())
-    if not rel:
-        console.print(f"ClipMonster {__version__} is up to date.")
-        return 0
-    console.print(f"[bold]ClipMonster {escape(rel.version)}[/] is available (you have {__version__}). {escape(rel.page_url)}")
-    if not install:
-        return 0
+    if go_back:
+        version = updater.previous_version()
+        if not version:
+            console.print("There's no previous version to go back to. One is kept from each update from 2.8.0 on.")
+            return 1
+        rel = None
+    else:
+        channel = channel or updater.channel_setting(s)
+        repo = updater.configured_repo(s.update_repo)
+        try:
+            rel = updater.check(repo, channel)
+        except updater.UpdateError as exc:
+            console.print(f"[red]{escape(str(exc))}[/]")
+            return 1
+        updater.save_state(last_check=time.time())
+        if not rel:
+            console.print(f"ClipMonster {escape(updater.build_label())} is up to date on the {channel} channel.")
+            return 0
+        version = rel.version
+        what = "Switch to" if rel.switch else "Available:"
+        console.print(f"{what} [bold]ClipMonster {escape(rel.label)}[/] (you have {escape(__version__)}). "
+                      f"{escape(rel.page_url)}")
+        if not install:
+            return 0
     target = updater.install_dir()
     if target is None:
         console.print("Running from source: update with [bold]git pull[/] instead.")
@@ -120,17 +135,19 @@ def run_update(install: bool) -> int:
         console.print(f"[red]Close these first; they keep the ClipMonster folder in use: {escape(', '.join(others))}[/]")
         return 1
     try:
-        with Progress(TextColumn("[cyan]{task.description}"), BarColumn(), console=console, transient=True) as bar:
-            task = bar.add_task("Downloading update", total=1)
-            zip_path = updater.download(rel, lambda f: bar.update(task, completed=f))
-            bar.update(task, description="Unpacking", completed=1)
-            new_app = updater.extract(zip_path, target)
+        if rel is None:
+            new_app = updater.prepare_previous(target)
+            updater.save_state(skipped=__version__)
+        else:
+            with Progress(TextColumn("[cyan]{task.description}"), BarColumn(), console=console, transient=True) as bar:
+                task = bar.add_task("Downloading update", total=1)
+                new_app = updater.prepare(rel, target, lambda f: bar.update(task, completed=f))
     except updater.UpdateError as exc:
         console.print(f"[red]{escape(str(exc))}[/]")
         return 1
-    updater.save_state(pending=rel.version)
+    updater.save_state(pending=version)
     updater.launch_swap(new_app, target, os.getpid(), relaunch="")
-    console.print(f"[green]✓ Downloaded and verified {escape(rel.version)}.[/] It's installed in the background "
+    console.print(f"[green]✓ Ready to install {escape(version)}.[/] It's installed in the background "
                   f"once this command exits; the next ytclip run reports the result. "
                   f"Log: {escape(str(updater.update_log()))}")
     return 0
@@ -1117,8 +1134,8 @@ def main(argv: list[str] | None = None) -> int:
     finished = updater.finished_update_message()  # result of an update started last time
     if finished:
         console.print(f"[green]✓ {escape(finished[0])}[/]" if finished[1] else f"[yellow]⚠ {escape(finished[0])}[/]")
-    if args.check_update or args.update:
-        return run_update(install=args.update)
+    if args.check_update or args.update or args.go_back:
+        return run_update(install=args.update, channel=args.channel or "", go_back=args.go_back)
     if args.list_layouts:
         for name, values in all_layouts().items():
             tag = "" if name in LAYOUT_PRESETS else " [dim](yours)[/]"

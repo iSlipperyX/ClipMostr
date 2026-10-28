@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPushButton,
                                QScrollArea, QTabWidget, QVBoxLayout)
 
-from .. import __version__, niches, updater, youtube_login
+from .. import niches, updater, youtube_login
 from ..settings import SCHEMA, Settings, app_dir
 from ..gemini import KEY_URL as GEMINI_KEY_URL
 from ..trending import KEY_HELP_URL
@@ -28,6 +28,7 @@ class SettingsDialog(QDialog):
         self.result_settings = settings.copy()
         self._editors: dict[str, forms.Editor] = {}
         self.signed_in = False  # signed in to YouTube from here: the caller ends a sign-in pause
+        self.go_back = False  # Go back to the previous version was pressed: the caller does it after saving
 
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
@@ -94,15 +95,30 @@ class SettingsDialog(QDialog):
                 page.layout().addRow("", row)
             if group == "Updates":
                 repo = updater.configured_repo(self.result_settings.update_repo)
-                note = QLabel(f"You have ClipMonster {__version__}. "
+                where = updater.install_dir()
+                note = QLabel(f"You have ClipMonster {updater.build_label()}"
+                              + (f", installed in {where}. " if where else ", running from source. ")
                               + (f"New versions are published at github.com/{repo}/releases. "
                                  if repo else "This build doesn't know its GitHub repository yet. Builds made by "
                                  "the GitHub release workflow set it automatically. ")
-                              + "Updates download in the background, are checked against their SHA-256 checksum, "
-                                "and install when ClipMonster restarts. Your settings and session are kept.")
+                              + "Updates are checked against their SHA-256 checksum and kept out of the install "
+                                f"folder, in {updater.updates_dir()}, until they're installed. Your settings, "
+                                "session and clips are never touched by an update.")
                 note.setWordWrap(True)
                 note.setProperty("muted", True)
                 page.layout().insertRow(0, note)
+                previous = updater.previous_version()
+                row = QHBoxLayout()
+                back = QPushButton(f"Go back to {previous}" if previous else "Go back to the previous version")
+                back.setEnabled(bool(previous) and where is not None)
+                back.setToolTip("Installs the version you had before the last update again. The version you have "
+                                "now is kept, so you can come back to it the same way" if previous else
+                                "The version before each update is kept from 2.8.0 on, so this is possible after "
+                                "your next update")
+                back.clicked.connect(self._go_back)
+                row.addWidget(back)
+                row.addStretch(1)
+                page.layout().addRow("", row)
             if group == "Research":
                 note = QLabel("The Research tab reads YouTube's most-popular chart for each region and scores "
                               "every video on how well it will cut into clips. It needs a free YouTube Data API "
@@ -201,6 +217,10 @@ class SettingsDialog(QDialog):
         if on != mine and (on or mine):
             self.result_settings = self.result_settings.apply({"cookies_browser": youtube_login.CHOICE if on else ""})
             forms.refresh(self._editors, self.result_settings)
+
+    def _go_back(self) -> None:
+        self.go_back = True
+        self.accept()
 
     def _reset(self) -> None:
         # Niches are your content, edited in their own tab, not a setting to reset.

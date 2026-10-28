@@ -166,7 +166,8 @@ class MainWindow(QMainWindow):
             else:
                 self._warn(msg)
         # Only packaged builds update themselves; from source you'd use git.
-        if self.settings.check_updates and updater.install_dir() and updater.due_for_check():
+        if self.settings.check_updates and updater.install_dir() and \
+                updater.due_for_check(updater.CHECK_HOURS[updater.channel_setting(self.settings)]):
             self.banner.check(manual=False)
 
     # ================================================================== UI
@@ -1464,8 +1465,13 @@ class MainWindow(QMainWindow):
     def _open_settings(self, tab: str = "") -> None:
         self.niches.commit()  # a niche name still being typed would be lost when the dialog's copy comes back
         dlg = SettingsDialog(self.settings, self, tab)
+        channel = self.settings.update_channel
         if dlg.exec():
             self._apply_settings(dlg.result_settings)
+            if dlg.go_back:
+                self.banner.go_back()
+            elif self.settings.update_channel != channel and self.settings.check_updates:
+                self.banner.check(manual=False)  # a new channel: see what it has straight away
         elif dlg.signed_in:  # cancelled, but the sign-in just made still counts
             self._apply_settings(self.settings.copy(cookies_browser=youtube_login.CHOICE))
         if dlg.signed_in and self.settings.cookies_browser == youtube_login.CHOICE:
@@ -1569,7 +1575,7 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle(f"About {APP_NAME}")
         box.setText(f"""
-            <h3>{APP_NAME} {__version__}</h3>
+            <h3>{APP_NAME} {updater.build_label()}</h3>
             <p>Paste links or drop videos, let the analysis find the best moments, fine-tune them on the
             timeline, then export clips with captions in any format.</p>
             <p><b>Clip colours:</b> purple = signals, cyan = AI, green = edited by you.</p>
