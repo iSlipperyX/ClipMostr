@@ -1119,8 +1119,9 @@ def startup_command() -> str:
 def _run_key(write: bool = False):
     import winreg
 
-    access = winreg.KEY_READ | (winreg.KEY_SET_VALUE if write else 0)
-    return winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, access)
+    if write:  # the Run key may not exist yet (a new Windows account has none until something adds to it)
+        return winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE)
+    return winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ)
 
 
 def _remove_old_task() -> None:

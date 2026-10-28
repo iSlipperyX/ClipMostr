@@ -543,8 +543,12 @@ def test_a_process_that_got_a_dead_runners_id_is_not_mistaken_for_it(tmp_path, m
 
 
 def test_process_name_names_this_process():
+    import sys
+
     name = pipeline.process_name(os.getpid()).lower()
-    assert name.startswith("python") or name == ""  # '' where the system won't say
+    # Python itself, or the script it was started as (`pytest`; Linux keeps 15 characters), or ''
+    # where the system won't say
+    assert name.startswith("python") or name == Path(sys.argv[0]).name.lower()[:15] or name == ""
     assert pipeline.process_name("not a pid") == ""
 
 
