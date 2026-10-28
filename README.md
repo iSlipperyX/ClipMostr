@@ -8,9 +8,18 @@ It comes as a Windows desktop app, **`ClipMonster.exe`**, plus a command-line to
 
 ## Running it
 
-The built app is in `dist/ClipMonster/`. Double-click **`ClipMonster.exe`**.
+Download **`ClipMonster-Setup.exe`** from the [newest release](https://github.com/iSlipperyX/ClipMostr/releases/latest) and run it. It installs for you only, with no admin prompt, into `%LOCALAPPDATA%\Programs\ClipMonster`, and adds ClipMonster to the Start menu and to Windows' Installed apps (uninstall it from there). Python isn't needed: ffmpeg, Qt, Whisper and the YouTube downloader are all inside.
 
-To give it to someone else, send them `dist/ClipMonster-windows.zip`. They unzip it and run `ClipMonster.exe`; Python isn't needed. Everything ships inside the folder, including ffmpeg, Qt, Whisper and the YouTube downloader.
+Where things live:
+
+| | Where |
+|---|---|
+| The program | `%LOCALAPPDATA%\Programs\ClipMonster` |
+| Settings, niches, the automation queue and history, sign-ins | `%APPDATA%\ClipMonster` |
+| Updates, the previous version, models and temporary work | `%LOCALAPPDATA%\ClipMonster` |
+| Your clips | the output folder in Settings → General |
+
+None of it is in OneDrive. A copy unzipped by hand (before 2.8.0) offers **Install now**, which moves it to the installer in one step and then offers to remove the old copy.
 
 > YouTube downloads need a JavaScript runtime on the PC: [Node.js](https://nodejs.org) or [Deno](https://deno.com). Local video files work without one.
 
@@ -302,7 +311,7 @@ Videos/ClipMonster/
 
 Automation's clips go to `<output>/Automation` in the same layout, inside a folder for each niche when you have niches: `Automation/Gaming/<channel>/<date> <title> [<id>]/`. A clip request's clips go to `Automation/Requests/<date> <N clips a-b s>/` (inside the niche's folder when it's for one).
 
-Full downloads are cached in `<output>/.downloads`, so re-analysing or re-exporting never downloads a video twice. Your settings, presets and session live in `%APPDATA%\ClipMonster`.
+Full downloads are cached in `<output>/.downloads`, so re-analysing or re-exporting never downloads a video twice. Your settings, presets and session live in `%APPDATA%\ClipMonster`. Each step's temporary files go in `%LOCALAPPDATA%\ClipMonster\work` and are deleted when the step ends; whatever a crash leaves there is cleared at the next start.
 
 ## Clean up
 
@@ -311,12 +320,13 @@ Clips, downloads and previews pile up. **🧹 Clean up…**, in the Library and 
 | Kind | What it is | Ticked to start with |
 |---|---|---|
 | Unfinished downloads | Downloads that stopped part way and haven't been touched for half an hour | yes |
-| Preview renders | Clips made by Render preview and the Layout tab's preview, in the temp folder | yes |
+| Preview renders | Clips made by Render preview and the Layout tab's preview, in the work folder | yes |
 | Downloaded videos | Full videos kept after clipping. Clipping one again downloads it again | no |
 | Saved transcripts and analysis | A video opened again is measured again without them | no |
 | Clips the quality check rejected | The `_rejected` folders. TikTok Manager never takes these | yes |
 | Clips you've posted | Clips TikTok Manager says you've posted. Its post history and stats stay | yes |
 | Clips you removed in TikTok Manager | It never brings them back | yes |
+| Clips safely uploaded | Clips whose same file is on your storage server (see [Uploading clips](#uploading-clips)). The uploaded copy stays | yes |
 
 Nothing goes until you've seen it: the window lists every file and how much space it frees. You can untick whole kinds or single files, choose **Only things older than** (posted clips count from when you posted them), or send everything to the Recycle Bin instead. Each video's `clips.json` and `README.md` are updated to match. Some things always stay:
 
@@ -325,7 +335,7 @@ Nothing goes until you've seen it: the window lists every file and how much spac
 - anything changed in the last 10 minutes;
 - anything that isn't ClipMonster's own.
 
-Tick **Do this by itself once a day while automation runs** and automation clears the ticked kinds once a day, at the age you chose (never less than a day).
+**Do this by itself once a day while automation runs** is on to start with: automation clears the ticked kinds once a day, at the age you chose (never less than a day). When automation deletes a full download after clipping it (*Delete full downloads after clipping*), the transcripts and measurements saved beside it go too.
 
 ```
 ytclip clean                     # what would go, and how much space it frees
@@ -334,6 +344,22 @@ ytclip clean --only posted,rejected --older-than 7 --delete
 ```
 
 Nothing is removed without `--delete`. Without `--only`, it leaves downloaded videos and analysis alone.
+
+## Uploading clips
+
+ClipMonster can upload every finished clip to **Google Drive**, or copy it to a **folder** (a NAS share, a mapped drive, or a folder Dropbox or OneDrive syncs). Pick one in **Settings → Upload**.
+
+- Google Drive needs a free OAuth client from your own Google Cloud project, made once: follow the [Google Drive setup guide](docs/google-drive-setup.md) (about 10 minutes). ClipMonster only gets the `drive.file` permission, so it sees nothing in your Drive but what it uploaded. The sign-in is kept encrypted for your Windows account.
+- Clips upload a few minutes after they're exported, while the window or automation runs, into the same folders as on your PC (`ClipMonster/Automation/<niche>/<channel>/<video>/`). Rejected clips never upload. *Which clips* can limit it to Automation's.
+- Big clips go up in pieces, and carry on from where they stopped after a dropped connection or a restart. A clip exported again replaces its upload.
+- The Automation tab shows what's uploading, waiting or failed. If the sign-in stops working or the Drive is full, uploads pause and say why; **Retry failed uploads** in Settings → Upload tries again.
+
+```
+ytclip upload               # what's uploading, waiting and failed
+ytclip upload --sign-in     # sign in to Google Drive
+ytclip upload --now         # upload everything waiting, then stop
+ytclip upload --retry
+```
 
 ## Command line (`ytclip.exe`)
 
@@ -358,36 +384,42 @@ Main options: `-n` number of clips · `--min/--max` length in seconds · `--mode
 
 ## Updates
 
-ClipMonster updates itself from this project's GitHub Releases.
+ClipMonster updates itself from this project's GitHub Releases, on the channel picked in **Settings → Updates**:
 
-- About once a day it checks quietly for a newer release. When one exists, a banner offers **What's new**, **Update now** and **Skip this version**. You can also check any time from **? → Check for updates**, or with `ytclip --check-update`.
-- **Update now** downloads the release and checks it against its SHA-256 checksum, then restarts ClipMonster. While the app is closed, the new version's own `ytclip.exe` replaces the app's own files (`ClipMonster.exe`, `ytclip.exe` and `_internal`) in place, keeping the old ones in a hidden backup folder until the new ones are in. If anything goes wrong, it puts the old version back. File Explorer windows or terminals open on the ClipMonster folder don't get in the way, and anything else you keep in the folder is left alone. Background automation is paused for the update and starts again afterwards. Settings, presets and your session are untouched. If an update doesn't complete, the app says why when it next opens. The helper writes a log to `%LOCALAPPDATA%\ClipMonster\updates\update.log`. Once the new version opens, it removes the downloaded zip and the unpacked copy.
-- Turn automatic checks off, or opt into beta versions, under **Settings → Updates**.
+| Channel | Gets | Checks |
+|---|---|---|
+| **Stable** | finished versions (`python release.py 2.8.0`) | about once a day |
+| **Beta** | those, and test versions of the next one (`2.9.0-beta.1`) | every 6 hours |
+| **Dev** | those, and a new build every time `main` changes, versioned like `2.8.0+dev.5` (5 changes after 2.8.0) | every 2 hours |
+
+- New versions download quietly in the background and are checked against their SHA-256. The bar then says the update is ready: **Restart now** installs it in a few seconds, and closing ClipMonster installs it too. With the window closed, automation installs updates itself between videos and carries on. Turn that off with *Get updates by themselves*; you're then offered each update instead.
+- Switching to a steadier channel offers its newest version straight away (**Switch now**), even though its number is lower.
+- **Go back to** (Settings → Updates) reinstalls the version you had before the last update, and skips the one you left.
+- Downloads, the unpacked update and the previous version are kept in `%LOCALAPPDATA%\ClipMonster\updates`. The download is deleted once unpacked, and the unpacked copy once it's installed. The update helper's log is `updates\update.log` there.
+- Installing replaces only the app's own files, with the old ones kept until the new ones are in; if anything fails, the old version is put back. Settings, history and clips are never touched.
+- From the command line: `ytclip --check-update`, `ytclip --update` (add `--channel beta` to try another channel once), `ytclip --update --go-back`.
+- Running a newer `ClipMonster-Setup.exe` also updates an installed copy.
 - The repository must be **public** so the app can see its releases without a login.
 
 ## Publishing a release
 
-One-time setup, after creating the GitHub repository:
+Every push to `main` publishes a **dev build** for the Dev channel by itself: the pre-release tagged `dev`, replaced each time, with the changes since the last release as its notes.
+
+For a release, write `release-notes/v2.9.0.md` (what the app and the release page show), merge it to `main`, then on `main`:
 
 ```
-git init
-git add .
-git commit -m "ClipMonster 1.1.0"
-git branch -M main
-git remote add origin https://github.com/<you>/<repo>.git
-git push -u origin main
+python release.py 2.9.0
 ```
 
-Then, for every release:
+For a beta, which only the Beta and Dev channels get (release notes optional):
 
 ```
-python release.py 1.2.0
-git push && git push --tags
+python release.py 2.9.0-beta.1
 ```
 
-`release.py` bumps the version, commits and tags. Pushing the tag starts the **Release** workflow in GitHub Actions, which takes about 10 minutes. It builds the app on Windows and publishes `ClipMonster-windows.zip` and `SHA256SUMS.txt` as a GitHub Release, with notes generated from your commits. To lead with your own notes, add `release-notes/v1.2.0.md` (named after the tag) before tagging. Every installed copy then offers the update. A tag with a suffix, such as `v1.3.0-beta.1`, becomes a pre-release, which only reaches people who opted into betas.
+`release.py` checks you're on an up-to-date, clean `main`, sets the version, commits, tags, and pushes `main` and the tag. The **Release** workflow in GitHub Actions then builds on Windows (about 15 minutes) and publishes `ClipMonster-Setup.exe`, `ClipMonster-windows.zip` (what updates install) and `SHA256SUMS.txt`. Never make releases by hand on GitHub's website: installed copies only trust what the workflow publishes with checksums.
 
-Builds record which repository they came from, so they need no update configuration. Local builds read it from the git remote; releases built on GitHub get it from Actions.
+Pull requests that change the build also run the workflow, without publishing, and keep the files as a workflow artifact. Builds record which repository they came from, so they need no update configuration.
 
 ## Building from source
 
@@ -398,7 +430,7 @@ pip install -e .[ai,whisper,build]
 python build.py
 ```
 
-This produces `dist/ClipMonster/` and `dist/ClipMonster-windows.zip`. To include Whisper for the graphics card, first install the Vulkan SDK and run `python packaging/build_whisper_cpp.py build/whisper-cpp --vulkan`; `build.py` then copies it in. The release workflow does both. During development, run the app with `python -m ytclip.gui.app` and the command line with `python -m ytclip`.
+This produces `dist/ClipMonster/` and `dist/ClipMonster-windows.zip`, and `dist/ClipMonster-Setup.exe` when [Inno Setup 6](https://jrsoftware.org/isinfo.php) is installed (`winget install JRSoftware.InnoSetup`; `python build.py --installer` fails without it). To include Whisper for the graphics card, first install the Vulkan SDK and run `python packaging/build_whisper_cpp.py build/whisper-cpp --vulkan`; `build.py` then copies it in. The release workflow does both. During development, run the app with `python -m ytclip.gui.app` and the command line with `python -m ytclip`.
 
 Run the tests with `pip install -e .[test]` and then `pytest`. They need no network or API key.
 
@@ -417,7 +449,10 @@ Run the tests with `pip install -e .[test]` and then `pytest`. They need no netw
 | `ytclip/sources.py` | Channel list and Creative Commons searches for Research |
 | `ytclip/policy.py` | Picking rules, each niche's share, and the log of picks |
 | `ytclip/niches.py` | Niches: each TikTok account's sources, look and folder, and which niche a video goes in |
-| `ytclip/cleanup.py` | Clean up: what nothing needs any more, and clearing it |
+| `ytclip/cleanup.py` | Clean up: what nothing needs any more, and clearing it; the work folder's startup sweep |
+| `ytclip/uploads.py` | The upload queue (in `jobs.db`), its background uploader, and the folder target |
+| `ytclip/gdrive.py` | Google Drive over plain HTTPS: desktop sign-in (PKCE), folders, resumable uploads |
+| `ytclip/updater.py`, `swap.py` | Update channels, background downloads, going back, the installer and old copies; the helper that swaps the files |
 | `ytclip/pipeline.py` | Automation: the unattended runner, recipes, pacing and retries |
 | `ytclip/jobs.py` | `jobs.db`, the automation queue shared by the runner and the app |
 | `ytclip/transcribe.py` | Whisper transcription: whole videos (with checkpoints) or just the clips |
@@ -425,6 +460,6 @@ Run the tests with `pip install -e .[test]` and then `pytest`. They need no netw
 | `ytclip/speed.py` | Speed: Whisper threads, automation's priority, the graphics card |
 | `ytclip/export.py`, `captions.py` | Reframing, captions, encoding |
 | `ytclip/gui/` | Desktop app (PySide6) |
-| `packaging/` | PyInstaller spec, launchers, icon, the whisper.cpp build (`build_whisper_cpp.py`) |
+| `packaging/` | PyInstaller spec, the Inno Setup script (`ClipMonster.iss`), launchers, icon, the whisper.cpp build (`build_whisper_cpp.py`) |
 
 Only download and repost videos you have the rights to use.
