@@ -133,7 +133,10 @@ def parse_recipes(text: str) -> tuple[list[Recipe], list[str]]:
 
 
 def has_ai_key(s: Settings) -> bool:
-    return bool(s.ai_api_key.strip() or os.environ.get("ANTHROPIC_API_KEY"))
+    """A Claude or Gemini key the AI can use (ai.order)."""
+    from .ai import has_key
+
+    return has_key(s)
 
 
 def settings_for(job: Job, s: Settings, order: "orders.Order | None" = None,

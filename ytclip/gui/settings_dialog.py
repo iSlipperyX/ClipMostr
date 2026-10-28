@@ -10,10 +10,12 @@ from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QHBoxLay
 
 from .. import __version__, niches, updater, youtube_login
 from ..settings import SCHEMA, Settings, app_dir
+from ..gemini import KEY_URL as GEMINI_KEY_URL
 from ..trending import KEY_HELP_URL
 from . import forms, theme
 from .sign_in_dialog import SignInDialog
 
+ANTHROPIC_KEY_URL = "https://console.anthropic.com/settings/keys"
 GROUPS = ("General", "Download", "Clip finding", "Transcription", "Speed", "AI", "Export", "Captions", "Layout",
           "Research", "Picking", "Automation", "Updates")
 
@@ -36,17 +38,23 @@ class SettingsDialog(QDialog):
             page, editors = forms.build_form(fields, self.result_settings, self._changed)
             self._editors |= editors
             if group == "AI":
-                note = QLabel("The AI clip finder sends the video's transcript to Claude and asks it to pick "
-                              "self-contained moments. AI polish sends it each clip's words and one frame, "
-                              "and gets back hooks, caption fixes and where the speaker is. "
-                              "Get an API key at console.anthropic.com. "
-                              "You can also set the ANTHROPIC_API_KEY environment variable instead.")
+                note = QLabel("The AI clip finder sends the video's transcript to the AI you choose (Claude or "
+                              "Gemini) and asks it to pick self-contained moments. AI polish sends it each clip's "
+                              "words and one frame, and gets back hooks, caption fixes and where the speaker is. "
+                              f"Get a Claude key at <a href='{ANTHROPIC_KEY_URL}' style='color:{theme.ACCENT_2}'>"
+                              "console.anthropic.com</a> or a Gemini key at "
+                              f"<a href='{GEMINI_KEY_URL}' style='color:{theme.ACCENT_2}'>aistudio.google.com"
+                              "</a> (Google may use what free keys send to improve its products; keys with "
+                              "billing on aren't used that way). You can also set ANTHROPIC_API_KEY or "
+                              "GEMINI_API_KEY as environment variables instead.")
                 note.setWordWrap(True)
+                note.setOpenExternalLinks(True)
                 note.setProperty("muted", True)
                 page.layout().insertRow(0, note)
                 row = QHBoxLayout()
-                test = QPushButton("Test key")
-                test.setToolTip("Checks the key and model with Anthropic. Uses no tokens.")
+                test = QPushButton("Test keys")
+                test.setToolTip("Checks each key you've added, and that it can use the models picked above. "
+                                "Uses no tokens.")
                 self._key_result = QLabel("")
                 self._key_result.setWordWrap(True)
                 test.clicked.connect(self._test_key)
@@ -119,7 +127,7 @@ class SettingsDialog(QDialog):
             if group == "Automation":
                 note = QLabel("Automation clips what your picking rules pick, one video at a time, with no one "
                               "clicking. Start it from the Automation tab. These settings choose the style of its "
-                              "clips, when it works, and how hard it pushes YouTube and the Claude API.")
+                              "clips, when it works, and how hard it pushes YouTube and the AI.")
                 note.setWordWrap(True)
                 note.setProperty("muted", True)
                 page.layout().insertRow(0, note)
@@ -154,20 +162,26 @@ class SettingsDialog(QDialog):
         self.result_settings = self.result_settings.apply({name: value})
 
     def _test_key(self) -> None:
-        from ..ai import check_key
+        from .. import ai
 
         s = self.result_settings
         self._key_result.setText("Checking…")
         self._key_result.setStyleSheet(f"color:{theme.MUTED};")
         QApplication.setOverrideCursor(Qt.WaitCursor)
         QApplication.processEvents()
+        lines, colour = [], theme.GOOD
         try:
-            msg, colour = check_key(s.ai_api_key or os.environ.get("ANTHROPIC_API_KEY", ""), s.ai_model), theme.GOOD
-        except Exception as exc:
-            msg, colour = f"✗ {exc}", theme.BAD
+            # The chosen AI first, then the other one if it has a key too.
+            providers = [ai.chosen(s)] + [p for p in ai.NAMES if p != ai.chosen(s) and ai.key_for(s, p)]
+            for provider in providers:
+                try:
+                    lines.append(f"✓ {ai.check_key(s, provider)}")
+                except Exception as exc:
+                    lines.append(f"✗ {ai.name(provider)}: {exc}")
+                    colour = theme.BAD if provider == providers[0] else theme.WARN
         finally:
             QApplication.restoreOverrideCursor()
-        self._key_result.setText(msg if colour == theme.BAD else f"✓ {msg}")
+        self._key_result.setText("\n".join(lines))
         self._key_result.setStyleSheet(f"color:{colour};")
 
     def _sign_in(self) -> None:

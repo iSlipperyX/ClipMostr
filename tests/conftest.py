@@ -13,7 +13,8 @@ def isolated_profile(tmp_path, monkeypatch):
     """Settings, research history and caches go to a temp folder, never the real profile."""
     monkeypatch.setenv("APPDATA", str(tmp_path / "roaming"))
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
-    monkeypatch.delenv("YOUTUBE_API_KEY", raising=False)
+    for key in ("YOUTUBE_API_KEY", "ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        monkeypatch.delenv(key, raising=False)  # tests never reach a real API with the developer's keys
     return tmp_path
 
 

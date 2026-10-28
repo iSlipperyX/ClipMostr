@@ -96,7 +96,7 @@ def test_new_request_window_fills_in_the_niches_length_and_checks_input(app, tmp
     assert (dlg.min_len.value(), dlg.max_len.value()) == (25, 40)  # the niche's own length
     assert dlg.warn.isHidden()  # keys are fine for picking; no special requests yet
     dlg.notes.setPlainText("only clutch plays")
-    assert "Anthropic key" in dlg.warn.text()
+    assert "Claude or Gemini key" in dlg.warn.text()
     dlg.from_links.setChecked(True)
     dlg.accept()
     assert dlg.order is None and "at least one link" in dlg.error.text()

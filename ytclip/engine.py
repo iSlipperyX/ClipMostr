@@ -268,7 +268,7 @@ class Engine:
     # ------------------------------------------------------------ stage 3: find clips
 
     def find(self, p: Project, use_ai: bool = True, strict: bool = False) -> None:
-        """Score the video and pick clips. Cheap unless AI mode calls out to Claude.
+        """Score the video and pick clips. Cheap unless AI mode calls out to the AI.
 
         If the AI call fails, unattended runs fall back to smart signals (recording why in
         p.ai_error); with strict=True - the user explicitly asked for AI - the error is raised."""
@@ -290,12 +290,12 @@ class Engine:
             try:
                 clips, model = find_clips_ai(
                     v.title, v.duration, sents, p.score, self.s.clip_count, self.s.min_len, self.s.max_len,
-                    self.s.ai_instructions, self.s.ai_api_key, self.s.ai_model, self.log,
+                    self.s.ai_instructions, self.s, self.log,
                     check=lambda: self.progress("AI is picking clips", None))
                 self.progress("AI is picking clips", None)  # a cancel during the call discards its result
                 clips = self._fit(clips, sents, m, v.duration)
                 if not clips:
-                    raise AIError("None of Claude's clips were long enough once aligned to sentences.")
+                    raise AIError("None of the AI's clips were long enough once aligned to sentences.")
                 p.clips, p.mode_used, p.ai_model = clips, "ai", model
                 self.parts(p, sents)
                 self.trim(p)
@@ -380,7 +380,7 @@ class Engine:
     # ------------------------------------------------------------ stage 3b: AI polish
 
     def polish(self, p: Project) -> None:
-        """Hooks, caption fixes, speaker crops and a burned-in subtitle check from one Claude call.
+        """Hooks, caption fixes, speaker crops and a burned-in subtitle check from one AI call.
         Never fails the video: on any error the clips go out as they are (reason in p.polish_error)."""
         from . import learn, niches, polish
 
@@ -405,8 +405,7 @@ class Engine:
         bottom_on = layout.uses_ai_bottom(self.s)
         usual = " ".join(layout.own_words(self.s.banner_bottom_alt).split()) if bottom_on else ""
         try:
-            result = polish.ask(p.video.title, clips, p.words, p.video.path, self.s.ai_api_key,
-                                self.s.ai_polish_model, self.log,
+            result = polish.ask(p.video.title, clips, p.words, p.video.path, self.s, self.log,
                                 check=lambda: self.progress("AI is polishing the clips", None), guide=guide,
                                 bottom=usual, handles=layout.bottom_handles(self.s) if bottom_on else [])
             self.progress("AI is polishing the clips", None)
@@ -470,7 +469,9 @@ class Engine:
     def signal_names(self, p: Project) -> list[str]:
         names = [SIGNAL_LABELS[k] for k in p.signals if self.s.weights.get(k, 0) > 0]
         if p.mode_used == "ai":
-            names.insert(0, f"AI ({p.ai_model or self.s.ai_model})")
+            from .ai import model_for
+
+            names.insert(0, f"AI ({p.ai_model or model_for(self.s)})")
         return names
 
     def overpick(self) -> int:

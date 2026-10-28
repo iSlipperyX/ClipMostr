@@ -50,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min", dest="min_len", type=float, help="minimum clip length in seconds")
     p.add_argument("--max", dest="max_len", type=float, help="maximum clip length in seconds")
     p.add_argument("--mode", choices=["auto", "ai", "chapters"],
-                   help="auto: smart signals; ai: Claude picks from the transcript; chapters: one clip per chapter")
+                   help="auto: smart signals; ai: the AI (Claude or Gemini) picks from the transcript; chapters: one clip per chapter")
     p.add_argument("-f", "--format", dest="aspect", choices=[a for a, _ in ASPECTS], help="output framing")
     p.add_argument("--vertical", action="store_true", help="shortcut for --format vertical_blur")
     p.add_argument("--captions", action="store_true", help="burn in animated word-by-word captions")
@@ -66,7 +66,9 @@ def build_parser() -> argparse.ArgumentParser:
                         "folder to use a different video from it for each clip")
     p.add_argument("--polish", action="store_true",
                    help="AI polish: hooks for the top banner, bottom lines for clips with no part 2, caption "
-                        "fixes, speaker crops (needs an Anthropic key)")
+                        "fixes, speaker crops (needs a Claude or Gemini key)")
+    p.add_argument("--ai", choices=["claude", "gemini"],
+                   help="which AI to use for --mode ai and --polish this run (default: Settings → AI)")
     p.add_argument("--bleep", action="store_true", help="mask strong swearing in captions (f*ck, sh*t)")
     p.add_argument("--qc", action="store_true", help="check each clip after export; failures move to _rejected")
     p.add_argument("--keywords", help="comma-separated words/phrases to boost")
@@ -157,6 +159,7 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
         "keep_source": False if args.delete_source else None,
         "tiktok_ready": False if args.no_tiktok else None,
         "ai_polish": True if args.polish else None,
+        "ai_provider": args.ai,
         "caption_censor": True if args.bleep else None,
         "qc_enabled": True if args.qc else None,
     }
@@ -807,7 +810,7 @@ def run_request(argv: list[str]) -> int:
         order = pipeline.Runner(db, log=pipeline.file_logger()).place(order)
         console.print(f"Request {order.id}: {escape(order.title(niches.name_of(s, niche)))}. {escape(order.message)}.")
         if order.notes and not pipeline.has_ai_key(s):
-            console.print("[yellow]Special requests need an Anthropic key (Settings → AI): without one the clips are "
+            console.print("[yellow]Special requests need a Claude or Gemini key (Settings → AI): without one the clips are "
                           "picked by smart signals.[/]")
         if order.picks and not youtube_key(s):
             console.print("[yellow]Automation needs a YouTube Data API key to pick videos for it (Settings → "

@@ -49,10 +49,10 @@ Clips grow outward from the peaks. When there's a transcript, their edges are al
 **Part series.** When a great moment runs longer than one clip, it carries on in **Part 2** (and Part 3), each starting on the next sentence where the last part stopped and ending when the moment does. Parts count towards *Clips per video*, so a series takes the place of the weakest stand-alone clips, and a weak last part never pushes out a better clip. Every part except the last shows your "Follow for part 2" bottom text; if the quality check rejects a part, the part before it is made again without the promise. The clip list marks parts (P1, P2…), and `clips.json` records each clip's `series`, `part` and `parts`, counting only the parts that passed the quality check. Set the most parts in *Find clips → Part series* (3 to start with; 1 turns it off).
 
 **Other clip finders** (pick one under *Find clips → Clip finder*):
-- **AI picks (Claude):** Claude reads the transcript, one sentence per line with exact times, and picks self-contained moments with a strong hook and payoff, plus a title and the reason for each. Add your Anthropic API key under *Settings → AI*, then click **Test key** to confirm it works (this uses no tokens). When you click **Re-detect clips**, a failure shows a message and leaves your clips untouched. In batch runs, a failure falls back to the signals above, and the video is flagged with the reason. Clips you've edited by hand are kept when you re-detect.
+- **AI picks (Claude or Gemini):** the AI reads the transcript, one sentence per line with exact times, and picks self-contained moments with a strong hook and payoff, plus a title and the reason for each. Under *Settings → AI*, choose **Claude** (Anthropic API key, from [console.anthropic.com](https://console.anthropic.com/settings/keys)) or **Gemini** (Google's Gemini API key, free from [aistudio.google.com/apikey](https://aistudio.google.com/apikey)), add its key, then click **Test keys** to confirm it works (this uses no tokens). Each AI has its own models for finding and for polishing. With both keys and **If it fails, try the other AI** on (the default), a video the chosen AI can't do (a used-up quota, busy servers, a refusal) goes to the other one. The keys can also come from the `ANTHROPIC_API_KEY` and `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) environment variables, and `--ai claude` or `--ai gemini` picks one for a single command-line run. Google may use what free Gemini keys send to improve its products; keys with billing turned on aren't used that way. When you click **Re-detect clips**, a failure shows a message and leaves your clips untouched. In batch runs, a failure falls back to the signals above, and the video is flagged with the reason. Clips you've edited by hand are kept when you re-detect.
 - **YouTube chapters:** one clip per chapter.
 
-**AI polish** (*Settings → AI → Polish clips with AI*, off by default) makes one more Claude call per video, sending each clip's transcript and one small frame from it. It sends back:
+**AI polish** (*Settings → AI → Polish clips with AI*, off by default) makes one more AI call per video (to Claude or Gemini, whichever Settings → AI uses), sending each clip's transcript and one small frame from it. It sends back:
 - a **hook** for each clip: a few honest, specific words that go in the top banner when it shows `{title}`, and into `clips.json` for your upload caption;
 - a **bottom line** for each clip with no part 2, when your bottom text promises one (see *Banners* under [Export options](#export-options));
 - **caption fixes** for words the transcript misheard, mostly names and jargon ("Joe Rogen" becomes "Joe Rogan"), swapped word for word so the timing stays right;
@@ -60,7 +60,7 @@ Clips grow outward from the peaks. When there's a transcript, their edges are al
 - where the **speaker** is, so *9:16 vertical cropped* and *1:1* keep them in shot;
 - whether the video **already has subtitles** in the picture. If it does, your captions are left off for that video (or kept, if you choose), so there aren't two sets of words on screen.
 
-Anything you've edited by hand is left alone, and if the call fails the clips simply go out unpolished. It uses Claude Sonnet 5.5 by default, which you can change.
+Anything you've edited by hand is left alone, and if the call fails the clips simply go out unpolished. It uses Claude Sonnet 5.5 or Gemini 3.8 Flash by default, which you can change.
 
 **No captions?** For local files, or videos without captions, ClipMonster transcribes speech on your PC with Whisper. The model is downloaded once on first use to `%LOCALAPPDATA%\ClipMonster\models`. **Transcription → For the clips** gets Whisper's better captions without the wait: YouTube's captions find the clips, then Whisper types out only the clips (and three seconds either side). That's a few minutes of speech instead of the whole video. A whole video keeps a checkpoint as it goes, so a stopped run carries on where it got to. `ytclip whisper-test VIDEO` times each model on your PC.
 
@@ -76,13 +76,13 @@ Unless the Speed is Quiet, scene detection decodes the video on the graphics car
 
 - **Formats:** original; 9:16 vertical with a blurred fill; 9:16 vertical cropped (reframe per clip); 1:1 square
 - **Animated captions:** word groups pop on screen with the spoken word highlighted. Font, size, colours, outline, position, words per screen and UPPERCASE are all adjustable. Sizes are letter heights in pixels on a 1080-wide video, so a size looks the same in every font. Optionally, the clip title appears as a banner at the top. **Bleep strong swearing** writes f\*ck, sh\*t and the like in captions and `.srt` files, which TikTok is less likely to hold back.
-- **Banners:** a solid bar of text at the top, the bottom or both (the video sits between them), or the same text laid over the video. `{title}` fills in the clip title, long text wraps and shrinks to fit, and each clip can override the text or show none. Bottom text that promises more, like *Follow for part 2*, only shows on a clip that the next clip carries straight on from, and not when the quality check rejects that part 2. Other clips show **Bottom text when there's no part 2** (*Follow for more* to start with) or, with AI polish, a line Claude wrote for that clip. Claude's lines never promise a part 2, and they keep any @handle in your bottom text.
+- **Banners:** a solid bar of text at the top, the bottom or both (the video sits between them), or the same text laid over the video. `{title}` fills in the clip title, long text wraps and shrinks to fit, and each clip can override the text or show none. Bottom text that promises more, like *Follow for part 2*, only shows on a clip that the next clip carries straight on from, and not when the quality check rejects that part 2. Other clips show **Bottom text when there's no part 2** (*Follow for more* to start with) or, with AI polish, a line the AI wrote for that clip. The AI's lines never promise a part 2, and they keep any @handle in your bottom text.
 - **Stacked layout:** your clip on one part of a 9:16 frame and a looping second video on the other. You choose which goes on top, how much room the clip gets, where the second video starts (a random spot per clip, or a fixed time) and how loud it is (silent by default). Captions set to *Middle* sit on the seam. Choose **a folder of second videos** instead of one, and each clip gets a different one: every video in the folder is used once before any repeats, and never the same one twice in a row, even across videos and restarts. `clips.json` notes which one each clip got.
 - **Fonts:** 13 free display fonts ship with the app and look the same on every PC: TikTok Sans Black, Montserrat Black/ExtraBold, Poppins Black/ExtraBold, Archivo Black, Anton, Bebas Neue, Bangers, Luckiest Guy, Lilita One, Titan One and Permanent Marker. Pick one for captions and one for banners. Any font installed on the PC works too. Licences are in `ytclip/fonts/licenses`.
 - **TikTok-ready output** (on by default): every clip comes out 9:16 at 1080×1920 (between 540×960 and 1080×1920 at other resolution settings). *Original* and *1:1* are fitted in with a blurred fill; turn this off to keep them. In 9:16 the banner text and captions stay out of the areas TikTok covers with its tabs, buttons and caption (the layout sketch shades them). Output is H.264 High with AAC 44.1 kHz audio, at most 60 fps and 20 Mbps, and at least 540×960. The log warns about any clip over 10 minutes, or over 287 MB (the phone-app limit; computers can upload up to 4 GB).
 - **Encoding:** GPU encoding on AMD (AMF), NVIDIA (NVENC) or Intel (Quick Sync), detected automatically, with x264 as the fallback
 - **Polish:** loudness normalisation (−14 LUFS, the level social platforms target), fade in/out, resolution, quality and audio bitrate
-- **Quality check** (*Check clips after export*): each clip is watched once, quickly, after it's made. A clip that's silent, mostly black or frozen, or the wrong length or size is **rejected**: it moves to a `_rejected` folder beside the others, so it never ends up in front of you as ready to upload. With AI polish on, Claude also rates how well each clip stands alone, from 1 to 10, and clips under *Reject AI ratings under* (5) are rejected too, with its reason. Clips that start or end mid-sentence, are very quiet or have hardly any talking are kept but flagged. The Library, the video's `README.md` and `clips.json` (a `qc` record per clip) all show the result. `ytclip qc FOLDER` checks existing folders again.
+- **Quality check** (*Check clips after export*): each clip is watched once, quickly, after it's made. A clip that's silent, mostly black or frozen, or the wrong length or size is **rejected**: it moves to a `_rejected` folder beside the others, so it never ends up in front of you as ready to upload. With AI polish on, the AI also rates how well each clip stands alone, from 1 to 10, and clips under *Reject AI ratings under* (5) are rejected too, with its reason. Clips that start or end mid-sentence, are very quiet or have hardly any talking are kept but flagged. The Library, the video's `README.md` and `clips.json` (a `qc` record per clip) all show the result. `ytclip qc FOLDER` checks existing folders again.
 - **Extras:** an `.srt` subtitle file and a thumbnail per clip, plus a `README.md` and `clips.json` index for each video
 - **Naming:** templates for folders (`{channel}/{date} {title} [{id}]`) and files (`{rank:02d} - {time} - {label}`)
 
@@ -183,8 +183,8 @@ The **Automation** tab runs the whole job without you: it checks Research on you
 | Work from / until | any time | Hours in which downloads and encodes may start, e.g. 1 to 7 overnight |
 | Minutes between downloads | 10 | Spacing that keeps YouTube from flagging the PC |
 | Check clips after export | on | The [quality check](#export-options); rejected clips go to `_rejected` and the queue shows them as "3 ✓ 1 ✗" |
-| Polish clips with AI | on | [AI polish](#how-clips-are-found) for every video, when there's an Anthropic key |
-| AI calls per day | 10 | The AI clip finder and AI polish each count as one. Over this, videos use the smart signals and skip polishing, so Claude costs stay predictable |
+| Polish clips with AI | on | [AI polish](#how-clips-are-found) for every video, when there's a Claude or Gemini key |
+| AI calls per day | 10 | The AI clip finder and AI polish each count as one. Over this, videos use the smart signals and skip polishing, so AI costs stay predictable |
 | Tries per video | 3 | Before a video is marked failed |
 | Delete full downloads after clipping | on | Keeps the disk from filling up |
 | Clear cached analysis after | 14 days | Removes transcripts and measurements of finished videos |
@@ -217,7 +217,7 @@ Want a set number of clips? **Automation → Requests → New request** asks for
 - **How many** clips, and **how long** each should be, e.g. 10 clips of 30 to 45 seconds;
 - **which niche** they're for (their folder, style and TikTok account), or none;
 - **where from:** let automation pick videos for it (with your picking rules and a YouTube Data API key), or paste the links to clip;
-- **special requests** in plain words, e.g. "only the funniest reactions, end on the punchline". With an Anthropic key, the AI clip finder and the AI polish follow them.
+- **special requests** in plain words, e.g. "only the funniest reactions, end on the punchline". With a Claude or Gemini key, the AI clip finder and the AI polish follow them.
 
 A request goes ahead of everything else in the queue, and its videos don't count against the daily limits. The Requests page shows each one's progress ("4 of 10 ready"); it's done when enough clips passed the quality check, or "finished short" when its links had no more good moments of that length. Its clips go to `Automation\Requests\<date> <N clips a-b s>\`. A video you already clipped is clipped again for a request.
 
@@ -225,7 +225,7 @@ A request goes ahead of everything else in the queue, and its videos don't count
 
 **Automation → Overnight report** tells you what happened while you were away: clips made per niche and per request, how many the quality check rejected and the usual reasons, videos that failed and why, and any pauses (YouTube sign-in requests, a full disk, stuck work stopped), for the last 12 hours, 24 hours or 7 days. The tab tells you when there's something new to read. `ytclip report` prints the same.
 
-Below it, the **health check** looks at everything automation needs: ffmpeg, how old the downloader is, your YouTube and Anthropic keys (**Check now** tries them online), the folders and free space, whether TikTok Manager watches your Automation folder, niches with nothing to find videos with, and requests that can't be filled. Each problem comes with the fix. Automation runs the offline part every time it starts and puts what it finds in the log. `ytclip doctor` runs it from the command line.
+Below it, the **health check** looks at everything automation needs: ffmpeg, how old the downloader is, your YouTube and AI keys (**Check now** tries them online), the folders and free space, whether TikTok Manager watches your Automation folder, niches with nothing to find videos with, and requests that can't be filled. Each problem comes with the fix. Automation runs the offline part every time it starts and puts what it finds in the log. `ytclip doctor` runs it from the command line.
 
 ### Niches
 
@@ -233,14 +233,14 @@ Run a TikTok account for each topic? Give each account a niche in the **🎯 Nic
 
 - **The account:** a name, the TikTok account it's for, how many videos a day it gets (2 to start with), and a switch to pause it.
 - **Where its videos come from:** its own channel list and Creative Commons searches. Title words and YouTube categories catch videos from the trending charts.
-- **How its clips look:** its own style, top/bottom view and folder of second videos (blank ones use Settings → Automation), and a note telling Claude what makes a good clip for that account. AI picks and AI polish both read the note.
+- **How its clips look:** its own style, top/bottom view and folder of second videos (blank ones use Settings → Automation), and a note telling the AI what makes a good clip for that account. AI picks and AI polish both read the note.
 
 Every picked video goes into one niche: the one that lists its channel, then the one whose search found it, then the first with a matching title word, then the first with its category. A video that fits no niche isn't picked, and its Pick tooltip says why. Research's **Niche** column shows where each video would go.
 
 - **Fair shares.** Each niche picks at most its own number of videos a day. **Videos picked per day** (Settings → Picking) is the limit for all of them together, handed out one pick at a time, and the niche with the fewest picks in the last day goes first. One busy niche can't take every pick.
 - **A paused niche** holds its own channels' and searches' videos back. They aren't handed to another account.
 - **Run from the Automation tab.** **Automation → Niches** shows each niche's picks today against its limit, its videos waiting and its clips today. Pause or resume it there, press **Find videos now** to check its sources straight away, or **Request clips for it**.
-- **Its own clips.** A niche can set its own **clips per video** and **clip length**, over its style's. Its **special requests** note tells the AI clip finder and the AI polish what makes a good clip for that account; with an Anthropic key, a niche with a note uses the AI clip finder (within *AI calls per day*).
+- **Its own clips.** A niche can set its own **clips per video** and **clip length**, over its style's. Its **special requests** note tells the AI clip finder and the AI polish what makes a good clip for that account; with a Claude or Gemini key, a niche with a note uses the AI clip finder (within *AI calls per day*).
 - **Style.** A recipe for the video's channel or category comes first, then the niche's own style and view, then a catch-all (`*`) recipe, then Settings → Automation.
 - **Folders.** Each niche's clips go to `Automation\<niche>\`, and `clips.json` records the niche and its TikTok account, so TikTok Manager can stage each folder for its own account. Renaming a niche sends new clips to its new folder. Clips already made stay where they are.
 
@@ -376,7 +376,8 @@ Run the tests with `pip install -e .[test]` and then `pytest`. They need no netw
 |---|---|
 | `ytclip/engine.py` | Pipeline: open → measure (cached) → transcribe → find clips → export |
 | `ytclip/analyze.py` | Signals, scoring and clip picking |
-| `ytclip/ai.py` | Claude clip finder |
+| `ytclip/ai.py` | AI clip finder, and the one place Claude and Gemini are called from (choosing the AI, falling back) |
+| `ytclip/gemini.py` | Google's Gemini API over plain HTTPS: streamed JSON answers, key checks |
 | `ytclip/polish.py` | AI polish: hooks, caption fixes, speaker crops, burned-in subtitle check |
 | `ytclip/qc.py` | Quality check: silence, black/frozen picture, length/size, mid-sentence edges, AI ratings |
 | `ytclip/stackpool.py` | Deals a different second video to each clip from a folder |
