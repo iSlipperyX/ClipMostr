@@ -61,7 +61,7 @@ class Report:
     reasons: list[tuple[str, int]] = field(default_factory=list)  # quality check problems, commonest first
     blocks: int = 0  # times YouTube asked the PC to sign in
     disk_pauses: int = 0
-    watchdog: int = 0  # stuck downloads or exports stopped
+    watchdog: int = 0  # stuck exports, measurements or checks stopped
     freed: int = 0  # bytes
     state: str = ""  # what automation is doing now
 
@@ -105,8 +105,8 @@ class Report:
             out.append(f"Paused {self.disk_pauses} time{'s' if self.disk_pauses != 1 else ''} because the disk was "
                        "nearly full")
         if self.watchdog:
-            out.append(f"Stopped {self.watchdog} stuck download{'s' if self.watchdog != 1 else ''} or export"
-                       f"{'s' if self.watchdog != 1 else ''} and tried again")
+            out.append(f"Stopped {self.watchdog} stuck job{'s' if self.watchdog != 1 else ''} (no progress for too "
+                       "long) and tried again")
         if self.freed:
             out.append(f"Clean up freed {size_text(self.freed)}")
         if self.waiting:

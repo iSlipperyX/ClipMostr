@@ -725,8 +725,8 @@ SCHEMA: list[Field] = [
           help="Before free space falls under this, automation runs a safe clean-up (unfinished and finished "
               "downloads, rejected clips, previews) and pauses if that isn't enough"),
     Field("watchdog_minutes", "Stop stuck work after (min, 0 = off)", "Automation", "int", lo=0, hi=600, step=5,
-          help="A download or export that makes no progress for this long is stopped, tried once more, then "
-              "skipped with the reason"),
+          help="An export, measurement or check that makes no progress for this long is stopped, tried once "
+              "more, then skipped with the reason. Stalled downloads give up by themselves"),
     Field("cleanup_auto", "Clean up by itself once a day", "Automation", "bool",
           help="Automation clears out what's ticked below, without asking. Clean up… in the Library or "
                "Automation tab shows what would go, and how much space it frees, before anything is deleted"),
