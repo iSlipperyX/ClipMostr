@@ -51,6 +51,7 @@ class Settings:
     clip_count: int = 5
     min_len: float = 20.0
     max_len: float = 60.0
+    series_parts: int = 3  # a great moment longer than one clip carries on in up to this many parts (1 = off)
     min_gap: float = 5.0
     quality_floor: float = 0.45
     snap_to_pauses: bool = True
@@ -499,6 +500,9 @@ SCHEMA: list[Field] = [
     Field("clip_count", "Clips per video", "Clip finding", "int", lo=1, hi=50),
     Field("min_len", "Min clip length (s)", "Clip finding", "float", lo=3, hi=600, step=1),
     Field("max_len", "Max clip length (s)", "Clip finding", "float", lo=5, hi=1800, step=1),
+    Field("series_parts", "Part series: up to this many parts", "Clip finding", "int", lo=1, hi=5,
+          help="When a great moment runs longer than one clip, it carries on in Part 2 (and 3...), each starting "
+               "where the last stopped. Parts count towards Clips per video. 1 = off"),
     Field("min_gap", "Min gap between clips (s)", "Clip finding", "float", lo=0, hi=120, step=1),
     Field("quality_floor", "Drop clips weaker than (x best)", "Clip finding", "float", lo=0, hi=1, step=0.05,
           help="0 keeps everything; 0.5 drops clips scoring under half the best clip"),

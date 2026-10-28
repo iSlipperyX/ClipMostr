@@ -2,7 +2,6 @@ import json
 import threading
 import time
 
-import pytest
 from conftest import NOW
 from test_pipeline import FakeEngine, _runner, _settings, fresh_engine  # noqa: F401
 

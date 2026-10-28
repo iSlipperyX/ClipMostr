@@ -9,7 +9,7 @@ from typing import Callable
 
 import numpy as np
 
-from . import layout
+from . import layout, series
 from . import transcribe as whisper
 from .analyze import (SIGNAL_LABELS, Clip, Measurements, breathing_room, build_signals, chapter_clips, clip_score,
                       combine, fit_to_sentences, loudness_db, pick_clips, quiet_frames, snap, trim_dead_air)
@@ -169,6 +169,7 @@ class Engine:
                 if not clips:
                     raise AIError("None of Claude's clips were long enough once aligned to sentences.")
                 p.clips, p.mode_used, p.ai_model = clips, "ai", model
+                self.parts(p, sents)
                 self.trim(p)
                 return
             except Cancelled:
@@ -194,9 +195,19 @@ class Engine:
                     c.score = clip_score(p.score, c.start, c.end)
                 clips.sort(key=lambda c: c.score, reverse=True)
             p.clips = clips
+            self.parts(p, sents)
         p.mode_used = mode
         self.trim(p)
         self.label(p)
+
+    def parts(self, p: Project, sents: list[Cue]) -> None:
+        """Part series (series.py): a great moment longer than one clip carries on in Part 2, 3..."""
+        if self.s.series_parts < 2 or p.video is None:
+            return
+        n = series.extend(p.clips, p.score, sents, self.s.min_len, self.s.max_len, self.s.clip_count,
+                          self.s.series_parts, p.video.duration)
+        if n:
+            self.log(f"Added {n} next part{'s' if n != 1 else ''}: a great moment ran longer than one clip.")
 
     def trim(self, p: Project) -> None:
         """Pull clip edges in to the speech (Trim dead air), leaving hand-edited clips alone."""
@@ -360,6 +371,11 @@ class Engine:
         if self.s.qc_enabled and clips:
             self.check(p, folder, clips, files, details, base)
             self._unpromise(p, folder, clips, files, made)
+        from .qc import REJECTED
+
+        # Number the parts of each series from what will be posted (the check may have rejected some).
+        for extra, label in zip(details, series.labels(clips, [not f.startswith(f"{REJECTED}/") for f in files])):
+            extra.update(series.details(label))
         write_index(folder, v, clips, files, self.signal_names(p), p.mode_used or self.s.mode, p.meta, details)
         if not self.s.keep_source and not v.is_local:
             v.path.unlink(missing_ok=True)
