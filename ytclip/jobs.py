@@ -16,6 +16,7 @@ from pathlib import Path
 from .settings import app_dir
 
 STATUSES = ("queued", "working", "done", "failed")
+SIGN_IN_WAIT = "Waiting: YouTube asked this PC to sign in"  # the stage of a video waiting out a sign-in pause
 
 
 @dataclass
@@ -149,6 +150,13 @@ class JobDB:
         with self._lock:
             return self.con.execute("UPDATE jobs SET status = 'queued', stage = 'Interrupted; will start again' "
                                     "WHERE status = 'working'").rowcount
+
+    def release_waiting(self, now: float) -> int:
+        """Videos waiting out a sign-in pause are due now (the pause was ended early)."""
+        with self._lock:
+            return self.con.execute("UPDATE jobs SET next_try = 0, stage = 'Waiting', updated = ? "
+                                    "WHERE status = 'queued' AND stage = ? AND next_try > ?",
+                                    (now, SIGN_IN_WAIT, now)).rowcount
 
     def drop_waiting(self, niche: str) -> int:
         """Take a niche's waiting videos out of the queue (the niche was deleted)."""

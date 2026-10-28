@@ -433,6 +433,8 @@ def build_auto_parser() -> argparse.ArgumentParser:
     p.add_argument("--pause", action="store_true", help="pause a running automation")
     p.add_argument("--resume", action="store_true", help="carry on after --pause")
     p.add_argument("--stop", action="store_true", help="ask a running automation to stop")
+    p.add_argument("--try-now", action="store_true",
+                   help="end a pause after YouTube asked this PC to sign in, and try again now")
     p.add_argument("--install", action="store_true", help="start automation whenever you sign in to Windows")
     p.add_argument("--uninstall", action="store_true", help="stop starting automation with Windows")
     return p
@@ -443,13 +445,17 @@ AUTO_COLOURS = {"working": "cyan", "queued": "white", "done": "green", "failed":
 
 def _auto_status(db) -> None:
     from .clipability import age_text
-    from .pipeline import runner_alive
+    from .pipeline import paused_until, runner_alive
 
     alive = runner_alive(db)
     state = db.meta("state") or "Stopped"
     paused = db.meta("paused") == "1"
     console.print("[bold]Automation:[/] " + ("[green]running[/]" if alive else "[dim]not running[/]")
                   + (" · [yellow]paused[/]" if paused else "") + (f" · {escape(state)}" if alive else ""))
+    blocked = paused_until(db, time.time())
+    if blocked and not (alive and state.startswith("Paused until")):
+        console.print(f"[yellow]YouTube asked this PC to sign in: no downloads until "
+                      f"{time.strftime('%H:%M', time.localtime(blocked))} (ytclip auto --try-now to try sooner).[/]")
     counts = db.counts()
     console.print(f"[dim]{counts['queued']} waiting · {counts['working']} working · {counts['done']} done · "
                   f"{counts['failed']} failed[/]")
@@ -494,6 +500,13 @@ def run_auto(argv: list[str]) -> int:
     if args.pause or args.resume:
         db.set_meta("paused", "1" if args.pause else "0")
         console.print("Paused." if args.pause else "Resumed.")
+        return 0
+    if args.try_now:
+        if not pipeline.paused_until(db, time.time()):
+            console.print("Automation isn't paused for a YouTube sign-in.")
+            return 0
+        n = pipeline.end_pause(db, time.time())
+        console.print("Trying YouTube again now" + (f" ({n} video{'s' if n != 1 else ''} waiting)." if n else "."))
         return 0
     if args.stop:
         db.set_meta("stop", "1")

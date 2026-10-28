@@ -79,6 +79,27 @@ def test_queue_a_link(app, tmp_path):
     assert "Give a video link" in notices[-1]
 
 
+def test_try_now_ends_a_sign_in_pause(app, tmp_path):
+    import time
+
+    from ytclip import pipeline
+
+    tab, db, _ = _make(app, tmp_path, youtube_api_key="k")
+    tab.refresh()
+    assert tab.try_btn.isHidden()
+    pipeline.record_block(db, "Sign in to confirm you're not a bot", time.time())
+    db.add(Job("a", "https://youtu.be/a", title="Held", stage=pipeline.SIGN_IN_WAIT,
+               next_try=db.meta_float("blocked_until")), time.time())
+    tab.refresh()
+    assert not tab.try_btn.isHidden() and "no downloads until" in tab.status.text()  # shown even when stopped
+    notices = []
+    tab.notice.connect(notices.append)
+    tab.try_btn.click()
+    assert not pipeline.paused_until(db, time.time()) and db.get("a").next_try == 0
+    assert notices[-1] == "Trying YouTube again now with 1 waiting video. Press Start to run automation."
+    assert tab.try_btn.isHidden() and "no downloads until" not in tab.status.text()
+
+
 def test_restarts_after_an_update(app, tmp_path):
     db = JobDB(tmp_path / "jobs.db")
     db.set_meta("resume_after_update", "1")

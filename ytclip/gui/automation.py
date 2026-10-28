@@ -88,8 +88,14 @@ class Automation(QWidget):
         self.stop_btn.clicked.connect(self.stop)
         self.pause_btn = QPushButton()
         self.pause_btn.clicked.connect(self.toggle_pause)
+        self.try_btn = QPushButton("↻  Try now")
+        self.try_btn.setToolTip("End the sign-in pause and try YouTube again now. If it asks again, the next pause "
+                                "is longer, so sign in to YouTube in a browser and pick it in Settings → Download → "
+                                "Use browser login first")
+        self.try_btn.clicked.connect(self.try_now)
         top.addWidget(title)
         top.addWidget(self.status, 1)
+        top.addWidget(self.try_btn)
         top.addWidget(self.pause_btn)
         top.addWidget(self.stop_btn)
         top.addWidget(self.start_btn)
@@ -241,6 +247,12 @@ class Automation(QWidget):
             text = f"<span style='color:{theme.ACCENT_2}'>●</span> Starting…"
         else:
             text = f"<span style='color:{theme.MUTED}'>○ Not running</span>"
+        blocked = pipeline.paused_until(self.db, time.time())
+        if blocked and not (alive and state.startswith("Paused until")):
+            until = time.strftime("%H:%M", time.localtime(blocked))
+            text += (f"   <span style='color:{theme.WARN}'>YouTube asked this PC to sign in: no downloads until "
+                     f"{until}</span>")
+        self.try_btn.setVisible(bool(blocked))
         if not youtube_key(self._settings()):
             text += (f"   <span style='color:{theme.WARN}'>No YouTube API key, so nothing new is picked "
                      f"(Settings → Research)</span>")
@@ -363,6 +375,12 @@ class Automation(QWidget):
     def stop(self) -> None:
         self.db.set_meta("stop", "1")
         self.notice.emit("Automation is stopping. A video in progress goes back in the queue.")
+
+    def try_now(self) -> None:
+        n = pipeline.end_pause(self.db, time.time())
+        self.notice.emit("Trying YouTube again now" + (f" with {n} waiting video{'s' if n != 1 else ''}." if n else ".")
+                         + ("" if self.running() else " Press Start to run automation."))
+        self.refresh()
 
     def toggle_pause(self) -> None:
         paused = self.db.meta("paused") == "1"
