@@ -874,6 +874,10 @@ def run_doctor(argv: list[str]) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["--apply-update"]:  # the updater's install step, run from the unpacked new version
+        from .swap import main as apply_update
+
+        return apply_update(argv[1:])
     if argv[:1] == ["clean"]:
         return run_clean(argv[1:])
     if argv[:1] == ["niches"]:

@@ -208,9 +208,31 @@ def _niches_and_requests(s: Settings, db) -> list[Check]:
     return out
 
 
+def in_synced_folder(folder: Path) -> bool:
+    """Whether `folder` is inside OneDrive (where Windows puts Desktop and Documents when backup is on)."""
+    roots = [os.environ.get(k, "") for k in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial")]
+    text = os.path.normcase(str(folder))
+    if any(r and (text + os.sep).startswith(os.path.normcase(r.rstrip("\\/")) + os.sep) for r in roots):
+        return True
+    return any(part.lower() == "onedrive" or part.lower().startswith("onedrive - ") for part in folder.parts)
+
+
+def _install_place(folder: Path | None) -> list[Check]:
+    """The app inside OneDrive: syncing its program files slows updates, and an app that changes its
+    own files inside a synced folder is one of the things Windows Defender's behaviour check flags."""
+    if folder is None or not in_synced_folder(folder):
+        return []
+    return [Check("App folder", WARN, f"ClipMonster is installed inside OneDrive ({folder})",
+                  f"Close ClipMonster and move the whole ClipMonster folder to {Path.home() / 'ClipMonster'}, "
+                  "then open it from there (and pin it again)")]
+
+
 def check(s: Settings, db=None, online: bool = False, now: float | None = None) -> list[Check]:
+    from .updater import install_dir
+
     now = time.time() if now is None else now
     checks = [_ffmpeg(), _downloader(now)]
+    checks += _install_place(install_dir())
     checks += _keys(s, online)
     checks += _folders(s)
     checks.append(_tiktok_manager(s))

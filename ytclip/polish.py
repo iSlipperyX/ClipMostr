@@ -216,7 +216,7 @@ def ask(title: str, clips: list[Clip], words: list[Word], src: Path, api_key: st
         raise PolishError("No Anthropic API key set (Settings → AI).")
     import anthropic
 
-    from .ai import _client, _friendly
+    from .ai import STREAM_TIMEOUT, _client, _friendly
 
     with tempfile.TemporaryDirectory(prefix="ytclip-polish-") as tmp:
         frames = grab_frames(src, clips, Path(tmp))
@@ -224,7 +224,7 @@ def ask(title: str, clips: list[Clip], words: list[Word], src: Path, api_key: st
     if log:
         log(f"Asking {model} to polish {len(clips)} clip{'s' if len(clips) != 1 else ''}…")
     try:
-        with _client(api_key, max_retries=3).beta.messages.stream(
+        with _client(api_key, max_retries=3, timeout=STREAM_TIMEOUT).beta.messages.stream(
             model=model,
             max_tokens=8000,
             system=SYSTEM,

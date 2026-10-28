@@ -245,6 +245,10 @@ class Automation(QWidget):
                 text += f" · <span style='color:{theme.MUTED}'>{_esc(state)}</span>"
         elif starting:
             text = f"<span style='color:{theme.ACCENT_2}'>●</span> Starting…"
+        elif hung := pipeline.runner_hung(self.db):
+            text = (f"<span style='color:{theme.WARN}'>●</span> Not responding (process {hung}). "
+                    f"<span style='color:{theme.MUTED}'>If it stays like this, end it in Task Manager, then press "
+                    "Start</span>")
         else:
             text = f"<span style='color:{theme.MUTED}'>○ Not running</span>"
         blocked = pipeline.paused_until(self.db, time.time())

@@ -82,6 +82,13 @@ def main() -> int:
     app.setWindowIcon(theme.app_icon())
     theme.apply(app)
     qt_fonts.register()  # bundled fonts, for the font picker and layout sketch
+    if getattr(sys, "frozen", False):
+        try:  # after an update or a move, Start with Windows starts this copy
+            from ..pipeline import refresh_start_with_windows
+
+            refresh_start_with_windows()
+        except Exception:
+            pass
 
     win = MainWindow()
     win.show()

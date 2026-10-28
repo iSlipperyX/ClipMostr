@@ -50,6 +50,11 @@ SYSTEM = (
 )
 
 
+# A stream that goes this long without a byte has stalled (the API sends keep-alive pings much more
+# often): give up on that try instead of the SDK's default 10 minutes, which held automation up.
+STREAM_TIMEOUT = 120.0
+
+
 def _client(api_key: str, **kwargs):
     import anthropic
 
@@ -135,7 +140,7 @@ def find_clips_ai(title: str, duration: float, sents: list[Cue], score: np.ndarr
     try:
         # Streaming keeps long transcripts clear of HTTP timeouts. `fallbacks: "default"`
         # lets the API re-run a safety-declined request on its recommended fallback model.
-        with _client(api_key, max_retries=3).beta.messages.stream(
+        with _client(api_key, max_retries=3, timeout=STREAM_TIMEOUT).beta.messages.stream(
             model=model,
             max_tokens=16000,
             system=SYSTEM,
