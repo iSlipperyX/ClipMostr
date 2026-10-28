@@ -22,14 +22,14 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
-from . import learn, niches, orders, research, youtube_login
+from . import learn, lookup, niches, orders, research, youtube_login
 from .download import Video, download, is_blocked
 from .engine import Cancelled, Engine, Project, timing_text
 from .jobs import SIGN_IN_WAIT, Job, JobDB
-from .policy import PickLog, Policy, decide, picks_path
+from .policy import PickLog, Policy, decide, language_codes, picks_path
 from .procs import boot_time, process_alive, process_name  # noqa: F401 (tests patch them here)
 from .settings import Settings, all_layouts, all_presets, app_dir, find_layout
-from .trending import CATEGORIES, History
+from .trending import CATEGORIES, History, ResearchBlocked
 
 Log = Callable[[str], None]
 
@@ -39,6 +39,14 @@ FIRST_PAUSE = 2 * 3600  # how long requests to YouTube pause after it asks the P
 BLOCK_PAUSE = 6 * 3600  # ... and after it asks again within a day of the last time
 CALM_DAY = DAY  # after this long with no sign-in request, downloads go back to the usual spacing
 DEEP_PAUSE = 20.0  # seconds between automation's most-replayed checks
+FIND_MATCH = 60.0  # a standing request's video must match at least this well (0-100) to be picked
+FIND_SINCE = "month"  # standing requests look for videos posted in the last month: new ones each run
+RULE_WORDS = {"score": "clip-ability under your minimum", "age": "older than your limit",
+              "length": "outside your video length", "daily_cap": "today's limit is reached",
+              "niche_cap": "the niche's videos a day are reached", "channel_cap": "the channel's weekly limit",
+              "channel": "a blocked channel", "category": "a blocked category", "word": "a blocked word",
+              "language": "another language", "source": "your picking rules allow Creative Commons only",
+              "live": "live or not out yet", "niche": "its niche is off or paused"}
 HEARTBEAT_STALE = 180  # a runner silent for this long is gone
 PULSE = 5.0  # seconds between heartbeats, whatever the runner is busy with
 IDLE = 300  # longest sleep between checks
@@ -604,6 +612,17 @@ class Runner:
         picks = self._picks()
         s = self.load()  # a scan takes minutes: niches and rules may have changed since it started
         niches.assign_from_settings(result.videos, s, history)
+        videos = list(result.videos)
+        found = self.standing(s, history, forced == "1", only)
+        if found:  # standing requests' videos join the scan's, under the same rules and limits
+            seen = {v.id: v for v in videos}
+            for v in found:
+                old = seen.get(v.id)
+                if old is None:
+                    videos.append(v)
+                else:  # on the charts too: it counts as found for the request, for the request's niche
+                    old.origins = sorted(set(old.origins) | {"request"})
+                    old.niche, old.match, old.match_why = v.niche, v.match, v.match_why
         policy = Policy.from_settings(s)
         wanted = self.videos_wanted(s)  # clip requests that pick: niche id -> [(request, videos it needs)]
         for nid, asks in wanted.items():  # what requests need comes on top of the daily limits
@@ -615,10 +634,20 @@ class Runner:
                     policy.niche_daily[k] += extra
             if not nid and policy.use_niches:  # and so will a video that fits no niche
                 policy.niche_daily[""] = policy.niche_daily.get("", 0) + extra
-        decisions = decide(result.videos, policy, picks, now=now, notes=result.notes,
+        decisions = decide(videos, policy, picks, now=now, notes=result.notes,
                            lessons=learn.for_settings(s))
         added = 0
         self.db.set_meta("pick_note", "" if any(d.picked for d in decisions) else why_none(decisions))
+        mine = {v.id for v in found}
+        passed = [d for d in decisions if d.video.id in mine and not d.picked and d.rule != "done"]
+        if passed:  # say why good matches weren't picked, so a request that picks nothing isn't a mystery
+            why: dict[str, int] = {}
+            for d in passed:
+                words = RULE_WORDS.get(d.rule, d.reason)
+                why[words] = why.get(words, 0) + 1
+            top = sorted(why.items(), key=lambda kv: -kv[1])[:3]
+            self.log(f"Standing requests: {len(passed)} good match{'es' if len(passed) != 1 else ''} not picked: "
+                     + "; ".join(f"{reason} ({n})" if n > 1 else reason for reason, n in top))
         if reused and any(d.picked for d in decisions):
             self.log("Using the Research tab's last check.")
         for d in decisions:
@@ -646,6 +675,67 @@ class Runner:
             picks.save()
             history.save()
         return added
+
+    # ------------------------------------------------------------ standing requests (lookup.py)
+    def standing(self, s: Settings, history: History, everything: bool = False, only: str = "") -> list:
+        """Run the standing requests that are due (every Settings → Picking hours; all of them for
+        Find videos now, or one niche's) and return their good matches, each in its niche. Each run
+        of a request costs about 200 YouTube quota units, and two AI calls when there's a key and
+        today's AI calls allow."""
+        asks = niches.standing_requests(s)
+        key = research.youtube_key(s)
+        if not asks or not key:
+            return []
+        try:
+            last = json.loads(self.db.meta("finds_last") or "{}")
+        except ValueError:
+            last = {}
+        now = self.now()
+        every = max(1, s.pick_find_hours) * 3600
+        ids = {f"{nid}|{text.lower()}" for nid, text in asks}
+        last = {k: t for k, t in last.items() if k in ids}  # requests since removed are forgotten
+        stop = self._stop
+        language = next(iter(language_codes(s.pick_languages)), "")
+        out: list = []
+        try:
+            for nid, text in asks:
+                k = f"{nid}|{text.lower()}"
+                due = everything or (only and nid == only) or now - float(last.get(k) or 0) >= every
+                if not due or (only and nid != only):
+                    continue
+                used = self.db.count("ai", now - DAY)
+                with_ai = has_ai_key(s) and used + 2 <= s.auto_ai_daily
+                self.state(f"Finding videos for “{text[:40]}”")
+                try:
+                    r = lookup.find(text, s, key, FIND_SINCE, s.research_min_minutes, language, self.log,
+                                    progress=lambda m, f: self.beat(),
+                                    cancelled=lambda: stop() or self.stop_requested(), use_ai=with_ai)
+                except research.ScanCancelled:
+                    raise
+                except ResearchBlocked as exc:  # a bad key or used-up quota: the rest would fail too
+                    self.log(f"⚠ Standing requests stopped: {exc}")
+                    break
+                except Exception as exc:
+                    self.log(f"⚠ Standing request “{text}”: {exc}")
+                    last[k] = now
+                    continue
+                last[k] = now
+                for _ in range(r.ai_calls):
+                    self.db.note("ai", self.now())
+                good = [v for v in r.videos if v.match >= FIND_MATCH]
+                for v in good:
+                    v.niche = nid
+                    v.sent = bool((history.videos.get(v.id) or {}).get("sent"))
+                out += good
+                niche = niches.name_of(s, nid)
+                self.log(f"Standing request “{text}”{' for ' + niche if niche else ''}: {len(good)} good "
+                         f"match{'es' if len(good) != 1 else ''} of {len(r.videos) + r.weak} found "
+                         f"({r.quota} quota units" + (f", rated by {r.rated_by}" if r.rated_by else "") + ").")
+                for p in r.problems:
+                    self.log(f"Standing request “{text}”: {p}")
+        finally:
+            self.db.set_meta("finds_last", json.dumps(last))
+        return out
 
     # ------------------------------------------------------------ clip requests (orders.py)
     def per_video(self, s: Settings, niche_id: str) -> int:

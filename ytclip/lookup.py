@@ -93,6 +93,7 @@ class LookupResult:
     weak: int = 0  # found but hidden: they don't match the request
     problems: list[str] = field(default_factory=list)
     rated_by: str = ""  # the model that rated the matches, "" = by their words
+    ai_calls: int = 0  # calls made to Claude (automation counts them against AI calls per day)
 
     def to_json(self) -> dict:
         return {"request": self.request, "time": self.time, "quota": self.quota, "weak": self.weak,
@@ -335,10 +336,12 @@ def find(request: str, s: Settings, api_key: str, since: str = "any", min_minute
         raise FindError("Add a YouTube Data API key (Settings → Research) to search YouTube.")
     problems: list[str] = []
     with_ai = ai.has_key(s) if use_ai is None else use_ai
+    calls = 0
     plan = None
     if with_ai:
         step("The AI is working out what to search for", None)
         try:
+            calls += 1
             plan = ai_plan(request, s, check=lambda: step("The AI is working out what to search for", None))
         except AIError as exc:
             problems.append(f"The AI couldn't plan the search ({exc}), so it searched your words.")
@@ -362,7 +365,7 @@ def find(request: str, s: Settings, api_key: str, since: str = "any", min_minute
             quota += SEARCH_COST
         ids += [x for x in got if x not in ids]
     if not ids:
-        return LookupResult(plan.request, [], now, plan, quota, 0, problems)
+        return LookupResult(plan.request, [], now, plan, quota, 0, problems, ai_calls=calls)
     step(f"Reading {len(ids)} videos", len(plan.queries) / (len(plan.queries) + 2))
     videos, text = details(api_key, ids, get)
     quota += math.ceil(len(ids) / 50)
@@ -381,6 +384,7 @@ def find(request: str, s: Settings, api_key: str, since: str = "any", min_minute
     rated, rated_by = {}, ""
     if with_ai and videos:
         step(f"The AI is rating how well {len(videos)} videos match", (len(plan.queries) + 1) / (len(plan.queries) + 2))
+        calls += math.ceil(len(videos) / RATE_AT_ONCE)
         try:
             rated, rated_by = ai_rate(videos, text, plan, s,
                                       check=lambda: step("The AI is rating the videos", None))
@@ -393,7 +397,7 @@ def find(request: str, s: Settings, api_key: str, since: str = "any", min_minute
     videos = [v for v in videos if v.match >= WEAK]
     videos.sort(key=lambda v: (rank(v), v.match), reverse=True)
     step("Done", 1.0)
-    return LookupResult(plan.request, videos, now, plan, quota, len(weak), problems, rated_by)
+    return LookupResult(plan.request, videos, now, plan, quota, len(weak), problems, rated_by, calls)
 
 
 def rank(v: TrendingVideo) -> float:

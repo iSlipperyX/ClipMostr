@@ -409,3 +409,16 @@ def test_quitting_while_the_cleanup_window_still_looks_doesnt_crash(tmp_path):
                         "XDG_CONFIG_HOME": str(tmp_path)}
     done = subprocess.run([sys.executable, str(script)], env=env, capture_output=True, text=True, timeout=60)
     assert done.returncode == 0, done.stderr
+
+
+def test_standing_requests_are_edited_and_move_with_the_first_and_last_niche(app, tmp_path, monkeypatch):
+    from PySide6.QtWidgets import QMessageBox
+
+    tab, host, _, _ = _tab(app, tmp_path, pick_finds="MW4 with good comedy")
+    tab.add()
+    assert host.settings.pick_finds == "" and tab._niche().finds == "MW4 with good comedy"
+    tab.finds.setPlainText("MW4 with good comedy\nWarzone funny moments")
+    assert host.settings.niches[0]["finds"].endswith("Warzone funny moments")
+    monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
+    tab.delete()
+    assert host.settings.pick_finds == "MW4 with good comedy\nWarzone funny moments"
