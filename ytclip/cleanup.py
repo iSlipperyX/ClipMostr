@@ -3,7 +3,7 @@
 plan() only looks; apply() removes what a plan lists, for the kinds you pick (CLEANUP_KINDS):
 
 * partial: unfinished downloads in the download cache that nothing has written to for a while
-* previews: what "Render preview" and the Layout tab's preview leave in the temp folder
+* previews: what "Render preview" and the Layout tab's preview leave in the work folder
 * downloads: full videos in the download cache
 * analysis: the transcripts, captions and measurements saved beside them (a video opens again
   instantly with them; without them it is measured again)
@@ -30,15 +30,17 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import tempfile
 import time
 from dataclasses import dataclass, field
+from glob import escape as glob_escape
 from pathlib import Path
 from typing import Callable
 
 from . import niches
 from .download import VIDEO_EXTS, is_url, local_id, video_id
-from .settings import APP_NAME, CLEANUP_KINDS, Settings, app_dir
+from .settings import APP_NAME, CLEANUP_KINDS, Settings, app_dir, work_dir
 
 DAY = 86400.0
 KINDS = tuple(k for k, _ in CLEANUP_KINDS)
@@ -234,7 +236,7 @@ def studio_ids(session: Path | None = None) -> set[str]:
 
 def plan(s: Settings, now: float | None = None, busy: set[str] | frozenset = frozenset(),
          older_than_days: float = 0.0, kinds=KINDS, tm: TikTokManager | None = None,
-         temp_dir: Path | None = None, uploaded: dict | None = None) -> Plan:
+         temp_dirs: list[Path] | None = None, uploaded: dict | None = None) -> Plan:
     """What a clean-up of these kinds would remove. Changes nothing. `uploaded`: uploads.uploaded()
     (read from jobs.db when it's needed and not given)."""
     now = time.time() if now is None else now
@@ -270,7 +272,7 @@ def plan(s: Settings, now: float | None = None, busy: set[str] | frozenset = fro
     if kinds & set(CACHE_KINDS):
         _plan_cache(p, s.cache_path, kinds, busy, cutoff, now, own_folder=not s.cache_dir)
     if "previews" in kinds:
-        _plan_previews(p, temp_dir or Path(tempfile.gettempdir()), cutoff, now)
+        _plan_previews(p, temp_dirs if temp_dirs is not None else _temp_dirs(), cutoff, now)
     order = {k: i for i, k in enumerate(KINDS)}
     p.items.sort(key=lambda it: (order[it.kind], str(it.path).lower()))
     return p
@@ -423,17 +425,105 @@ def _plan_cache(p: Plan, cache: Path, kinds: set[str], busy, cutoff: float, now:
         p.items.append(Item(kind, f, size, companions, when=mtime, title=f.name))
 
 
-def _plan_previews(p: Plan, temp: Path, cutoff: float, now: float) -> None:
-    found = []
-    folder = temp / f"{APP_NAME}_previews"
-    if folder.is_dir():
-        found += [f for f in folder.glob("preview_*.mp4")]
-    found += list(temp.glob(f"{APP_NAME}_layout_*.jpg"))
-    for f in sorted(found):
+def _temp_dirs() -> list[Path]:
+    """Where previews are: the work folder, and (before 2.8.0) Windows' temp folder."""
+    return [work_dir(), Path(tempfile.gettempdir())]
+
+
+def _previews(temp: Path) -> list[Path]:
+    found = list((temp / "previews").glob("preview_*.mp4")) + list(temp.glob("layout_*.jpg"))
+    found += list((temp / f"{APP_NAME}_previews").glob("preview_*.mp4"))  # before 2.8.0
+    return found + list(temp.glob(f"{APP_NAME}_layout_*.jpg"))
+
+
+def _plan_previews(p: Plan, temps: list[Path], cutoff: float, now: float) -> None:
+    for f in sorted({f for temp in temps for f in _previews(temp)}):
         st = _stat(f)
         if st is None or now - st[1] < FRESH or st[1] > cutoff:
             continue
         p.items.append(Item("previews", f, st[0], when=st[1], title=f.name))
+
+
+# ---------------------------------------------------------------- what a step left behind
+
+def remove_download(video: Path) -> int:
+    """Delete a downloaded video and what was saved beside it (its details, transcripts, captions and
+    measurements, named <video id>.<...>). Returns the bytes freed."""
+    freed = 0
+    siblings = [f for f in video.parent.glob(f"{glob_escape(video.stem)}.*")
+                if f != video and _ANALYSIS.search(f.name) and f.name.split(".", 1)[0] == video.stem]
+    for f in [video, *siblings]:
+        try:
+            size = f.stat().st_size
+            f.unlink()
+            freed += size
+        except OSError:
+            pass
+    return freed
+
+
+
+WORK_STALE = 12 * 3600  # a step's folder nothing has written to for this long was left by a crash
+PREVIEW_STALE = DAY
+# What steps before 2.8.0 left in Windows' temp folder.
+LEGACY_TEMP = ("clipmonster_*", "ytclip-polish-*", "cm-whisper-*", "cm-login-*")
+
+
+def _newest(path: Path) -> float:
+    """When anything in path last changed (0 when it's gone)."""
+    newest = 0.0
+    try:
+        newest = path.lstat().st_mtime
+        if path.is_dir() and not path.is_symlink():
+            for f in path.rglob("*"):
+                try:
+                    newest = max(newest, f.lstat().st_mtime)
+                except OSError:
+                    pass
+    except OSError:
+        pass
+    return newest
+
+
+def _size(path: Path) -> int:
+    try:
+        if path.is_file() or path.is_symlink():
+            return path.lstat().st_size
+        return sum(f.lstat().st_size for f in path.rglob("*") if f.is_file())
+    except OSError:
+        return 0
+
+
+def sweep_work(now: float | None = None, work: Path | None = None, temp: Path | None = None) -> tuple[int, int]:
+    """Remove what a crash or a closed window left in the work folder (and, from before 2.8.0, in
+    Windows' temp folder): step folders untouched for WORK_STALE, previews older than a day. Anything
+    still in use is newer than that, or locked and left for next time. Returns (removed, bytes freed)."""
+    now = time.time() if now is None else now
+    work = work_dir() if work is None else work
+    temp = Path(tempfile.gettempdir()) if temp is None else temp
+    stale = [f for f in work.iterdir() if f.name != "previews"] if work.is_dir() else []
+    for pattern in LEGACY_TEMP:
+        stale += [f for f in temp.glob(pattern) if f.is_dir()]
+    stale = [f for f in stale if now - _newest(f) > WORK_STALE]
+    stale += [f for f in _previews(work) + _previews(temp) if now - _newest(f) > PREVIEW_STALE]
+    removed = freed = 0
+    for f in stale:
+        size = _size(f)
+        try:
+            if f.is_dir() and not f.is_symlink():
+                shutil.rmtree(f)
+            else:
+                f.unlink()
+        except OSError:
+            continue  # still open somewhere: next time
+        removed += 1
+        freed += size
+    for empty in (temp / f"{APP_NAME}_previews",):
+        try:
+            empty.rmdir()
+        except OSError:
+            pass
+    return removed, freed
 
 
 # ---------------------------------------------------------------- doing it

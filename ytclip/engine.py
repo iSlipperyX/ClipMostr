@@ -654,7 +654,9 @@ class Engine:
             extra.update(series.details(label))
         write_index(folder, v, clips, files, self.signal_names(p), p.mode_used or self.s.mode, p.meta, details)
         if not self.s.keep_source and not v.is_local:
-            v.path.unlink(missing_ok=True)
+            from .cleanup import remove_download
+
+            remove_download(v.path)  # with its transcripts and measurements: nothing else uses them
         p.export_dir = folder
         self.log(f"Exported {len(files)} clips to {folder}")
         return folder

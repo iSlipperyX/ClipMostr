@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
@@ -23,7 +24,7 @@ def app_dir() -> Path:
 
 def local_dir(*parts: str) -> Path:
     """%LOCALAPPDATA%\\ClipMonster (or a folder in it): this PC's own big or short-lived files, never
-    synced or roamed: downloads, models, updates, the previous version and temporary work."""
+    synced or roamed: models, updates, the previous version and temporary work."""
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".cache")
     path = Path(base, APP_NAME, *parts)
     path.mkdir(parents=True, exist_ok=True)
@@ -40,9 +41,10 @@ def work_dir() -> Path:
     return local_dir("work")
 
 
-def downloads_dir() -> Path:
-    """The download cache when Settings → General leaves it empty (before 2.8.0: <output>/.downloads)."""
-    return local_dir("downloads")
+def work_folder(prefix: str) -> "tempfile.TemporaryDirectory[str]":
+    """A temporary folder in work_dir(), removed when the `with` ends. A file Windows still has open
+    can't go then; cleanup.sweep_work clears it on the next start instead of letting it fail the step."""
+    return tempfile.TemporaryDirectory(prefix=prefix, dir=work_dir(), ignore_cleanup_errors=True)
 
 
 @dataclass

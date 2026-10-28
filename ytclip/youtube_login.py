@@ -16,10 +16,11 @@ import shutil
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+
+from .settings import work_folder
 
 # The value of Settings.cookies_browser that means "this profile".
 CHOICE = "clipmonster"
@@ -170,7 +171,7 @@ def read_sign_in(folder: Path | None = None, now: float | None = None) -> SignIn
     db = folder / "cookies.sqlite"
     if not db.is_file():
         return SignIn(False)
-    with tempfile.TemporaryDirectory(prefix="cm-login-") as tmp:
+    with work_folder("login-") as tmp:
         copy = Path(tmp) / "cookies.sqlite"
         try:
             shutil.copyfile(db, copy)

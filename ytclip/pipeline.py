@@ -1354,6 +1354,12 @@ def run_headless() -> int:
     from . import updater
 
     updater.tidy()  # after an update it installed itself: the download and the unpacked copy
+    try:
+        from .cleanup import sweep_work
+
+        sweep_work()  # what a crash left in the work folder
+    except Exception:
+        pass
     return Runner(log=file_logger(), priority=speed.set_priority, self_update=True).run()
 
 

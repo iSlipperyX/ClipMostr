@@ -268,9 +268,43 @@ def test_preview_renders(tmp_path):
     _write(temp / "ClipMonster_previews" / "preview_new_1.mp4", when=time.time())
     layout = _write(temp / "ClipMonster_layout_3.jpg")
     _write(temp / "someone_else.mp4")
+    work = tmp_path / "work"
+    new = [_write(work / "previews" / "preview_abc_40.mp4"), _write(work / "layout_7.jpg")]
     p = cleanup.plan(Settings().apply({"output_dir": str(tmp_path / "o")}), tm=TikTokManager(), kinds=["previews"],
-                     temp_dir=temp)
-    assert sorted(it.path for it in p.items) == sorted([old, layout])
+                     temp_dirs=[work, temp])
+    assert sorted(it.path for it in p.items) == sorted([old, layout, *new])
+
+
+def test_the_startup_sweep_clears_what_crashes_left(tmp_path):
+    work, temp = tmp_path / "work", tmp_path / "temp"
+    crashed = _write(work / "whisper-abc" / "audio.wav", when=time.time() - 13 * 3600).parent
+    os.utime(crashed, (OLD, OLD))
+    running = _write(work / "export-def" / "frame.png", when=time.time() - 60).parent
+    os.utime(running, (OLD, OLD))  # an old folder still being written to
+    preview = _write(work / "previews" / "preview_a_1.mp4", when=time.time() - 2 * 86400)
+    fresh_preview = _write(work / "previews" / "preview_a_2.mp4", when=time.time())
+    legacy = [_write(temp / "clipmonster_x1" / "a.png", when=OLD - 86400).parent,
+              _write(temp / "cm-whisper-y" / "audio.wav", when=OLD - 86400).parent,
+              _write(temp / "ClipMonster_previews" / "preview_b.mp4", when=OLD - 86400)]
+    for d in legacy[:2]:
+        os.utime(d, (OLD - 86400, OLD - 86400))
+    others = [_write(temp / "someone_elses" / "f", when=OLD - 86400), _write(temp / "notes.txt", when=OLD - 86400)]
+    removed, freed = cleanup.sweep_work(work=work, temp=temp)
+    assert removed == 5 and freed == 5000
+    assert not crashed.exists() and not preview.exists() and not any(p.exists() for p in legacy)
+    assert running.exists() and fresh_preview.exists() and all(p.exists() for p in others)
+    assert not (temp / "ClipMonster_previews").exists()
+
+
+def test_a_deleted_download_takes_what_was_saved_beside_it(tmp_path):
+    cache = tmp_path / "cache"
+    video = _write(cache / "abcdefghijk.mp4")
+    extras = [_write(cache / f"abcdefghijk.{x}") for x in ("analysis.npz", "video.json", "en.vtt",
+                                                             "whisper-small.en.json")]
+    kept = [_write(cache / "abcdefghijk2.analysis.npz"), _write(cache / "zzzzzzzzzzz.mp4"),
+            _write(cache / "abcdefghijk.notes.txt")]
+    assert cleanup.remove_download(video) == 5000
+    assert not video.exists() and not any(f.exists() for f in extras) and all(f.exists() for f in kept)
 
 
 def test_reading_tiktok_managers_library(tmp_path):

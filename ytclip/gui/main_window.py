@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import tempfile
 from dataclasses import asdict, fields, replace
 from pathlib import Path
 
@@ -24,7 +23,7 @@ from ..export import export_clip
 from ..export import frame as export_frame
 from ..ffmpeg import MediaInfo, probe
 from ..organize import stamp
-from ..settings import APP_NAME, SCHEMA, Settings, all_presets, app_dir, save_user_preset
+from ..settings import APP_NAME, SCHEMA, Settings, all_presets, app_dir, save_user_preset, work_dir
 from ..polish import reapply_fixes
 from ..stackpool import preview_video
 from . import forms, theme
@@ -1591,7 +1590,7 @@ class MainWindow(QMainWindow):
             return
         clip = replace(p.clips[self.sel])
         settings = self.settings.copy(fast_copy=False)
-        out_dir = Path(tempfile.gettempdir()) / f"{APP_NAME}_previews"
+        out_dir = work_dir() / "previews"
         out_dir.mkdir(exist_ok=True)
         dest = out_dir / f"preview_{p.video.id}_{int(clip.start)}.mp4"
 

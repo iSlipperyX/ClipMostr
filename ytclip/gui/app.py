@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
+import threading
 
 
 def _prepare_process() -> None:
@@ -99,6 +100,10 @@ def main() -> int:
         except Exception:
             pass
 
+    # What a crash or a closed window left in the work folder, cleared off the UI thread.
+    from ..cleanup import sweep_work
+
+    threading.Thread(target=sweep_work, daemon=True, name="sweep-work").start()
     win = MainWindow()
     win.old_copies = old_copies
     win.show()

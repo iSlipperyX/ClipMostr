@@ -19,13 +19,13 @@ from __future__ import annotations
 import base64
 import json
 import re
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
 from .analyze import Clip
 from .ffmpeg import ffmpeg_exe, run
+from .settings import work_folder
 from .subtitles import Word, words_between
 
 FRAME_WIDTH = 512
@@ -224,7 +224,7 @@ def ask(title: str, clips: list[Clip], words: list[Word], src: Path, s,
 
     if not ai.has_key(s):
         raise PolishError(ai.missing_key(s))
-    with tempfile.TemporaryDirectory(prefix="ytclip-polish-") as tmp:
+    with work_folder("polish-") as tmp:
         frames = grab_frames(src, clips, Path(tmp))
         content = build_content(title, clips, words, frames, guide, bottom, handles)
     try:

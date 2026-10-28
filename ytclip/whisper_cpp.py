@@ -16,7 +16,6 @@ import re
 import shutil
 import subprocess
 import sys
-import tempfile
 import time
 import urllib.request
 import wave
@@ -26,7 +25,7 @@ from typing import Callable
 import numpy as np
 
 from .ffmpeg import NO_WINDOW, Cancelled, tracked
-from .settings import models_dir
+from .settings import models_dir, work_folder
 from .subtitles import Cue, Word
 
 Cancel = Cancelled
@@ -244,7 +243,7 @@ def transcribe(audio: np.ndarray, model_name: str, language: str, spans: list[tu
             return [], []
         audio, where = join_spans(audio, spans)
     label = "Transcribing speech on the graphics card" if spans is None else "Transcribing the clips on the graphics card"
-    with tempfile.TemporaryDirectory(prefix="cm-whisper-") as tmp:
+    with work_folder("whisper-") as tmp:
         wav, out = Path(tmp) / "audio.wav", Path(tmp) / "words"
         write_wav(wav, audio)
         progress(label, 0.0)
