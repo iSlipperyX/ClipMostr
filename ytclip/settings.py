@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 import time
 from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
@@ -21,12 +22,29 @@ def app_dir() -> Path:
     return path
 
 
-def models_dir() -> Path:
-    """Large downloaded models live in the local (non-roaming) profile."""
+def local_dir(*parts: str) -> Path:
+    """%LOCALAPPDATA%\\ClipMonster (or a folder in it): this PC's own big or short-lived files, never
+    synced or roamed: models, updates, the previous version and temporary work."""
     base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".cache")
-    path = Path(base) / APP_NAME / "models"
+    path = Path(base, APP_NAME, *parts)
     path.mkdir(parents=True, exist_ok=True)
     return path
+
+
+def models_dir() -> Path:
+    """Large downloaded models live in the local (non-roaming) profile."""
+    return local_dir("models")
+
+
+def work_dir() -> Path:
+    """Where every step's temporary files go (cleanup.sweep_work empties what a crash left behind)."""
+    return local_dir("work")
+
+
+def work_folder(prefix: str) -> "tempfile.TemporaryDirectory[str]":
+    """A temporary folder in work_dir(), removed when the `with` ends. A file Windows still has open
+    can't go then; cleanup.sweep_work clears it on the next start instead of letting it fail the step."""
+    return tempfile.TemporaryDirectory(prefix=prefix, dir=work_dir(), ignore_cleanup_errors=True)
 
 
 @dataclass
@@ -39,7 +57,8 @@ class Settings:
     auto_export: bool = False
     # Updates
     check_updates: bool = True
-    include_prereleases: bool = False
+    update_channel: str = "stable"  # stable | beta | dev (updater.CHANNELS)
+    auto_update: bool = True  # download updates by themselves; automation installs them when it's idle
     update_repo: str = ""  # "" = the GitHub repo this build was published from
     # Download
     quality: int = 1080
@@ -187,9 +206,16 @@ class Settings:
     disk_min_free_gb: int = 15  # automation cleans up, then pauses, before free space falls under this (0 = off)
     watchdog_minutes: int = 30  # a download or export that stops moving this long is stopped (0 = off)
     auto_prefetch: bool = True  # download the next video while this one is clipped
+    # Upload (uploads.py): finished clips go to a storage server too
+    upload_target: str = ""  # "" (off) | gdrive | folder (UPLOAD_TARGETS)
+    upload_what: str = "all"  # all | automation
+    gdrive_client_id: str = ""  # your own OAuth client (a "Desktop app" one), from console.cloud.google.com
+    gdrive_client_secret: str = ""
+    gdrive_folder: str = "ClipMonster"  # the folder in your Drive that clips go into
+    upload_folder: str = ""  # for "folder": a NAS share, mapped drive or synced folder
     # Clean up (cleanup.py): clear out downloads, rejected clips and clips TikTok Manager is done with
-    cleanup_auto: bool = False  # automation does it once a day
-    cleanup_kinds: str = "partial, previews, rejected, posted, removed"
+    cleanup_auto: bool = True  # automation does it once a day
+    cleanup_kinds: str = "partial, previews, rejected, posted, removed, uploaded"
     cleanup_days: int = 3
     # 2 = text sizes are letter heights (1 = raw .ass sizes, which looked different in every font)
     text_units: int = 2
@@ -245,6 +271,13 @@ class Settings:
             # Saved before 2.5.0, when "Always" was the only way to get Whisper's captions on clips that
             # have YouTube captions: now only the clips are typed out (the captions still find them).
             data = data | {"transcribe": "clips"}
+        if isinstance(data, dict) and data and "update_channel" not in data:
+            # Saved before 2.8.0. "Include beta versions" is the Beta channel now, and Clean up runs by
+            # itself every day: nothing ClipMonster is done with is left taking up space.
+            kinds = str(data.get("cleanup_kinds") or "")
+            data = data | {"update_channel": "beta" if data.get("include_prereleases") else "stable",
+                           "cleanup_auto": True,
+                           "cleanup_kinds": f"{kinds}, uploaded" if kinds and "uploaded" not in kinds else kinds}
         return cls().apply(migrate(data))
 
     def save(self, path: Path | None = None) -> None:
@@ -490,7 +523,12 @@ CLEANUP_KINDS = (
     ("rejected", "Clips the quality check rejected"),
     ("posted", "Clips you've posted (TikTok Manager)"),
     ("removed", "Clips you removed in TikTok Manager"),
+    ("uploaded", "Clips safely uploaded to your storage server"),
 )
+
+UPLOAD_TARGETS = (("", "Off"), ("gdrive", "Google Drive"), ("folder", "A folder (NAS, network share or synced folder)"))
+
+UPDATE_CHANNELS = (("stable", "Stable"), ("beta", "Beta (test versions)"), ("dev", "Dev (every change)"))
 
 BANNER_MODES = (("bar", "Solid bar (video sits between)"), ("overlay", "Text over the video"))
 LAYOUT_FITS = (("auto", "Auto (from Format)"), ("crop", "Crop to fill"), ("blur", "Fit, blurred fill"),
@@ -508,7 +546,29 @@ SCHEMA: list[Field] = [
 
     Field("check_updates", "Check for updates automatically", "Updates", "bool",
           help="Looks for a new release on GitHub about once a day"),
-    Field("include_prereleases", "Include beta versions", "Updates", "bool"),
+    Field("update_channel", "Update channel", "Updates", "choice", choices=UPDATE_CHANNELS,
+          help="Stable: finished versions only. Beta: also test versions of the next one. Dev: a new build "
+               "every time ClipMonster's code changes, for trying things the moment they're made (least "
+               "tested). Picking a steadier channel offers its newest version straight away"),
+    Field("auto_update", "Get updates by themselves", "Updates", "bool",
+          help="New versions download in the background, so updating is one click (Restart now). When the "
+               "window is closed, automation installs them itself between videos and carries on. Off: you're "
+               "told about new versions and download them yourself"),
+    Field("upload_target", "Upload finished clips to", "Upload", "choice", choices=UPLOAD_TARGETS,
+          help="Every clip that's exported and passes the quality check is copied to the server once, in the "
+               "same folders it has on this PC. It runs in the background and never holds up clipping"),
+    Field("upload_what", "Which clips", "Upload", "choice",
+          choices=(("all", "All finished clips"), ("automation", "Only automation's clips"))),
+    Field("gdrive_client_id", "Google OAuth client ID", "Upload", "str", placeholder="….apps.googleusercontent.com",
+          help="From your own Google Cloud project: Google Auth Platform → Clients → Create client → Desktop "
+               "app. Free. The guide linked above takes about 10 minutes"),
+    Field("gdrive_client_secret", "Google OAuth client secret", "Upload", "secret", placeholder="GOCSPX-…"),
+    Field("gdrive_folder", "Folder in your Drive", "Upload", "str",
+          help="Made in My Drive if it isn't there. ClipMonster can only see what it put in Drive itself"),
+    Field("upload_folder", "Folder to upload to", "Upload", "path",
+          help="For 'A folder': a NAS share (\\\\NAS\\clips), a mapped drive, or a folder Google Drive, Dropbox or "
+               "OneDrive syncs"),
+
     Field("update_repo", "Update source (GitHub owner/repo)", "Updates", "str",
           help="Leave blank to use the repository this build was published from"),
 

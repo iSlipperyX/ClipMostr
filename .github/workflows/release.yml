@@ -1,20 +1,36 @@
-# Builds ClipMonster on Windows and publishes a GitHub Release whenever a version tag
-# (v1.2.3, or v1.3.0-beta.1 for a pre-release) is pushed. Installed copies of the app
-# find these releases through the GitHub API and update themselves.
+# Builds ClipMonster on Windows: the app folder, ClipMonster-windows.zip (what installed copies update
+# from), ClipMonster-Setup.exe (what people download) and SHA256SUMS.txt.
+#
+# - A version tag (v2.8.0, or v2.9.0-beta.1 for a beta), pushed by `python release.py <version>`,
+#   publishes that release. Betas are GitHub pre-releases: only the Beta and Dev channels get them.
+# - Every push to main publishes a dev build: the pre-release tagged "dev", replaced each time,
+#   versioned "<last release>+dev.<commits since it>". Only the Dev channel gets it.
+# - A pull request that touches the build, or a manual run, only builds, and keeps the files as a
+#   workflow artifact, so packaging problems show up before a release.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+    branches: [main]
+  pull_request:
+    paths: ["packaging/**", "build.py", "pyproject.toml", ".github/workflows/release.yml"]
+  workflow_dispatch:
 
 permissions:
   contents: write  # needed to create the release
+
+concurrency:  # a newer push to main replaces a dev build still being made; releases always finish
+  group: release-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
 
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # the tags, to number dev builds
 
       - uses: actions/setup-python@v5
         with:
@@ -27,17 +43,41 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[ai,whisper,build]"
 
-      - name: Check the tag matches the app version
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue) -and
+              -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
+
+      - name: Work out the version
+        id: version
         shell: bash
         run: |
-          version=$(python -c "import ytclip; print(ytclip.__version__)")
-          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
-            echo "::error::Tag $GITHUB_REF_NAME doesn't match ytclip.__version__ ($version). Run: python release.py <version>"
-            exit 1
+          source=$(python -c "import ytclip; print(ytclip.__version__)")
+          if [[ "$GITHUB_REF" == refs/tags/* ]]; then
+            if [ "v$source" != "$GITHUB_REF_NAME" ]; then
+              echo "::error::Tag $GITHUB_REF_NAME doesn't match ytclip.__version__ ($source). Run: python release.py <version>"
+              exit 1
+            fi
+            echo "version=$source" >> "$GITHUB_OUTPUT"
+            echo "kind=release" >> "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_REF" == "refs/heads/main" ] && [ "$GITHUB_EVENT_NAME" == "push" ]; then
+            last=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD)
+            count=$(git rev-list --count "$last..HEAD")
+            echo "version=${last#v}+dev.$count" >> "$GITHUB_OUTPUT"
+            echo "since=$last" >> "$GITHUB_OUTPUT"
+            # main is exactly a release: that release is the newest build already
+            if [ "$count" = "0" ]; then echo "kind=none" >> "$GITHUB_OUTPUT"; else echo "kind=dev" >> "$GITHUB_OUTPUT"; fi
+          else
+            echo "version=$source" >> "$GITHUB_OUTPUT"
+            echo "kind=check" >> "$GITHUB_OUTPUT"
           fi
 
       # Whisper for the graphics card. If this fails the app still ships, with Whisper on the CPU only.
       - name: Cache the whisper.cpp build
+        if: steps.version.outputs.kind != 'none'
         id: whisper-cache
         uses: actions/cache@v4
         with:
@@ -45,25 +85,47 @@ jobs:
           key: whisper-cpp-vulkan-${{ hashFiles('packaging/build_whisper_cpp.py', 'packaging/install_vulkan_sdk.ps1') }}
 
       - name: Vulkan SDK
-        if: steps.whisper-cache.outputs.cache-hit != 'true'
+        if: steps.version.outputs.kind != 'none' && steps.whisper-cache.outputs.cache-hit != 'true'
         continue-on-error: true
         shell: pwsh
         run: ./packaging/install_vulkan_sdk.ps1
 
       - name: Build whisper.cpp for the graphics card
-        if: steps.whisper-cache.outputs.cache-hit != 'true'
+        if: steps.version.outputs.kind != 'none' && steps.whisper-cache.outputs.cache-hit != 'true'
         continue-on-error: true
         run: python packaging/build_whisper_cpp.py build/whisper-cpp --vulkan
 
       - name: Build
-        run: python build.py
+        if: steps.version.outputs.kind != 'none'
+        run: python build.py --installer --version "${{ steps.version.outputs.version }}"
 
-      - name: Checksum
+      - name: Check the build runs and says its version
+        if: steps.version.outputs.kind != 'none'
+        shell: bash
+        run: |
+          said=$(dist/ClipMonster/ytclip.exe --version)
+          echo "$said"
+          [[ "$said" == *"${{ steps.version.outputs.version }}"* ]] || { echo "::error::ytclip.exe says '$said'"; exit 1; }
+
+      - name: Checksums
+        if: steps.version.outputs.kind != 'none'
         shell: bash
         working-directory: dist
-        run: sha256sum ClipMonster-windows.zip > SHA256SUMS.txt && cat SHA256SUMS.txt
+        run: sha256sum ClipMonster-windows.zip ClipMonster-Setup.exe > SHA256SUMS.txt && cat SHA256SUMS.txt
+
+      - name: Keep the build
+        if: steps.version.outputs.kind == 'check'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipMonster-build
+          path: |
+            dist/ClipMonster-windows.zip
+            dist/ClipMonster-Setup.exe
+            dist/SHA256SUMS.txt
+          retention-days: 7
 
       - name: Publish release
+        if: steps.version.outputs.kind == 'release'
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
@@ -73,5 +135,24 @@ jobs:
           # Hand-written notes in release-notes/<tag>.md go first; GitHub's change list follows them.
           notes=()
           if [ -f "release-notes/$GITHUB_REF_NAME.md" ]; then notes=(--notes-file "release-notes/$GITHUB_REF_NAME.md"); fi
-          gh release create "$GITHUB_REF_NAME" dist/ClipMonster-windows.zip dist/SHA256SUMS.txt \
+          gh release create "$GITHUB_REF_NAME" dist/ClipMonster-Setup.exe dist/ClipMonster-windows.zip dist/SHA256SUMS.txt \
             --title "ClipMonster ${GITHUB_REF_NAME#v}" "${notes[@]}" --generate-notes $prerelease
+
+      - name: Publish the dev build
+        if: steps.version.outputs.kind == 'dev'
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+          SINCE: ${{ steps.version.outputs.since }}
+        run: |
+          {
+            echo "The newest build of main, for the **Dev** update channel (Settings → Updates). It's replaced by"
+            echo "every change, and is the least tested version: Stable and Beta never get it."
+            echo
+            echo "**Changes since ${SINCE#v}:**"
+            git log --no-merges --format='- %s (%h)' "$SINCE..HEAD" | head -60
+          } > dev-notes.md
+          gh release delete dev --cleanup-tag --yes || true
+          gh release create dev dist/ClipMonster-Setup.exe dist/ClipMonster-windows.zip dist/SHA256SUMS.txt \
+            --title "ClipMonster $VERSION" --notes-file dev-notes.md --target "$GITHUB_SHA" --prerelease --latest=false

@@ -7,6 +7,8 @@ from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, co
 
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
 ICON = os.path.join(SPECPATH, "clipmonster.ico")
+VERSION_INFO = os.path.join(SPECPATH, "version_info.txt")  # written by build.py: Explorer > Properties > Details
+VERSION = VERSION_INFO if os.path.exists(VERSION_INFO) else None
 
 datas = (
     collect_data_files("imageio_ffmpeg", includes=["binaries/*"])  # bundled ffmpeg.exe
@@ -44,11 +46,11 @@ cli = analysis("launch_cli.py")
 
 gui_exe = EXE(
     PYZ(gui.pure), gui.scripts, [],
-    exclude_binaries=True, name="ClipMonster", icon=ICON, console=False, upx=False,
+    exclude_binaries=True, name="ClipMonster", icon=ICON, console=False, upx=False, version=VERSION,
 )
 cli_exe = EXE(
     PYZ(cli.pure), cli.scripts, [],
-    exclude_binaries=True, name="ytclip", icon=ICON, console=True, upx=False,
+    exclude_binaries=True, name="ytclip", icon=ICON, console=True, upx=False, version=VERSION,
 )
 COLLECT(
     gui_exe, gui.binaries, gui.datas,

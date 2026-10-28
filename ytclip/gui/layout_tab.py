@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
 import threading
 from dataclasses import replace
 from pathlib import Path
@@ -18,7 +17,7 @@ from ..export import export_clip
 from ..export import frame as export_frame
 from ..ffmpeg import MediaInfo
 from ..settings import (APP_NAME, LAYOUT_PRESETS, SCHEMA, Settings, all_layouts, delete_user_layout,
-                        load_user_layouts, save_user_layout)
+                        load_user_layouts, save_user_layout, work_dir)
 from ..stackpool import pool_files, preview_video
 from . import forms, overlay, theme
 from .compositor import paint_safe_zone
@@ -357,7 +356,7 @@ class LayoutTab(QWidget):
         clip, s = replace(self.clip), self.settings.copy()
         s.stack_video = preview_video(s)
         src, media, words, next_part = self.src, self.media, list(self.words), self.next_part
-        dest = Path(tempfile.gettempdir()) / f"{APP_NAME}_layout_{gen}.jpg"
+        dest = work_dir() / f"layout_{gen}.jpg"
         self.status.setText("Rendering frame…")
 
         def work() -> None:

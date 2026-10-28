@@ -6,7 +6,8 @@ Run on Windows after `python build.py` (the Tests workflow's frozen-update job d
 
 It copies the build twice into a temporary folder: an "installed" copy, and an "update" copy marked
 with an extra file. The update's ytclip.exe then installs itself over the installed copy (with a
-program holding a folder inside it open), and the result is checked.
+program holding a folder inside it open), keeping the replaced copy as the previous version, and the
+result is checked.
 """
 
 import shutil
@@ -32,7 +33,8 @@ def main(build: Path) -> int:
     try:
         start = time.monotonic()
         r = subprocess.run([str(new / "ytclip.exe"), "--apply-update", "--wait-pid", "0", "--new-dir", str(new),
-                            "--install-dir", str(app), "--log-file", str(log)],
+                            "--install-dir", str(app), "--log-file", str(log),
+                            "--keep-previous", str(base / "previous"), "--old-version", "1.0.0"],
                            capture_output=True, text=True, timeout=600,
                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         took = time.monotonic() - start
@@ -55,6 +57,11 @@ def main(build: Path) -> int:
         problems.append("your own file was touched")
     if any(p.name.startswith(".cm-old") for p in app.iterdir()):
         problems.append("the backup folder was left behind")
+    kept = base / "previous" / "ClipMonster"
+    if not (kept / "_internal" / "only-in-the-old-one.txt").exists() or not (kept / "ClipMonster.exe").exists():
+        problems.append("the previous version wasn't kept")
+    elif (base / "previous" / "version.txt").read_text(encoding="utf-8") != "1.0.0":
+        problems.append("the previous version's number wasn't kept")
     if "powershell" in text.lower():
         problems.append("PowerShell was mentioned")
     v = subprocess.run([str(app / "ytclip.exe"), "--version"], capture_output=True, text=True, timeout=120)

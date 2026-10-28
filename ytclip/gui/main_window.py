@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import json
-import tempfile
+import time
 from dataclasses import asdict, fields, replace
 from pathlib import Path
 
-from PySide6.QtCore import QSettings, QSize, Qt, QTimer, QUrl
+from PySide6.QtCore import QObject, QSettings, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleS
                                QPushButton, QScrollArea, QSlider, QSplitter, QTableWidget, QTableWidgetItem,
                                QTabWidget, QTextEdit, QVBoxLayout, QWidget)
 
-from .. import __version__, compose, layout, series, updater, youtube_login
+from .. import __version__, compose, layout, pipeline, series, updater, uploads, youtube_login
 from ..analyze import SIGNAL_LABELS, Clip, clip_score
 from ..download import VIDEO_EXTS, expand_sources, is_url, needs_expansion
 from ..engine import Engine, Project
@@ -24,7 +24,7 @@ from ..export import export_clip
 from ..export import frame as export_frame
 from ..ffmpeg import MediaInfo, probe
 from ..organize import stamp
-from ..settings import APP_NAME, SCHEMA, Settings, all_presets, app_dir, save_user_preset
+from ..settings import APP_NAME, SCHEMA, Settings, all_presets, app_dir, save_user_preset, work_dir
 from ..polish import reapply_fixes
 from ..stackpool import preview_video
 from . import forms, theme
@@ -125,6 +125,12 @@ class QueueItem(QWidget):
             self.bar.setValue(int(frac * 1000))
 
 
+class _Relay(QObject):
+    """Hands lines from a worker thread to the window's log, on the window's own thread."""
+
+    line = Signal(str)
+
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -156,6 +162,12 @@ class MainWindow(QMainWindow):
         self._restore()
         self.library.refresh()
         QTimer.singleShot(2500, self._startup_updates)
+        # Finished clips go up to the storage server (Settings → Upload), here while automation isn't running.
+        self._upload_log = _Relay(self)
+        self._upload_log.line.connect(self._log)
+        self.uploader = uploads.Uploader(lambda: self.settings, self._upload_log.line.emit,
+                                         idle_when=pipeline.runner_alive)
+        self.uploader.start()
 
     def _startup_updates(self) -> None:
         finished = updater.finished_update_message()
@@ -165,9 +177,103 @@ class MainWindow(QMainWindow):
                 self._notice(f"✓ {msg}")
             else:
                 self._warn(msg)
+        self._offer_old_copies()
+        if self._offer_install():
+            return
         # Only packaged builds update themselves; from source you'd use git.
-        if self.settings.check_updates and updater.install_dir() and updater.due_for_check():
+        if self.settings.check_updates and updater.install_dir() and \
+                updater.due_for_check(updater.CHECK_HOURS[updater.channel_setting(self.settings)]):
             self.banner.check(manual=False)
+
+    def _offer_old_copies(self) -> None:
+        """Copies of ClipMonster unzipped by hand before the installer: offer to remove each (once)."""
+        for folder in getattr(self, "old_copies", []):
+            box = QMessageBox(QMessageBox.Question, APP_NAME,
+                              f"There's another copy of ClipMonster in {folder}, from before it was installed. "
+                              f"The one you're using now is in {updater.install_dir()}, and it has all your "
+                              "settings, niches and history (they're kept separately from the program).\n\n"
+                              "Remove the old copy? Only ClipMonster's own program files are removed: anything "
+                              "else you keep in that folder stays.", parent=self)
+            remove = box.addButton("Remove old copy", QMessageBox.AcceptRole)
+            box.addButton("Keep it", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is remove:
+                why = updater.remove_copy(folder)
+                if why:
+                    self._warn(f"The old copy in {folder} is still there: {why}")
+                    continue
+                self._notice(f"✓ Removed the old copy of ClipMonster in {folder}.")
+            else:
+                updater.keep_copy(folder)
+        self.old_copies = []
+
+    INSTALL_ASK_AGAIN = 7 * 86400
+
+    def _offer_install(self) -> bool:
+        """A copy unzipped by hand, from before the installer: offer to install ClipMonster properly
+        (again a week after "Not now"). True when it's installing and this window is closing."""
+        asked = updater.load_state().get("install_offer")
+        if not updater.needs_installing() or asked == "never" or \
+                isinstance(asked, (int, float)) and time.time() - asked < self.INSTALL_ASK_AGAIN:
+            return False
+        box = QMessageBox(QMessageBox.Question, APP_NAME,
+                          "ClipMonster now installs like other Windows apps: into your user folder "
+                          "(%LOCALAPPDATA%\\Programs\\ClipMonster), out of OneDrive and the Desktop, with a Start "
+                          "menu entry and its own Uninstall. Updates are smoother there.\n\n"
+                          f"This copy, in {updater.install_dir()}, was unzipped by hand. Install ClipMonster "
+                          "now? Your settings, niches, history and clips stay exactly as they are, and "
+                          "automation carries on. This window closes, and the installed ClipMonster opens by "
+                          "itself (in about a minute) and offers to remove this copy.", parent=self)
+        install = box.addButton("Install now", QMessageBox.AcceptRole)
+        later = box.addButton("Not now", QMessageBox.RejectRole)
+        box.addButton("Keep using this copy", QMessageBox.DestructiveRole)
+        box.setDefaultButton(install)
+        box.exec()
+        if box.clickedButton() is not install:
+            updater.save_state(install_offer=time.time() if box.clickedButton() is later else "never")
+            return False
+        updater.save_state(install_offer=time.time())  # if it fails, ask again next week
+        setup = self._download_setup()
+        if setup is None:
+            return False
+        try:
+            updater.run_setup(setup, stop_from=updater.install_dir())
+        except updater.UpdateError as exc:
+            self._warn(str(exc))
+            return False
+        self.banner.ready = None  # the installer brings the newest version: no update on closing
+        QTimer.singleShot(0, self.close)
+        return True
+
+    def _download_setup(self) -> Path | None:
+        from PySide6.QtWidgets import QProgressDialog
+
+        s = self.settings
+        wait = QProgressDialog("Downloading ClipMonster-Setup.exe…", "Cancel", 0, 100, self)
+        wait.setWindowTitle(f"Install {APP_NAME}")
+        wait.setMinimumDuration(0)
+
+        def fetch(t: Task) -> Path:
+            rel = updater.setup_release(updater.configured_repo(s.update_repo), updater.channel_setting(s))
+            return updater.download(rel, progress=lambda f: t.progress.emit("", f), setup=True,
+                                    cancelled=lambda: t.cancel_requested)
+
+        task = Task("Downloading the installer", fetch)
+        done: dict = {}
+        wait.canceled.connect(lambda: setattr(task, "cancel_requested", True))
+        task.progress.connect(lambda _m, f: wait.setValue(int(f * 100)) if f >= 0 else None)
+        task.succeeded.connect(lambda path: done.update(path=path))
+        task.failed.connect(lambda msg: done.update(error=msg))
+        task.finished.connect(wait.reset)
+        self._setup_task = task  # kept alive while it runs
+        task.start()
+        wait.exec()
+        task.wait(5000)
+        if done.get("error") and not isinstance(done.get("path"), Path):
+            if "Cancel" not in done["error"]:
+                self._warn(f"Couldn't download the installer: {done['error']}")
+            return None
+        return done.get("path")
 
     # ================================================================== UI
     def _build(self) -> None:
@@ -885,6 +991,7 @@ class MainWindow(QMainWindow):
         self._status_is_progress = False
 
     def _idle(self) -> None:
+        self.uploader.nudge()  # an export may have just finished
         self.progress.setVisible(False)
         self.cancel_btn.setVisible(False)
         if self._status_is_progress:
@@ -1432,6 +1539,7 @@ class MainWindow(QMainWindow):
         old = self.settings
         self.settings = new
         self.settings.save()
+        self.uploader.nudge()
         forms.refresh(self.tune_editors, new)
         forms.refresh(self.export_editors, new)
         self.research.settings_changed()
@@ -1464,10 +1572,18 @@ class MainWindow(QMainWindow):
     def _open_settings(self, tab: str = "") -> None:
         self.niches.commit()  # a niche name still being typed would be lost when the dialog's copy comes back
         dlg = SettingsDialog(self.settings, self, tab)
+        channel = self.settings.update_channel
         if dlg.exec():
             self._apply_settings(dlg.result_settings)
+            if dlg.go_back:
+                self.banner.go_back()
+            elif self.settings.update_channel != channel and self.settings.check_updates:
+                self.banner.check(manual=False)  # a new channel: see what it has straight away
         elif dlg.signed_in:  # cancelled, but the sign-in just made still counts
             self._apply_settings(self.settings.copy(cookies_browser=youtube_login.CHOICE))
+        if dlg.drive_changed:
+            self.uploader.nudge()
+            pipeline.request_uploads(self.automation.db)
         if dlg.signed_in and self.settings.cookies_browser == youtube_login.CHOICE:
             self.automation.end_pause_after_sign_in()
 
@@ -1545,7 +1661,7 @@ class MainWindow(QMainWindow):
             return
         clip = replace(p.clips[self.sel])
         settings = self.settings.copy(fast_copy=False)
-        out_dir = Path(tempfile.gettempdir()) / f"{APP_NAME}_previews"
+        out_dir = work_dir() / "previews"
         out_dir.mkdir(exist_ok=True)
         dest = out_dir / f"preview_{p.video.id}_{int(clip.start)}.mp4"
 
@@ -1569,7 +1685,7 @@ class MainWindow(QMainWindow):
         box = QMessageBox(self)
         box.setWindowTitle(f"About {APP_NAME}")
         box.setText(f"""
-            <h3>{APP_NAME} {__version__}</h3>
+            <h3>{APP_NAME} {updater.build_label()}</h3>
             <p>Paste links or drop videos, let the analysis find the best moments, fine-tune them on the
             timeline, then export clips with captions in any format.</p>
             <p><b>Clip colours:</b> purple = signals, cyan = AI, green = edited by you.</p>
@@ -1633,6 +1749,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e) -> None:
         self._closing = True
+        self.uploader.stop(wait=3)  # an upload cut off carries on next time, from where it stopped
         self.banner.shutdown()
         self.research.shutdown()
         self.niches.shutdown()

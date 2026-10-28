@@ -65,8 +65,7 @@ def test_cli_updates_from_inside_the_app_folder(tmp_path, monkeypatch):
     monkeypatch.setattr(updater, "check", lambda *a: rel)
     monkeypatch.setattr(updater, "install_dir", lambda: target)
     monkeypatch.setattr(updater, "other_instances", lambda t: [])
-    monkeypatch.setattr(updater, "download", lambda r, progress: tmp_path / "u.zip")
-    monkeypatch.setattr(updater, "extract", lambda z, t: tmp_path / ".cm-up" / "ClipMonster")
+    monkeypatch.setattr(updater, "prepare", lambda r, t, progress: tmp_path / "next" / "ClipMonster")
     monkeypatch.setattr(updater, "launch_swap", lambda *a, **kw: launched.append(a))
     assert cli.run_update(True) == 0 and launched
 
@@ -104,7 +103,9 @@ def _zip(path, names):
 def test_path_length_check_allows_for_the_backup_folder(tmp_path, monkeypatch):
     target = tmp_path / "ClipMonster"
     target.mkdir()
-    room = updater.MAX_PATH - len(str(target / updater.BACKUP_NAME)) - 1
+    # The deepest of the backup folder in the install folder and the unpacked copy counts
+    deepest = max(len(str(target / updater.BACKUP_NAME)), len(str(updater.staging_dir() / "ClipMonster")))
+    room = updater.MAX_PATH - deepest - 1
     deep = "_internal/" + "d" * (room - len("_internal/") + 1)
     with pytest.raises(updater.UpdateError, match="path length"):
         updater.extract(_zip(tmp_path / "u.zip", ["ClipMonster/ClipMonster.exe", "ClipMonster/" + deep]), target)

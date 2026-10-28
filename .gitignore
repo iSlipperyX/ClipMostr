@@ -15,3 +15,4 @@ venv/
 # Local clips and caches (in case the output folder is pointed here)
 clips/
 .downloads/
+packaging/version_info.txt

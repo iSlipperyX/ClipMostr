@@ -137,7 +137,7 @@ def test_automation_runs_the_check_as_it_starts(tmp_path):
 
 
 def test_low_disk_cleans_up_then_pauses_then_carries_on(tmp_path, monkeypatch):
-    s = _settings(disk_min_free_gb=15)
+    s = _settings(disk_min_free_gb=15, cleanup_auto=False)  # only the disk guard's clean-up
     r = _runner(tmp_path, s)
     free = {"bytes": 5 * GB}
     monkeypatch.setattr(pipeline.Runner, "free_space", lambda self, s: (free["bytes"], "D:\\"))

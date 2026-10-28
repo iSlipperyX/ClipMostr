@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 import time
 from pathlib import Path
@@ -39,7 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
         epilog='Example: ytclip "https://youtu.be/VIDEO" --preset "Shorts / TikTok / Reels"\n'
            "Trending research: ytclip research --help\nFind videos for a request: ytclip find --help\n"
            "Automation: ytclip auto --help\n"
-           "Quality check: ytclip qc --help\nWhat's working: ytclip results --help",
+           "Quality check: ytclip qc --help\nWhat's working: ytclip results --help\n"
+           "Upload to a storage server: ytclip upload --help\nClear out space: ytclip clean --help",
     formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("sources", nargs="*", help="video/playlist/channel URLs, video files or folders")
@@ -84,30 +86,45 @@ def build_parser() -> argparse.ArgumentParser:
                         "edge, firefox...")
     p.add_argument("--check-update", action="store_true", help="check GitHub for a newer ClipMonster release")
     p.add_argument("--update", action="store_true", help="download and install the newest release (packaged app only)")
+    p.add_argument("--channel", choices=("stable", "beta", "dev"),
+                   help="with --check-update/--update: this update channel instead of Settings → Updates'")
+    p.add_argument("--go-back", action="store_true",
+                   help="install the version you had before the last update again (packaged app only)")
     p.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     return p
 
 
-def run_update(install: bool) -> int:
+def run_update(install: bool, channel: str = "", go_back: bool = False) -> int:
     import os
     import time
 
     from . import updater
 
     s = Settings.load()
-    repo = updater.configured_repo(s.update_repo)
-    try:
-        rel = updater.check(repo, s.include_prereleases)
-    except updater.UpdateError as exc:
-        console.print(f"[red]{escape(str(exc))}[/]")
-        return 1
-    updater.save_state(last_check=time.time())
-    if not rel:
-        console.print(f"ClipMonster {__version__} is up to date.")
-        return 0
-    console.print(f"[bold]ClipMonster {escape(rel.version)}[/] is available (you have {__version__}). {escape(rel.page_url)}")
-    if not install:
-        return 0
+    if go_back:
+        version = updater.previous_version()
+        if not version:
+            console.print("There's no previous version to go back to. One is kept from each update from 2.8.0 on.")
+            return 1
+        rel = None
+    else:
+        channel = channel or updater.channel_setting(s)
+        repo = updater.configured_repo(s.update_repo)
+        try:
+            rel = updater.check(repo, channel)
+        except updater.UpdateError as exc:
+            console.print(f"[red]{escape(str(exc))}[/]")
+            return 1
+        updater.save_state(last_check=time.time())
+        if not rel:
+            console.print(f"ClipMonster {escape(updater.build_label())} is up to date on the {channel} channel.")
+            return 0
+        version = rel.version
+        what = "Switch to" if rel.switch else "Available:"
+        console.print(f"{what} [bold]ClipMonster {escape(rel.label)}[/] (you have {escape(__version__)}). "
+                      f"{escape(rel.page_url)}")
+        if not install:
+            return 0
     target = updater.install_dir()
     if target is None:
         console.print("Running from source: update with [bold]git pull[/] instead.")
@@ -120,17 +137,19 @@ def run_update(install: bool) -> int:
         console.print(f"[red]Close these first; they keep the ClipMonster folder in use: {escape(', '.join(others))}[/]")
         return 1
     try:
-        with Progress(TextColumn("[cyan]{task.description}"), BarColumn(), console=console, transient=True) as bar:
-            task = bar.add_task("Downloading update", total=1)
-            zip_path = updater.download(rel, lambda f: bar.update(task, completed=f))
-            bar.update(task, description="Unpacking", completed=1)
-            new_app = updater.extract(zip_path, target)
+        if rel is None:
+            new_app = updater.prepare_previous(target)
+            updater.save_state(skipped=__version__)
+        else:
+            with Progress(TextColumn("[cyan]{task.description}"), BarColumn(), console=console, transient=True) as bar:
+                task = bar.add_task("Downloading update", total=1)
+                new_app = updater.prepare(rel, target, lambda f: bar.update(task, completed=f))
     except updater.UpdateError as exc:
         console.print(f"[red]{escape(str(exc))}[/]")
         return 1
-    updater.save_state(pending=rel.version)
+    updater.save_state(pending=version)
     updater.launch_swap(new_app, target, os.getpid(), relaunch="")
-    console.print(f"[green]✓ Downloaded and verified {escape(rel.version)}.[/] It's installed in the background "
+    console.print(f"[green]✓ Ready to install {escape(version)}.[/] It's installed in the background "
                   f"once this command exits; the next ytclip run reports the result. "
                   f"Log: {escape(str(updater.update_log()))}")
     return 0
@@ -536,6 +555,8 @@ def build_auto_parser() -> argparse.ArgumentParser:
     p.add_argument("--pause", action="store_true", help="pause a running automation")
     p.add_argument("--resume", action="store_true", help="carry on after --pause")
     p.add_argument("--stop", action="store_true", help="ask a running automation to stop")
+    p.add_argument("--wait", action="store_true",
+                   help="with --stop: wait (up to 90 s) until it has; exit code 10 = it was running and stopped")
     p.add_argument("--try-now", action="store_true",
                    help="end a pause after YouTube asked this PC to sign in, and try again now")
     p.add_argument("--install", action="store_true", help="start automation whenever you sign in to Windows")
@@ -611,6 +632,17 @@ def run_auto(argv: list[str]) -> int:
         n = pipeline.end_pause(db, time.time())
         console.print("Trying YouTube again now" + (f" ({n} video{'s' if n != 1 else ''} waiting)." if n else "."))
         return 0
+    if args.stop and args.wait:  # the installer, before it replaces the app's files
+        db.close()
+        from . import updater
+
+        was = pipeline.runner_alive(JobDB())
+        if not updater.stop_automation(resume=False):
+            console.print("[red]Automation didn't stop within 90 seconds.[/]")
+            return 1
+        console.print("Automation stopped. A video in progress went back in the queue." if was
+                      else "Automation wasn't running.")
+        return 10 if was else 0
     if args.stop:
         db.set_meta("stop", "1")
         console.print("Asked automation to stop. A video in progress goes back in the queue.")
@@ -1031,6 +1063,66 @@ def run_whisper_test(argv: list[str]) -> int:
     return 0
 
 
+def run_upload(argv: list[str]) -> int:
+    from . import gdrive, pipeline, uploads
+    from .jobs import JobDB
+
+    p = argparse.ArgumentParser(
+        prog="ytclip upload", description="Upload finished clips to your storage server (Settings → Upload). "
+        "Automation and the app upload by themselves; this shows how it's going or does it now.")
+    p.add_argument("--sign-in", action="store_true", help="sign in to Google Drive (opens your browser)")
+    p.add_argument("--sign-out", action="store_true", help="forget the Google Drive sign-in")
+    p.add_argument("--now", action="store_true", help="upload everything waiting now, then exit")
+    p.add_argument("--retry", action="store_true", help="try failed uploads again")
+    args = p.parse_args(argv)
+    s = Settings.load()
+    if args.sign_out:
+        gdrive.sign_out()
+        console.print("Signed out of Google Drive. Nothing is uploaded there until you sign in again.")
+        return 0
+    if args.sign_in:
+        console.print("Your browser is opening Google's sign-in page. Sign in and allow ClipMonster to add files "
+                      "to your Drive…")
+        try:
+            account = gdrive.sign_in(s.gdrive_client_id, s.gdrive_client_secret)
+        except gdrive.DriveError as exc:
+            console.print(f"[red]✗ {escape(str(exc))}[/]")
+            return 1
+        if not s.upload_target:
+            s.copy(upload_target="gdrive").save()
+        console.print(f"[green]✓ Signed in to Google Drive as {escape(account.email or 'your account')}.[/] Clips "
+                      "upload by themselves from now on.")
+        return 0
+    db = JobDB()
+    try:
+        if args.retry:
+            n = uploads.retry_failed(db)
+            pipeline.request_uploads(db)
+            console.print(f"{n} failed upload{'s' if n != 1 else ''} will be tried again.")
+        target = uploads.target_for(s)
+        if target is None:
+            console.print("Uploading is off. Pick a server in Settings → Upload.")
+            return 0
+        problem = target.problem(s)
+        if problem:
+            console.print(f"[yellow]⚠ {escape(problem)}[/]")
+            return 1
+        if args.now:
+            uploads.sync(db, s)
+            db.set_meta("upload_hold", 0)
+            sent = 0
+            with Progress(TextColumn("[cyan]{task.description}"), BarColumn(), console=console, transient=True) as bar:
+                task = bar.add_task("Uploading", total=None)
+                while uploads.upload_next(db, s, f"{os.getpid()}:cli",
+                                          lambda m: (bar.update(task, description=escape(m)), console.print(escape(m)))):
+                    sent += 1
+            console.print(f"{sent} clip{'s' if sent != 1 else ''} uploaded.")
+        console.print(escape(uploads.status(db).text()))
+        return 0
+    finally:
+        db.close()
+
+
 def run_sign_in(argv: list[str], wait: float = 1800.0, poll: float = 2.0) -> int:
     from . import pipeline, youtube_login
     from .jobs import JobDB
@@ -1099,6 +1191,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_whisper_test(argv[1:])
     if argv[:1] == ["sign-in"]:
         return run_sign_in(argv[1:])
+    if argv[:1] == ["upload"]:
+        return run_upload(argv[1:])
     if argv[:1] == ["doctor"]:
         return run_doctor(argv[1:])
     if argv[:1] == ["results"]:
@@ -1117,8 +1211,8 @@ def main(argv: list[str] | None = None) -> int:
     finished = updater.finished_update_message()  # result of an update started last time
     if finished:
         console.print(f"[green]✓ {escape(finished[0])}[/]" if finished[1] else f"[yellow]⚠ {escape(finished[0])}[/]")
-    if args.check_update or args.update:
-        return run_update(install=args.update)
+    if args.check_update or args.update or args.go_back:
+        return run_update(install=args.update, channel=args.channel or "", go_back=args.go_back)
     if args.list_layouts:
         for name, values in all_layouts().items():
             tag = "" if name in LAYOUT_PRESETS else " [dim](yours)[/]"

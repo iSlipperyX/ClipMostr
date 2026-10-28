@@ -195,7 +195,7 @@ def test_a_leftover_backup_and_failure_note_from_an_earlier_run(case):
 
 def test_the_app_restarts_after_an_update_and_after_a_failure(case, monkeypatch):
     started = []
-    monkeypatch.setattr(swap, "start_app", lambda install, relaunch, log: started.append((install, relaunch)))
+    monkeypatch.setattr(swap, "start_app", lambda install, relaunch, log, args=(): started.append((install, relaunch)))
     assert swap.apply(case.new, case.app, 0, "ClipMonster.exe", case.log, sleep=lambda s: None)
     assert started == [(case.app, "ClipMonster.exe")]
     monkeypatch.setattr(swap, "process_alive", lambda pid: True)

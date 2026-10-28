@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import tempfile
 from pathlib import Path
 from typing import Callable
 
@@ -11,7 +10,7 @@ from .analyze import Clip
 from .captions import build_ass
 from .ffmpeg import MediaInfo, encoder_args, ffmpeg_exe, pick_encoder, probe, run, run_with_progress
 from .layout import Box, Plan
-from .settings import Settings
+from .settings import Settings, work_folder
 from .subtitles import Word
 
 
@@ -123,7 +122,7 @@ def export_clip(src: Path, src_info: MediaInfo, dest: Path, clip: Clip, words: l
     seek = clip.start if still_at is None else clip.start + min(max(0.0, still_at), max(0.0, dur - 0.05))
     length = dur if still_at is None else 0.5
 
-    with tempfile.TemporaryDirectory(prefix="clipmonster_") as tmp:
+    with work_folder("export-") as tmp:
         cmd = [ffmpeg_exe(), "-y", "-v", "error", "-ss", f"{seek:.3f}", "-i", str(src.resolve()),
                "-t", f"{length:.3f}"]
         second_audio = False

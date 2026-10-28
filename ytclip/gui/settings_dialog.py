@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPushButton,
                                QScrollArea, QTabWidget, QVBoxLayout)
 
-from .. import __version__, niches, updater, youtube_login
+from .. import gdrive, niches, updater, youtube_login
 from ..settings import SCHEMA, Settings, app_dir
 from ..gemini import KEY_URL as GEMINI_KEY_URL
 from ..trending import KEY_HELP_URL
@@ -17,7 +17,7 @@ from .sign_in_dialog import SignInDialog
 
 ANTHROPIC_KEY_URL = "https://console.anthropic.com/settings/keys"
 GROUPS = ("General", "Download", "Clip finding", "Transcription", "Speed", "AI", "Export", "Captions", "Layout",
-          "Research", "Picking", "Automation", "Updates")
+          "Research", "Picking", "Automation", "Upload", "Updates")
 
 
 class SettingsDialog(QDialog):
@@ -28,6 +28,8 @@ class SettingsDialog(QDialog):
         self.result_settings = settings.copy()
         self._editors: dict[str, forms.Editor] = {}
         self.signed_in = False  # signed in to YouTube from here: the caller ends a sign-in pause
+        self.go_back = False  # Go back to the previous version was pressed: the caller does it after saving
+        self.drive_changed = False  # signed in or out, or asked to retry: the caller nudges the uploader
 
         layout = QVBoxLayout(self)
         tabs = QTabWidget()
@@ -92,17 +94,34 @@ class SettingsDialog(QDialog):
                 row.addWidget(self._gpu_state, 1)
                 row.addWidget(again)
                 page.layout().addRow("", row)
+            if group == "Upload":
+                self._build_upload(page)
             if group == "Updates":
                 repo = updater.configured_repo(self.result_settings.update_repo)
-                note = QLabel(f"You have ClipMonster {__version__}. "
+                where = updater.install_dir()
+                note = QLabel(f"You have ClipMonster {updater.build_label()}"
+                              + (f", installed in {where}. " if where else ", running from source. ")
                               + (f"New versions are published at github.com/{repo}/releases. "
                                  if repo else "This build doesn't know its GitHub repository yet. Builds made by "
                                  "the GitHub release workflow set it automatically. ")
-                              + "Updates download in the background, are checked against their SHA-256 checksum, "
-                                "and install when ClipMonster restarts. Your settings and session are kept.")
+                              + "Updates are checked against their SHA-256 checksum and kept out of the install "
+                                f"folder, in {updater.updates_dir()}, until they're installed. Your settings, "
+                                "session and clips are never touched by an update.")
                 note.setWordWrap(True)
                 note.setProperty("muted", True)
                 page.layout().insertRow(0, note)
+                previous = updater.previous_version()
+                row = QHBoxLayout()
+                back = QPushButton(f"Go back to {previous}" if previous else "Go back to the previous version")
+                back.setEnabled(bool(previous) and where is not None)
+                back.setToolTip("Installs the version you had before the last update again. The version you have "
+                                "now is kept, so you can come back to it the same way" if previous else
+                                "The version before each update is kept from 2.8.0 on, so this is possible after "
+                                "your next update")
+                back.clicked.connect(self._go_back)
+                row.addWidget(back)
+                row.addStretch(1)
+                page.layout().addRow("", row)
             if group == "Research":
                 note = QLabel("The Research tab reads YouTube's most-popular chart for each region and scores "
                               "every video on how well it will cut into clips. It needs a free YouTube Data API "
@@ -161,6 +180,8 @@ class SettingsDialog(QDialog):
     def _changed(self, name: str, value) -> None:
         self.result_settings = self.result_settings.apply({name: value})
         s = self.result_settings
+        if name in ("gdrive_client_id", "gdrive_client_secret") and hasattr(self, "_drive_state"):
+            self._refresh_upload()
         if name in ("min_len", "max_len") and s.min_len > s.max_len:  # the other end follows along
             other = "max_len" if name == "min_len" else "min_len"
             self.result_settings = s.apply({other: value})
@@ -201,6 +222,122 @@ class SettingsDialog(QDialog):
         if on != mine and (on or mine):
             self.result_settings = self.result_settings.apply({"cookies_browser": youtube_login.CHOICE if on else ""})
             forms.refresh(self._editors, self.result_settings)
+
+    # ------------------------------------------------------------ Upload
+    def _build_upload(self, page) -> None:
+        note = QLabel("Finished clips are copied to your storage server once each, in the same folders they have on "
+                      "this PC, while ClipMonster carries on clipping. Clean up can then clear clips that are "
+                      "safely uploaded and that TikTok Manager doesn't still need. For Google Drive, make your "
+                      f"own free sign-in key first: <a href='{gdrive.SETUP_HELP}' style='color:{theme.ACCENT_2}'>"
+                      "the 5-minute guide</a> (in a Google Cloud project: turn on the Google Drive API, set up the "
+                      "consent screen and publish it, then make a Desktop app OAuth client).")
+        note.setWordWrap(True)
+        note.setOpenExternalLinks(True)
+        note.setProperty("muted", True)
+        page.layout().insertRow(0, note)
+        row = QHBoxLayout()
+        self._drive_btn = QPushButton("Sign in to Google Drive…")
+        self._drive_btn.setToolTip("Opens Google's sign-in page in your browser. ClipMonster is only allowed to see "
+                                   "and change the files it uploads itself")
+        self._drive_btn.clicked.connect(self._drive_sign_in)
+        self._drive_out = QPushButton("Sign out")
+        self._drive_out.clicked.connect(self._drive_sign_out)
+        self._drive_state = QLabel("")
+        self._drive_state.setWordWrap(True)
+        row.addWidget(self._drive_btn)
+        row.addWidget(self._drive_out)
+        row.addWidget(self._drive_state, 1)
+        page.layout().addRow("Google Drive", row)
+        row = QHBoxLayout()
+        retry = QPushButton("Retry failed uploads")
+        retry.clicked.connect(self._retry_uploads)
+        self._upload_state = QLabel("")
+        self._upload_state.setWordWrap(True)
+        self._upload_state.setProperty("muted", True)
+        row.addWidget(retry)
+        row.addWidget(self._upload_state, 1)
+        page.layout().addRow("", row)
+        self._refresh_upload()
+
+    def _refresh_upload(self) -> None:
+        from .. import uploads
+        from ..jobs import JobDB
+
+        s = self.result_settings
+        account = gdrive.load_account(s.gdrive_client_id) if s.gdrive_client_id.strip() else None
+        has_client = bool(s.gdrive_client_id.strip() and s.gdrive_client_secret.strip())
+        if account:
+            self._drive_state.setText(f"✓ Signed in as {account.email or 'your Google account'}")
+            self._drive_state.setStyleSheet(f"color:{theme.GOOD};")
+        else:
+            self._drive_state.setText("Not signed in." if has_client else "Enter the client ID and secret first.")
+            self._drive_state.setStyleSheet(f"color:{theme.MUTED};")
+        self._drive_btn.setEnabled(has_client)
+        self._drive_btn.setText("Sign in again…" if account else "Sign in to Google Drive…")
+        self._drive_out.setVisible(account is not None)
+        try:
+            db = JobDB()
+            try:
+                self._upload_state.setText(uploads.status(db).text())
+            finally:
+                db.close()
+        except Exception:
+            self._upload_state.setText("")
+
+    def _drive_sign_in(self) -> None:
+        from PySide6.QtWidgets import QProgressDialog
+
+        from .tasks import Task
+
+        s = self.result_settings
+        wait = QProgressDialog("Finish signing in on Google's page in your browser…", "Cancel", 0, 0, self)
+        wait.setWindowTitle("Google Drive")
+        wait.setMinimumDuration(0)
+        task = Task("Signing in to Google Drive",
+                    lambda t: gdrive.sign_in(s.gdrive_client_id, s.gdrive_client_secret,
+                                             cancelled=lambda: t.cancel_requested))
+        wait.canceled.connect(lambda: setattr(task, "cancel_requested", True))
+        done = {}
+        task.succeeded.connect(lambda account: done.update(ok=account))
+        task.failed.connect(lambda msg: done.update(error=msg))
+        task.finished.connect(wait.reset)
+        self._sign_in_task = task  # kept alive while it runs
+        task.start()
+        wait.exec()
+        task.wait(3000)
+        if done.get("ok"):
+            if not s.upload_target:  # signing in to Drive means you want to upload to it
+                self.result_settings = self.result_settings.apply({"upload_target": "gdrive"})
+                forms.refresh(self._editors, self.result_settings)
+            self.drive_changed = True
+        elif done.get("error") and "cancelled" not in done["error"]:
+            self._drive_state.setText(f"✗ {done['error']}")
+            self._drive_state.setStyleSheet(f"color:{theme.BAD};")
+            return
+        self._refresh_upload()
+
+    def _drive_sign_out(self) -> None:
+        gdrive.sign_out()
+        self.drive_changed = True
+        self._refresh_upload()
+
+    def _retry_uploads(self) -> None:
+        from .. import uploads
+        from ..jobs import JobDB
+
+        db = JobDB()
+        try:
+            n = uploads.retry_failed(db)
+            db.set_meta("upload_hold", 0)
+        finally:
+            db.close()
+        self.drive_changed = True
+        self._upload_state.setText(f"{n} upload{'s' if n != 1 else ''} will be tried again." if n else
+                                   "No uploads have failed.")
+
+    def _go_back(self) -> None:
+        self.go_back = True
+        self.accept()
 
     def _reset(self) -> None:
         # Niches are your content, edited in their own tab, not a setting to reset.
