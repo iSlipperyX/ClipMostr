@@ -44,6 +44,19 @@ class Job:
     pruned: int = 0  # cache files removed
     niche: str = ""  # id of the niche it was picked for (niches.py), "" for none
     order: str = ""  # id of the clip request it's for (orders.py), "" for none
+    progress: str = ""  # while it's worked on: its steps.Status as JSON, for the Automation tab's status bars
+
+    @property
+    def status_bar(self):
+        """Its steps.Status while it's being worked on, else None."""
+        from .steps import Status
+
+        if not self.progress or self.status not in ("working", "queued"):
+            return None
+        try:
+            return Status.from_json(json.loads(self.progress))
+        except ValueError:
+            return None
 
     @property
     def video_id(self) -> str:
@@ -112,6 +125,13 @@ class JobDB:
                 "CASE status WHEN 'queued' THEN created END ASC, updated DESC LIMIT ?", (limit,)).fetchall()
         return [Job.from_row(r) for r in rows]
 
+    def working(self) -> Job | None:
+        """The video being clipped right now, if any."""
+        with self._lock:
+            row = self.con.execute("SELECT * FROM jobs WHERE status = 'working' ORDER BY updated DESC LIMIT 1"
+                                   ).fetchone()
+        return Job.from_row(row) if row else None
+
     def video_ids(self) -> set[str]:
         """The YouTube id of every video ever queued, whatever happened to it."""
         with self._lock:
@@ -152,13 +172,13 @@ class JobDB:
             self.con.execute("DELETE FROM jobs WHERE id = ?", (job_id,))
 
     def retry(self, job_id: str) -> None:
-        self.update(job_id, status="queued", next_try=0.0, attempts=0, error="", stage="Waiting")
+        self.update(job_id, status="queued", next_try=0.0, attempts=0, error="", stage="Waiting", progress="")
 
     def reset_interrupted(self) -> int:
         """Jobs left 'working' by a runner that crashed or was killed go back in the queue."""
         with self._lock:
-            return self.con.execute("UPDATE jobs SET status = 'queued', stage = 'Interrupted; will start again' "
-                                    "WHERE status = 'working'").rowcount
+            return self.con.execute("UPDATE jobs SET status = 'queued', stage = 'Interrupted; will start again', "
+                                    "progress = '' WHERE status = 'working'").rowcount
 
     def release_waiting(self, now: float) -> int:
         """Videos waiting out a sign-in pause are due now (the pause was ended early)."""

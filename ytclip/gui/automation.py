@@ -7,6 +7,7 @@ runner's log.
 
 from __future__ import annotations
 
+import json
 import os
 import time
 from pathlib import Path
@@ -28,8 +29,11 @@ from .library import reveal
 from .overnight import OvernightPanel
 from .requests_panel import NichePanel, RequestDialog, RequestPanel
 from .sign_in_dialog import SignInDialog
+from .status_bars import BAR_ROLE, LabeledBar, NowPanel, ProgressDelegate
 
 REPORT_EVERY = 30.0  # seconds between refreshes of the Overnight page while it's showing
+NOW_EVERY = 1000  # ms between updates of the status bars while automation runs
+ACTIVITY_STALE = 120.0  # an activity this old was left behind by a runner that stopped
 
 COLUMNS = ("Video", "Channel", "Niche", "Status", "Clips", "Updated", "Why it was picked")
 NICHE_COLUMN = COLUMNS.index("Niche")
@@ -62,12 +66,16 @@ class Automation(QWidget):
         self._niche_names: dict[str, str] = {}
         self._sign_in_checked = -SIGN_IN_CHECK
         self._signed_in = False
+        self._alive = False
         self._build()
         self.niches_changed()
         self.refresh()
         self.timer = QTimer(self, interval=3000)
         self.timer.timeout.connect(self.refresh)
         self.timer.start()
+        self.now_timer = QTimer(self, interval=NOW_EVERY)  # the status bars move more often than the rest
+        self.now_timer.timeout.connect(self._show_now)
+        self.now_timer.start()
         QTimer.singleShot(2000, self._while_away)
         if self.db.meta("resume_after_update") == "1":  # stopped so the app could update itself
             self.db.set_meta("resume_after_update", "0")
@@ -141,6 +149,10 @@ class Automation(QWidget):
         row.addWidget(clean)
         layout.addLayout(row)
 
+        self.now = NowPanel()
+        self.now.setVisible(False)
+        layout.addWidget(self.now)
+
         self.table = QTableWidget(0, len(COLUMNS))
         self.table.setObjectName("panel")
         self.table.setHorizontalHeaderLabels(COLUMNS)
@@ -158,6 +170,7 @@ class Automation(QWidget):
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._menu)
         self.table.itemDoubleClicked.connect(lambda item: self._open_folder(self._job_at(item.row())))
+        self.table.setItemDelegateForColumn(STATUS_COLUMN, ProgressDelegate(self.table))
 
         self.empty = QLabel()
         self.empty.setAlignment(Qt.AlignCenter)
@@ -180,7 +193,13 @@ class Automation(QWidget):
         self.uploads = QLabel()
         self.uploads.setWordWrap(True)
         self.uploads.setToolTip("Finished clips going up to your storage server (Settings → Upload)")
-        uv.addWidget(self.uploads)
+        self.upload_bar = LabeledBar(height=14)
+        self.upload_bar.setVisible(False)
+        up = QHBoxLayout()
+        up.addWidget(self.uploads, 1)
+        up.addWidget(self.upload_bar)
+        self.upload_bar.setFixedWidth(260)
+        uv.addLayout(up)
         self.learned = QLabel()
         self.learned.setTextFormat(Qt.RichText)
         self.learned.setWordWrap(True)
@@ -244,7 +263,7 @@ class Automation(QWidget):
         return pipeline.runner_alive(self.db)
 
     def refresh(self) -> None:
-        alive = self.running()
+        alive = self._alive = self.running()
         starting = not alive and time.time() < self._starting_until
         paused = self.db.meta("paused") == "1"
         state = self.db.meta("state")
@@ -279,6 +298,7 @@ class Automation(QWidget):
         self.pause_btn.setToolTip("Carry on" if paused else "Finish nothing new until you resume; a video in "
                                                             "progress carries on")
         self._fill_table()
+        self._show_now()
         self._show_uploads()
         self.niche_panel.refresh()
         self.request_panel.refresh()
@@ -294,6 +314,50 @@ class Automation(QWidget):
         colour = theme.WARN if st.problem or st.failed else theme.MUTED
         self.uploads.setText(f"<span style='color:{colour}'>☁ {_esc(st.text())}</span>")
         self.uploads.setVisible(True)
+        busy = bool(st.uploading and not st.problem)
+        self.upload_bar.setVisible(busy)
+        if busy:
+            self.upload_bar.set_fraction(st.progress, f"{st.progress:.0%} of {st.current}" if st.current else "")
+            self.upload_bar.setToolTip(f"Uploading {st.current}")
+
+    def _show_now(self) -> None:
+        """The Now panel and the working video's row: its steps, a bar for the whole video, time left."""
+        if not self._alive:
+            self.now.idle()
+            return
+        job = self.db.working()
+        if job is not None:
+            status = job.status_bar
+            self.now.show_job(job.title or job.url, status, job.stage)
+            for r in range(self.table.rowCount()):
+                it = self.table.item(r, 0)
+                cell = self.table.item(r, STATUS_COLUMN)
+                if it is not None and cell is not None and it.data(Qt.UserRole) == job.id:
+                    text = self._status_text(job)
+                    if cell.text() != text:
+                        cell.setText(text)
+                    cell.setData(BAR_ROLE, status.overall if status else None)
+                    break
+            if self.db.meta("paused") != "1":
+                self._show_uploads()
+            return
+        try:
+            act = json.loads(self.db.meta("activity") or "{}")
+        except ValueError:
+            act = {}
+        if act.get("text") and time.time() - float(act.get("time") or 0) < ACTIVITY_STALE:
+            frac = act.get("frac")
+            self.now.show_activity(act["text"], float(frac) if isinstance(frac, (int, float)) else None)
+        else:
+            self.now.idle()
+
+    @staticmethod
+    def _status_text(j: Job) -> str:
+        word = STATUS_WORDS.get(j.status, j.status)
+        bar = j.status_bar
+        if bar is not None:
+            return f"{word}: {bar.summary()}"
+        return word + (f": {j.stage}" if j.stage and j.stage not in (word, "Done") else "")
 
     def _show_lessons(self) -> None:
         """What's working, from TikTok Manager's results (re-read only when the file changes)."""
@@ -317,7 +381,7 @@ class Automation(QWidget):
 
     def _fill_table(self) -> None:
         jobs = self.db.jobs()
-        sig = [(j.id, j.status, j.stage, j.updated, j.clips, j.rejected, j.niche) for j in jobs]
+        sig = [(j.id, j.status, j.stage, j.updated, j.clips, j.rejected, j.niche, j.progress) for j in jobs]
         counts = self.db.counts()
         self.counts.setText(f"{counts['queued']} waiting · {counts['working']} working · {counts['done']} done · "
                             f"{counts['failed']} failed")
@@ -328,8 +392,7 @@ class Automation(QWidget):
         self.table.setRowCount(len(jobs))
         now = time.time()
         for r, j in enumerate(jobs):
-            word = STATUS_WORDS.get(j.status, j.status)
-            status = word + (f": {j.stage}" if j.stage and j.stage not in (word, "Done") else "")
+            status = self._status_text(j)
             tip = j.error if j.error and j.status != "done" else ""
             niche = self._niche_names.get(j.niche, "(deleted niche)" if j.niche else "")
             cells = [
@@ -345,6 +408,8 @@ class Automation(QWidget):
             ]
             cells[0].setData(Qt.UserRole, j.id)
             cells[STATUS_COLUMN].setForeground(QColor(STATUS_COLOURS.get(j.status, theme.TEXT)))
+            bar = j.status_bar
+            cells[STATUS_COLUMN].setData(BAR_ROLE, bar.overall if bar is not None else None)
             cells[STATUS_COLUMN + 1].setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             for c, cell in enumerate(cells):
                 self.table.setItem(r, c, cell)
@@ -565,6 +630,7 @@ class Automation(QWidget):
 
     def shutdown(self) -> None:
         self.timer.stop()
+        self.now_timer.stop()
 
 
 def _item(text: str, tip: str = "") -> QTableWidgetItem:

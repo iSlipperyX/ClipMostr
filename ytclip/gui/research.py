@@ -9,11 +9,11 @@ from PySide6.QtCore import QRectF, QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QCompleter, QFrame, QGridLayout,
-                               QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMenu, QProgressBar,
+                               QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMenu,
                                QPushButton, QScrollArea, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
-from .. import clipability, fresh, learn, lookup, niches
+from .. import clipability, fresh, learn, lookup, niches, steps
 from ..clipability import FIT, PART_LABELS, WEIGHTS, age_text, compact, verdict
 from ..organize import stamp
 from ..policy import Decision, PickLog, Policy, decide, language_codes, picks_path
@@ -21,6 +21,7 @@ from ..research import ScanCancelled, ScanOptions, ScanResult, history_path, las
 from ..settings import Settings
 from ..trending import CATEGORIES, KEY_HELP_URL, REGIONS, History, TrendingVideo, deep_check, parse_regions
 from . import theme
+from .status_bars import LabeledBar
 
 COLUMNS = ("Score", "Video", "Channel", "Found in", "Views", "Views / h", "Engagement", "Length", "Posted", "Niche",
            "Pick", "Seen", "Match")
@@ -289,10 +290,9 @@ class Research(QWidget):
 
         layout.addWidget(self._build_key_panel())
 
-        self.bar = QProgressBar()
-        self.bar.setFixedHeight(5)
-        self.bar.setRange(0, 1000)
+        self.bar = LabeledBar(height=14)
         self.bar.setVisible(False)
+        self._tracker = steps.Tracker()
         layout.addWidget(self.bar)
 
         self.table = QTableWidget(0, len(COLUMNS))
@@ -618,7 +618,8 @@ class Research(QWidget):
         self.find_btn.setEnabled(False)
         self.cancel_btn.setVisible(True)
         self.bar.setVisible(True)
-        self.bar.setRange(0, 0)
+        self.bar.set_fraction(None)
+        self._tracker = steps.Tracker()  # for the time left
         self.summary.setText(text)
         job.start()
 
@@ -756,11 +757,7 @@ class Research(QWidget):
 
     def _progress(self, msg: str, frac: float) -> None:
         self.summary.setText(msg)
-        if frac < 0:
-            self.bar.setRange(0, 0)
-        else:
-            self.bar.setRange(0, 1000)
-            self.bar.setValue(int(frac * 1000))
+        self.bar.set_status(self._tracker.update(msg, None if frac < 0 else frac))
 
     def _job_finished(self) -> None:
         if self.job:

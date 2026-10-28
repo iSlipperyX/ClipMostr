@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
-from . import fresh, learn, lookup, niches, orders, research, youtube_login
+from . import fresh, learn, lookup, niches, orders, research, steps, youtube_login
 from .download import Video, download, is_blocked
 from .engine import Cancelled, Engine, Project, timing_text
 from .jobs import SIGN_IN_WAIT, Job, JobDB
@@ -326,6 +326,7 @@ class Runner:
         self._history = history or (lambda: History(research.history_path()))
         self._picks = picks or (lambda: PickLog(picks_path()))
         self._fresh = fresh.load  # what each standing request searched and showed (fresh.py)
+        self._activity_at, self._activity_text = 0.0, ""
         self.pid = os.getpid()
         self._last_beat = 0.0
         self._stop: Callable[[], bool] = lambda: False  # run()'s stop check, so a long scan can be stopped
@@ -378,6 +379,15 @@ class Runner:
             self.db.set_meta("runner_pid", "")
             self.db.set_meta("heartbeat", 0)
             self.db.set_meta("state", "Stopped")
+
+    def activity(self, text: str, frac: float | None = None) -> None:
+        """What automation is doing besides clipping (checking what to clip, a standing request), for
+        the Automation tab's status bar; "" when it's done. Written at most once a second."""
+        now = self.now()
+        if text and text == self._activity_text and now - self._activity_at < 1.0 and frac not in (0.0, 1.0):
+            return
+        self._activity_at, self._activity_text = now, text
+        self.db.set_meta("activity", json.dumps({"text": text, "frac": frac, "time": now}) if text else "")
 
     def state(self, text: str) -> None:
         if self.db.meta("state") != text:
@@ -617,6 +627,13 @@ class Runner:
     # ------------------------------------------------------------ research → queue
     def research(self, s: Settings) -> int:
         """Scan (or reuse a scan the app made recently), run the picking rules, queue the picks."""
+        self.activity("Checking what to clip", 0.0)
+        try:
+            return self._research(s)
+        finally:
+            self.activity("")
+
+    def _research(self, s: Settings) -> int:
         now = self.now()
         self.state("Checking what to clip")
         forced = self.db.meta("scan_now")
@@ -646,7 +663,7 @@ class Runner:
                 if self.blocked(now):
                     opts.deep_count = 0
                 # Spaced-out checks take minutes: keep the heartbeat going so the runner isn't taken for dead.
-                result = scan(opts, history, self.log, progress=lambda m, f: self.beat(),
+                result = scan(opts, history, self.log, progress=lambda m, f: (self.beat(), self.activity(m, f)),
                               cancelled=lambda: stop() or self.stop_requested(), now=now)
                 self.log(f"Checked {len(result.videos)} videos ({result.quota} quota units).")
                 for p in result.problems:
@@ -764,7 +781,8 @@ class Runner:
                 self.state(f"Finding videos for “{text[:40]}”")
                 try:
                     r = lookup.find(text, s, key, FIND_SINCE, s.research_min_minutes, language, self.log,
-                                    progress=lambda m, f: self.beat(),
+                                    progress=lambda m, f, t=text: (self.beat(),
+                                                                   self.activity(f"“{t[:40]}”: {m}", f)),
                                     cancelled=lambda: stop() or self.stop_requested(), use_ai=with_ai,
                                     memory=memory, request_key=fresh.request_key(text, nid), skip=done)
                 except research.ScanCancelled:
@@ -938,12 +956,21 @@ class Runner:
 
         last = {"t": 0.0, "msg": "", "video": ""}
         self.db.set_meta("working_video", "")
+        self.activity("")
+        # The status bars: the video's steps, weighted by how long each took last time.
+        try:
+            timings = json.loads(self.db.meta("last_timings") or "{}")
+        except ValueError:
+            timings = {}
+        tracker = steps.Tracker(steps.plan_for(settings), steps.weights_from_timings(timings))
 
         def progress(msg: str, frac: float | None) -> None:
             t = self.now()
+            status = tracker.update(msg, frac)
             if msg != last["msg"] or t - last["t"] >= 2:
                 last.update(t=t, msg=msg)
-                self.db.update(job.id, t, stage=msg + (f" {frac:.0%}" if frac is not None else ""))
+                self.db.update(job.id, t, stage=msg + (f" {frac:.0%}" if frac is not None else ""),
+                               progress=json.dumps(status.to_json()))
             mark_busy()
             self.beat()
 
@@ -985,7 +1012,7 @@ class Runner:
             folder = engine.export(p)
         except Cancelled:
             watch.stop()
-            self.db.update(job.id, self.now(), status="queued", stage="Stopped; will start again")
+            self.db.update(job.id, self.now(), status="queued", stage="Stopped; will start again", progress="")
             self.log(f"Stopped while clipping {job.title}; it'll start again next time.")
             raise Stopped()
         except Exception as exc:
@@ -1003,7 +1030,7 @@ class Runner:
         title = p.video.title if p.video else job.title
         made = len([c for c in p.clips if c.enabled])
         rejected = p.qc.get("rejected", 0) if p.qc else 0
-        self.db.update(job.id, self.now(), status="done", stage="Done", folder=str(folder),
+        self.db.update(job.id, self.now(), status="done", stage="Done", folder=str(folder), progress="",
                        clips=made - rejected, rejected=rejected, title=title,
                        channel=p.video.channel if p.video else job.channel)
         self.log(f"✓ {made - rejected} clips from {title} → {folder}"
@@ -1021,12 +1048,12 @@ class Runner:
         attempts = job.attempts + 1
         if kind == "blocked":
             self.block(error, now, s)
-            self.db.update(job.id, now, status="queued", stage=SIGN_IN_WAIT,
+            self.db.update(job.id, now, status="queued", stage=SIGN_IN_WAIT, progress="",
                            error=error, next_try=self.db.meta_float("blocked_until"))
             return
         if kind == "permanent" or attempts >= s.auto_retries:
             stuck = error.startswith(STUCK)
-            self.db.update(job.id, now, status="failed", attempts=attempts, error=error,
+            self.db.update(job.id, now, status="failed", attempts=attempts, error=error, progress="",
                            stage="Skipped: stuck twice" if stuck and kind == "permanent" else
                            "Gave up" if kind == "retry" else "Can't be clipped")
             self.log(f"✗ {job.title or job.url}: {error}" + (" (gave up)" if kind == "retry" else ""))
@@ -1034,7 +1061,7 @@ class Runner:
             return
         wait = 60.0 if error.startswith(STUCK) else BACKOFF[min(attempts - 1, len(BACKOFF) - 1)]
         self.db.update(job.id, now, status="queued", attempts=attempts, error=error, next_try=now + wait,
-                       stage=f"Try {attempts + 1} in {_span(wait)}")
+                       stage=f"Try {attempts + 1} in {_span(wait)}", progress="")
         self.log(f"⚠ {job.title or job.url}: {error}. Trying again in {_span(wait)}.")
 
     def prune(self, s: Settings) -> int:
@@ -1159,6 +1186,8 @@ class Prefetch:
         self._cancel = threading.Event()
         self._lock = threading.Lock()  # starting the download and calling it off can't cross
         self._thread = threading.Thread(target=self._run, name="Download the next video", daemon=True)
+        self._tracker = steps.Tracker()
+        self._shown = 0.0
 
     @property
     def busy(self) -> bool:
@@ -1190,6 +1219,13 @@ class Prefetch:
     def _progress(self, msg: str, frac: float | None) -> None:
         if self._cancel.is_set():
             raise Cancelled()
+        now = self.runner.now()
+        if msg.startswith("Downloading") and now - self._shown >= 2:  # its own status bar in the queue
+            self._shown = now
+            status = self._tracker.update(msg, frac)
+            status.message = f"Downloading early: {msg[len('Downloading '):].strip('()') or 'starting'}"
+            self.runner.db.update(self.job.id, now, stage=status.message + (f" {frac:.0%}" if frac is not None else ""),
+                                  progress=json.dumps(status.to_json()))
 
     def _run(self) -> None:
         r, s, job = self.runner, self.s, self.job
@@ -1220,9 +1256,9 @@ class Prefetch:
                 else:
                     r.log(f"Couldn't download {title} early ({youtube_said(self.error)}); it's downloaded "
                           "again in its turn.")
-            r.db.update(job.id, r.now(), stage="Waiting")
+            r.db.update(job.id, r.now(), stage="Waiting", progress="")
             return
-        r.db.update(job.id, r.now(), stage="Downloaded, waiting its turn")
+        r.db.update(job.id, r.now(), stage="Downloaded, waiting its turn", progress="")
 
 
 class Pulse:

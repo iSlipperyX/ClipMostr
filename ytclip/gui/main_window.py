@@ -12,11 +12,11 @@ from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
                                QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit, QProgressBar,
+                               QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
                                QPushButton, QScrollArea, QSlider, QSplitter, QTableWidget, QTableWidgetItem,
                                QTabWidget, QTextEdit, QVBoxLayout, QWidget)
 
-from .. import __version__, compose, layout, pipeline, series, updater, uploads, youtube_login
+from .. import __version__, compose, layout, pipeline, series, steps, updater, uploads, youtube_login
 from ..analyze import SIGNAL_LABELS, Clip, clip_score
 from ..download import VIDEO_EXTS, expand_sources, is_url, needs_expansion
 from ..engine import Engine, Project
@@ -36,6 +36,7 @@ from .cleanup_dialog import CleanupDialog
 from .niches import Niches
 from .research import Research
 from .settings_dialog import SettingsDialog
+from .status_bars import LabeledBar
 from .tasks import Task, TaskQueue
 from .timeline import Timeline
 from .update_banner import UpdateBanner
@@ -89,9 +90,7 @@ class QueueItem(QWidget):
         self.title.setStyleSheet("font-weight:600;")
         self.sub = QLabel()
         self.sub.setStyleSheet(f"color:{theme.MUTED}; font-size:9pt;")
-        self.bar = QProgressBar()
-        self.bar.setFixedHeight(5)
-        self.bar.setRange(0, 1000)
+        self.bar = LabeledBar(height=14)
         lay = QVBoxLayout(self)
         lay.setContentsMargins(10, 7, 10, 7)
         lay.setSpacing(3)
@@ -99,7 +98,8 @@ class QueueItem(QWidget):
         lay.addWidget(self.sub)
         lay.addWidget(self.bar)
 
-    def show_state(self, p: Project, msg: str = "", frac: float | None = None) -> None:
+    def show_state(self, p: Project, msg: str = "", frac: float | None = None,
+                   status: "steps.Status | None" = None) -> None:
         saved_title = (getattr(p, "_saved", None) or {}).get("title")
         name = p.video.title if p.video else saved_title or (p.source if is_url(p.source) else Path(p.source).name)
         self.title.setText(self.title.fontMetrics().elidedText(name, Qt.ElideRight, 250))
@@ -107,6 +107,8 @@ class QueueItem(QWidget):
         text, colour = STATUS_TEXT.get(p.status, (p.status, theme.MUTED))
         if p.status == "error":
             text = f"Failed: {p.error[:80]}"
+        elif status is not None and p.status in ("working", "exporting"):
+            text = (f"Step {status.index}/{status.count} · " if status.step else "") + status.detail()
         elif msg and p.status in ("working", "exporting"):
             text = msg
         elif p.status in ("ready", "done") and p.clips:
@@ -118,11 +120,14 @@ class QueueItem(QWidget):
         self.sub.setStyleSheet(f"color:{colour}; font-size:9pt;")
         busy = p.status in ("working", "exporting", "queued")
         self.bar.setVisible(busy)
-        if frac is None or frac < 0:
-            self.bar.setRange(0, 0 if p.status != "queued" else 1000)
+        if p.status == "queued":
+            self.bar.set_fraction(0.0, "Waiting")
+        elif status is not None:
+            self.bar.set_status(status)
+        elif frac is None or frac < 0:
+            self.bar.set_fraction(None)
         else:
-            self.bar.setRange(0, 1000)
-            self.bar.setValue(int(frac * 1000))
+            self.bar.set_fraction(frac)
 
 
 class _Relay(QObject):
@@ -733,9 +738,8 @@ class MainWindow(QMainWindow):
         self.status = QLabel("Ready")
         self.status.setOpenExternalLinks(False)
         self.status.linkActivated.connect(lambda link: QDesktopServices.openUrl(QUrl(link)))
-        self.progress = QProgressBar()
-        self.progress.setFixedWidth(280)
-        self.progress.setRange(0, 1000)
+        self.progress = LabeledBar()
+        self.progress.setFixedWidth(300)
         self.progress.setVisible(False)
         self.cancel_btn = QPushButton("Cancel")
         self.cancel_btn.setVisible(False)
@@ -857,7 +861,8 @@ class MainWindow(QMainWindow):
                 p.status = "done"
             return p
 
-        task = Task(f"Analysing {p.source}", run, owner=p)
+        task = Task(f"Analysing {p.source}", run, owner=p,
+                    plan=steps.plan_for(settings, export=settings.auto_export))
         task.succeeded.connect(lambda _p: self._project_ready(p))
         task.failed.connect(lambda msg: self._project_failed(p, msg))
         self._wire(task)
@@ -888,9 +893,10 @@ class MainWindow(QMainWindow):
         if self.current is p:
             self.load_project(p)
 
-    def _refresh_item(self, p: Project, msg: str = "", frac: float | None = None) -> None:
+    def _refresh_item(self, p: Project, msg: str = "", frac: float | None = None,
+                      status: "steps.Status | None" = None) -> None:
         if id(p) in self.items:
-            self.items[id(p)][1].show_state(p, msg, frac)
+            self.items[id(p)][1].show_state(p, msg, frac, status)
 
     def _select_project(self, p: Project) -> None:
         if p in self.projects:
@@ -969,21 +975,20 @@ class MainWindow(QMainWindow):
 
     def _task_progress(self, task: Task, msg: str, frac: float) -> None:
         f = None if frac < 0 else frac
+        status = task.status(msg, frac)
         name = task.owner.name if isinstance(task.owner, Project) else ""
-        self._set_status(f"{msg}{' — ' + name if name else ''}", f, busy=True)
+        text = (f"{status.headline()} · " if status.step else "") + status.detail()
+        self._set_status(f"{text}{' — ' + name if name else ''}", status.overall, busy=True,
+                         bar_text=status.bar_text())
         if isinstance(task.owner, Project):
-            self._refresh_item(task.owner, msg, f)
+            self._refresh_item(task.owner, msg, f, status)
 
-    def _set_status(self, text: str, frac: float | None, busy: bool) -> None:
+    def _set_status(self, text: str, frac: float | None, busy: bool, bar_text: str = "") -> None:
         self.status.setText(text)
         self._status_is_progress = busy
         self.progress.setVisible(busy)
         self.cancel_btn.setVisible(busy)
-        if frac is None:
-            self.progress.setRange(0, 0)
-        else:
-            self.progress.setRange(0, 1000)
-            self.progress.setValue(int(frac * 1000))
+        self.progress.set_fraction(frac, bar_text)
 
     def _notice(self, text: str) -> None:
         """A result message for the user; unlike progress text it stays after the queue goes idle."""
@@ -1647,7 +1652,7 @@ class MainWindow(QMainWindow):
             if msg != "Cancelled" and not self._closing:
                 QMessageBox.warning(self, APP_NAME, f"Export failed:\n\n{msg}")
 
-        task = Task(f"Exporting {p.name}", run, owner=p)
+        task = Task(f"Exporting {p.name}", run, owner=p, plan=steps.plan_for(settings, prepare=False))
         task.succeeded.connect(done)
         task.failed.connect(failed)
         self._wire(task)

@@ -276,6 +276,7 @@ class Engine:
         p.ai_error); with strict=True - the user explicitly asked for AI - the error is raised."""
         m, v = p.measurements, p.video
         assert m is not None and v is not None
+        self.progress("Finding clips", None)
         self.rescore(p)
         sents = self._sentences(p)
         mode = self.s.mode
