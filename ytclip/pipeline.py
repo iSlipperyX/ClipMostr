@@ -299,7 +299,10 @@ class Runner:
         beat = self.db.meta_float("heartbeat")
         other = self.db.meta("runner_pid")
         if other and other != str(self.pid) and self.now() - beat < HEARTBEAT_STALE:
-            return f"Automation is already running (process {other})."
+            if process_alive(other):
+                return f"Automation is already running (process {other})."
+            self.log(f"The last automation (process {other}) ended without stopping (a crash or a restart): "
+                     "taking over.")
         self.db.set_meta("stop", "0")
         self.db.set_meta("started", self.now())
         self.beat(force=True)
@@ -972,9 +975,43 @@ def run_headless() -> int:
     return Runner(log=file_logger()).run()
 
 
+def process_alive(pid: str | int) -> bool:
+    """Whether a process with this id is running on this PC. True when it can't be told."""
+    try:
+        pid = int(pid)
+    except (TypeError, ValueError):
+        return False
+    if pid <= 0:
+        return False
+    if sys.platform == "win32":
+        import ctypes
+
+        kernel32 = ctypes.windll.kernel32
+        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return ctypes.GetLastError() == 5  # access denied: it exists, it's just not ours
+        try:
+            code = ctypes.c_ulong()
+            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
+                return True
+            return code.value == 259  # STILL_ACTIVE
+        finally:
+            kernel32.CloseHandle(handle)
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:  # it exists, but belongs to someone else
+        return True
+    return True
+
+
 def runner_alive(db: JobDB, now: float | None = None) -> bool:
+    """Whether automation is running: its heartbeat is fresh and its process is still there (after a crash
+    the heartbeat stays fresh for a few minutes)."""
     now = now or time.time()
-    return bool(db.meta("runner_pid")) and now - db.meta_float("heartbeat") < HEARTBEAT_STALE
+    pid = db.meta("runner_pid")
+    return bool(pid) and now - db.meta_float("heartbeat") < HEARTBEAT_STALE and process_alive(pid)
 
 
 def launch_command() -> list[str]:

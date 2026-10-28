@@ -85,7 +85,7 @@ def test_update_waits_for_automation_and_gives_up_clearly(monkeypatch):
     from ytclip.jobs import JobDB
 
     db = JobDB()
-    db.set_meta("runner_pid", "123")
+    db.set_meta("runner_pid", str(os.getpid()))  # a process that is running
     db.set_meta("heartbeat", time.time())
     monkeypatch.setattr(updater.time, "sleep", lambda s: None)
     assert updater.stop_automation(timeout=0) is False  # still running

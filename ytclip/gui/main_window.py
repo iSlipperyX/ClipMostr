@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleS
                                QPushButton, QScrollArea, QSlider, QSplitter, QTableWidget, QTableWidgetItem,
                                QTabWidget, QTextEdit, QVBoxLayout, QWidget)
 
-from .. import __version__, compose, layout, updater
+from .. import __version__, compose, layout, series, updater
 from ..analyze import SIGNAL_LABELS, Clip, clip_score
 from ..download import VIDEO_EXTS, expand_sources, is_url, needs_expansion
 from ..engine import Engine, Project
@@ -457,7 +457,7 @@ class MainWindow(QMainWindow):
         self.table.setSelectionMode(QAbstractItemView.SingleSelection)
         self.table.setEditTriggers(QAbstractItemView.DoubleClicked | QAbstractItemView.EditKeyPressed)
         hh = self.table.horizontalHeader()
-        for col, w in ((0, 28), (1, 30), (2, 58), (3, 44), (4, 48)):
+        for col, w in ((0, 28), (1, 44), (2, 58), (3, 44), (4, 48)):
             hh.setSectionResizeMode(col, QHeaderView.Fixed)
             self.table.setColumnWidth(col, w)
         hh.setSectionResizeMode(5, QHeaderView.Stretch)
@@ -950,13 +950,18 @@ class MainWindow(QMainWindow):
         was = self._filling
         self._filling = True
         origin = {"ai": "✨ ", "manual": "✎ ", "chapter": "§ "}.get(c.origin, "")
-        cells = [str(r + 1), stamp(c.start), f"{c.length:.0f}s", f"{c.score:.0f}", f"{origin}{c.title}"]
+        clips = self.current.clips if self.current else []
+        _, part, parts = series.labels(clips)[r] if r < len(clips) else ("", 0, 0)
+        cells = [f"{r + 1}" + (f" P{part}" if part else ""), stamp(c.start), f"{c.length:.0f}s", f"{c.score:.0f}",
+                 f"{origin}{c.title}"]
+        tips = {1: f"Part {part} of {parts}: " + ("the next part starts where this one stops" if part < parts
+                                                   else "the last part") if part else "", 5: c.reason}
         for col, text in enumerate(cells, 1):
             item = self.table.item(r, col) or QTableWidgetItem()
             item.setText(text)
             flags = Qt.ItemIsEnabled | Qt.ItemIsSelectable | (Qt.ItemIsEditable if col == 5 else Qt.NoItemFlags)
             item.setFlags(flags)
-            item.setToolTip(c.reason if col == 5 else "")  # cells are reused, so always reset it
+            item.setToolTip(tips.get(col, ""))  # cells are reused, so always reset it
             self.table.setItem(r, col, item)
         self._filling = was
 

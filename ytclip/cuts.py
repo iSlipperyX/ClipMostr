@@ -33,6 +33,7 @@ REACH = 0.5  # seconds an edge may move
 LONG, REACH_LONG = 0.18, 1.2  # a pause this long is most likely between sentences: an edge may move further to it
 CONTEXT = 3.0  # seconds of sound either side that judge what's loud
 BLOCK = 0.5  # seconds judged together
+BLUR = 0.06  # seconds: an edge this close to a pause is in it
 LEAD, TAIL = 0.12, 0.2  # seconds of a pause kept before a clip's first word and after its last
 
 
@@ -52,7 +53,7 @@ class Pauses:
             if loud - quietest >= CONTRAST:  # else there are no clear pauses here
                 quiet[k:k + block] = level[k:k + block] <= quietest + QUIET * (loud - quietest)
         edges = np.flatnonzero(np.diff(np.concatenate(([0], quiet.astype(np.int8), [0]))))
-        self._runs = [(round(s * FINE, 3), round(e * FINE, 3)) for s, e in zip(edges[::2], edges[1::2])]
+        self._runs = [(round(float(s) * FINE, 3), round(float(e) * FINE, 3)) for s, e in zip(edges[::2], edges[1::2])]
         self._starts = [s for s, _ in self._runs]
 
     def __bool__(self) -> bool:
@@ -117,10 +118,10 @@ def _move(t: float, pauses: Pauses, start: bool, lo: float, hi: float) -> float:
                 and abs(spot(r) - t) <= reach]
         # earlier is safer for a start (it keeps the first word), later for an end (it keeps the last)
         best = min(runs, key=lambda r: (abs(spot(r) - t), spot(r) if start else -spot(r)), default=None)
-        return round(spot(best), 2) if best else None
+        return round(float(spot(best)), 2) if best else None
 
-    def inside(shortest: float) -> bool:
-        return any(s <= t <= e for s, e in pauses.runs(t - 1e-6, t + 1e-6, shortest))
+    def inside(shortest: float) -> bool:  # the 60 ms average blurs a pause's ends by a frame or two
+        return any(s - BLUR <= t <= e + BLUR for s, e in pauses.runs(t - BLUR, t + BLUR, shortest))
 
     if inside(BREATH):
         return t

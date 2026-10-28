@@ -472,11 +472,22 @@ def test_without_a_key_queued_videos_still_run(tmp_path):
 
 
 def test_only_one_runner_at_a_time(tmp_path):
+    import subprocess
+    import sys
+
     clock = Clock()
     r = _runner(tmp_path, clock=clock)
-    r.db.set_meta("runner_pid", "99999")
-    r.db.set_meta("heartbeat", clock.t - 30)
-    assert "already running" in r.claim()
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        r.db.set_meta("runner_pid", str(other.pid))
+        r.db.set_meta("heartbeat", clock.t - 30)
+        assert "already running" in r.claim()
+    finally:
+        other.kill()
+        other.wait()
+    assert not pipeline.process_alive(other.pid)
+    assert r.claim() == "" and any("ended without stopping" in line for line in r.logs)  # it crashed: take over
+    r.db.set_meta("runner_pid", str(other.pid))
     r.db.set_meta("heartbeat", clock.t - pipeline.HEARTBEAT_STALE - 1)  # that one died
     assert r.claim() == ""
 

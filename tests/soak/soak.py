@@ -117,14 +117,14 @@ class Soak:
     def wait_for(self, what: str, test, limit: float = 900, every: float = 2.0) -> bool:
         end = time.time() + limit
         while time.time() < end:
+            if self.proc and self.proc.poll() is not None:
+                self.problems.append(f"automation exited (code {self.proc.returncode}) while waiting for {what}")
+                return False
             try:
                 if test():
                     return True
             except sqlite3.Error:
                 pass
-            if self.proc and self.proc.poll() is not None:
-                self.problems.append(f"automation exited (code {self.proc.returncode}) while waiting for {what}")
-                return False
             time.sleep(every)
         self.problems.append(f"gave up waiting for {what} after {limit / 60:.0f} min")
         return False
@@ -159,8 +159,9 @@ class Soak:
         self.start()
 
         # 1. kill -9 mid-export, start again
-        if self.wait_for("an export", lambda: "Exporting" in self.meta("state"), 600, 0.5):
-            victim = next((j["id"] for j in self.jobs() if j["status"] == "working"), "")
+        exporting = lambda: [j["id"] for j in self.jobs() if j["status"] == "working" and "Exporting" in j["stage"]]
+        if self.wait_for("an export", exporting, 600, 0.5):
+            victim = exporting()[0]
             self.proc.send_signal(signal.SIGKILL)
             self.proc.wait()
             self.say(f"killed automation mid-export ({victim})")
