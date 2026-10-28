@@ -133,9 +133,9 @@ def _folders(s: Settings) -> list[Check]:
             out.append(Check(label, BAD, f"{path}: its drive isn't there", "Pick another folder in Settings"))
             continue
         try:  # a folder that isn't there yet is made on first use: its nearest parent must be writable
-            test = probe / f".clipmonster-check-{os.getpid()}"
-            test.write_bytes(b"ok")
-            test.unlink()
+            test = probe / f".clipmonster-check-{os.getpid()}"  # a folder: a drive's root may refuse files
+            test.mkdir()
+            test.rmdir()
             out.append(Check(label, GOOD, str(path) + ("" if path.exists() else " (made on first use)")))
         except OSError as exc:
             out.append(Check(label, BAD, f"Can't write to {path}: {exc.strerror or exc}",

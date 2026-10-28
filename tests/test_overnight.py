@@ -180,9 +180,13 @@ def test_kill_running_stops_ffmpeg_and_the_caller_knows(tmp_path):
     assert not t.is_alive() and isinstance(errors[0], ffmpeg.Stopped)
 
 
-def test_a_watchdog_fires_only_after_its_limit():
+def test_a_watchdog_fires_only_after_its_limit(monkeypatch):
     clock = {"t": 100.0}
+    running = {"n": 0}
+    monkeypatch.setattr(ffmpeg, "kill_running", lambda: running["n"])
     w = pipeline.Watchdog(60, last=lambda: 30.0, stage=lambda: "Exporting clip 2/5 40%", now=lambda: clock["t"])
+    assert not w.check()  # nothing to stop (a slow download): it keeps watching
+    running["n"] = 1
     assert w.check()
     assert w.reason() == "Stuck: no progress for 1 min while exporting clip 2/5, so it was stopped"
     quiet = pipeline.Watchdog(60, last=lambda: 90.0, stage=lambda: "x", now=lambda: clock["t"])

@@ -239,6 +239,7 @@ class Niches(QWidget):
             box_.setSingleStep(5)
             box_.setSuffix(" s")
             box_.setSpecialValueText("Style's")
+            box_.setKeyboardTracking(False)  # typing 45 doesn't save 4 on the way
             box_.valueChanged.connect(lambda v, key=key: self._set(key, float(v)))
         lrow.addWidget(self.min_len)
         lrow.addWidget(QLabel("to"))

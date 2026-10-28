@@ -4,7 +4,8 @@ extend() looks at each clip the finder chose. One that ran into the longest clip
 the video was still at its best gets a next part: it starts on the next sentence after the clip
 ends and runs up to the longest length again, ending on a sentence. That repeats while the moment
 stays as good, up to the most parts allowed (Settings → Clip finding → Part series). Parts come out
-of the clip count: a series replaces the weakest standalone clips rather than adding to them.
+of the clip count: a series replaces the weakest standalone clips rather than adding to them, and
+when it covers clips the finder chose, spare picks (the next best moments) fill their places.
 
 A next part starts within layout.CARRIES_ON seconds of the part before, so layout.has_next_part
 already says every part but the last has a next part, and the bottom banner promises it. When the
@@ -77,17 +78,23 @@ def _next_part(part: Clip, sents: list, score: np.ndarray, bar: float, min_len: 
 
 
 def extend(clips: list[Clip], score: np.ndarray, sents: list, min_len: float, max_len: float, count: int,
-           max_parts: int, duration: float) -> int:
+           max_parts: int, duration: float, spares: list[Clip] = ()) -> int:
     """Add next parts to the clips a great moment outlasted, then keep `count` clips (in place).
-    A weaker clip the finder put further into the same moment gives way to the parts.
+    A weaker clip the finder put further into the same moment gives way to the parts, and `spares`
+    (the finder's next picks, as good as it gets after `clips`) may take the room that leaves.
     Returns how many parts were added and kept."""
     if max_parts < 2 or not len(score) or not clips:
         return 0
     floor = float(np.median(score))  # a moment has to stay better than most of the video
     added: list[Clip] = []
+
+    def signal(c: Clip) -> float:  # an AI pick's score mixes in Claude's rating; compare like with like
+        return clip_score(score, c.start, c.end) if c.origin == "ai" else c.score
+
     for first in sorted([c for c in clips if c.enabled and not c.edited], key=lambda c: c.score, reverse=True):
         if first not in clips:
             continue  # gave way to an earlier series
+        offset = first.score - clip_score(score, first.start, first.end)  # a part scores on its clip's scale
         part, chain = first, 1
         bar = max(floor, _mean(score, first.start, first.end) * KEEP_UP)
         while chain < max_parts and part.length >= max_len * FULL:
@@ -97,11 +104,11 @@ def extend(clips: list[Clip], score: np.ndarray, sents: list, min_len: float, ma
             start, end = where
             if any(o.enabled and abs(o.start - part.end) <= CARRIES_ON and o.end > part.end for o in clips + added):
                 break  # a clip already carries on from this one: it is the next part
-            nxt = Clip(start, end, clip_score(score, start, end), origin=first.origin,
+            nxt = Clip(start, end, round(clip_score(score, start, end) + offset, 1), origin="part",
                        reason="Carries on from the clip before: the moment was longer than one clip")
             inside = [o for o in clips + added if o.enabled and o is not part
                       and start < o.end - OVERLAP and end > o.start + OVERLAP]
-            if any(o.edited or o.score > first.score or o in added for o in inside):
+            if any(o.edited or signal(o) > signal(first) or o in added for o in inside):
                 break  # a clip you placed, a better one, or another series is there
             for o in inside:
                 clips.remove(o)
@@ -110,6 +117,11 @@ def extend(clips: list[Clip], score: np.ndarray, sents: list, min_len: float, ma
     if not added:
         return 0
     clips.extend(added)
+    on = [c for c in clips if c.enabled]
+    for s in sorted(spares, key=lambda c: c.score, reverse=True):  # well clear of every clip, so no false series
+        if all(s.end + CARRIES_ON < o.start or s.start > o.end + CARRIES_ON for o in on):
+            clips.append(s)
+            on.append(s)
     keep(clips, count)
     return sum(1 for c in added if c in clips)
 

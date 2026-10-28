@@ -108,6 +108,15 @@ def test_a_niche_can_set_its_own_count_and_length(tmp_path):
     assert n.clips_per_video == 0 and (n.min_len, n.max_len) == (30, 50)
 
 
+def test_a_niches_one_length_never_passes_the_styles_other(tmp_path):
+    s = _settings(niches=[GAMING | {"min_len": 80}], auto_output_dir=str(tmp_path / "out"), max_len=60)
+    game, _ = settings_for(Job("a", "u", niche="game01"), s)
+    assert (game.min_len, game.max_len) == (80, 80)  # the niche's shortest wins over the style's longest
+    s = _settings(niches=[GAMING | {"max_len": 15}], auto_output_dir=str(tmp_path / "out"), min_len=20)
+    game, _ = settings_for(Job("a", "u", niche="game01"), s)
+    assert (game.min_len, game.max_len) == (15, 15)
+
+
 def test_a_paused_niche_picks_nothing_and_holds_its_queue(tmp_path):
     history = __import__("ytclip.trending", fromlist=["History"]).History(None)
     history.sources["channels"]["@c0"] = {"id": "UCC0"}
@@ -224,3 +233,71 @@ def test_find_videos_now_for_one_niche_checks_only_its_sources(tmp_path):
     r.tick()
     assert seen["searches"] == ["podcast clips"]
     assert any("Finding videos now for Podcasts" in line for line in r.logs)
+
+
+# ---------------------------------------------------------------- found in review (2.4.0)
+
+
+def test_once_ends_when_only_a_paused_niches_videos_wait(tmp_path):
+    r = _runner(tmp_path, _settings(youtube_api_key="", disk_min_free_gb=0,
+                                    niches=[{"id": "g", "name": "G", "searches": "x", "paused": True}]))
+    r.db.add(Job("aaaaaaaaaaa", "https://youtu.be/aaaaaaaaaaa", niche="g"), 0)
+    ticks = []
+    real = r.tick
+    r.tick = lambda: ticks.append(1) or (real() if len(ticks) < 20 else pytest.fail("never ended"))
+    r.run(once=True, sleep=lambda x: None)
+    assert len(ticks) == 1 and r.db.meta("state") == "Stopped"
+
+
+def test_the_runner_never_waits_less_than_a_second(tmp_path):
+    r = _runner(tmp_path, _settings(youtube_api_key="", auto_gap_minutes=60, disk_min_free_gb=0))
+    r.db.add(Job("aaaaaaaaaaa", "https://youtu.be/aaaaaaaaaaa"), 0)
+    r.db.set_meta("last_download", r.now())
+    r.db.set_meta("scan_now", "1")  # "Find videos now" with no key to find them with
+    assert r.tick() >= 60
+
+
+def test_a_requests_own_picks_dont_use_up_its_daily_room(tmp_path):
+    s = _settings(pick_daily=1, clip_count=4)
+    r = _runner(tmp_path, s, scan=lambda *a, **k: _scan_result("a", "b", "c", "d", "e", "f"))
+    o = r.place(orders.make(8, 20, 40))
+    r.research(s)
+    for j in r.db.order_jobs(o.id):
+        r.db.update(j.id, status="done", clips=1)  # each made one clip: it needs another video
+    r.order_progress(o.id)
+    r.research(s)
+    assert len(r.db.order_jobs(o.id)) == 3
+
+
+def test_a_request_for_no_niche_takes_videos_when_niches_exist(tmp_path):
+    s = _settings(pick_daily=1, clip_count=4, niches=[GAMING])
+    r = _runner(tmp_path, s, scan=lambda *a, **k: _scan_result("a", "b", "c", "d"))
+    o = r.place(orders.make(8, 20, 40))
+    assert r.research(s) == 2 and len(r.db.order_jobs(o.id)) == 2
+
+
+def test_a_request_whose_videos_were_removed_finishes(tmp_path):
+    r = _runner(tmp_path, _settings(youtube_api_key="", disk_min_free_gb=0))
+    o = r.place(orders.make(3, 20, 40, links=["https://youtu.be/aaaaaaaaaaa"]))
+    r.db.remove(r.db.order_jobs(o.id)[0].id)  # Remove in the queue
+    r.tick()
+    assert r.db.get_order(o.id).status == "short"
+
+
+def test_a_cancel_isnt_undone_by_the_runners_count(tmp_path):
+    db = JobDB(tmp_path / "jobs.db")
+    o = orders.make(3, 20, 40, links=["https://youtu.be/aaaaaaaaaaa"])
+    db.add_order(o)
+    db.update_order(o.id, status="cancelled")
+    assert db.update_order(o.id, status="open", made=2).status == "cancelled"
+
+
+def test_find_now_for_two_niches_checks_them_all(tmp_path):
+    from ytclip import pipeline
+
+    db = JobDB(tmp_path / "jobs.db")
+    pipeline.request_scan(db, "g")
+    pipeline.request_scan(db, "g")
+    assert db.meta("scan_now") == "g" and db.meta("nudge") == "1"
+    pipeline.request_scan(db, "p")
+    assert db.meta("scan_now") == "1"

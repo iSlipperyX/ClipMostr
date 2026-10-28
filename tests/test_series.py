@@ -78,7 +78,7 @@ def test_parts_come_out_of_the_clip_count():
     clips, score = [_first(), Clip(230.0, 250.0, 75.0, "b")], _score()
     score[160:200] = 0.7  # still the moment, a little less good
     series.extend(clips, score, SENTS, 20, 60, count=3, max_parts=3, duration=300)
-    assert [c.score for c in clips] == [90.0, 90.0, 75.0]  # a weaker part 3 doesn't push out a better clip
+    assert [c.score for c in clips] == [90.0, 91.2, 75.0]  # (scored like the clip it carries on from) a weaker part 3 doesn't push out a better clip
 
 
 def test_a_clip_already_there_is_the_next_part():
@@ -144,3 +144,23 @@ def test_clips_json_numbers_the_parts_that_survived(tmp_path, monkeypatch):
     out = Engine(s.copy(qc_enabled=True)).export(p)
     records = json.loads((out / "clips.json").read_text(encoding="utf-8"))["clips"]
     assert [(r.get("part"), r.get("parts")) for r in records] == [(1, 2), (2, 2), (None, None)]
+
+
+# ---------------------------------------------------------------- found in review (2.4.0)
+
+def test_spare_picks_fill_the_places_a_series_took():
+    clips = [_first(), Clip(120.0, 140.0, 80.0, "inside"), Clip(230.0, 250.0, 40.0, "b")]
+    spares = [Clip(201.0, 221.0, 35.0, "too close"), Clip(265.0, 285.0, 30.0, "spare")]
+    series.extend(clips, _score(), SENTS, 20, 60, count=5, max_parts=3, duration=300, spares=spares)
+    titles = [c.title for c in clips]
+    assert len(clips) == 5 and "spare" in titles and "inside" not in titles
+    assert "too close" not in titles  # it would look like a part 4
+
+
+def test_parts_of_an_ai_pick_are_marked_as_parts_and_scored_on_its_scale():
+    first = Clip(39.85, 99.8, 95.0, "claude liked it", origin="ai")  # signals alone say 88.8
+    clips = [first]
+    series.extend(clips, _score(), SENTS, 20, 60, count=5, max_parts=3, duration=300)
+    parts = [c for c in clips if c is not first]
+    assert parts and all(c.origin == "part" for c in parts)
+    assert all(abs(c.score - (90.0 + 95.0 - 88.8)) < 0.2 for c in parts)

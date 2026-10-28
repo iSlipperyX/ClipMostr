@@ -37,7 +37,7 @@ _live: set[subprocess.Popen] = set()
 _live_lock = threading.Lock()
 
 
-_killed: set[int] = set()  # ids of processes kill_running() stopped
+_killed: set[subprocess.Popen] = set()  # processes kill_running() stopped, while still tracked
 
 
 class Stopped(RuntimeError):
@@ -55,8 +55,8 @@ def tracked(proc: subprocess.Popen):
     finally:
         with _live_lock:
             _live.discard(proc)
-            killed = id(proc) in _killed
-            _killed.discard(id(proc))
+            killed = proc in _killed
+            _killed.discard(proc)
     if killed:
         raise Stopped("ffmpeg was stopped because it had stopped making progress")
 
@@ -70,7 +70,9 @@ def kill_running() -> int:
         if proc.poll() is None:
             try:
                 with _live_lock:
-                    _killed.add(id(proc))
+                    if proc not in _live:  # finished meanwhile
+                        continue
+                    _killed.add(proc)
                 proc.kill()
                 n += 1
             except OSError:

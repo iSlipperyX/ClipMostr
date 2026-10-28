@@ -91,3 +91,28 @@ def test_rounding_out_to_sentences_never_runs_over_the_longest_length():
     assert cap_length(0.0, 64.8, sents, 20, 60) == 59.8  # back to the last sentence that fits, with its breath
     assert cap_length(0.0, 59.7, sents, 20, 60) == 59.7  # already fits
     assert cap_length(40.0, 64.8, sents, 30, 20) == 64.8  # nothing fits and stays long enough: left alone
+
+
+# ---------------------------------------------------------------- found in review (2.4.0)
+
+def test_two_clips_never_become_a_series_by_moving_their_edges():
+    from ytclip import layout
+
+    sound = _sound(40, [(10.0, 10.3), (20.0, 20.3), (22.95, 23.1), (30.0, 30.3)])
+    clips = [Clip(10.2, 19.5, 80), Clip(23.4, 30.1, 70)]  # 3.9 s apart; the pauses near would leave 2.8 s
+    cuts.clean_edges(clips, cuts.Pauses(sound), 40, 5, 20)
+    assert clips[1].start - clips[0].end > layout.CARRIES_ON
+    assert not layout.has_next_part(clips[0], clips)  # so the first doesn't promise a part 2
+
+
+def test_edges_never_take_a_clip_under_the_shortest_length():
+    clips = [Clip(9.9, 20.1, 80)]  # the shortest allowed; the breath just after its start would make it shorter
+    cuts.clean_edges(clips, cuts.Pauses(SOUND), 40, min_len=10.2, max_len=20)
+    assert clips[0].length >= 10.2 - 1e-6
+
+
+def test_found_pauses_keep_the_words_in_order():
+    words = [Word(0.5, 0.9, "so"), Word(1.0, 1.05, "the"), Word(1.1, 1.5, "thing"), Word(1.6, 2.0, "is")]
+    cuts.refine_words(words, cuts.Pauses(_sound(10, [(0.92, 1.18)])))
+    starts = [w.start for w in words]
+    assert starts == sorted(starts) and all(a.end <= b.start + 1e-6 for a, b in zip(words, words[1:]))

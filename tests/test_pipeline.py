@@ -1,4 +1,6 @@
 import json
+import os
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -490,6 +492,19 @@ def test_only_one_runner_at_a_time(tmp_path):
     r.db.set_meta("runner_pid", str(other.pid))
     r.db.set_meta("heartbeat", clock.t - pipeline.HEARTBEAT_STALE - 1)  # that one died
     assert r.claim() == ""
+
+
+def test_a_heartbeat_from_before_the_pc_started_is_from_a_runner_thats_gone(tmp_path, monkeypatch):
+    clock = Clock()
+    r = _runner(tmp_path, clock=clock)
+    r.db.set_meta("runner_pid", str(os.getpid()))  # a live process has its id now (ids are reused)
+    r.db.set_meta("heartbeat", clock.t - 30)
+    r.pid = os.getpid() + 1
+    monkeypatch.setattr(pipeline, "boot_time", lambda: clock.t - 10)  # a fast restart
+    assert not pipeline.runner_alive(r.db, clock.t)
+    assert r.claim() == ""
+    monkeypatch.undo()  # and the real one answers
+    assert 0 <= pipeline.boot_time() < time.time()
 
 
 def test_run_resumes_interrupted_work_and_stops_cleanly(tmp_path):

@@ -124,10 +124,13 @@ class JobDB:
                                    (now, *skip)).fetchone()
         return Job.from_row(row) if row else None
 
-    def next_try(self) -> float | None:
-        """When the soonest waiting job becomes due."""
+    def next_try(self, skip_niches: set[str] | frozenset = frozenset()) -> float | None:
+        """When the soonest waiting job becomes due, leaving out the niches in `skip_niches` (paused)."""
+        skip = sorted(skip_niches)
+        where = f" AND COALESCE(niche, '') NOT IN ({', '.join('?' * len(skip))})" if skip else ""
         with self._lock:
-            row = self.con.execute("SELECT MIN(next_try) AS t FROM jobs WHERE status = 'queued'").fetchone()
+            row = self.con.execute(f"SELECT MIN(next_try) AS t FROM jobs WHERE status = 'queued'{where}",
+                                   skip).fetchone()
         return row["t"] if row and row["t"] is not None else None
 
     def update(self, job_id: str, now: float | None = None, **changes) -> None:
@@ -229,7 +232,9 @@ class JobDB:
             try:
                 row = self.con.execute("SELECT data FROM orders WHERE id = ?", (order_id,)).fetchone()
                 order = Order.from_json(json.loads(row["data"])) if row else None
-                if order is not None:
+                if order is not None and order.status == "cancelled" and changes.get("status", "cancelled") != "cancelled":
+                    changes = {}  # cancelled meanwhile (by the app): the runner's count mustn't reopen it
+                if order is not None and changes:
                     for k, v in changes.items():
                         setattr(order, k, v)
                     order.updated = now or time.time()

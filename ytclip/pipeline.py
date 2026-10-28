@@ -166,6 +166,12 @@ def settings_for(job: Job, s: Settings, order: "orders.Order | None" = None,
     overrides = {"output_dir": str(folder), "cache_dir": str(s.cache_path)}
     if niche:
         overrides |= niche.clip_overrides()
+        lo, hi = overrides.get("min_len", out.min_len), overrides.get("max_len", out.max_len)
+        if lo > hi:  # the niche's shortest passes the style's longest (or the other way): the niche's wins
+            if "max_len" in overrides:
+                overrides["min_len"] = hi
+            else:
+                overrides["max_len"] = lo
     if order is not None:
         overrides |= {"min_len": order.min_len, "max_len": order.max_len,
                       "clip_count": max(1, clips or order.remaining or order.count)}
@@ -299,7 +305,7 @@ class Runner:
         beat = self.db.meta_float("heartbeat")
         other = self.db.meta("runner_pid")
         if other and other != str(self.pid) and self.now() - beat < HEARTBEAT_STALE:
-            if process_alive(other):
+            if beat > boot_time() and process_alive(other):
                 return f"Automation is already running (process {other})."
             self.log(f"The last automation (process {other}) ended without stopping (a crash or a restart): "
                      "taking over.")
@@ -347,19 +353,23 @@ class Runner:
             self.cleanup(s)
 
         self.lift_pause_for_sign_in(s, now)
-        job = self.db.next_due(now, niches.paused_ids(s))
+        self.check_orders()
+        paused = niches.paused_ids(s)
+        # Without a key there's no check to wait for (and "Find videos now" can't happen).
+        scan_wait = next_scan - now if research.youtube_key(s) else IDLE
+        job = self.db.next_due(now, paused)
         if job:
             wait, why = self.wait_reason(s, now)
             if wait:
                 self.state(why)
-                return min(wait, next_scan - now, IDLE)
+                return max(1.0, min(wait, scan_wait, IDLE))
             low = self.disk_guard(s, now)
             if low:
                 self.state(low)
-                return min(DISK_RECHECK, max(1.0, next_scan - now))
+                return max(1.0, min(DISK_RECHECK, scan_wait))
             self.process(job, s)
             return 1.0
-        upcoming = self.db.next_try()
+        upcoming = self.db.next_try(paused)
         blocked = self.blocked(now)
         if blocked and upcoming:  # the videos waiting are waiting for the sign-in pause: say so
             self.state(self.wait_reason(s, now)[1])
@@ -367,7 +377,7 @@ class Runner:
             self.state("Waiting: the niches with videos waiting are paused")
         else:
             self.state(self.idle_text(s, next_scan, upcoming))
-        return max(1.0, min(next_scan - now, (upcoming - now) if upcoming else IDLE, IDLE))
+        return max(1.0, min(scan_wait, (upcoming - now) if upcoming else IDLE, IDLE))
 
     def idle_text(self, s: Settings, next_scan: float, upcoming: float | None = None) -> str:
         """What the status says with nothing to clip, so an empty queue doesn't look stuck."""
@@ -459,10 +469,11 @@ class Runner:
         """Scan (or reuse a scan the app made recently), run the picking rules, queue the picks."""
         now = self.now()
         self.state("Checking what to clip")
-        self.db.set_meta("last_scan", now)
         forced = self.db.meta("scan_now")
         self.db.set_meta("scan_now", "")
         only = forced if forced not in ("", "1") else ""  # "Find videos now" for one niche
+        if not only:  # a one-niche check doesn't put off the next check of the others
+            self.db.set_meta("last_scan", now)
         if only and niches.find(s, only):
             s = s.copy(niches=[d for d in s.niches if isinstance(d, dict) and niches.Niche.from_json(d)
                                and niches.Niche.from_json(d).id == only])
@@ -503,10 +514,14 @@ class Runner:
         policy = Policy.from_settings(s)
         wanted = self.videos_wanted(s)  # clip requests that pick: niche id -> [(request, videos it needs)]
         for nid, asks in wanted.items():  # what requests need comes on top of the daily limits
-            extra = sum(n for _, n in asks)
+            # (and so do their own picks in the last day, which the limits already count)
+            extra = sum(n + self.picked_for(o, now) for o, n in asks)
             policy.daily += extra
-            if nid in policy.niche_daily:
-                policy.niche_daily[nid] += extra
+            for k in ([nid] if nid else list(policy.niche_daily)):  # no niche: any niche's video will do
+                if k in policy.niche_daily:
+                    policy.niche_daily[k] += extra
+            if not nid and policy.use_niches:  # and so will a video that fits no niche
+                policy.niche_daily[""] = policy.niche_daily.get("", 0) + extra
         decisions = decide(result.videos, policy, picks, now=now, notes=result.notes,
                            lessons=learn.for_settings(s))
         added = 0
@@ -516,11 +531,11 @@ class Runner:
                 continue
             v = d.video
             order = ""
-            for i, (o, n) in enumerate(wanted.get(v.niche, [])):
-                if n > 0:
-                    order = o.id
-                    wanted[v.niche][i] = (o, n - 1)
-                    break
+            for key in dict.fromkeys((v.niche, "")):  # its niche's requests first, then ones for no niche
+                for i, (o, n) in enumerate(wanted.get(key, [])):
+                    if n > 0 and not order:
+                        order = o.id
+                        wanted[key][i] = (o, n - 1)
             job = Job(id=v.id, url=v.url, title=v.title, channel=v.channel, channel_id=v.channel_id,
                       category=v.category, permission=d.reason, origins=list(v.origins), how="auto",
                       stage="Waiting", niche=v.niche, order=order)
@@ -545,6 +560,16 @@ class Runner:
             return n.clips_per_video
         job = Job(id="", url="", niche=niche_id)
         return max(1, settings_for(job, s)[0].clip_count)
+
+    def picked_for(self, order: orders.Order, now: float) -> int:
+        """Videos automation picked for a request in the last day."""
+        return sum(1 for j in self.db.order_jobs(order.id) if j.how == "auto" and j.created >= now - DAY)
+
+    def check_orders(self) -> None:
+        """Count open requests again: their videos may have been removed from the queue meanwhile."""
+        for o in self.db.orders(open_only=True):
+            if not any(j.status in ("queued", "working") for j in self.db.order_jobs(o.id)):
+                self.order_progress(o.id)
 
     def videos_wanted(self, s: Settings) -> dict[str, list[tuple[orders.Order, int]]]:
         """Open requests that pick their videos, by niche id, with how many more videos each needs."""
@@ -571,7 +596,7 @@ class Runner:
                 job.id = orders.job_id(vid, order.id)
                 self.db.add(job, now)
         if order.picks:
-            self.db.set_meta("scan_now", order.niche or "1")
+            request_scan(self.db, order.niche)
             message = "Waiting for automation to pick videos"
         else:
             message = f"{len(order.links)} video{'s' if len(order.links) != 1 else ''} waiting"
@@ -835,7 +860,7 @@ class Runner:
                     wait = self.tick()
                 except Stopped:
                     break
-                if once and (wait > 1.0 or not self.db.next_due(self.now())):
+                if once and (wait > 1.0 or not self.db.next_due(self.now(), niches.paused_ids(self.load()))):
                     break
                 waited = 0.0
                 while waited < wait:
@@ -881,23 +906,19 @@ class Watchdog:
         self._thread.start()
 
     def _watch(self) -> None:
-        from .ffmpeg import kill_running
-
         while not self._done.wait(self.every):
-            if self._now() - self._last() >= self.limit:
-                self._stage_at_fire = self._stage()
-                self.fired = True
-                kill_running()
+            if self.check():
                 return
 
     def check(self) -> bool:
-        """One look (what the thread does every few seconds); True if it stopped the work."""
+        """One look (what the thread does every few seconds); True if it stopped the work. With no
+        ffmpeg running (a download or an AI call is slow), there's nothing to stop: it keeps watching."""
         from .ffmpeg import kill_running
 
         if self.limit > 0 and not self.fired and self._now() - self._last() >= self.limit:
-            self._stage_at_fire = self._stage()
-            self.fired = True
-            kill_running()
+            stage = self._stage()
+            if kill_running():
+                self._stage_at_fire, self.fired = stage, True
         return self.fired
 
     def stop(self) -> None:
@@ -975,6 +996,32 @@ def run_headless() -> int:
     return Runner(log=file_logger()).run()
 
 
+def request_scan(db: JobDB, niche_id: str = "") -> None:
+    """Ask automation to check for videos now: for one niche, or all ("1"). Two different asks
+    before the check happens make it a check of all of them."""
+    asked = db.meta("scan_now")
+    db.set_meta("scan_now", niche_id if niche_id and asked in ("", niche_id) else "1")
+    db.set_meta("nudge", "1")  # a running automation looks now, not after its wait
+
+
+def boot_time() -> float:
+    """When this PC last started (a time.time()), or 0 when it can't be told. A heartbeat from before
+    then is from a process that's gone, whatever has its process id now."""
+    try:
+        if sys.platform == "win32":
+            import ctypes
+
+            ticks = ctypes.WinDLL("kernel32").GetTickCount64
+            ticks.restype = ctypes.c_ulonglong
+            return time.time() - ticks() / 1000
+        if sys.platform.startswith("linux"):
+            with open("/proc/stat", encoding="ascii") as f:
+                return float(next(line.split()[1] for line in f if line.startswith("btime")))
+    except (OSError, AttributeError, StopIteration, ValueError):
+        pass
+    return 0.0
+
+
 def process_alive(pid: str | int) -> bool:
     """Whether a process with this id is running on this PC. True when it can't be told."""
     try:
@@ -985,13 +1032,18 @@ def process_alive(pid: str | int) -> bool:
         return False
     if sys.platform == "win32":
         import ctypes
+        from ctypes import wintypes
 
-        kernel32 = ctypes.windll.kernel32
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
+        kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
+        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
         handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
         if not handle:
-            return ctypes.GetLastError() == 5  # access denied: it exists, it's just not ours
+            return ctypes.get_last_error() == 5  # access denied: it exists, it's just not ours
         try:
-            code = ctypes.c_ulong()
+            code = wintypes.DWORD()
             if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
                 return True
             return code.value == 259  # STILL_ACTIVE
@@ -1011,7 +1063,8 @@ def runner_alive(db: JobDB, now: float | None = None) -> bool:
     the heartbeat stays fresh for a few minutes)."""
     now = now or time.time()
     pid = db.meta("runner_pid")
-    return bool(pid) and now - db.meta_float("heartbeat") < HEARTBEAT_STALE and process_alive(pid)
+    beat = db.meta_float("heartbeat")
+    return bool(pid) and now - beat < HEARTBEAT_STALE and beat > boot_time() and process_alive(pid)
 
 
 def launch_command() -> list[str]:

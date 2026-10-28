@@ -76,8 +76,8 @@ def main() -> int:
     ytclip(ROOT, "auto", "--status")
     ytclip(ROOT, "doctor", "--offline", ok=False)  # warnings (no YouTube key) exit 0, problems exit 1
     report = ytclip(ROOT, "report", "--hours", "24")
-    if "1 video failed" not in report and "failed" not in report:
-        problems.append(f"the report doesn't mention the failed video: {report}")
+    if "2 clips ready from 1 video" not in report:  # the broken link is still being retried, not failed
+        problems.append(f"the report doesn't count 2.3.0's video: {report}")
     ytclip(ROOT, "request", "--list")
     ytclip(ROOT, "auto", "--once")
     con = sqlite3.connect(profile / "jobs.db")

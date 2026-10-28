@@ -946,6 +946,12 @@ class MainWindow(QMainWindow):
         if 0 <= self.sel < len(clips):
             self.table.selectRow(self.sel)
 
+    def _fill_rows(self) -> None:
+        """Every row's text again: moving or switching off one clip can change its neighbours' part numbers."""
+        clips = self.current.clips if self._ready() else []
+        for r, c in enumerate(clips[:self.table.rowCount()]):
+            self._fill_row(r, c)
+
     def _fill_row(self, r: int, c: Clip) -> None:
         was = self._filling
         self._filling = True
@@ -1021,6 +1027,7 @@ class MainWindow(QMainWindow):
         c = p.clips[item.row()]
         if item.column() == 0:
             c.enabled = item.checkState() == Qt.Checked
+            self._fill_rows()  # a switched-off part breaks its series
             self.timeline.update()
             self._update_export_btn()
         elif item.column() == 5:
@@ -1118,7 +1125,7 @@ class MainWindow(QMainWindow):
     def _clip_dragging(self, i: int) -> None:
         p = self._ready()
         if p and 0 <= i < len(p.clips):
-            self._fill_row(i, p.clips[i])
+            self._fill_rows()
             if i == self.sel:
                 self._refresh_export_view()
 
@@ -1128,11 +1135,11 @@ class MainWindow(QMainWindow):
             return
         c = p.clips[i]
         c.edited = True  # hand-tuned clips (including AI picks) survive re-detection
-        if c.origin == "auto":
+        if c.origin in ("auto", "part"):
             c.origin = "manual"
         if c.origin != "ai":
             c.score = clip_score(p.score, c.start, c.end)
-        self._fill_row(i, c)
+        self._fill_rows()
         if i == self.sel:
             self._fill_inspector()
         self.timeline.update()

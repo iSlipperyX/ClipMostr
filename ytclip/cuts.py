@@ -18,6 +18,7 @@ count as speech; where there's no clear pause nearby (a crowd shouting over the 
 from __future__ import annotations
 
 import bisect
+import itertools
 
 import numpy as np
 
@@ -63,7 +64,7 @@ class Pauses:
         """Pauses (start, end) of at least `shortest` seconds that overlap [a, b]."""
         i = max(0, bisect.bisect_left(self._starts, a) - 1)
         out = []
-        for s, e in self._runs[i:]:
+        for s, e in itertools.islice(self._runs, i, None):
             if s >= b:
                 break
             if e > a and e - s >= shortest - 1e-9:
@@ -72,6 +73,19 @@ class Pauses:
 
     def quiet_at(self, t: float) -> bool:
         return bool(self.runs(t - 1e-6, t + 1e-6, 0.0))
+
+
+_last: tuple = (None, None)  # (fine loudness, its Pauses): measuring and finding clips ask about the same video
+
+
+def pauses_in(fine: np.ndarray) -> Pauses:
+    """Pauses(fine), worked out once for the video in hand."""
+    global _last
+    seen, pauses = _last
+    if seen is not fine:
+        pauses = Pauses(fine)
+        _last = (fine, pauses)
+    return pauses
 
 
 def punctuated(words: list) -> bool:
@@ -88,15 +102,15 @@ def refine_words(words: list, pauses: Pauses) -> int:
     if not pauses:
         return 0
     found = 0
-    for w, nxt in zip(words, words[1:]):
+    for i, (w, nxt) in enumerate(zip(words, words[1:])):
         lo = max(w.start + 0.05, nxt.start - 0.4)  # a caption stamp can come a little early or late
         hi = nxt.start + 0.15
         runs = [r for r in pauses.runs(lo, hi, BREATH) if r[0] >= lo - 0.02 and r[1] <= hi + 0.3]
         if not runs:
             continue
         s, e = min(runs, key=lambda r: abs(r[1] - nxt.start))
-        if s <= w.start or e >= nxt.end + 0.3:
-            continue
+        if s <= w.start or e >= nxt.end + 0.3 or (i + 2 < len(words) and e >= words[i + 2].start):
+            continue  # not between these two words (the words would come out of order)
         w.end, nxt.start = s, e
         if nxt.end < nxt.start:
             nxt.end = nxt.start + 0.05
@@ -143,20 +157,31 @@ def clean_edges(clips: list[Clip], pauses: Pauses, duration: float, min_len: flo
     if not pauses:
         return 0
     on = sorted((c for c in clips if c.enabled), key=lambda c: c.start)
-    chained = {(id(a), id(b)) for a in on for b in on
-               if b.start > a.start and b.end > a.end and abs(b.start - a.end) <= CARRIES_ON}
+
+    def pairs() -> set[tuple[int, int]]:  # (part, its next part): what layout.has_next_part goes by
+        return {(id(a), id(b)) for a in on for b in on
+                if b.start > a.start and b.end > a.end and abs(b.start - a.end) <= CARRIES_ON}
+
+    chained = pairs()
     was = {id(c): (c.start, c.end) for c in on}
     for i, c in enumerate(on):
         if c.edited:
             continue
-        shortest = min(min_len, c.length) * 0.9
+        shortest = min(min_len, c.length)
         longest = max(max_len, c.length) if max_len else float("inf")  # never longer than allowed, or than it was
         before = max((o.end for o in on[:i] if o.end <= c.start + 0.01), default=0.0)
         after = min((o.start for o in on[i + 1:] if o.start >= c.end - 0.01), default=duration or float("inf"))
         c.start = _move(c.start, pauses, True, max(before, c.end - longest), c.end - shortest)
         c.end = _move(c.end, pauses, False, c.start + shortest, min(after, c.start + longest))
-    for a in on:  # a part must still carry on right after the part before it
-        for b in on:
-            if (id(a), id(b)) in chained and abs(b.start - a.end) > CARRIES_ON:
-                a.end, b.start = was[id(a)][1], was[id(b)][0]
+    # A part must still carry on right after the part before it, and two clips that weren't a
+    # series mustn't become one (the first would promise a part 2). Clips that would are put back.
+    by_id = {id(c): c for c in on}
+    for _ in range(len(on)):
+        now = pairs()
+        wrong = (now - chained) | {(a, b) for a, b in chained if (a, b) not in now}
+        if not wrong:
+            break
+        for k in {k for pair in wrong for k in pair}:
+            c = by_id[k]
+            c.start, c.end = was[id(c)]
     return sum(1 for c in on if (c.start, c.end) != was[id(c)])

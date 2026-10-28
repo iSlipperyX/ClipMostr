@@ -160,7 +160,7 @@ class NichePanel(QWidget):
         n = niches.find(self._settings(), self.current())
         if n is None:
             return
-        self.db.set_meta("scan_now", n.id)
+        pipeline.request_scan(self.db, n.id)
         alive = pipeline.runner_alive(self.db)
         self.notice.emit(f"Automation checks {n.name}'s sources at its next step."
                          + ("" if alive else " Start automation for that to happen."))
@@ -238,7 +238,10 @@ class RequestPanel(QWidget):
         self._buttons()
 
     def _buttons(self) -> None:
-        o = self.db.get_order(self.current()) if self.current() else None
+        try:
+            o = self.db.get_order(self.current()) if self.current() else None
+        except Exception:  # jobs.db busy for a moment: the next refresh sets it
+            return
         self.cancel_btn.setEnabled(bool(o and o.is_open))
 
     def cancel(self) -> None:
@@ -283,15 +286,16 @@ class RequestDialog(QDialog):
         row.addWidget(self.max_len)
         row.addStretch(1)
         form.addRow("How long", lengths)
-        self.niche = QComboBox()
+        self.niche = QComboBox(self)
         for n in niches.load(settings):
             self.niche.addItem(n.label + ("  (paused)" if n.paused else ""), n.id)
         self.niche.addItem("No niche", "")
         self.niche.setCurrentIndex(max(0, self.niche.findData(niche_id)))
         self.niche.currentIndexChanged.connect(self._niche_changed)
-        self.niche.setVisible(self.niche.count() > 1)
         if self.niche.count() > 1:
             form.addRow("For", self.niche)
+        else:
+            self.niche.hide()  # only "No niche": nothing to choose
         self.pick = QRadioButton("Let automation pick videos for it")
         self.from_links = QRadioButton("Clip these videos:")
         self.pick.setChecked(True)

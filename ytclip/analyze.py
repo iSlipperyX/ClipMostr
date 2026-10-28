@@ -49,7 +49,7 @@ class Clip:
     title: str = ""
     enabled: bool = True
     crop_x: float = 0.5  # horizontal crop centre for vertical/square exports
-    origin: str = "auto"  # auto | ai | chapter | manual
+    origin: str = "auto"  # auto | ai | chapter | manual | part (a next part, series.py)
     reason: str = ""
     edited: bool = False  # touched by the user, so re-detection keeps it
     top_text: str | None = None  # banner text for this clip; None = the template in settings, "" = no words
