@@ -6,12 +6,13 @@ import pytest
 
 from ytclip import updater
 
+# The window needs Qt Multimedia, which needs PulseAudio on Linux (CI's Ubuntu has none; Windows runs these).
+main_window = pytest.importorskip("ytclip.gui.main_window", exc_type=ImportError)
+
 
 @pytest.fixture
 def window(app, monkeypatch, tmp_path):
     from PySide6.QtWidgets import QMessageBox, QWidget
-
-    from ytclip.gui import main_window
 
     class Window(QWidget):
         _offer_install = main_window.MainWindow._offer_install
