@@ -59,7 +59,8 @@ class Soak:
                    SOAK_CONTROL=str(self.control), NO_PROXY="127.0.0.1,localhost", no_proxy="127.0.0.1,localhost",
                    PYTHONUNBUFFERED="1")
         env.pop("YOUTUBE_API_KEY", None)
-        env.pop("ANTHROPIC_API_KEY", None)
+        for key in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+            env.pop(key, None)
         return env
 
     def py(self, *args: str, check: bool = True) -> subprocess.CompletedProcess:

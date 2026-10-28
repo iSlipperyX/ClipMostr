@@ -3,7 +3,7 @@
 Each clip file is decoded once (small and fast) to measure its loudness, black frames and
 frozen picture, and its length, size and audio are compared with what was asked for.
 With a transcript, it also checks there's talking in it and that it doesn't start or end
-mid-sentence; with AI polish on, Claude's 1-10 "does this stand alone?" rating counts too.
+mid-sentence; with AI polish on, the AI's 1-10 "does this stand alone?" rating counts too.
 
 Problems reject a clip: its files move to a `_rejected` folder beside the others, so
 whatever picks up the ready clips never sees them. Warnings are noted in clips.json but

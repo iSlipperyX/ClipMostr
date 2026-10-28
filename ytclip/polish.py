@@ -1,6 +1,6 @@
-"""AI polish: one Claude call per video that tidies the clips the finder chose.
+"""AI polish: one AI call per video (Claude or Gemini, Settings → AI) that tidies the clips the finder chose.
 
-Claude gets each clip's transcript and one frame from it, and sends back:
+The AI gets each clip's transcript and one frame from it, and sends back:
 
 * a hook per clip - a few punchy words for the top banner and the upload caption,
 * a bottom line per clip - a call to follow or comment written for that clip, which the bottom
@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import base64
 import json
-import os
 import re
 import tempfile
 from dataclasses import dataclass, field
@@ -169,9 +168,17 @@ def parse(text: str, count: int) -> Polish:
     try:
         data = json.loads(text)
     except ValueError as exc:
-        raise PolishError("Claude's answer couldn't be read.") from exc
+        raise PolishError("The AI's answer couldn't be read.") from exc
+    if not isinstance(data, dict):
+        raise PolishError("The AI's answer couldn't be read.")
+    return parse_data(data, count)
+
+
+def parse_data(data: dict, count: int) -> Polish:
     out = Polish({}, bool(data.get("burned_in_subtitles")))
     for item in data.get("clips") or []:
+        if not isinstance(item, dict):
+            continue
         try:
             n = int(item["clip"]) - 1
         except (KeyError, TypeError, ValueError):
@@ -208,43 +215,27 @@ def _line(value, limit: int, cut: bool = True) -> str:
     return text
 
 
-def ask(title: str, clips: list[Clip], words: list[Word], src: Path, api_key: str, model: str,
+def ask(title: str, clips: list[Clip], words: list[Word], src: Path, s,
         log: Callable[[str], None] | None = None, check: Callable[[], None] | None = None,
         guide: str = "", bottom: str = "", handles: list[str] | None = None) -> Polish:
-    """Send the clips to Claude and read back its polish. Raises PolishError."""
-    if not ((api_key or "").strip() or os.environ.get("ANTHROPIC_API_KEY")):
-        raise PolishError("No Anthropic API key set (Settings → AI).")
-    import anthropic
+    """Send the clips to the AI Settings → AI chose (`s` is the Settings) and read back its polish.
+    Raises PolishError."""
+    from . import ai
 
-    from .ai import STREAM_TIMEOUT, _client, _friendly
-
+    if not ai.has_key(s):
+        raise PolishError(ai.missing_key(s))
     with tempfile.TemporaryDirectory(prefix="ytclip-polish-") as tmp:
         frames = grab_frames(src, clips, Path(tmp))
         content = build_content(title, clips, words, frames, guide, bottom, handles)
-    if log:
-        log(f"Asking {model} to polish {len(clips)} clip{'s' if len(clips) != 1 else ''}…")
     try:
-        with _client(api_key, max_retries=3, timeout=STREAM_TIMEOUT).beta.messages.stream(
-            model=model,
-            max_tokens=8000,
-            system=SYSTEM,
-            messages=[{"role": "user", "content": content}],
-            output_config={"effort": "low", "format": {"type": "json_schema", "schema": SCHEMA}},
-            betas=["server-side-fallback-2026-07-01"],
-            extra_body={"fallbacks": "default"},
-        ) as stream:
-            for i, _event in enumerate(stream):
-                if check and i % 25 == 0:
-                    check()
-            response = stream.get_final_message()
-    except (anthropic.APIError, TypeError) as exc:
-        raise PolishError(str(_friendly(exc, model))) from exc
-    if response.stop_reason == "refusal":
-        raise PolishError("Claude declined to polish these clips.")
-    if response.stop_reason == "max_tokens":
-        raise PolishError("Claude's answer was cut off.")
-    result = parse("".join(b.text for b in response.content if b.type == "text"), len(clips))
-    result.model = getattr(response, "model", None) or model
+        answer = ai.ask_json(s, "polish", SYSTEM, content, SCHEMA, effort="low", max_tokens=8000, log=log,
+                             check=check, what=f"polish {len(clips)} clip{'s' if len(clips) != 1 else ''}")
+    except ai.AIRefused as exc:
+        raise PolishError(f"{exc} The clips go out unpolished.") from exc
+    except ai.AIError as exc:
+        raise PolishError(str(exc)) from exc
+    result = parse_data(answer.data, len(clips))
+    result.model = answer.model
     return result
 
 

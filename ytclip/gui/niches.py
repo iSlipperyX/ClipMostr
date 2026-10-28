@@ -251,7 +251,7 @@ class Niches(QWidget):
         self.instructions.setFixedHeight(70)
         self.instructions.setPlaceholderText("e.g. clutch plays and funny fails, skip menus and loading screens, "
                                              "no swearing in the hook")
-        self.instructions.setToolTip("Plain words for the AI. With an Anthropic key, the AI picks this niche's "
+        self.instructions.setToolTip("Plain words for the AI. With a Claude or Gemini key, the AI picks this niche's "
                                      "clips so it can follow them, and it writes the hooks and bottom text to "
                                      "suit. Each video then counts towards AI calls per day")
         self.instructions.textChanged.connect(lambda: self._set("instructions", self.instructions.toPlainText()))

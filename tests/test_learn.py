@@ -8,7 +8,7 @@ import pytest
 from conftest import NOW
 from test_policy import vid
 
-from ytclip import cli, learn, polish
+from ytclip import ai, cli, learn, polish
 from ytclip.analyze import Clip, Measurements
 from ytclip.download import Video
 from ytclip.engine import Engine, Project
@@ -132,7 +132,8 @@ def test_engine_polish_passes_hook_examples(monkeypatch):
     write([row(hook=f"Hook {i}", lift=lift) for i, lift in enumerate((5, 4, 1, 1, 0.2, 0.3))])
     seen = {}
 
-    def ask(title, clips, w, src, key, model, log=None, check=None, guide="", bottom="", handles=None):
+    def ask(title, clips, w, src, settings, log=None, check=None, guide="", bottom="", handles=None):
+        model = ai.model_for(settings, "polish")
         seen["guide"] = guide
         return polish.Polish({}, False, model)
 

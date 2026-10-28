@@ -314,7 +314,7 @@ class RequestDialog(QDialog):
         self.notes.setPlaceholderText("Special requests, in plain words. e.g. only the funniest reactions, no "
                                       "swearing in the hook, end on the punchline")
         self.notes.setToolTip("Told to the AI that picks the moments and to the AI that writes hooks and bottom "
-                              "text. Needs an Anthropic key (Settings → AI)")
+                              "text. Needs a Claude or Gemini key (Settings → AI)")
         form.addRow("Special requests", self.notes)
         self.warn = QLabel()
         self.warn.setWordWrap(True)
@@ -345,7 +345,7 @@ class RequestDialog(QDialog):
     def _warnings(self) -> None:
         lines = []
         if self.notes.toPlainText().strip() and not pipeline.has_ai_key(self.s):
-            lines.append("Special requests need an Anthropic key (Settings → AI). Without one, smart signals pick "
+            lines.append("Special requests need a Claude or Gemini key (Settings → AI). Without one, smart signals pick "
                          "the clips and the special requests aren't used.")
         if self.pick.isChecked() and not youtube_key(self.s):
             lines.append("Automation needs a YouTube Data API key (Settings → Research) to pick videos. Give it "
