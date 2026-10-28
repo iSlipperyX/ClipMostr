@@ -62,7 +62,15 @@ Clips grow outward from the peaks. When there's a transcript, their edges are al
 
 Anything you've edited by hand is left alone, and if the call fails the clips simply go out unpolished. It uses Claude Sonnet 5.5 by default, which you can change.
 
-**No captions?** For local files, or videos without captions, ClipMonster transcribes speech on your PC with Whisper. The model is downloaded once on first use to `%LOCALAPPDATA%\ClipMonster\models`.
+**No captions?** For local files, or videos without captions, ClipMonster transcribes speech on your PC with Whisper. The model is downloaded once on first use to `%LOCALAPPDATA%\ClipMonster\models`. **Transcription → For the clips** gets Whisper's better captions without the wait: YouTube's captions find the clips, then Whisper types out only the clips (and three seconds either side). That's a few minutes of speech instead of the whole video. A whole video keeps a checkpoint as it goes, so a stopped run carries on where it got to. `ytclip whisper-test VIDEO` times each model on your PC.
+
+**Speed** (Settings → Speed) sets how hard ClipMonster works:
+
+- **Quiet** gives Whisper a quarter of the CPU threads, and automation only uses the PC when nothing else wants it.
+- **Balanced** gives Whisper half the threads, and automation steps aside for what you're doing.
+- **Full power** uses every thread and the graphics card. Whisper runs on the card through whisper.cpp with Vulkan, so AMD, NVIDIA and Intel cards all work. Its model is downloaded once. If the card can't be used, Whisper falls back to the CPU and the health check says why.
+
+Unless the Speed is Quiet, scene detection decodes the video on the graphics card. Automation also downloads the next video while this one is clipped, though it still waits the minutes between downloads. With AI polish, **Find extra clips, keep the best the AI rates** finds half as many clips again and exports only the best rated. More of your clips pass the quality check, and none is encoded just to be rejected.
 
 ### Export options
 
@@ -360,7 +368,7 @@ pip install -e .[ai,whisper,build]
 python build.py
 ```
 
-This produces `dist/ClipMonster/` and `dist/ClipMonster-windows.zip`. During development, run the app with `python -m ytclip.gui.app` and the command line with `python -m ytclip`.
+This produces `dist/ClipMonster/` and `dist/ClipMonster-windows.zip`. To include Whisper for the graphics card, first install the Vulkan SDK and run `python packaging/build_whisper_cpp.py build/whisper-cpp --vulkan`; `build.py` then copies it in. The release workflow does both. During development, run the app with `python -m ytclip.gui.app` and the command line with `python -m ytclip`.
 
 Run the tests with `pip install -e .[test]` and then `pytest`. They need no network or API key.
 
@@ -381,9 +389,11 @@ Run the tests with `pip install -e .[test]` and then `pytest`. They need no netw
 | `ytclip/cleanup.py` | Clean up: what nothing needs any more, and clearing it |
 | `ytclip/pipeline.py` | Automation: the unattended runner, recipes, pacing and retries |
 | `ytclip/jobs.py` | `jobs.db`, the automation queue shared by the runner and the app |
-| `ytclip/transcribe.py` | Whisper transcription |
+| `ytclip/transcribe.py` | Whisper transcription: whole videos (with checkpoints) or just the clips |
+| `ytclip/whisper_cpp.py` | Whisper on the graphics card (whisper.cpp with Vulkan) |
+| `ytclip/speed.py` | Speed: Whisper threads, automation's priority, the graphics card |
 | `ytclip/export.py`, `captions.py` | Reframing, captions, encoding |
 | `ytclip/gui/` | Desktop app (PySide6) |
-| `packaging/` | PyInstaller spec, launchers, icon |
+| `packaging/` | PyInstaller spec, launchers, icon, the whisper.cpp build (`build_whisper_cpp.py`) |
 
 Only download and repost videos you have the rights to use.

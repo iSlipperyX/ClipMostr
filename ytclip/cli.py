@@ -187,6 +187,7 @@ def process(source: str, engine: Engine, dry_run: bool) -> None:
         console.print(f"[bold]{escape(v.title)}[/]  [dim]{escape(v.channel)} · {stamp(v.duration)}[/]")
         engine.measure(p)
         engine.find(p)
+        engine.retype(p)
         if engine.s.ai_polish:
             engine.polish(p)
 
@@ -547,7 +548,9 @@ def run_auto(argv: list[str]) -> int:
         _auto_status(db)
         return 0
     log = pipeline.file_logger(lambda line: console.print(escape(line), highlight=False))
-    return pipeline.Runner(db, log=log).run(once=args.once)
+    from . import speed
+
+    return pipeline.Runner(db, log=log, priority=speed.set_priority).run(once=args.once)
 
 
 def run_qc(argv: list[str]) -> int:
@@ -874,6 +877,60 @@ def run_doctor(argv: list[str]) -> int:
     return 1 if any(c.level == doctor.BAD for c in checks) else 0
 
 
+def run_whisper_test(argv: list[str]) -> int:
+    from . import speed, whisper_cpp
+    from . import transcribe as whisper
+    from .ffmpeg import probe
+
+    s = Settings.load()
+    p = argparse.ArgumentParser(prog="ytclip whisper-test", description="Time each Whisper model on this PC, on a "
+                                "minute of one of your videos, so you can pick the quickest one that's good enough.")
+    p.add_argument("video", type=Path, help="a video or audio file (a download in the downloads folder will do)")
+    p.add_argument("--models", default="small,medium,large-v3-turbo",
+                   help="models to try, comma-separated (default: small,medium,large-v3-turbo)")
+    p.add_argument("--seconds", type=float, default=60.0, help="how much of the video to type out (default 60)")
+    p.add_argument("--speed", choices=speed.LEVELS, default=speed.level(s.speed), help="Speed to test at")
+    args = p.parse_args(argv)
+    if not args.video.is_file():
+        console.print(f"[red]No file {escape(str(args.video))}[/]")
+        return 2
+    if not whisper.available():
+        console.print("[red]Whisper isn't installed in this copy of ClipMonster.[/]")
+        return 1
+    duration = probe(args.video).duration
+    start = max(0.0, duration / 2 - args.seconds / 2)
+    span = [(start, min(duration, start + args.seconds))]
+    length = span[0][1] - span[0][0]
+    threads = speed.threads(args.speed)
+    ways = [("CPU", False)]
+    if args.speed == "full" and not whisper_cpp.unavailable():
+        ways.append(("graphics card", True))
+    console.print(f"Typing out {length:.0f} s from the middle of {escape(args.video.name)}, at "
+                  f"{speed.WORDS[args.speed]} ({threads} CPU threads).")
+    table = Table(show_edge=False, header_style="bold")
+    for col in ("Model", "On", "Took", "Speed", "First words"):
+        table.add_column(col)
+    for model in [m.strip() for m in args.models.split(",") if m.strip()]:
+        for where, gpu in ways:
+            notes: list[str] = []
+            began = time.monotonic()
+            try:
+                with console.status(f"{model} on the {where}…"):
+                    _, words = whisper.transcribe(args.video, model, s.whisper_language, duration, lambda m, f: None,
+                                                  threads=threads, spans=span, gpu=gpu, log=notes.append)
+            except Exception as exc:
+                table.add_row(model, where, "failed", "", escape(str(exc)[:60]))
+                continue
+            took = time.monotonic() - began
+            if gpu and any("CPU" in n for n in notes):  # it fell back to the CPU: don't credit the card
+                where = "CPU (card failed)"
+            table.add_row(model, where, f"{took:.1f} s", f"{length / took:.1f}x real time",
+                          escape(" ".join(w.text for w in words[:8])))
+    console.print(table)
+    console.print("[dim]The first run of a model includes downloading it. Pick one in Settings → Transcription.[/]")
+    return 0
+
+
 def run_sign_in(argv: list[str], wait: float = 1800.0, poll: float = 2.0) -> int:
     from . import pipeline, youtube_login
     from .jobs import JobDB
@@ -938,6 +995,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_request(argv[1:])
     if argv[:1] == ["report"]:
         return run_report(argv[1:])
+    if argv[:1] == ["whisper-test"]:
+        return run_whisper_test(argv[1:])
     if argv[:1] == ["sign-in"]:
         return run_sign_in(argv[1:])
     if argv[:1] == ["doctor"]:

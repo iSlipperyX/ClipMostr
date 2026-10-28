@@ -58,6 +58,13 @@ def main() -> int:
                     "--distpath", str(DIST), "--workpath", str(work), str(PACKAGING / "ClipMonster.spec")],
                    check=True, cwd=ROOT)
     app_dir = DIST / "ClipMonster"
+    # Whisper for the graphics card (packaging/build_whisper_cpp.py --vulkan), when it was built
+    whisper_cpp = Path(os.environ.get("WHISPER_CPP_DIR") or ROOT / "build" / "whisper-cpp")
+    if (whisper_cpp / "whisper-cli.exe").is_file():
+        shutil.copytree(whisper_cpp, app_dir / "whisper-cpp", dirs_exist_ok=True)
+        print(f"Included whisper.cpp from {whisper_cpp}")
+    else:
+        print("No whisper.cpp build, so Whisper runs on the CPU only (packaging/build_whisper_cpp.py makes one)")
     archive = shutil.make_archive(str(DIST / "ClipMonster-windows"), "zip", DIST, "ClipMonster")
     size = sum(f.stat().st_size for f in app_dir.rglob("*") if f.is_file()) / 1e6
     print(f"\nBuilt {app_dir / 'ClipMonster.exe'} ({size:.0f} MB folder)\nZip: {archive}")

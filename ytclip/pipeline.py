@@ -15,6 +15,7 @@ import json
 import os
 import re
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -22,7 +23,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import learn, niches, orders, research, youtube_login
-from .download import is_blocked
+from .download import Video, download, is_blocked
 from .engine import Cancelled, Engine, Project, timing_text
 from .jobs import SIGN_IN_WAIT, Job, JobDB
 from .policy import PickLog, Policy, decide, picks_path
@@ -293,7 +294,9 @@ class Runner:
     def __init__(self, db: JobDB | None = None, load: Callable[[], Settings] = Settings.load,
                  log: Log | None = None, now: Callable[[], float] = time.time,
                  scan: Callable | None = None, engine: Callable[..., Engine] = Engine,
-                 history: Callable[[], History] | None = None, picks: Callable[[], PickLog] | None = None):
+                 history: Callable[[], History] | None = None, picks: Callable[[], PickLog] | None = None,
+                 priority: Callable[[str], str] | None = None,
+                 fetch: Callable[..., Video] = download):
         self.db = db or JobDB()
         self.load = load
         self._log = log or (lambda m: None)
@@ -306,6 +309,9 @@ class Runner:
         self._last_beat = 0.0
         self._stop: Callable[[], bool] = lambda: False  # run()'s stop check, so a long scan can be stopped
         self._last_flag_check = 0.0
+        self._priority = priority  # speed.set_priority for the headless runner; None leaves the process alone
+        self._fetch = fetch
+        self.prefetch: Prefetch | None = None  # the next video, downloading while this one is clipped
 
     # ------------------------------------------------------------ bookkeeping
     def log(self, msg: str) -> None:
@@ -361,6 +367,10 @@ class Runner:
         self.beat()
         now = self.now()
         s = self.load()
+        if self._priority:
+            said = self._priority(s.speed)
+            if said:
+                self.log(f"{said} (Settings → Speed).")
         if self.db.meta("paused") == "1":
             self.state("Paused")
             return 30.0
@@ -387,7 +397,7 @@ class Runner:
         scan_wait = next_scan - now if research.youtube_key(s) else IDLE
         job = self.db.next_due(now, paused)
         if job:
-            wait, why = self.wait_reason(s, now)
+            wait, why = self.wait_reason(s, now, downloaded=self.prefetched(job))
             if wait:
                 self.state(why)
                 return max(1.0, min(wait, scan_wait, IDLE))
@@ -434,7 +444,9 @@ class Runner:
     def gap_factor(self, now: float) -> int:
         return gap_factor(self.db, now)
 
-    def wait_reason(self, s: Settings, now: float) -> tuple[float, str]:
+    def wait_reason(self, s: Settings, now: float, downloaded: bool = False) -> tuple[float, str]:
+        """How long until the next video may start, and why. `downloaded`: it was downloaded early,
+        so the minutes between downloads are already behind it."""
         blocked = self.blocked(now)
         if blocked:
             until = time.strftime("%H:%M", time.localtime(blocked))
@@ -444,11 +456,55 @@ class Runner:
         if wait:
             return wait, f"Outside working hours ({s.auto_start_hour}:00–{s.auto_end_hour}:00)"
         factor = self.gap_factor(now)
-        gap = self.db.meta_float("last_download") + s.auto_gap_minutes * 60 * factor - now
-        if gap > 0:
+        gap = self.next_download(s, now) - now
+        if gap > 0 and not downloaded:
             return gap, (f"Spacing downloads out: next in {max(1, round(gap / 60))} min"
                          + (f" (slowed down {factor}x after YouTube asked this PC to sign in)" if factor > 1 else ""))
         return 0.0, ""
+
+    def next_download(self, s: Settings, now: float) -> float:
+        """When the next download may start (the minutes between downloads, slowed after sign-in requests)."""
+        return self.db.meta_float("last_download") + s.auto_gap_minutes * 60 * self.gap_factor(now)
+
+    # ------------------------------------------------------------ the next video, early
+    def prefetched(self, job: Job) -> bool:
+        pre = self.prefetch
+        return pre is not None and pre.job.id == job.id and pre.video is not None and pre.video.path.exists()
+
+    def start_prefetch(self, current: Job, s: Settings) -> None:
+        """Download the video after `current` while it's clipped, once the minutes between
+        downloads are up (Download the next video while clipping)."""
+        if not s.auto_prefetch or (self.prefetch is not None and self.prefetch.busy):
+            return
+        now = self.now()
+        nxt = self.db.next_due(now, niches.paused_ids(s))  # `current` is working, so it's not this
+        if nxt is None or nxt.id == current.id or self.prefetched(nxt):
+            return
+        order = self.db.get_order(nxt.order) if nxt.order else None
+        if nxt.order and (order is None or not order.is_open):
+            return
+        settings = settings_for(nxt, s, order)[0]
+        self.prefetch = Prefetch(nxt, self.next_download(s, now), settings, self)
+        self.prefetch.start()
+
+    def take_prefetch(self, job: Job) -> Video | None:
+        """The video downloaded early for `job`, waiting for it to finish if it's still downloading."""
+        pre = self.prefetch
+        if pre is None or pre.job.id != job.id:
+            return None
+        if pre.call_off():  # still waiting for the minutes between downloads: download it now instead
+            self.prefetch = None
+            return None
+        self.state(f"Finishing the early download of {job.title or job.url}")
+        pre.wait(self.beat)
+        self.prefetch = None
+        return pre.video if pre.video is not None and pre.video.path.exists() else None
+
+    def stop_prefetch(self) -> None:
+        if self.prefetch is not None:
+            self.prefetch.cancel()
+            self.prefetch.join(10)
+            self.prefetch = None
 
     def block(self, error: str, now: float, s: Settings | None = None) -> None:
         self.log(record_block(self.db, error, now, (s or self.load()).cookies_browser))
@@ -712,8 +768,11 @@ class Runner:
             label += " · no polish (today's AI limit is used up)"
         elif settings.ai_polish:
             label += " · AI polish"
+        early = self.take_prefetch(job)
+        if early is None:
+            self.db.set_meta("last_download", now)
+        now = self.now()
         self.db.update(job.id, now, status="working", stage="Starting", recipe=label, error="")
-        self.db.set_meta("last_download", now)
         self.state(f"Clipping: {job.title or job.url}")
         self.log(f"Clipping {job.title or job.url} with {label}")
 
@@ -732,6 +791,7 @@ class Runner:
             if p.video is not None and p.video.id != last["video"]:
                 last["video"] = p.video.id
                 self.db.set_meta("working_video", p.video.id)
+                self.start_prefetch(job, s)  # this one's downloaded: the next can start (in its time)
 
         def cancelled() -> bool:
             t = self.now()
@@ -743,6 +803,7 @@ class Runner:
         watch = Watchdog(s.watchdog_minutes * 60, lambda: (last["t"] or now), lambda: last["msg"], self.now)
         engine = self._engine(settings, log=self.log, progress=progress, cancelled=cancelled)
         p = Project(job.url)
+        p.video = early
         p.meta = {"automation": {"permission": job.permission, "origins": job.origins, "how": job.how,
                                  "recipe": label, "picked_at": job.created}}
         niche = niches.find(s, job.niche)
@@ -914,10 +975,90 @@ class Runner:
         except (Stopped, KeyboardInterrupt):
             pass
         finally:
+            self.stop_prefetch()
             pulse.stop()  # before release, so a last beat can't mark it running again
             self.log("Automation stopped.")
             self.release()
         return 0
+
+
+class Prefetch:
+    """The next video downloading on a thread of its own while this one is clipped. It waits for
+    the minutes between downloads first, and on anything going wrong gives up quietly: the video
+    is then downloaded in its turn, as before. A sign-in request still pauses everything."""
+
+    def __init__(self, job: Job, start_at: float, settings: Settings, runner: Runner):
+        self.job, self.start_at, self.s, self.runner = job, start_at, settings, runner
+        self.video: Video | None = None
+        self.error = ""
+        self.started = False  # the download itself has begun
+        self._cancel = threading.Event()
+        self._lock = threading.Lock()  # starting the download and calling it off can't cross
+        self._thread = threading.Thread(target=self._run, name="Download the next video", daemon=True)
+
+    @property
+    def busy(self) -> bool:
+        return self._thread.is_alive()
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def cancel(self) -> None:
+        self._cancel.set()
+
+    def call_off(self) -> bool:
+        """Cancel it if the download hasn't begun yet. False: it has, so wait for it instead."""
+        with self._lock:
+            if self.started:
+                return False
+            self._cancel.set()
+            return True
+
+    def join(self, timeout: float | None = None) -> None:
+        if self._thread.ident is not None:
+            self._thread.join(timeout)
+
+    def wait(self, beat: Callable[[], None]) -> None:
+        while self.busy:
+            self._thread.join(2)
+            beat()
+
+    def _progress(self, msg: str, frac: float | None) -> None:
+        if self._cancel.is_set():
+            raise Cancelled()
+
+    def _run(self) -> None:
+        r, s, job = self.runner, self.s, self.job
+        title = job.title or job.url
+        while not self._cancel.is_set() and r.now() < self.start_at:
+            self._cancel.wait(min(5.0, max(0.05, self.start_at - r.now())))
+        now = r.now()
+        if (self._cancel.is_set() or r.blocked(now) or hours_wait(now, s.auto_start_hour, s.auto_end_hour)
+                or r.db.meta("paused") == "1"):
+            return
+        fresh = r.db.get(job.id)
+        if fresh is None or fresh.status != "queued":  # removed or retried meanwhile
+            return
+        with self._lock:
+            if self._cancel.is_set():
+                return
+            self.started = True
+        r.db.set_meta("last_download", now)
+        r.db.update(job.id, now, stage="Downloading early, while the video before it is clipped")
+        r.log(f"Downloading {title} now, while the video before it is clipped.")
+        try:
+            self.video = r._fetch(job.url, s.cache_path, s.quality, s.cookies_browser or None, None, self._progress)
+        except Exception as exc:
+            if not self._cancel.is_set():
+                self.error = str(exc) or exc.__class__.__name__
+                if is_blocked(self.error):
+                    r.block(self.error, r.now(), s)
+                else:
+                    r.log(f"Couldn't download {title} early ({youtube_said(self.error)}); it's downloaded "
+                          "again in its turn.")
+            r.db.update(job.id, r.now(), stage="Waiting")
+            return
+        r.db.update(job.id, r.now(), stage="Downloaded, waiting its turn")
 
 
 class Pulse:
@@ -1057,7 +1198,9 @@ def file_logger(console: Log | None = None) -> Log:
 
 def run_headless() -> int:
     """`ClipMonster.exe --automation`: the runner with no window, logging to automation.log."""
-    return Runner(log=file_logger()).run()
+    from . import speed
+
+    return Runner(log=file_logger(), priority=speed.set_priority).run()
 
 
 def request_scan(db: JobDB, niche_id: str = "") -> None:

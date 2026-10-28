@@ -238,7 +238,20 @@ def check(s: Settings, db=None, online: bool = False, now: float | None = None) 
     checks.append(_tiktok_manager(s))
     checks += _niches_and_requests(s, db)
     checks += _youtube_sign_in(s, db, now)
+    checks += _whisper_speed(s)
     return checks
+
+
+def _whisper_speed(s: Settings) -> list[Check]:
+    from . import speed, whisper_cpp
+
+    if s.transcribe == "never" or not speed.use_gpu(s):
+        return []
+    why = whisper_cpp.unavailable()
+    if why:
+        return [Check("Whisper on the graphics card", WARN, f"Full power uses the CPU for Whisper: {why}",
+                      "Settings → Speed → Try the graphics card again (after a driver update)")]
+    return [Check("Whisper on the graphics card", GOOD, "Full power types out speech on the graphics card")]
 
 
 def _youtube_sign_in(s: Settings, db, now: float) -> list[Check]:

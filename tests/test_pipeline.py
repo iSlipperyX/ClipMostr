@@ -39,6 +39,7 @@ class FakeEngine:
         FakeEngine.made.append(self)
 
     def prepare(self, p):
+        self.early = p.video  # downloaded early by the runner (Prefetch)
         what = self.plan.get(p.source, 3)
         self.progress("Downloading", 0.5)
         if isinstance(what, BaseException):
@@ -77,14 +78,18 @@ def _scan_result(*ids, score=80):
     return ScanResult(videos, NOW, ["US"])
 
 
-def _runner(tmp_path, settings=None, scan=None, clock=None, history=None):
+def offline(*args, **kwargs):
+    raise OSError("no downloads in tests")
+
+
+def _runner(tmp_path, settings=None, scan=None, clock=None, history=None, fetch=offline):
     db = JobDB(tmp_path / "jobs.db")
     s = settings or _settings()
     logs = []
     hist = history or History(tmp_path / "research.json")
     picks = PickLog(tmp_path / "picks.json")
     r = Runner(db, load=lambda: s, log=logs.append, now=clock or Clock(), scan=scan, engine=FakeEngine,
-               history=lambda: hist, picks=lambda: picks)
+               history=lambda: hist, picks=lambda: picks, fetch=fetch)
     r.logs, r.picks_log, r.hist = logs, picks, hist
     return r
 
@@ -944,3 +949,118 @@ def test_timing_text():
     assert clock_text(0.4) == "0 s" and clock_text(59.6) == "1:00" and clock_text(3725) == "1:02:05"
     assert timing_text({}) == "took 0 s"
     assert timing_text({"find": 0.2}) == "took 0 s"
+
+
+# ---------------------------------------------------------------- the next video, early (Prefetch)
+
+class Fetcher:
+    """Stands in for download(): a video file in tmp_path, or an error."""
+
+    def __init__(self, tmp_path, error=None):
+        self.tmp_path, self.error, self.urls = tmp_path, error, []
+
+    def __call__(self, url, cache_dir, quality, cookies, log, progress):
+        self.urls.append(url)
+        progress("Downloading", 0.5)
+        if self.error:
+            raise RuntimeError(self.error)
+        vid = url.rsplit("/", 1)[-1]
+        path = self.tmp_path / f"{vid}.mp4"
+        path.write_bytes(b"video")
+        return Video(id=vid, title=f"Title {vid}", channel="Chan", upload_date="", duration=600, url=url, path=path)
+
+
+def test_the_next_video_downloads_while_this_one_is_clipped(tmp_path):
+    clock = Clock()
+    fetch = Fetcher(tmp_path)
+    r = _runner(tmp_path, clock=clock, fetch=fetch)
+    for vid in ("fffffffffff", "ggggggggggg"):
+        r.add_manual(f"https://youtu.be/{vid}")
+    r.process(r.db.next_due(NOW), r.load())
+    r.prefetch.join(5)
+    assert fetch.urls == ["https://youtu.be/ggggggggggg"]
+    assert r.db.get("ggggggggggg").stage == "Downloaded, waiting its turn"
+    assert any("Downloading Title ggggggggggg" in line or "Downloading https://youtu.be/ggggggggggg" in line
+               for line in r.logs)
+    clock.t += 300
+    job = r.db.next_due(clock.t)
+    assert r.prefetched(job)
+    r.process(job, r.load())
+    assert FakeEngine.made[-1].early is not None and FakeEngine.made[-1].early.id == "ggggggggggg"
+    assert r.db.meta_float("last_download") == NOW  # its download was when it started early, not now
+    assert r.prefetch is None and fetch.urls == ["https://youtu.be/ggggggggggg"]
+
+
+def test_downloaded_early_skips_the_wait_between_downloads(tmp_path):
+    r = _runner(tmp_path, _settings(auto_gap_minutes=10), fetch=Fetcher(tmp_path))
+    r.db.set_meta("last_download", NOW)
+    wait, why = r.wait_reason(r.load(), NOW + 60)
+    assert wait > 0 and "Spacing downloads out" in why
+    assert r.wait_reason(r.load(), NOW + 60, downloaded=True)[0] == 0
+
+
+def test_the_early_download_waits_for_the_minutes_between_downloads(tmp_path):
+    fetch = Fetcher(tmp_path)
+    r = _runner(tmp_path, _settings(auto_gap_minutes=10), fetch=fetch)
+    for vid in ("fffffffffff", "ggggggggggg"):
+        r.add_manual(f"https://youtu.be/{vid}")
+    r.process(r.db.next_due(NOW), r.load())
+    assert r.prefetch is not None and r.prefetch.busy and not r.prefetch.started  # waiting: 10 minutes to go
+    # Its turn came before then (the clock here doesn't move): it's downloaded the usual way instead.
+    r.process(r.db.next_due(NOW), r.load())
+    assert fetch.urls == [] and FakeEngine.made[-1].early is None
+
+
+def test_a_sign_in_request_during_the_early_download_pauses_everything(tmp_path):
+    fetch = Fetcher(tmp_path, error="ERROR: [youtube] ggggggggggg: Sign in to confirm you're not a bot.")
+    r = _runner(tmp_path, fetch=fetch)
+    for vid in ("fffffffffff", "ggggggggggg"):
+        r.add_manual(f"https://youtu.be/{vid}")
+    r.process(r.db.next_due(NOW), r.load())
+    r.prefetch.join(5)
+    assert r.blocked(NOW) and r.db.get("ggggggggggg").stage == "Waiting"
+    assert not r.prefetched(r.db.get("ggggggggggg"))
+
+
+def test_an_early_download_that_fails_is_downloaded_again_in_its_turn(tmp_path):
+    r = _runner(tmp_path, fetch=Fetcher(tmp_path, error="HTTP Error 503: Service Unavailable"))
+    for vid in ("fffffffffff", "ggggggggggg"):
+        r.add_manual(f"https://youtu.be/{vid}")
+    r.process(r.db.next_due(NOW), r.load())
+    r.prefetch.join(5)
+    assert not r.blocked(NOW) and any("downloaded again in its turn" in line for line in r.logs)
+    r.process(r.db.next_due(NOW), r.load())
+    assert FakeEngine.made[-1].early is None and r.db.get("ggggggggggg").status == "done"
+
+
+def test_no_early_download_when_turned_off_or_nothing_is_next(tmp_path):
+    fetch = Fetcher(tmp_path)
+    r = _runner(tmp_path, _settings(auto_prefetch=False), fetch=fetch)
+    for vid in ("fffffffffff", "ggggggggggg"):
+        r.add_manual(f"https://youtu.be/{vid}")
+    r.process(r.db.next_due(NOW), r.load())
+    assert r.prefetch is None
+    (tmp_path / "two").mkdir()
+    r2 = _runner(tmp_path / "two", fetch=fetch)
+    r2.add_manual("https://youtu.be/hhhhhhhhhhh")
+    r2.process(r2.db.next_due(NOW), r2.load())
+    assert r2.prefetch is None and fetch.urls == []
+
+
+def test_stopping_calls_off_the_early_download(tmp_path):
+    r = _runner(tmp_path, _settings(auto_gap_minutes=10), fetch=Fetcher(tmp_path))
+    for vid in ("fffffffffff", "ggggggggggg"):
+        r.add_manual(f"https://youtu.be/{vid}")
+    r.process(r.db.next_due(NOW), r.load())
+    pre = r.prefetch
+    r.stop_prefetch()
+    assert r.prefetch is None and not pre.busy
+
+
+def test_automation_sets_its_priority_from_the_speed(tmp_path):
+    asked = []
+    r = _runner(tmp_path, _settings(speed="quiet"))
+    r._priority = lambda level: asked.append(level) or ("Speed: Quiet" if len(asked) == 1 else "")
+    r.tick()
+    r.tick()
+    assert asked == ["quiet", "quiet"] and sum("Speed: Quiet (Settings → Speed)." in line for line in r.logs) == 1
