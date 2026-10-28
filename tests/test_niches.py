@@ -262,6 +262,15 @@ def test_the_niche_with_fewer_picks_today_goes_first():
     assert ds["p0"].picked and ds["g1"].rule == "daily_cap"
 
 
+def test_between_niches_with_as_many_picks_the_better_video_goes_first():
+    s = _s(GAMING | {"daily": 5}, PODS | {"daily": 5}, pick_daily=3, pick_channel_weekly=0)
+    videos = [vid("g0", channel="G0", niche="game01", score=95), vid("g1", channel="G1", niche="game01", score=40),
+              vid("p0", channel="P0", niche="pod001", score=90), vid("p1", channel="P1", niche="pod001", score=88)]
+    ds = _decide(videos, s)
+    assert sorted(k for k, d in ds.items() if d.picked) == ["g0", "p0", "p1"]  # 88 takes the last pick, not 40
+    assert ds["g1"].rule == "daily_cap"
+
+
 def test_a_channel_limit_doesnt_cost_its_niche_a_turn():
     s = _s(GAMING | {"daily": 5}, PODS | {"daily": 5}, pick_daily=2, pick_channel_weekly=1)
     videos = [vid("g0", channel="Same", niche="game01", score=95), vid("g1", channel="Same", niche="game01", score=94),

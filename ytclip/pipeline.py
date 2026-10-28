@@ -400,9 +400,14 @@ class Runner:
         now = self.now()
         if job.niche and niches.find(s, job.niche) is None:
             s = self.load()  # the settings we were given may be older than the niche
-            if niches.find(s, job.niche) is None:  # deleted while it waited (or mid-scan)
-                self.db.remove(job.id)
-                self.log(f"Took {job.title or job.url} out of the queue: its niche was deleted.")
+            if niches.find(s, job.niche) is None:
+                if niches.load(s):  # deleted while it waited (or mid-scan)
+                    self.db.remove(job.id)
+                    self.log(f"Took {job.title or job.url} out of the queue: its niche was deleted.")
+                else:  # no niches at all: settings.json may not have been readable, so don't lose the video
+                    self.db.update(job.id, now, status="failed", error="Its niche isn't in your settings",
+                                   stage="Its niche is missing")
+                    self.log(f"✗ {job.title or job.url}: its niche isn't in your settings. Retry it once it's back.")
                 return
         settings, label = settings_for(job, s)
         used = self.db.count("ai", now - DAY)

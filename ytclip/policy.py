@@ -207,8 +207,8 @@ def decide(videos: list[TrendingVideo], policy: Policy, log: PickLog, now: float
 
     With niches, every pick must fit one (video.niche), each niche has a daily limit of its own,
     and the overall daily limit is handed out one pick at a time to each niche in turn (its best
-    video first), the niche with the fewest picks in the last day going first, so one busy niche
-    can't take every pick of the day."""
+    video first), the niche with the fewest picks in the last day going first (on a tie, the one
+    with the better next video), so one busy niche can't take every pick of the day."""
     now = now or time.time()
     notes = notes or {}
     learned = {v.id: lessons.bonus(v.channel) if lessons else (0.0, "") for v in videos}
@@ -226,10 +226,16 @@ def decide(videos: list[TrendingVideo], policy: Policy, log: PickLog, now: float
     per_channel: dict[str, int] = {}
     per_niche: dict[str, int] = {}
     earlier = {k: log.count_since(now - DAY, niche=k) for k in queues} if policy.use_niches else {}
-    turns = list(queues.items())  # in the order of each niche's best video
+    turns = list(queues.items())
+
+    def turn(kq) -> tuple:  # the niche with the fewest picks so far goes first; on a tie, the better next video
+        k, q = kq
+        head = q[0][0] if q else None
+        return (earlier.get(k, 0) + per_niche.get(k, 0),
+                -(head.score + learned[head.id][0]) if head else 0.0, -(head.velocity if head else 0.0))
+
     while any(q for _, q in turns):
-        # Each round the niche with the fewest picks so far goes first; on a tie, the better video.
-        turns.sort(key=lambda kq: earlier.get(kq[0], 0) + per_niche.get(kq[0], 0))
+        turns.sort(key=turn)  # each round
         for _, q in turns:
             while q:  # this niche's next video that the limits allow, if any
                 v, permission = q.pop(0)

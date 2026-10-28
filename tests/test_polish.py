@@ -216,9 +216,10 @@ def test_banner_left_alone_when_it_is_off_or_has_no_title():
 
 def test_parse_reads_the_bottom_line():
     answer = json.dumps({"burned_in_subtitles": False, "clips": [
-        {"clip": 1, "hook": "h", "bottom_text": ' "Would you   have stayed?" #fyp ', "subject_x": 0.5, "fixes": [],
-         "rating": 8, "rating_note": ""}]})
+        {"clip": 1, "hook": "The #1 mistake #fyp", "bottom_text": ' "Would you   have stayed?" #fyp ', "subject_x": 0.5,
+         "fixes": [], "rating": 8, "rating_note": ""}]})
     assert parse(answer, 1).clips[0].bottom_text == "Would you have stayed?"
+    assert parse(answer, 1).clips[0].hook == "The #1 mistake"  # a number isn't a hashtag
     line = "Would you have walked out of that meeting halfway? Follow @bigtalkclips_daily"
     long = json.dumps({"burned_in_subtitles": False, "clips": [
         {"clip": 1, "hook": "h", "bottom_text": line, "subject_x": 0.5, "fixes": [], "rating": 8, "rating_note": ""}]})

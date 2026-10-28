@@ -199,9 +199,9 @@ def parse(text: str, count: int) -> Polish:
 
 
 def _line(value, limit: int, cut: bool = True) -> str:
-    """One tidy banner line: no quotes, hashtags or runs of spaces. Over the limit it's cut at a word,
-    or with cut False left out ("")."""
-    text = re.sub(r"#\w+", "", str(value or ""))
+    """One tidy banner line: no quotes, hashtags or runs of spaces ("#1" isn't a hashtag). Over the
+    limit it's cut at a word, or with cut False left out ("")."""
+    text = re.sub(r"(?<!\w)#[^\W\d_]\w*", "", str(value or ""))
     text = re.sub(r"\s+", " ", text).strip().strip('"“”').strip()
     if len(text) > limit:
         text = text[:limit].rsplit(" ", 1)[0] if cut else ""
