@@ -116,6 +116,16 @@ def test_the_engine_adds_parts_and_logs_it(tmp_path, monkeypatch):
     assert len(p.clips) == 2
 
 
+def test_the_finders_own_parts_are_listed_together(tmp_path, monkeypatch):
+    found = [Clip(100.0, 120.0, 90.0), Clip(10.0, 30.0, 80.0), Clip(120.5, 140.0, 70.0)]
+    monkeypatch.setattr(engine_mod, "pick_clips", lambda *a, **k: [Clip(c.start, c.end, c.score) for c in found])
+    monkeypatch.setattr(Engine, "rescore", lambda self, p: setattr(p, "score", _score()))
+    monkeypatch.setattr(engine_mod, "clip_score", lambda score, a, b: {100.0: 90.0, 10.0: 80.0}.get(a, 70.0))
+    p = _find_project(tmp_path)
+    Engine(Settings(mode="auto", min_len=15, max_len=60, clip_count=5, trim_silence=False)).find(p)
+    assert [c.start for c in p.clips] == [99.85, 119.85, 9.85]  # part 2 straight after part 1
+
+
 def test_clips_json_numbers_the_parts_that_survived(tmp_path, monkeypatch):
     monkeypatch.setattr(engine_mod, "export_clip", lambda src, media, dest, clip, w, s, prog=None, next_part=True:
                         dest.write_bytes(b"clip"))

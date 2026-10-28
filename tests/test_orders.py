@@ -157,7 +157,7 @@ def test_a_request_with_links_is_clipped_to_its_count_and_length(tmp_path):
     r.tick()
     assert FakeEngine.made[-1].s.clip_count == 2  # what's left
     done = r.db.get_order(o.id)
-    assert done.status == "done" and done.made == 5 and done.message == "Done: 5 clips ready"
+    assert done.status == "done" and done.made == 5 and done.message == "5 clips ready"
 
 
 def test_a_request_whose_videos_run_dry_finishes_short(tmp_path):

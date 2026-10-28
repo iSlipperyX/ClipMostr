@@ -1,7 +1,7 @@
 import numpy as np
 
 from ytclip import cuts
-from ytclip.analyze import FINE, Clip
+from ytclip.analyze import FINE, Clip, cap_length
 from ytclip.subtitles import Word, sentences
 
 
@@ -82,3 +82,12 @@ def test_auto_caption_words_get_the_pauses_the_audio_has():
 def test_punctuation_is_noticed():
     assert cuts.punctuated([Word(0, 1, "Hello."), Word(1, 2, "there")])
     assert cuts.punctuated([])
+
+
+def test_rounding_out_to_sentences_never_runs_over_the_longest_length():
+    from ytclip.subtitles import Cue
+
+    sents = [Cue(t, t + 4.5, "s") for t in np.arange(0.0, 100.0, 5.0)]
+    assert cap_length(0.0, 64.8, sents, 20, 60) == 59.8  # back to the last sentence that fits, with its breath
+    assert cap_length(0.0, 59.7, sents, 20, 60) == 59.7  # already fits
+    assert cap_length(40.0, 64.8, sents, 30, 20) == 64.8  # nothing fits and stays long enough: left alone

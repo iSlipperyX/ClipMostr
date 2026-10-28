@@ -289,6 +289,18 @@ def fit_to_sentences(start: float, end: float, sents: list[Cue], min_len: float,
     return new_start, new_end
 
 
+def cap_length(start: float, end: float, sents: list[Cue], min_len: float, max_len: float) -> float:
+    """An end that keeps the clip within max_len: rounding out to whole sentences can run a few
+    seconds over, so the end comes back to the last sentence that fits (if the clip stays long enough)."""
+    if end - start <= max_len + 0.01:
+        return end
+    fits = [s.end for s in sents if start < s.end and s.end + 0.3 - start <= max_len and s.end - start >= min_len]
+    if not fits:
+        return end
+    nxt = min((s.start for s in sents if s.start >= fits[-1] - 0.01), default=fits[-1] + 0.3)
+    return float(min(fits[-1] + 0.3, max(fits[-1], nxt - 0.05)))
+
+
 def breathing_room(start: float, end: float, sents: list[Cue], lead: float, tail: float) -> tuple[float, float]:
     """Pad a sentence-aligned clip without catching a syllable of the neighbouring sentences."""
     prev_end = max((s.end for s in sents if s.end <= start + 0.01), default=start - lead)

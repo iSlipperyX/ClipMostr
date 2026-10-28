@@ -586,7 +586,7 @@ class Runner:
             if j.status == "queued":
                 self.db.remove(j.id)
                 removed += 1
-        self.db.update_order(order_id, self.now(), status="cancelled", message="Cancelled")
+        self.db.update_order(order_id, self.now(), status="cancelled", message="")
         return removed
 
     def order_progress(self, order_id: str) -> orders.Order | None:
@@ -599,7 +599,7 @@ class Runner:
         waiting = sum(1 for j in jobs if j.status in ("queued", "working"))
         status, message = "open", ""
         if made >= order.count:
-            status, message = "done", f"Done: {made} clips ready"
+            status, message = "done", f"{made} clips ready"
         elif order.links and not waiting:
             status = "short"
             message = (f"Made {made} of {order.count}: its videos didn't have more good moments of "

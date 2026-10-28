@@ -12,7 +12,7 @@ import numpy as np
 from . import cuts, layout, series
 from . import transcribe as whisper
 from .analyze import (SIGNAL_LABELS, Clip, Measurements, breathing_room, build_signals, chapter_clips, clip_score,
-                      combine, fit_to_sentences, loudness, pick_clips, quiet_frames, snap, trim_dead_air)
+                      cap_length, combine, fit_to_sentences, loudness, pick_clips, quiet_frames, snap, trim_dead_air)
 from .download import Video, download, is_url, local_video
 from .export import export_clip, thumbnail, tiktok_warnings
 from .export import frame as export_frame
@@ -224,6 +224,8 @@ class Engine:
             return
         n = series.extend(p.clips, p.score, sents, self.s.min_len, self.s.max_len, self.s.clip_count,
                           self.s.series_parts, p.video.duration)
+        if not n and any(sid for sid, _, _ in series.labels(p.clips)):  # the finder's own clips carry on
+            series.keep(p.clips, len(p.clips))  # list them together, in order
         if n:
             self.log(f"Added {n} next part{'s' if n != 1 else ''}: a great moment ran longer than one clip.")
 
@@ -298,6 +300,7 @@ class Engine:
             if sents and self.s.snap_to_pauses:
                 c.start, c.end = fit_to_sentences(c.start, c.end, sents, self.s.min_len, self.s.max_len)
                 c.start, c.end = breathing_room(c.start, c.end, sents, 0.15, 0.3)
+                c.end = cap_length(c.start, c.end, sents, self.s.min_len, self.s.max_len)
             elif len(quiet):
                 c.start, c.end = snap(c.start, quiet, -1.5, 0.5), snap(c.end, quiet, -0.5, 1.5)
             # pad_start/pad_end are deliberate user choices, so they may reach into neighbours.

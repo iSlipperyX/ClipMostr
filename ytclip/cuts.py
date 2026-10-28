@@ -150,7 +150,7 @@ def clean_edges(clips: list[Clip], pauses: Pauses, duration: float, min_len: flo
         if c.edited:
             continue
         shortest = min(min_len, c.length) * 0.9
-        longest = max(max_len, c.length) + 0.5 if max_len else float("inf")
+        longest = max(max_len, c.length) if max_len else float("inf")  # never longer than allowed, or than it was
         before = max((o.end for o in on[:i] if o.end <= c.start + 0.01), default=0.0)
         after = min((o.start for o in on[i + 1:] if o.start >= c.end - 0.01), default=duration or float("inf"))
         c.start = _move(c.start, pauses, True, max(before, c.end - longest), c.end - shortest)
