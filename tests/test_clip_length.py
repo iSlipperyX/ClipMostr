@@ -1,4 +1,4 @@
-"""2.5.1: no clip comes out shorter than Min clip length, wherever its settings came from."""
+"""No clip comes out shorter than Min clip length, wherever its settings came from (2.6.1)."""
 
 import numpy as np
 import pytest

@@ -78,7 +78,7 @@ def test_the_health_check_finds_what_automation_needs(tmp_path, monkeypatch):
     db.set_meta("blocked_at", NOW - 3600)
     got = _levels(doctor.check(s, db, now=NOW))
     assert got["ffmpeg"] == doctor.GOOD
-    assert got["YouTube Data API key"] == doctor.WARN and got["Anthropic key"] == doctor.WARN
+    assert got["YouTube Data API key"] == doctor.WARN and got["Claude key"] == doctor.WARN
     assert got["Automation folder"] == doctor.GOOD and not out.exists()  # checking makes no folders
     assert got["Niche Gaming"] == doctor.WARN and got["Paused niches"] == doctor.WARN
     assert got["Clip requests"] == doctor.BAD and got["YouTube sign-in"] == doctor.WARN

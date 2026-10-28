@@ -88,7 +88,7 @@ def extend(clips: list[Clip], score: np.ndarray, sents: list, min_len: float, ma
     floor = float(np.median(score))  # a moment has to stay better than most of the video
     added: list[Clip] = []
 
-    def signal(c: Clip) -> float:  # an AI pick's score mixes in Claude's rating; compare like with like
+    def signal(c: Clip) -> float:  # an AI pick's score mixes in the AI's rating; compare like with like
         return clip_score(score, c.start, c.end) if c.origin == "ai" else c.score
 
     for first in sorted([c for c in clips if c.enabled and not c.edited], key=lambda c: c.score, reverse=True):

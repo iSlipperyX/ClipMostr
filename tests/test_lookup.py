@@ -210,3 +210,25 @@ def test_ytclip_find_lists_and_queues(monkeypatch, capsys):
     finally:
         db.close()
     assert cli.main(["find", "MW4 funny", "--niche", "nope"]) == 2
+
+
+def test_find_uses_whichever_ai_settings_chose(monkeypatch):
+    from ytclip import ai
+
+    asked = []
+
+    def ask_json(s, task, system, content, schema, **kw):
+        asked.append((task, s.ai_provider))
+        if "queries" in schema["properties"]:
+            return ai.Answer({"queries": ["MW4 funny moments"], "subject": ["mw4"], "vibe": ["funny"],
+                              "about": "x"}, "gemini-test", "gemini")
+        return ai.Answer({"videos": [{"n": 1, "match": 9, "why": "yes"}]}, "gemini-test", "gemini")
+
+    monkeypatch.setattr(ai, "ask_json", ask_json)
+    s = Settings(ai_provider="gemini", gemini_api_key="g-key")
+    r = lookup.find("MW4 with good comedy", s, "KEY", get=FakeYouTube(VIDEOS[:1]), now=NOW)
+    assert asked == [("polish", "gemini"), ("polish", "gemini")] and r.rated_by == "gemini-test"
+    assert r.plan.by_ai and r.videos[0].match == 90
+    asked.clear()
+    lookup.find("MW4 with good comedy", Settings(), "KEY", get=FakeYouTube(VIDEOS[:1]), now=NOW)
+    assert asked == []  # no key for either AI: by the words

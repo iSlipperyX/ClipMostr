@@ -2,8 +2,8 @@
 
 check() looks at the PC and the settings without going online: ffmpeg, the downloader's age, the
 keys, the folders and free space, TikTok Manager, niches and clip requests. With online=True it
-also asks the YouTube Data API and Anthropic whether the keys work (no quota or tokens used for
-Anthropic; one quota unit for YouTube).
+also asks the YouTube Data API, Anthropic and Google whether the keys work (no quota or tokens used
+for the AI keys; one quota unit for YouTube).
 
 Automation runs the offline check each time it starts and logs what's wrong; the Automation
 tab's Check button and `ytclip doctor` run it in full.
@@ -105,21 +105,28 @@ def _keys(s: Settings, online: bool) -> list[Check]:
                              "Research (a new key can take a few minutes to start working)"))
     else:
         out.append(Check("YouTube Data API key", GOOD, "Set"))
+    from . import ai
+
     special = any(n.instructions.strip() for n in niches.active(s))
+    first = ai.chosen(s)
     if not has_ai_key(s):
-        out.append(Check("Anthropic key", WARN if (special or s.auto_polish) else GOOD,
+        out.append(Check(f"{ai.name(first)} key", WARN if (special or s.auto_polish) else GOOD,
                          "Not set: no AI polish" + (", and special requests aren't followed" if special else ""),
                          "Add a key in Settings → AI" if (special or s.auto_polish) else ""))
-    elif online:
+        return out
+    use = ai.order(s)
+    if use[0] != first:
+        out.append(Check(f"{ai.name(first)} key", WARN, f"Not set, so {ai.name(use[0])} is used instead",
+                         f"Add a {ai.name(first)} key in Settings → AI, or choose {ai.name(use[0])} there"))
+    for provider in use:
+        label = f"{ai.name(provider)} key" + (" (if the other fails)" if provider != use[0] else "")
+        if not online:
+            out.append(Check(label, GOOD, "Set"))
+            continue
         try:
-            from .ai import check_key
-
-            out.append(Check("Anthropic key", GOOD, check_key(s.ai_api_key or os.environ.get("ANTHROPIC_API_KEY",
-                                                                                               ""), s.ai_model)))
+            out.append(Check(label, GOOD, ai.check_key(s, provider)))
         except Exception as exc:
-            out.append(Check("Anthropic key", BAD, f"Didn't work: {exc}", "Check the key in Settings → AI"))
-    else:
-        out.append(Check("Anthropic key", GOOD, "Set"))
+            out.append(Check(label, BAD, f"Didn't work: {exc}", "Check the key in Settings → AI"))
     return out
 
 

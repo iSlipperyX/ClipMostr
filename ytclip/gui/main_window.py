@@ -579,7 +579,7 @@ class MainWindow(QMainWindow):
         self.live.setToolTip("Re-pick clips instantly as you change settings (replaces unedited clips)")
         redetect = QPushButton("⟳ Re-detect clips")
         redetect.setObjectName("primary")
-        redetect.setToolTip("Pick clips again with the current settings. In AI mode this asks Claude.")
+        redetect.setToolTip("Pick clips again with the current settings. In AI mode this asks the AI (Settings → AI).")
         redetect.clicked.connect(lambda: self.redetect(force_ai=True))
         row.addWidget(self.live)
         row.addStretch()
@@ -1339,12 +1339,14 @@ class MainWindow(QMainWindow):
         self._after_redetect(p, keep)
 
     def _ask_ai(self, p: Project) -> None:
-        if not (self.settings.ai_api_key or _env_key()):
-            QMessageBox.information(self, APP_NAME, "Add your Anthropic API key in Settings → AI to use the "
-                                                    "AI clip finder.")
+        from ..ai import has_key, name
+
+        if not has_key(self.settings):
+            QMessageBox.information(self, APP_NAME, f"Add your {name(self.settings)} API key in Settings → AI to "
+                                                    "use the AI clip finder.")
             return
         if getattr(p, "_ai_pending", False):
-            self._notice("Claude is already picking clips for this video…")
+            self._notice(f"{name(self.settings)} is already picking clips for this video…")
             return
         p._ai_pending = True  # type: ignore[attr-defined]
         settings = self.settings.copy()
@@ -1370,7 +1372,7 @@ class MainWindow(QMainWindow):
         keep = self._kept(p)  # recomputed now, so edits made while waiting are respected
         p.clips, p.mode_used, p.ai_model, p.ai_error = q.clips, "ai", q.ai_model, ""
         self._after_redetect(p, keep)
-        self._notice(f"✨ {q.ai_model or 'Claude'} picked {len(q.clips)} clips"
+        self._notice(f"✨ {q.ai_model or 'The AI'} picked {len(q.clips)} clips"
                             + (f" · kept {len(keep)} you edited" if keep else ""))
 
     def _ai_failed(self, p: Project, msg: str) -> None:
@@ -1648,8 +1650,3 @@ class MainWindow(QMainWindow):
                 self.tasks.current.terminate()
         super().closeEvent(e)
 
-
-def _env_key() -> str:
-    import os
-
-    return os.environ.get("ANTHROPIC_API_KEY", "")

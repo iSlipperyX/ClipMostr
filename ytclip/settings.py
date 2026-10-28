@@ -72,14 +72,19 @@ class Settings:
     # Speed (speed.py): how much of the PC clipping may use
     speed: str = "balanced"  # quiet | balanced | full
     gpu_whisper: bool = True  # Full power: Whisper on the graphics card (whisper_cpp.py), when there is one
-    # AI
-    ai_api_key: str = ""
+    # AI (ai.py): Claude or Gemini, each with its own key and models
+    ai_provider: str = "claude"  # claude | gemini
+    ai_fallback: bool = True  # when the chosen AI fails or has no key, ask the other one (if it has a key)
+    ai_api_key: str = ""  # Anthropic's, for Claude
     ai_model: str = "claude-opus-5-5"
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-3.8-flash"
+    gemini_polish_model: str = "gemini-3.8-flash"
     ai_instructions: str = (
         "Find self-contained moments that would work as standalone short-form clips: "
         "strong hooks, punchlines, surprising facts, hot takes, emotional peaks."
     )
-    ai_polish: bool = False  # polish.py: one extra Claude call per video for hooks, caption fixes, crops
+    ai_polish: bool = False  # polish.py: one extra AI call per video for hooks, caption fixes, crops
     ai_polish_model: str = "claude-sonnet-5-5"
     polish_overpick: bool = True  # with polish: find extra clips, keep the best rated (engine.keep_best)
     polish_burned_subs: str = "off"  # off = turn our captions off when the video already has subtitles | keep
@@ -97,7 +102,7 @@ class Settings:
     write_srt: bool = True
     tiktok_ready: bool = True
     qc_enabled: bool = False  # qc.py: check every clip after export, moving bad ones to _rejected
-    qc_min_rating: int = 5  # with AI polish: reject clips Claude rates under this (0 = ignore ratings)
+    qc_min_rating: int = 5  # with AI polish: reject clips the AI rates under this (0 = ignore ratings)
     # Captions
     burn_captions: bool = False
     caption_font: str = "Montserrat Black"
@@ -215,7 +220,7 @@ class Settings:
     def apply(self, overrides: dict) -> "Settings":
         known = {f.name for f in fields(self)}
         clean = {k: v for k, v in overrides.items() if k in known}
-        for key in ("ai_api_key", "youtube_api_key"):
+        for key in ("ai_api_key", "gemini_api_key", "youtube_api_key"):
             if isinstance(clean.get(key), str):
                 clean[key] = clean[key].strip()  # pasted keys often carry a stray space
         return replace(self, **clean)
@@ -454,9 +459,15 @@ class Field:
     placeholder: str = ""
 
 
+AI_PROVIDERS = (("claude", "Claude (Anthropic)"), ("gemini", "Gemini (Google)"))  # ai.PROVIDERS
+CLAUDE_MODELS = (("claude-opus-5-5", "Claude Opus 5.5 (best)"), ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
+                 ("claude-haiku-5-5", "Claude Haiku 5.5 (cheapest)"))
+GEMINI_MODELS = (("gemini-4-argon", "Gemini 4 Argon (best)"),  # gemini.MODELS
+                 ("gemini-3.8-flash", "Gemini 3.8 Flash (fast, recommended)"),
+                 ("gemini-3.5-flash-lite", "Gemini 3.5 Flash-Lite (cheapest)"))
 SPEEDS = (("quiet", "Quiet (slowest, the PC stays free)"), ("balanced", "Balanced"),
           ("full", "Full power (every core and the graphics card)"))
-MODES = (("auto", "Smart signals"), ("ai", "AI picks (Claude)"), ("chapters", "YouTube chapters"))
+MODES = (("auto", "Smart signals"), ("ai", "AI picks (Claude or Gemini)"), ("chapters", "YouTube chapters"))
 ASPECTS = (("original", "Original"), ("vertical_blur", "9:16 vertical, blurred fill"),
            ("vertical_crop", "9:16 vertical, cropped"), ("square", "1:1 square"))
 ENCODERS = (("auto", "Auto (fastest available)"), ("libx264", "CPU (x264)"), ("h264_amf", "AMD GPU (AMF)"),
@@ -556,14 +567,23 @@ SCHEMA: list[Field] = [
                "times faster than the CPU. Downloads the model for it once. Falls back to the CPU if it fails"),
     Field("whisper_language", "Language code (blank = detect)", "Transcription", "str"),
 
-    Field("ai_api_key", "Anthropic API key", "AI", "secret", help="Needed for the AI clip finder",
-          placeholder="sk-ant-…"),
-    Field("ai_model", "Claude model", "AI", "choice",
-          choices=(("claude-opus-5-5", "Claude Opus 5.5 (best)"), ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
-                   ("claude-haiku-5-5", "Claude Haiku 5.5 (cheapest)"))),
+    Field("ai_provider", "AI to use", "AI", "choice", choices=AI_PROVIDERS,
+          help="Which AI picks clips, polishes them and follows special requests. Each needs its own API key"),
+    Field("ai_fallback", "If it fails, try the other AI", "AI", "bool",
+          help="When the AI above can't answer (no key, a rejected key, a used-up quota, busy servers, or it "
+               "declines), the other AI is asked instead, if it has a key. Off: that video uses smart signals "
+               "or goes out unpolished"),
+    Field("ai_api_key", "Anthropic API key (Claude)", "AI", "secret", help="Needed to use Claude. From "
+          "console.anthropic.com", placeholder="sk-ant-…"),
+    Field("ai_model", "Claude model for finding clips", "AI", "choice", choices=CLAUDE_MODELS),
+    Field("ai_polish_model", "Claude model for polishing", "AI", "choice", choices=CLAUDE_MODELS),
+    Field("gemini_api_key", "Gemini API key", "AI", "secret", help="Needed to use Gemini. Free from "
+          "aistudio.google.com/apikey", placeholder="AIza…"),
+    Field("gemini_model", "Gemini model for finding clips", "AI", "choice", choices=GEMINI_MODELS),
+    Field("gemini_polish_model", "Gemini model for polishing", "AI", "choice", choices=GEMINI_MODELS),
     Field("ai_instructions", "What makes a good clip?", "AI", "text"),
     Field("ai_polish", "Polish clips with AI", "AI", "bool",
-          help="One extra Claude call per video, with a frame from each clip: writes a hook for the top banner and "
+          help="One extra AI call per video, with a frame from each clip: writes a hook for the top banner and "
                "bottom lines for clips with no part 2, fixes misheard words in the captions, spots subtitles "
                "already in the video and centres vertical crops on the speaker"),
     Field("polish_bottom_text", "AI writes the bottom text when there's no part 2", "AI", "bool",
@@ -575,9 +595,6 @@ SCHEMA: list[Field] = [
           help="With polish on, half as many clips again are found and polished, and only the best rated ones "
                "are exported. More of the clips you get pass the quality check, and none is made just to be "
                "rejected. A little more text goes to the AI"),
-    Field("ai_polish_model", "Model for polishing", "AI", "choice",
-          choices=(("claude-opus-5-5", "Claude Opus 5.5 (best)"), ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
-                   ("claude-haiku-5-5", "Claude Haiku 5.5 (cheapest)"))),
     Field("polish_burned_subs", "If the video already has subtitles", "AI", "choice",
           choices=(("off", "Turn my captions off for it"), ("keep", "Keep my captions anyway")),
           help="Two sets of words on screen at once is hard to read"),
@@ -602,7 +619,7 @@ SCHEMA: list[Field] = [
           help="Watches each clip once for silence, black or frozen picture and the wrong length or size, and "
                "notes clips that start or end mid-sentence. Failed clips move to a _rejected folder"),
     Field("qc_min_rating", "Reject AI ratings under", "Export", "int", lo=0, hi=10,
-          help="With AI polish on, Claude rates how well each clip stands alone, 1 to 10. 0 ignores the ratings"),
+          help="With AI polish on, the AI rates how well each clip stands alone, 1 to 10. 0 ignores the ratings"),
 
     Field("burn_captions", "Burn in animated captions", "Captions", "bool"),
     Field("caption_font", "Font", "Captions", "font"),
@@ -736,8 +753,8 @@ SCHEMA: list[Field] = [
           help="Clips that fail (silent, black, frozen, wrong length, or rated low by the AI polish) go to a "
                "_rejected folder instead of being ready to upload"),
     Field("auto_polish", "Polish clips with AI", "Automation", "bool",
-          help="Hooks, caption fixes and speaker crops (see Settings → AI). Needs an Anthropic key and "
-               "counts toward the AI limit below"),
+          help="Hooks, caption fixes and speaker crops (see Settings → AI). Needs a Claude or Gemini key "
+               "and counts toward the AI limit below"),
     Field("auto_start_hour", "Work from (hour)", "Automation", "int", lo=0, hi=23,
           help="Downloads and encodes only start between these hours. The same hour twice means any time"),
     Field("auto_end_hour", "Work until (hour)", "Automation", "int", lo=0, hi=23),
@@ -746,7 +763,7 @@ SCHEMA: list[Field] = [
                "automation pauses for 6 hours, then spaces downloads out 2x (4x if it asks again) for a day"),
     Field("auto_ai_daily", "AI calls per day", "Automation", "int", lo=0, hi=500,
           help="Finding clips with AI and polishing each count as one. Over the limit, videos use the smart "
-               "signals and skip polishing, so Claude costs stay predictable"),
+               "signals and skip polishing, so AI costs stay predictable"),
     Field("auto_retries", "Tries per video", "Automation", "int", lo=1, hi=10,
           help="A failed video is tried again after 15 minutes, then 1 hour, then 4 hours"),
     Field("auto_delete_sources", "Delete full downloads after clipping", "Automation", "bool"),

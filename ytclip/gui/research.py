@@ -179,8 +179,8 @@ class Research(QWidget):
         self.find_box.setPlaceholderText(f"Describe what you want, like: {FIND_EXAMPLE}")
         self.find_box.setClearButtonEnabled(True)
         self.find_box.setMaxLength(lookup.MAX_REQUEST)
-        self.find_box.setToolTip("What the videos are about and what kind you want. With an AI key, Claude writes "
-                                 "the searches and rates how well each video matches; without one, the words do. "
+        self.find_box.setToolTip("What the videos are about and what kind you want. With a Claude or Gemini key "
+                                 "(Settings → AI), the AI writes the searches and rates how well each video matches; without one, the words do. "
                                  "Each request uses about 200 of the YouTube API's 10,000 free daily units")
         self.find_box.returnPressed.connect(self.find)
         self._recent = QCompleter([], self)
@@ -681,8 +681,8 @@ class Research(QWidget):
         bits = [f"<b>{len(r.videos)} video{'s' if len(r.videos) != 1 else ''}</b> for “{_esc(r.request)}”"]
         if r.weak:
             bits.append(f"{r.weak} that didn't match left out")
-        bits.append(f"rated by {_esc(r.rated_by)}" if r.rated_by else "matched by their words (add an AI key for "
-                    "Claude to rate them)")
+        bits.append(f"rated by {_esc(r.rated_by)}" if r.rated_by else "matched by their words (add a Claude or Gemini "
+                    "key in Settings → AI to have them rated)")
         bits.append(f"found {age_text((time.time() - r.time) / 3600)} ago" if time.time() - r.time >= 60
                     else "found just now")
         searched = ", ".join(f"“{_esc(q)}”" for q in r.plan.queries)

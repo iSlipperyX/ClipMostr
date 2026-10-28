@@ -1,8 +1,8 @@
 """Find videos for a request you type, like "a Call of Duty MW4 video with good comedy".
 
-The request becomes one or two YouTube searches (with an AI key, Claude writes them, knowing that
+The request becomes one or two YouTube searches (with an AI key, the AI writes them, knowing that
 MW4 is Modern Warfare 4 and that comedy means funny moments). Every video found is scored twice:
-how well it matches the request (Claude rates each one, or the words in its title, tags and
+how well it matches the request (the AI rates each one, or the words in its title, tags and
 description are counted) and how well it will clip (clipability.py). Best first.
 
 A search costs 100 of the YouTube API's 10,000 free daily units, so a request uses about 200.
@@ -31,7 +31,7 @@ PER_SEARCH = 50  # results asked of each search (the most one call gives)
 MAX_SEARCHES = 3
 MAX_REQUEST = 300  # characters
 RECENT = 12  # requests remembered for the box's suggestions
-RATE_AT_ONCE = 60  # videos Claude rates in one call
+RATE_AT_ONCE = 60  # videos the AI rates in one call
 MATCH_WEIGHT = 0.6  # the rest is clip-ability
 WEAK = 35.0  # a match under this isn't what you asked for: hidden
 SINCE = {"any": 0, "week": 7, "month": 31, "year": 365}
@@ -79,7 +79,7 @@ class Plan:
     queries: list[str]
     subject: list[str] = field(default_factory=list)  # words the video should be about (lowercase)
     vibe: list[str] = field(default_factory=list)  # words that show it's the kind asked for
-    about: str = ""  # one line: what Claude understood
+    about: str = ""  # one line: what the AI understood
     by_ai: bool = False
 
 
@@ -203,31 +203,12 @@ RATE_SYSTEM = (
 
 def _ask(prompt: str, system: str, schema: dict, s: Settings, check: Callable[[], None] | None = None,
          max_tokens: int = 4000) -> tuple[dict, str]:
-    """One Claude call with a JSON answer. Returns the answer and the model that gave it."""
-    import anthropic
+    """One AI call (Claude or Gemini, per Settings → AI) with a JSON answer, and the model that gave it.
+    The quicker polish model is plenty for writing searches and rating titles."""
+    from .ai import ask_json
 
-    from .ai import STREAM_TIMEOUT, AIError, _client, _friendly
-
-    model = s.ai_model
-    try:
-        with _client(s.ai_api_key, max_retries=2, timeout=STREAM_TIMEOUT).messages.stream(
-            model=model, max_tokens=max_tokens, system=system,
-            messages=[{"role": "user", "content": prompt}],
-            output_config={"effort": "low", "format": {"type": "json_schema", "schema": schema}},
-        ) as stream:
-            for i, _ in enumerate(stream):
-                if check and i % 25 == 0:
-                    check()
-            response = stream.get_final_message()
-    except (anthropic.APIError, TypeError) as exc:
-        raise _friendly(exc, model) from exc
-    if response.stop_reason == "refusal":
-        raise AIError("Claude declined this request.")
-    text = "".join(b.text for b in response.content if b.type == "text")
-    try:
-        return json.loads(text), getattr(response, "model", None) or model
-    except ValueError as exc:
-        raise AIError("Claude's answer couldn't be read.") from exc
+    answer = ask_json(s, "polish", system, prompt, schema, effort="low", max_tokens=max_tokens, check=check)
+    return answer.data, answer.model
 
 
 def ai_plan(request: str, s: Settings, check: Callable[[], None] | None = None) -> Plan:
@@ -307,7 +288,7 @@ def word_match(v: TrendingVideo, extra: str, plan: Plan) -> tuple[float, str]:
 
 def ai_rate(videos: list[TrendingVideo], text: dict[str, str], plan: Plan, s: Settings,
             check: Callable[[], None] | None = None) -> tuple[dict[str, tuple[float, str]], str]:
-    """Claude's 0-100 match for each video (by id), and the model that rated them."""
+    """The AI's 0-100 match for each video (by id), and the model that rated them."""
     out: dict[str, tuple[float, str]] = {}
     model = ""
     for k in range(0, len(videos), RATE_AT_ONCE):
@@ -335,6 +316,7 @@ def find(request: str, s: Settings, api_key: str, since: str = "any", min_minute
          cancelled: Callable[[], bool] | None = None, get: Callable[[str], dict] = _get,
          use_ai: bool | None = None, now: float | None = None) -> LookupResult:
     """Search YouTube for the request and score what comes back, best match first."""
+    from . import ai
     from .ai import AIError
 
     log = log or (lambda m: None)
@@ -352,14 +334,14 @@ def find(request: str, s: Settings, api_key: str, since: str = "any", min_minute
     if not api_key:
         raise FindError("Add a YouTube Data API key (Settings → Research) to search YouTube.")
     problems: list[str] = []
-    with_ai = bool(s.ai_api_key.strip()) if use_ai is None else use_ai
+    with_ai = ai.has_key(s) if use_ai is None else use_ai
     plan = None
     if with_ai:
-        step("Claude is working out what to search for", None)
+        step("The AI is working out what to search for", None)
         try:
-            plan = ai_plan(request, s, check=lambda: step("Claude is working out what to search for", None))
+            plan = ai_plan(request, s, check=lambda: step("The AI is working out what to search for", None))
         except AIError as exc:
-            problems.append(f"Claude couldn't plan the search ({exc}), so it searched your words.")
+            problems.append(f"The AI couldn't plan the search ({exc}), so it searched your words.")
     plan = plan or plain_plan(request)
     log(f"Find: searching YouTube for {', '.join(repr(q) for q in plan.queries)}")
     after = now - SINCE.get(since, 0) * 86400 if SINCE.get(since) else 0.0
@@ -398,12 +380,12 @@ def find(request: str, s: Settings, api_key: str, since: str = "any", min_minute
         clipability.score(v, velocities, now)
     rated, rated_by = {}, ""
     if with_ai and videos:
-        step(f"Claude is rating how well {len(videos)} videos match", (len(plan.queries) + 1) / (len(plan.queries) + 2))
+        step(f"The AI is rating how well {len(videos)} videos match", (len(plan.queries) + 1) / (len(plan.queries) + 2))
         try:
             rated, rated_by = ai_rate(videos, text, plan, s,
-                                      check=lambda: step("Claude is rating the videos", None))
+                                      check=lambda: step("The AI is rating the videos", None))
         except AIError as exc:
-            problems.append(f"Claude couldn't rate the videos ({exc}), so they're matched by their words.")
+            problems.append(f"The AI couldn't rate the videos ({exc}), so they're matched by their words.")
     for v in videos:
         v.match, v.match_why = rated.get(v.id) or word_match(v, text.get(v.id, ""), plan)
         v.reasons = [f"Match {v.match:.0f}: {v.match_why}"] + [r for r in v.reasons if not r.startswith("Match ")]

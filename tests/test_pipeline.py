@@ -408,6 +408,10 @@ def test_no_polish_without_a_key_or_when_turned_off(tmp_path, monkeypatch):
     assert not settings_for(Job("a", "u"), _settings())[0].ai_polish
     assert settings_for(Job("a", "u"), _settings(ai_api_key="k"))[0].ai_polish
     assert not settings_for(Job("a", "u"), _settings(ai_api_key="k", auto_polish=False))[0].ai_polish
+    # a Gemini key does as well, whichever AI is chosen (the other one stands in)
+    assert settings_for(Job("a", "u"), _settings(gemini_api_key="g", ai_provider="gemini"))[0].ai_polish
+    assert settings_for(Job("a", "u"), _settings(gemini_api_key="g"))[0].ai_polish
+    assert not settings_for(Job("a", "u"), _settings(gemini_api_key="g", ai_fallback=False))[0].ai_polish
 
 
 def test_quality_check_counts_reach_the_queue(tmp_path):

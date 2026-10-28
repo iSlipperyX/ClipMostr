@@ -1,8 +1,11 @@
-"""AI clip finder: Claude reads the timestamped transcript and picks the best moments."""
+"""AI clip finder: the AI (Claude or Gemini, Settings → AI) reads the timestamped transcript and picks the
+best moments. Also the one place both AIs are called from: ask_json, check_key, has_key."""
 
 from __future__ import annotations
 
 import json
+import os
+from dataclasses import dataclass
 from typing import Callable
 
 import numpy as np
@@ -54,6 +57,166 @@ SYSTEM = (
 # often): give up on that try instead of the SDK's default 10 minutes, which held automation up.
 STREAM_TIMEOUT = 120.0
 
+# Settings → AI chooses which AI answers; each has its own key and models.
+PROVIDERS = (("claude", "Claude (Anthropic)"), ("gemini", "Gemini (Google)"))
+NAMES = {"claude": "Claude", "gemini": "Gemini"}
+ENV_KEYS = {"claude": ("ANTHROPIC_API_KEY",), "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY")}
+KEY_FIELDS = {"claude": "ai_api_key", "gemini": "gemini_api_key"}
+# task -> the setting holding each AI's model for it: "find" wants the best model, "polish" a quicker one
+MODEL_FIELDS = {"find": {"claude": "ai_model", "gemini": "gemini_model"},
+                "polish": {"claude": "ai_polish_model", "gemini": "gemini_polish_model"}}
+
+
+class AIRefused(AIError):
+    """The AI declined to answer (a safety filter)."""
+
+
+class AICutOff(AIError):
+    """The answer ran out of room before it finished."""
+
+
+@dataclass
+class Answer:
+    data: dict
+    model: str  # the model that actually answered
+    provider: str  # "claude" | "gemini"
+
+
+def chosen(s) -> str:
+    """The AI Settings → AI picked."""
+    p = str(getattr(s, "ai_provider", "claude") or "claude").lower()
+    return p if p in NAMES else "claude"
+
+
+def name(s_or_provider) -> str:
+    """'Claude' or 'Gemini', for messages."""
+    p = s_or_provider if isinstance(s_or_provider, str) else chosen(s_or_provider)
+    return NAMES.get(p, "AI")
+
+
+def key_for(s, provider: str = "") -> str:
+    """That AI's key from settings, else from its environment variable."""
+    provider = provider or chosen(s)
+    own = str(getattr(s, KEY_FIELDS[provider], "") or "").strip()
+    return own or next((os.environ[v].strip() for v in ENV_KEYS[provider] if os.environ.get(v, "").strip()), "")
+
+
+def model_for(s, task: str = "find", provider: str = "") -> str:
+    return str(getattr(s, MODEL_FIELDS[task][provider or chosen(s)]))
+
+
+def order(s) -> list[str]:
+    """The AIs to ask, in turn: the chosen one when it has a key, then (with "If it fails, try the other
+    AI" on) the other one when it has a key."""
+    first = chosen(s)
+    out = [first] if key_for(s, first) else []
+    if getattr(s, "ai_fallback", True):
+        out += [p for p in NAMES if p != first and key_for(s, p)]
+    return out
+
+
+def has_key(s) -> bool:
+    """Whether any AI can be asked: the AI clip finder, polish and special requests need one."""
+    return bool(order(s))
+
+
+def missing_key(s) -> str:
+    """What to tell someone with no usable key."""
+    return f"No {name(s)} API key set. Add one in Settings → AI."
+
+
+def ask_json(s, task: str, system: str, content: str | list[dict], schema: dict, *, effort: str = "medium",
+             max_tokens: int = 16000, log: Callable[[str], None] | None = None,
+             check: Callable[[], None] | None = None, what: str = "") -> Answer:
+    """Ask the AI Settings → AI chose (`s` is a Settings) for JSON matching `schema`.
+
+    `task` is "find" or "polish" and picks the model setting (the best model, or the quicker one).
+    `content` is text, or Anthropic-style blocks (text, and base64 JPEG images), which work for both AIs.
+    `what` finishes the log line "Asking <model> to …". `check` is called while the answer streams in
+    and may raise to cancel; that exception passes straight through. If the chosen AI fails and the
+    other one has a key (and ai_fallback is on), the other one is asked. Raises AIError."""
+    providers = order(s)
+    if not providers:
+        raise AIError(missing_key(s))
+    failures: list[tuple[str, AIError]] = []
+    for provider in providers:
+        model = model_for(s, task, provider)
+        if failures and log:
+            log(f"{name(failures[-1][0])} didn't work: {failures[-1][1]} Trying {name(provider)} instead.")
+        if log and what:
+            log(f"Asking {model} to {what}…")
+        try:
+            if provider == "gemini":
+                text, used = _ask_gemini(key_for(s, provider), model, system, content, schema, effort, max_tokens,
+                                         check)
+            else:
+                text, used = _ask_claude(key_for(s, provider), model, system, content, schema, effort, max_tokens,
+                                         check)
+            try:
+                data = json.loads(text)
+            except ValueError as exc:
+                raise AIError(f"{name(provider)}'s answer couldn't be read. Try again.") from exc
+            if not isinstance(data, dict):
+                raise AIError(f"{name(provider)}'s answer couldn't be read. Try again.")
+            return Answer(data, used or model, provider)
+        except AIError as exc:
+            failures.append((provider, exc))
+    if len(failures) == 1:
+        raise failures[0][1]
+    kind = type(failures[0][1]) if len({type(e) for _, e in failures}) == 1 else AIError
+    raise kind(" ".join(f"{name(p)}: {e}" for p, e in failures))
+
+
+def _ask_claude(key: str, model: str, system: str, content, schema: dict, effort: str, max_tokens: int,
+                check) -> tuple[str, str]:
+    try:
+        import anthropic
+    except ImportError as exc:  # a source install without the "ai" extra
+        raise AIError("Claude needs the anthropic package (pip install anthropic).") from exc
+
+    messages = [{"role": "user", "content": content}]
+    try:
+        # Streaming keeps long transcripts clear of HTTP timeouts. `fallbacks: "default"`
+        # lets the API re-run a safety-declined request on its recommended fallback model.
+        with _client(key, max_retries=3, timeout=STREAM_TIMEOUT).beta.messages.stream(
+            model=model,
+            max_tokens=max_tokens,
+            system=system,
+            messages=messages,
+            output_config={"effort": effort, "format": {"type": "json_schema", "schema": schema}},
+            betas=["server-side-fallback-2026-07-01"],
+            extra_body={"fallbacks": "default"},
+        ) as stream:
+            for i, _event in enumerate(stream):
+                if check and i % 25 == 0:
+                    check()  # lets Cancel stop a request mid-stream
+            response = stream.get_final_message()
+    except (anthropic.APIError, TypeError) as exc:
+        raise _friendly(exc, model) from exc
+
+    if response.stop_reason == "refusal":
+        category = getattr(getattr(response, "stop_details", None), "category", None)
+        raise AIRefused("Claude declined to answer" + (f" (its {category} safety filter triggered)" if category
+                                                       else "") + ".")
+    if response.stop_reason == "max_tokens":
+        raise AICutOff("Claude's answer was cut off before it finished.")
+    # After a mid-stream fallback the answer continues in a second text block, so join them all.
+    return "".join(b.text for b in response.content if b.type == "text"), getattr(response, "model", None) or model
+
+
+def _ask_gemini(key: str, model: str, system: str, content, schema: dict, effort: str, max_tokens: int,
+                check) -> tuple[str, str]:
+    from . import gemini
+
+    try:
+        # Gemini counts its thinking inside the output limit, so it gets more room.
+        reply = gemini.generate(key, model, system, content, schema, effort=effort, max_tokens=max_tokens * 2,
+                                timeout=STREAM_TIMEOUT, check=check)
+    except gemini.GeminiError as exc:
+        kind = {"refused": AIRefused, "cut_off": AICutOff}.get(exc.kind, AIError)
+        raise kind(str(exc)) from exc
+    return reply.text, reply.model
+
 
 def _client(api_key: str, **kwargs):
     import anthropic
@@ -67,7 +230,8 @@ def _friendly(exc: Exception, model: str) -> AIError:
     import anthropic
 
     if isinstance(exc, anthropic.AuthenticationError):
-        return AIError("The API key was rejected. Check it was copied completely (it starts with sk-ant-).")
+        return AIError("The Anthropic API key was rejected. Check it was copied completely (it starts with "
+                       "sk-ant-).")
     if isinstance(exc, anthropic.PermissionDeniedError):
         return AIError(f"This key isn't allowed to use {model}.")
     if isinstance(exc, anthropic.NotFoundError):
@@ -81,19 +245,36 @@ def _friendly(exc: Exception, model: str) -> AIError:
     if isinstance(exc, anthropic.APIConnectionError):
         return AIError("Couldn't reach the Anthropic API. Check your internet connection.")
     if isinstance(exc, TypeError) and "authentication" in str(exc).lower():
-        return AIError("No API key set. Add one in Settings → AI.")
+        return AIError("No Anthropic API key set. Add one in Settings → AI.")
     return AIError(str(exc) or exc.__class__.__name__)
 
 
-def check_key(api_key: str, model: str) -> str:
-    """Confirm the key works and can use `model` by looking the model up (costs no tokens)."""
+def check_key(s, provider: str = "") -> str:
+    """Confirm that AI's key works and can use both its models (finding and polishing) by looking
+    them up. Costs no tokens. Raises AIError."""
+    provider = provider or chosen(s)
+    key = key_for(s, provider)
+    if not key:
+        raise AIError(f"No {name(provider)} API key set.")
+    models = list(dict.fromkeys(model_for(s, task, provider) for task in MODEL_FIELDS))
+    found = [_lookup(provider, key, m) for m in models]
+    return f"{name(provider)} key works. {' and '.join(found)} {'is' if len(found) == 1 else 'are'} ready."
+
+
+def _lookup(provider: str, key: str, model: str) -> str:
+    if provider == "gemini":
+        from . import gemini
+
+        try:
+            return gemini.check_model(key, model)
+        except gemini.GeminiError as exc:
+            raise AIError(str(exc)) from exc
     import anthropic
 
     try:
-        info = _client(api_key, max_retries=1, timeout=20).models.retrieve(model)
+        return _client(key, max_retries=1, timeout=20).models.retrieve(model).display_name
     except (anthropic.APIError, TypeError) as exc:
         raise _friendly(exc, model) from exc
-    return f"Key works. {info.display_name} is ready."
 
 
 def _transcript(sents: list[Cue]) -> str:
@@ -116,14 +297,13 @@ def _hotspots(score: np.ndarray, n: int = 12) -> str:
 
 
 def find_clips_ai(title: str, duration: float, sents: list[Cue], score: np.ndarray, count: int,
-                  min_len: float, max_len: float, instructions: str, api_key: str, model: str,
+                  min_len: float, max_len: float, instructions: str, s,
                   log: Callable[[str], None] | None = None,
                   check: Callable[[], None] | None = None) -> tuple[list[Clip], str]:
-    """Ask Claude for clips. `sents` is the transcript split into sentences (see
-    subtitles.sentences). `check` is called while the answer streams in and may raise
-    to cancel. Returns the clips and the model that actually answered."""
-    import anthropic
-
+    """Ask the AI for clips. `sents` is the transcript split into sentences (see
+    subtitles.sentences); `s` is the Settings, which choose the AI, its key and model. `check` is
+    called while the answer streams in and may raise to cancel. Returns the clips and the model
+    that actually answered."""
     if not sents:
         raise AIError("AI mode needs a transcript (captions or Whisper transcription).")
     prompt = (
@@ -134,43 +314,20 @@ def find_clips_ai(title: str, duration: float, sents: list[Cue], score: np.ndarr
         f"Signal hotspots (time, seconds, interest 0-100): {_hotspots(score)}\n\n"
         f"Transcript:\n{_transcript(sents)}"
     )
-    if log:
-        log(f"Asking {model} to pick clips…")
-
     try:
-        # Streaming keeps long transcripts clear of HTTP timeouts. `fallbacks: "default"`
-        # lets the API re-run a safety-declined request on its recommended fallback model.
-        with _client(api_key, max_retries=3, timeout=STREAM_TIMEOUT).beta.messages.stream(
-            model=model,
-            max_tokens=16000,
-            system=SYSTEM,
-            messages=[{"role": "user", "content": prompt}],
-            output_config={"effort": "medium", "format": {"type": "json_schema", "schema": SCHEMA}},
-            betas=["server-side-fallback-2026-07-01"],
-            extra_body={"fallbacks": "default"},
-        ) as stream:
-            for i, _event in enumerate(stream):
-                if check and i % 25 == 0:
-                    check()  # lets Cancel stop a request mid-stream
-            response = stream.get_final_message()
-    except (anthropic.APIError, TypeError) as exc:
-        raise _friendly(exc, model) from exc
-
-    if response.stop_reason == "refusal":
-        category = getattr(getattr(response, "stop_details", None), "category", None)
-        raise AIError("Claude declined to analyse this transcript"
-                      + (f" (its {category} safety filter triggered)" if category else "") + ".")
-    if response.stop_reason == "max_tokens":
-        raise AIError("Claude's answer was cut off before it finished. Try asking for fewer clips.")
-    # After a mid-stream fallback the answer continues in a second text block, so join them all.
-    text = "".join(b.text for b in response.content if b.type == "text")
-    try:
-        items = json.loads(text).get("clips", [])
-    except (ValueError, AttributeError) as exc:
-        raise AIError("Claude's answer couldn't be read. Try again.") from exc
+        answer = ask_json(s, "find", SYSTEM, prompt, SCHEMA, effort="medium", max_tokens=16000, log=log,
+                          check=check, what="pick clips")
+    except AICutOff as exc:
+        raise AICutOff(f"{exc} Try asking for fewer clips.") from exc
+    who = name(answer.provider)
+    items = answer.data.get("clips") or []
+    if not isinstance(items, list):
+        raise AIError(f"{who}'s answer couldn't be read. Try again.")
 
     clips: list[Clip] = []
     for item in items:
+        if not isinstance(item, dict):
+            continue
         try:
             start = max(0.0, float(item["start"]))
             end = min(duration, float(item["end"]))
@@ -182,17 +339,21 @@ def find_clips_ai(title: str, duration: float, sents: list[Cue], score: np.ndarr
             end = start + max_len
         if any(start < c.end and end > c.start for c in clips):
             continue
-        clips.append(Clip(start, end, float(item.get("score", 0)), item.get("title", ""), origin="ai",
-                          reason=item.get("reason", "")))
+        try:
+            rating = float(item.get("score", 0))
+        except (TypeError, ValueError):
+            rating = 0.0
+        clips.append(Clip(start, end, rating, str(item.get("title") or ""), origin="ai",
+                          reason=str(item.get("reason") or "")))
     if not clips:
-        raise AIError(f"Claude suggested {len(items)} clip{'s' if len(items) != 1 else ''} but none fit inside "
+        raise AIError(f"{who} suggested {len(items)} clip{'s' if len(items) != 1 else ''} but none fit inside "
                       "the video." if items
-                      else "Claude didn't find any moments worth clipping in this video.")
+                      else f"{who} didn't find any moments worth clipping in this video.")
     if log and len(clips) < len(items):
         log(f"Skipped {len(items) - len(clips)} AI suggestion(s) that overlapped or fell outside the video.")
-    # Report the signal score alongside Claude's own rating so both are comparable.
+    # Report the signal score alongside the AI's own rating so both are comparable.
     for c in clips:
         sig = clip_score(score, c.start, c.end) if len(score) else c.score
         c.score = round((c.score + sig) / 2, 1)
     clips.sort(key=lambda c: c.score, reverse=True)
-    return clips[:count], getattr(response, "model", None) or model
+    return clips[:count], answer.model

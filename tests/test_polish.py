@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from ytclip import engine as engine_mod
-from ytclip import polish, qc
+from ytclip import ai, polish, qc
 from ytclip.analyze import Clip, Measurements, trim_dead_air
 from ytclip.download import Video
 from ytclip.engine import Engine, Project
@@ -270,7 +270,8 @@ def _polish_project():
 def test_engine_polish_applies_the_answer(monkeypatch):
     seen = {}
 
-    def ask(title, clips, w, src, key, model, log=None, check=None, guide="", bottom="", handles=None):
+    def ask(title, clips, w, src, settings, log=None, check=None, guide="", bottom="", handles=None):
+        model = ai.model_for(settings, "polish")
         seen.update(title=title, n=len(clips), model=model, guide=guide)
         return Polish({0: ClipPolish("Hook!", 0.7, [("joe rogen", "Joe Rogan")])}, True, model)
 
@@ -289,7 +290,8 @@ def test_engine_polish_applies_the_answer(monkeypatch):
 def test_engine_polish_writes_the_bottom_line_when_that_banner_is_on(monkeypatch):
     seen = {}
 
-    def ask(title, clips, w, src, key, model, log=None, check=None, guide="", bottom="", handles=None):
+    def ask(title, clips, w, src, settings, log=None, check=None, guide="", bottom="", handles=None):
+        model = ai.model_for(settings, "polish")
         seen.update(bottom=bottom, handles=handles)
         return Polish({0: ClipPolish("Hook!", bottom_text="Would you stay? @me")}, False, model)
 
@@ -379,9 +381,10 @@ def test_captions_off_reaches_the_export_and_the_hook_reaches_clips_json(tmp_pat
 
 
 def test_ask_needs_a_key(monkeypatch):
-    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
-    with pytest.raises(polish.PolishError, match="No Anthropic API key"):
-        polish.ask("t", [Clip(0, 10, 80)], [], Path("x.mp4"), "  ", "claude-sonnet-5-5")
+    for v in ("ANTHROPIC_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY"):
+        monkeypatch.delenv(v, raising=False)
+    with pytest.raises(polish.PolishError, match="No Claude API key"):
+        polish.ask("t", [Clip(0, 10, 80)], [], Path("x.mp4"), Settings(ai_api_key="  "))
 
 
 def test_cli_flags(tmp_path, monkeypatch):
