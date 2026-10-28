@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import threading
 import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -428,6 +429,13 @@ class FakeResponse:
 
 
 def fake_claude(monkeypatch, response, seen):
+    try:
+        import anthropic  # noqa: F401
+    except ImportError:  # CI installs no anthropic package: errors only need its APIError to exist
+        import types
+
+        monkeypatch.setitem(sys.modules, "anthropic", types.SimpleNamespace(APIError=type("APIError", (Exception,),
+                                                                                           {})))
     class Messages:
         def stream(self, **kw):
             seen.update(kw)
