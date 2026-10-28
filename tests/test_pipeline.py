@@ -177,6 +177,17 @@ def test_research_reuses_the_apps_recent_scan(tmp_path):
     r = _runner(tmp_path, scan=lambda *a, **k: called.append(1), clock=clock, history=history)
     assert r.research(_settings()) == 1 and not called
     assert "Using the Research tab's last check." in r.logs[0]
+    r.logs.clear()
+    assert r.research(_settings()) == 0  # nothing new: the same check isn't announced every half hour
+    assert not any("last check" in line for line in r.logs)
+
+
+def test_a_sign_in_pause_quotes_youtube_once():
+    error = ("ERROR: [youtube] U3jj7XjsS0k: Sign in to confirm you’re not a bot. This helps protect our "
+             "community. Use --cookies-from-browser or --cookies for the authentication.")
+    assert pipeline.youtube_said(error) == "Sign in to confirm you’re not a bot."
+    assert pipeline.youtube_said("HTTP Error 429: Too Many Requests") == "HTTP Error 429: Too Many Requests"
+    assert pipeline.youtube_said("") == ""
 
 
 def test_research_failure_is_logged_not_raised(tmp_path):
@@ -494,6 +505,98 @@ def test_only_one_runner_at_a_time(tmp_path):
     assert r.claim() == ""
 
 
+def test_a_quiet_runner_that_is_still_there_is_not_taken_over(tmp_path):
+    """A stale heartbeat from a process that's still ClipMonster means it's stuck, not gone: a second
+    automation would clip the same video alongside it."""
+    import subprocess
+    import sys
+
+    clock = Clock()
+    r = _runner(tmp_path, clock=clock)
+    other = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        r.db.set_meta("runner_pid", str(other.pid))
+        r.db.set_meta("heartbeat", clock.t - pipeline.HEARTBEAT_STALE - 600)
+        why = r.claim()
+        assert "hasn't answered for 13 min" in why and "Task Manager" in why
+        assert pipeline.runner_hung(r.db, clock.t) == str(other.pid)
+        assert not pipeline.runner_alive(r.db, clock.t)
+    finally:
+        other.kill()
+        other.wait()
+    assert pipeline.runner_hung(r.db, clock.t) == ""
+    assert r.claim() == ""  # once it's gone, it's taken over
+
+
+def test_a_process_that_got_a_dead_runners_id_is_not_mistaken_for_it(tmp_path, monkeypatch):
+    clock = Clock()
+    r = _runner(tmp_path, clock=clock)
+    r.db.set_meta("runner_pid", str(os.getpid()))
+    r.db.set_meta("heartbeat", clock.t - pipeline.HEARTBEAT_STALE - 60)
+    r.pid = os.getpid() + 1
+    monkeypatch.setattr(pipeline, "process_name", lambda pid: "notepad.exe")
+    assert r.claim() == ""
+    assert pipeline.is_app_process(1) is False
+    for name in ("ClipMonster.exe", "ytclip.exe", "python3", "pythonw.exe", ""):
+        monkeypatch.setattr(pipeline, "process_name", lambda pid, n=name: n)
+        assert pipeline.is_app_process(1)
+
+
+def test_process_name_names_this_process():
+    import sys
+
+    name = pipeline.process_name(os.getpid()).lower()
+    # Python itself, or the script it was started as (`pytest`; Linux keeps 15 characters), or ''
+    # where the system won't say
+    assert name.startswith("python") or name == Path(sys.argv[0]).name.lower()[:15] or name == ""
+    assert pipeline.process_name("not a pid") == ""
+
+
+def test_the_heartbeat_keeps_going_through_a_long_quiet_step(tmp_path, monkeypatch):
+    """Whisper can go minutes without reporting progress; the Automation tab must still see a live runner."""
+    import threading
+
+    monkeypatch.setattr(pipeline, "PULSE", 0.02)
+    r = _runner(tmp_path, _settings(youtube_api_key=""))
+    r.now = time.time
+    r.add_manual("https://youtu.be/qqqqqqqqqqq")
+    beats, release = [], threading.Event()
+
+    class QuietEngine(FakeEngine):
+        def prepare(self, p):
+            start = r.db.meta_float("heartbeat")
+            release.wait(0.5)  # a long step that reports nothing
+            beats.append(r.db.meta_float("heartbeat") - start)
+            super().prepare(p)
+
+    r._engine = QuietEngine
+    assert r.run(once=True, sleep=lambda s: None) == 0
+    assert beats and beats[0] > 0.3  # the heartbeat moved on while the step said nothing
+    assert r.db.meta("runner_pid") == ""  # and no beat after it signed off
+
+
+def test_pulse_beats_until_stopped():
+    import threading
+
+    n = []
+    seen = threading.Event()
+
+    def beat():
+        n.append(1)
+        if len(n) >= 3:
+            seen.set()
+        raise OSError("database is locked")  # a failed beat doesn't stop the next one
+
+    pulse = pipeline.Pulse(beat, 0.01)
+    pulse.start()
+    assert seen.wait(5)
+    pulse.stop()
+    count = len(n)
+    time.sleep(0.05)
+    assert len(n) == count
+    pipeline.Pulse(beat, 0).start()  # 0 = off
+
+
 def test_a_heartbeat_from_before_the_pc_started_is_from_a_runner_thats_gone(tmp_path, monkeypatch):
     clock = Clock()
     r = _runner(tmp_path, clock=clock)
@@ -528,12 +631,25 @@ def test_stop_flag_ends_the_loop(tmp_path):
     assert len(sleeps) == 1
 
 
-def test_schedule_command():
-    cmd = pipeline.schedule_command(True)
-    assert cmd[:4] == ["schtasks", "/Create", "/TN", pipeline.TASK_NAME]
-    assert cmd[cmd.index("/SC") + 1] == "ONLOGON"
-    assert "--automation" in cmd[cmd.index("/TR") + 1]
-    assert pipeline.schedule_command(False) == ["schtasks", "/Delete", "/TN", pipeline.TASK_NAME, "/F"]
+def test_startup_command_runs_automation():
+    cmd = pipeline.startup_command()
+    assert cmd.endswith(" --automation") and cmd.startswith('"')
+    assert not pipeline.starts_with_windows() or os.name == "nt"
+    if os.name != "nt":
+        assert "only works on Windows" in pipeline.set_start_with_windows(True)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="the Run key is Windows'")
+def test_start_with_windows_uses_the_run_key(monkeypatch):
+    monkeypatch.setattr(pipeline, "RUN_VALUE", "ClipMonster test entry (safe to delete)")
+    monkeypatch.setattr(pipeline, "_remove_old_task", lambda: None)
+    try:
+        assert pipeline.set_start_with_windows(True) == ""
+        assert pipeline.starts_with_windows()
+    finally:
+        assert pipeline.set_start_with_windows(False) == ""
+    assert not pipeline.starts_with_windows()
+    assert pipeline.set_start_with_windows(False) == ""  # already off
 
 
 def test_file_logger_rolls_over(tmp_path, monkeypatch):
@@ -800,3 +916,31 @@ def test_clean_up_runs_once_a_day_when_switched_on(tmp_path, monkeypatch):
     clock.t += 2 * pipeline.DAY
     r.tick()
     assert len(calls) == 2
+
+
+def test_each_video_logs_where_its_time_went(tmp_path):
+    class TimedEngine(FakeEngine):
+        def prepare(self, p):
+            super().prepare(p)
+            p.timings.update(download=70.2, audio=12.0, transcript=160.4, find=0.3, polish=40.0)
+
+        def export(self, p):
+            p.timings.update(export=65.0, check=9.0)
+            return super().export(p)
+
+    r = _runner(tmp_path, _settings(youtube_api_key=""))
+    r._engine = TimedEngine
+    r.add_manual("https://www.youtube.com/watch?v=ttttttttttt")
+    r.tick()
+    line = next(line for line in r.logs if " took " in line)
+    assert line.endswith("Title ttttttttttt took 5:57 (download 1:10, audio 12 s, transcript 2:40, "
+                         "AI polish 40 s, export 1:05, quality check 9 s).")
+    assert json.loads(r.db.meta("last_timings"))["transcript"] == 160.4
+
+
+def test_timing_text():
+    from ytclip.engine import clock_text, timing_text
+
+    assert clock_text(0.4) == "0 s" and clock_text(59.6) == "1:00" and clock_text(3725) == "1:02:05"
+    assert timing_text({}) == "took 0 s"
+    assert timing_text({"find": 0.2}) == "took 0 s"

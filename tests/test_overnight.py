@@ -1,6 +1,7 @@
 import json
 import threading
 import time
+from pathlib import Path
 
 from conftest import NOW
 from test_pipeline import FakeEngine, _runner, _settings, fresh_engine  # noqa: F401
@@ -95,6 +96,22 @@ def test_low_disk_and_an_old_downloader_are_flagged(tmp_path, monkeypatch):
 
     monkeypatch.setattr(yt_dlp.version, "__version__", "2020.01.01")
     assert _levels(doctor.check(s, None, now=NOW))["Downloader (yt-dlp)"] == doctor.WARN
+
+
+def test_an_app_installed_inside_onedrive_is_flagged(tmp_path, monkeypatch):
+    from ytclip import updater
+
+    s = _settings(auto_output_dir=str(tmp_path))
+    synced = tmp_path / "OneDrive" / "Desktop" / "ClipMonster"
+    monkeypatch.setattr(updater, "install_dir", lambda: synced)
+    app = next(c for c in doctor.check(s, None, now=NOW) if c.name == "App folder")
+    assert app.level == doctor.WARN and "OneDrive" in app.detail and "ClipMonster" in app.fix
+    monkeypatch.setenv("OneDrive", str(tmp_path / "Sync"))
+    assert doctor.in_synced_folder(tmp_path / "Sync" / "Desktop" / "ClipMonster")
+    assert doctor.in_synced_folder(Path("C:/Users/J/OneDrive - Work/ClipMonster"))
+    assert not doctor.in_synced_folder(tmp_path / "SyncNot" / "ClipMonster")
+    monkeypatch.setattr(updater, "install_dir", lambda: tmp_path / "ClipMonster")
+    assert "App folder" not in _levels(doctor.check(s, None, now=NOW))
 
 
 def test_tiktok_manager_watching_the_folder_is_good(tmp_path, monkeypatch):

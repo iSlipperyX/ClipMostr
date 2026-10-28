@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -57,6 +59,7 @@ class Project:
     qc: dict = field(default_factory=dict)  # the quality check's tally after export (qc.py)
     export_dir: Path | None = None
     meta: dict = field(default_factory=dict)  # extra sections for clips.json, e.g. why automation picked it
+    timings: dict[str, float] = field(default_factory=dict)  # seconds each stage took (see TIMED)
 
     @property
     def name(self) -> str:
@@ -68,6 +71,37 @@ class Project:
 
     def transcript(self, clip: Clip) -> str:
         return text_between(self.cues, clip.start, clip.end)
+
+
+# The stages a video's time is reported in, in order (automation logs them per video).
+TIMED = (("download", "download"), ("audio", "audio"), ("scenes", "scene cuts"), ("transcript", "transcript"),
+         ("find", "finding clips"), ("polish", "AI polish"), ("export", "export"), ("check", "quality check"))
+
+
+@contextmanager
+def timed(p: Project, key: str):
+    start = time.monotonic()
+    try:
+        yield
+    finally:
+        p.timings[key] = p.timings.get(key, 0.0) + time.monotonic() - start
+
+
+def clock_text(seconds: float) -> str:
+    """'45 s', '6:05' (minutes:seconds) or '1:02:10'."""
+    seconds = int(round(seconds))
+    if seconds < 60:
+        return f"{seconds} s"
+    h, rest = divmod(seconds, 3600)
+    m, sec = divmod(rest, 60)
+    return f"{h}:{m:02d}:{sec:02d}" if h else f"{m}:{sec:02d}"
+
+
+def timing_text(timings: dict[str, float]) -> str:
+    """'took 6:05 (download 1:10, audio 12 s, transcript 2:40, ...)'; stages under a second are left out."""
+    total = sum(timings.values())
+    parts = [f"{label} {clock_text(timings[key])}" for key, label in TIMED if timings.get(key, 0) >= 1]
+    return f"took {clock_text(total)}" + (f" ({', '.join(parts)})" if parts else "")
 
 
 class Engine:
@@ -87,6 +121,10 @@ class Engine:
     # ------------------------------------------------------------ stage 1: open
 
     def open(self, p: Project) -> None:
+        with timed(p, "download"):
+            self._open(p)
+
+    def _open(self, p: Project) -> None:
         if is_url(p.source):
             p.video = download(p.source, self.s.cache_path, self.s.quality, self.s.cookies_browser or None,
                                self.log, self.progress)
@@ -112,14 +150,17 @@ class Engine:
             except Exception:
                 db = None
         if db is None or fine is None:
-            db, fine = loudness(v.path, v.duration, lambda f: self.progress("Measuring audio", f))
+            with timed(p, "audio"):
+                db, fine = loudness(v.path, v.duration, lambda f: self.progress("Measuring audio", f))
         if self.s.detect_scenes and not scenes_done:
-            scene_cuts = detect_scenes(v.path, v.duration, lambda f: self.progress("Detecting scene cuts", f))
+            with timed(p, "scenes"):
+                scene_cuts = detect_scenes(v.path, v.duration, lambda f: self.progress("Detecting scene cuts", f))
             scenes_done = True
         self.s.cache_path.mkdir(parents=True, exist_ok=True)
         np.savez_compressed(cache, db=db, fine=fine, cuts=np.array(scene_cuts, dtype=float), scenes_done=scenes_done)
 
-        cues, words, source = self._transcript(p)
+        with timed(p, "transcript"):
+            cues, words, source = self._transcript(p)
         if words and source == "captions" and not cuts.punctuated(words):
             n = cuts.refine_words(words, cuts.pauses_in(fine))  # auto-captions: find the pauses by listening
             if n:
@@ -356,14 +397,25 @@ class Engine:
         p.status = "working"
         self.open(p)
         self.measure(p)
-        self.find(p)
+        with timed(p, "find"):
+            self.find(p)
         if self.s.ai_polish:
-            self.polish(p)
+            with timed(p, "polish"):
+                self.polish(p)
         p.status = "ready"
 
     # ------------------------------------------------------------ stage 4: export
 
     def export(self, p: Project, clips: list[Clip] | None = None) -> Path:
+        check_before = p.timings.get("check", 0.0)
+        start = time.monotonic()
+        try:
+            return self._export(p, clips)
+        finally:  # the quality check inside it is timed on its own
+            p.timings["export"] = (p.timings.get("export", 0.0) + time.monotonic() - start
+                                   - (p.timings.get("check", 0.0) - check_before))
+
+    def _export(self, p: Project, clips: list[Clip] | None = None) -> Path:
         v, media = p.video, p.media
         assert v is not None and media is not None
         clips = [c for c in (clips if clips is not None else p.clips) if c.enabled]
@@ -408,7 +460,8 @@ class Engine:
             details.append(extra)
 
         if self.s.qc_enabled and clips:
-            self.check(p, folder, clips, files, details, base)
+            with timed(p, "check"):
+                self.check(p, folder, clips, files, details, base)
             self._unpromise(p, folder, clips, files, made)
         from .qc import REJECTED
 

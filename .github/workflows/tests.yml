@@ -1,6 +1,6 @@
 # Runs the test suite on every pull request, every push to main and every push to a work branch.
 # Linux runs on Python 3.12; Windows runs on 3.14, the version the release build and Justyn's PC use,
-# so Windows-only behaviour (paths, file locks, Task Scheduler commands) is tested before a release.
+# so Windows-only behaviour (paths, file locks, the updater's install step, the Start with Windows entry) is tested before a release.
 # GUI tests use Qt's offscreen platform.
 name: Tests
 
@@ -36,3 +36,21 @@ jobs:
         run: pip install -e ".[test]"
       - name: Test
         run: pytest -q
+
+  # The updater's install step as installed copies run it: a real PyInstaller build's own ytclip.exe
+  # installing itself over another copy of the build.
+  frozen-update:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.14"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: pip install -e ".[ai,whisper,build]"
+      - name: Build
+        run: python build.py
+      - name: Update the build with its own helper
+        run: python tests/windows/frozen_update.py dist/ClipMonster

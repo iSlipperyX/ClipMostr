@@ -11,6 +11,7 @@ It runs as `ytclip auto` in a console, as `ClipMonster.exe --automation` with no
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -22,9 +23,10 @@ from typing import Callable
 
 from . import learn, niches, orders, research
 from .download import is_blocked
-from .engine import Cancelled, Engine, Project
+from .engine import Cancelled, Engine, Project, timing_text
 from .jobs import SIGN_IN_WAIT, Job, JobDB
 from .policy import PickLog, Policy, decide, picks_path
+from .procs import boot_time, process_alive, process_name  # noqa: F401 (tests patch them here)
 from .settings import Settings, all_layouts, all_presets, app_dir, find_layout
 from .trending import CATEGORIES, History
 
@@ -37,6 +39,7 @@ BLOCK_PAUSE = 6 * 3600  # ... and after it asks again within a day of the last t
 CALM_DAY = DAY  # after this long with no sign-in request, downloads go back to the usual spacing
 DEEP_PAUSE = 20.0  # seconds between automation's most-replayed checks
 HEARTBEAT_STALE = 180  # a runner silent for this long is gone
+PULSE = 5.0  # seconds between heartbeats, whatever the runner is busy with
 IDLE = 300  # longest sleep between checks
 GB = 1024 ** 3
 DISK_RECHECK = 600  # seconds between free-space checks while the disk is too full
@@ -265,7 +268,17 @@ def record_block(db: JobDB, error: str, now: float, cookies: str = "") -> str:
     return (f"⚠ YouTube asked this PC to sign in, so ClipMonster stops asking it for anything until "
             f"{time.strftime('%H:%M', time.localtime(until))} and then spaces downloads {factor}x further "
             f"apart for a day. It carries on by itself; to carry on sooner, pick a browser that's signed in to "
-            f"YouTube in Settings → Download → Use browser login, or press Try now in Automation. ({error})")
+            f"YouTube in Settings → Download → Use browser login, or press Try now in Automation. "
+            f"(YouTube said: {youtube_said(error)})")
+
+
+def youtube_said(error: str) -> str:
+    """The point of a yt-dlp error, for a log line that already has the whole error above it:
+    'ERROR: [youtube] abc: Sign in to confirm you're not a bot. This helps...' -> 'Sign in to confirm
+    you're not a bot.'"""
+    text = re.sub(r"^\s*(ERROR:\s*)?(\[[^\]]+\]\s*)?([\w-]{6,}:\s*)?", "", error or "").strip()
+    first = re.split(r"(?<=[.!?])\s", text, maxsplit=1)[0].strip()
+    return (first or error or "").strip()
 
 
 class Runner:
@@ -304,11 +317,18 @@ class Runner:
         """Become the one runner; '' on success, else why not."""
         beat = self.db.meta_float("heartbeat")
         other = self.db.meta("runner_pid")
-        if other and other != str(self.pid) and self.now() - beat < HEARTBEAT_STALE:
-            if beat > boot_time() and process_alive(other):
+        if other and other != str(self.pid):
+            fresh = self.now() - beat < HEARTBEAT_STALE
+            there = beat > boot_time() and process_alive(other)
+            if there and fresh:
                 return f"Automation is already running (process {other})."
-            self.log(f"The last automation (process {other}) ended without stopping (a crash or a restart): "
-                     "taking over.")
+            if there and is_app_process(other):  # its heartbeat stopped, but it's still there: stuck
+                return (f"Automation is already running (process {other}) but hasn't answered for "
+                        f"{max(1, round((self.now() - beat) / 60))} min. If it's stuck, end it in Task Manager "
+                        "and press Start again.")
+            if fresh:
+                self.log(f"The last automation (process {other}) ended without stopping (a crash or a restart): "
+                         "taking over.")
         self.db.set_meta("stop", "0")
         self.db.set_meta("started", self.now())
         self.beat(force=True)
@@ -480,11 +500,12 @@ class Runner:
             self.log(f"Finding videos now for {niches.name_of(s, only)}.")
         history = self._history()
         recent = history.last_scan.get("time", 0)
+        reused = False
         try:
             if (not forced and now - recent < max(10, s.research_interval) * 60
                     and history.last_scan.get("videos")):
                 result = research.last_result(history)
-                self.log("Using the Research tab's last check.")
+                reused = True  # said in the log only when it picks something, not every half hour
             else:
                 scan = self._scan or research.scan
                 stop = self._stop
@@ -526,6 +547,8 @@ class Runner:
                            lessons=learn.for_settings(s))
         added = 0
         self.db.set_meta("pick_note", "" if any(d.picked for d in decisions) else why_none(decisions))
+        if reused and any(d.picked for d in decisions):
+            self.log("Using the Research tab's last check.")
         for d in decisions:
             if not d.picked:
                 continue
@@ -756,6 +779,9 @@ class Runner:
                        channel=p.video.channel if p.video else job.channel)
         self.log(f"✓ {made - rejected} clips from {title} → {folder}"
                  + (f" ({rejected} rejected by the quality check)" if rejected else ""))
+        if p.timings:
+            self.log(f"  {title} {timing_text(p.timings)}.")
+            self.db.set_meta("last_timings", json.dumps({k: round(v, 1) for k, v in p.timings.items()}))
         if job.order:
             self.order_progress(job.order)
         self.prune(s)
@@ -829,8 +855,6 @@ class Runner:
     def health(self) -> None:
         """The health check (doctor.py, offline) as automation starts: problems go in the log and in
         jobs.db for the Automation tab."""
-        import json
-
         from . import doctor
 
         try:
@@ -852,9 +876,13 @@ class Runner:
             self.log(why)
             return 1
         self.log(f"Automation started (process {self.pid}).")
-        self.health()
+        # The heartbeat keeps going on its own, so a long step (Whisper can go minutes without
+        # reporting progress) never makes automation look stopped, or lets a second one take over.
+        pulse = Pulse(lambda: self.beat(force=True), PULSE)
+        pulse.start()
         stop = self._stop = stop or (lambda: False)
         try:
+            self.health()
             while True:
                 try:
                     wait = self.tick()
@@ -878,9 +906,37 @@ class Runner:
         except (Stopped, KeyboardInterrupt):
             pass
         finally:
+            pulse.stop()  # before release, so a last beat can't mark it running again
             self.log("Automation stopped.")
             self.release()
         return 0
+
+
+class Pulse:
+    """Calls `beat` every `every` seconds on a thread of its own until stopped."""
+
+    def __init__(self, beat: Callable[[], None], every: float):
+        import threading
+
+        self._beat, self.every = beat, every
+        self._done = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="heartbeat", daemon=True)
+
+    def start(self) -> None:
+        if self.every > 0:
+            self._thread.start()
+
+    def _run(self) -> None:
+        while not self._done.wait(self.every):
+            try:
+                self._beat()
+            except Exception:  # a locked or busy jobs.db: the next beat tries again
+                pass
+
+    def stop(self) -> None:
+        self._done.set()
+        if self._thread.is_alive():
+            self._thread.join(timeout=10)
 
 
 class Watchdog:
@@ -1004,58 +1060,21 @@ def request_scan(db: JobDB, niche_id: str = "") -> None:
     db.set_meta("nudge", "1")  # a running automation looks now, not after its wait
 
 
-def boot_time() -> float:
-    """When this PC last started (a time.time()), or 0 when it can't be told. A heartbeat from before
-    then is from a process that's gone, whatever has its process id now."""
-    try:
-        if sys.platform == "win32":
-            import ctypes
-
-            ticks = ctypes.WinDLL("kernel32").GetTickCount64
-            ticks.restype = ctypes.c_ulonglong
-            return time.time() - ticks() / 1000
-        if sys.platform.startswith("linux"):
-            with open("/proc/stat", encoding="ascii") as f:
-                return float(next(line.split()[1] for line in f if line.startswith("btime")))
-    except (OSError, AttributeError, StopIteration, ValueError):
-        pass
-    return 0.0
+def is_app_process(pid: str | int) -> bool:
+    """Whether the process with this id is ClipMonster (or Python running it). True when it can't be
+    told; False for some other program that was given the id after ClipMonster's ended."""
+    name = process_name(pid).lower()
+    return not name or name.removesuffix(".exe") in ("clipmonster", "ytclip") or name.startswith(("python", "pythonw"))
 
 
-def process_alive(pid: str | int) -> bool:
-    """Whether a process with this id is running on this PC. True when it can't be told."""
-    try:
-        pid = int(pid)
-    except (TypeError, ValueError):
-        return False
-    if pid <= 0:
-        return False
-    if sys.platform == "win32":
-        import ctypes
-        from ctypes import wintypes
-
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.OpenProcess.restype = wintypes.HANDLE
-        kernel32.OpenProcess.argtypes = (wintypes.DWORD, wintypes.BOOL, wintypes.DWORD)
-        kernel32.GetExitCodeProcess.argtypes = (wintypes.HANDLE, ctypes.POINTER(wintypes.DWORD))
-        kernel32.CloseHandle.argtypes = (wintypes.HANDLE,)
-        handle = kernel32.OpenProcess(0x1000, False, pid)  # PROCESS_QUERY_LIMITED_INFORMATION
-        if not handle:
-            return ctypes.get_last_error() == 5  # access denied: it exists, it's just not ours
-        try:
-            code = wintypes.DWORD()
-            if not kernel32.GetExitCodeProcess(handle, ctypes.byref(code)):
-                return True
-            return code.value == 259  # STILL_ACTIVE
-        finally:
-            kernel32.CloseHandle(handle)
-    try:
-        os.kill(pid, 0)
-    except ProcessLookupError:
-        return False
-    except OSError:  # it exists, but belongs to someone else
-        return True
-    return True
+def runner_hung(db: JobDB, now: float | None = None) -> str:
+    """The process id of an automation whose heartbeat stopped while it's still running, else ''."""
+    now = now or time.time()
+    pid = db.meta("runner_pid")
+    beat = db.meta_float("heartbeat")
+    if pid and now - beat >= HEARTBEAT_STALE and beat > boot_time() and process_alive(pid) and is_app_process(pid):
+        return pid
+    return ""
 
 
 def runner_alive(db: JobDB, now: float | None = None) -> bool:
@@ -1086,42 +1105,80 @@ def launch_background() -> None:
                      stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
-TASK_NAME = "ClipMonster Automation"
+TASK_NAME = "ClipMonster Automation"  # the scheduled task versions before 2.4.1 used (removed when seen)
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_VALUE = "ClipMonster Automation"
 
 
-def schedule_command(install: bool) -> list[str]:
-    """schtasks arguments that start (or stop starting) the runner when you sign in to Windows."""
-    if not install:
-        return ["schtasks", "/Delete", "/TN", TASK_NAME, "/F"]
-    cmd = launch_command()
-    run = " ".join(f'"{c}"' if " " in c or not c.startswith("-") else c for c in cmd)
-    return ["schtasks", "/Create", "/TN", TASK_NAME, "/SC", "ONLOGON", "/TR", run, "/RL", "LIMITED", "/F"]
+def startup_command() -> str:
+    """The command line Windows runs at sign-in to start automation: the usual per-user Run entry,
+    the way most apps start with Windows (a scheduled task looked suspicious to Defender)."""
+    return " ".join(f'"{c}"' if " " in c or not c.startswith("-") else c for c in launch_command())
+
+
+def _run_key(write: bool = False):
+    import winreg
+
+    if write:  # the Run key may not exist yet (a new Windows account has none until something adds to it)
+        return winreg.CreateKeyEx(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ | winreg.KEY_SET_VALUE)
+    return winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY, 0, winreg.KEY_READ)
+
+
+def _remove_old_task() -> None:
+    """Versions before 2.4.1 started automation with a scheduled task: remove it if it's still there."""
+    import subprocess
+
+    try:
+        subprocess.run(["schtasks", "/Delete", "/TN", TASK_NAME, "/F"], capture_output=True, timeout=30,
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 def set_start_with_windows(on: bool) -> str:
     """'' on success, else the error."""
-    import subprocess
-
     if os.name != "nt":
         return "Start with Windows only works on Windows."
+    import winreg
+
     try:
-        r = subprocess.run(schedule_command(on), capture_output=True, text=True, timeout=30,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    except (OSError, subprocess.SubprocessError) as exc:
+        with _run_key(write=True) as key:
+            if on:
+                winreg.SetValueEx(key, RUN_VALUE, 0, winreg.REG_SZ, startup_command())
+            else:
+                try:
+                    winreg.DeleteValue(key, RUN_VALUE)
+                except FileNotFoundError:
+                    pass
+    except OSError as exc:
         return str(exc)
-    if r.returncode and not (not on and "cannot find" in (r.stderr + r.stdout).lower()):
-        return (r.stderr or r.stdout).strip() or f"schtasks failed ({r.returncode})"
+    _remove_old_task()
     return ""
 
 
 def starts_with_windows() -> bool:
-    import subprocess
-
     if os.name != "nt":
         return False
+    import winreg
+
     try:
-        r = subprocess.run(["schtasks", "/Query", "/TN", TASK_NAME], capture_output=True, text=True, timeout=20,
-                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    except (OSError, subprocess.SubprocessError):
+        with _run_key() as key:
+            value, _ = winreg.QueryValueEx(key, RUN_VALUE)
+    except OSError:
         return False
-    return r.returncode == 0
+    return "--automation" in str(value)
+
+
+def refresh_start_with_windows() -> None:
+    """After an update or a move, point the Run entry at this copy of ClipMonster (it's only rewritten
+    when it's already on and points somewhere else)."""
+    if starts_with_windows():
+        try:
+            import winreg
+
+            with _run_key() as key:
+                value, _ = winreg.QueryValueEx(key, RUN_VALUE)
+            if value != startup_command():
+                set_start_with_windows(True)
+        except OSError:
+            pass

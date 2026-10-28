@@ -56,16 +56,6 @@ def test_helper_that_never_started_points_at_its_output(updates, monkeypatch):
     assert "installer didn't start" in msg and "apply-update.out" in msg
 
 
-def test_launch_leaves_out_an_empty_relaunch(updates, tmp_path, monkeypatch):
-    calls = []
-    monkeypatch.setattr(updater.subprocess, "Popen", lambda cmd, **kw: calls.append(cmd))
-    updater.launch_swap(tmp_path / "new", tmp_path / "ClipMonster", 1, relaunch="")
-    updater.launch_swap(tmp_path / "new", tmp_path / "ClipMonster", 1)
-    assert "-Relaunch" not in calls[0] and "" not in calls[0]
-    assert calls[1][calls[1].index("-Relaunch") + 1] == "ClipMonster.exe"
-    assert updater.last_attempt()[0] == "requested"
-
-
 def test_cli_updates_from_inside_the_app_folder(tmp_path, monkeypatch):
     target = tmp_path / "ClipMonster"
     target.mkdir()
@@ -102,20 +92,6 @@ def test_a_failed_update_says_why(updates, monkeypatch):
     msg, ok = updater.finished_update_message()
     assert not ok and "still on 2.2.0. The new version is incomplete. Details:" in msg
     assert updater.finished_update_message() is None  # said once
-
-
-def test_the_install_folder_itself_is_never_moved():
-    script = updater.SWAP_SCRIPT
-    # Renaming the whole folder failed whenever File Explorer, a terminal or any program had it open.
-    assert "Directory]::Move($InstallDir" not in script
-    assert "Move-Item " not in script and "Remove-Item" not in script
-    # Only the app's own files move; anything else in the folder stays.
-    assert "@('ClipMonster.exe', 'ytclip.exe', '_internal')" in script
-    assert "Undo-Moves" in script
-    # A restore keeps going past anything it can't put back, and never says to delete files.
-    assert "$failed += , $m" in script and "Don't delete anything" in script
-    # Logging can't throw and stop a restore.
-    assert "AppendAllText" in script and "Add-Content" not in script
 
 
 def _zip(path, names):
