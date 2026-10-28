@@ -155,7 +155,7 @@ The **Automation** tab runs the whole job without you: it checks Research on you
 
 - **The queue** shows every video, what it's doing now, how many clips it made and why it was picked. Right-click a video to show its clips, try it again or remove it, or paste a link above the queue to add one yourself. Finished clips go to an `Automation` folder in your output folder, in a folder for each [niche](#niches) when you have them. Each video's `clips.json` records why it was picked, the style it was cut with, and its niche and TikTok account.
 - **It survives anything.** The queue lives in `%APPDATA%\ClipMonster\jobs.db`. If the PC restarts or the process is killed halfway through a video, that video starts again next time. Downloads and analysis are cached, so the second try is quick. No video is ever queued twice.
-- **It's gentle with YouTube.** It does one download at a time, 10 minutes apart. When YouTube asks the PC to "sign in to confirm you're not a bot", it pauses downloads for 6 hours instead of pushing harder. A video that fails is tried again after 15 minutes, then after 1 hour. Videos that can never work (private, removed, members-only) are marked failed straight away.
+- **It's gentle with YouTube.** It does one download at a time, 10 minutes apart. When YouTube asks the PC to "sign in to confirm you're not a bot", it stops asking YouTube for anything for 2 hours (6 if it asks again within a day) instead of pushing harder. Press **Try now** in the Automation tab (or run `ytclip auto --try-now`) to end the pause early. Picking a browser in **Settings → Download → Use browser login** ends it by itself. A video that fails is tried again after 15 minutes, then after 1 hour. Videos that can never work (private, removed, members-only) are marked failed straight away.
 - **Pause** finishes nothing new until you resume. **Stop** ends the run within a few seconds, and a video in progress goes back in the queue. Updating ClipMonster stops automation and starts it again afterwards.
 
 **Settings → Automation** chooses the style and the pace:
@@ -184,7 +184,7 @@ ytclip auto --once             # do what's due now, then exit
 ytclip auto --status           # the queue and what automation is doing
 ytclip auto --add "https://youtu.be/VIDEO"
 ytclip auto --add "https://youtu.be/VIDEO" --niche Gaming   # queue it for one niche
-ytclip auto --pause | --resume | --stop
+ytclip auto --pause | --resume | --stop | --try-now
 ytclip auto --retry ID         # try a failed video again
 ytclip auto --install          # start with Windows (--uninstall to undo)
 ```

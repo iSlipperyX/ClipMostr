@@ -244,9 +244,79 @@ def test_a_bot_check_pauses_downloads(tmp_path):
     r.process(r.db.next_due(NOW), r.load())
     job = r.db.get("ddddddddddd")
     assert job.status == "queued" and job.attempts == 0  # not the video's fault
-    assert r.db.meta_float("blocked_until") == NOW + pipeline.BLOCK_PAUSE
+    assert r.db.meta_float("blocked_until") == NOW + pipeline.FIRST_PAUSE  # 2 hours the first time
     wait, why = r.wait_reason(r.load(), NOW + 60)
-    assert wait == pipeline.BLOCK_PAUSE - 60 and "sign in" in why
+    assert wait == pipeline.FIRST_PAUSE - 60 and "sign in" in why
+    assert job.stage == pipeline.SIGN_IN_WAIT and job.next_try == NOW + pipeline.FIRST_PAUSE
+
+
+def test_a_second_bot_check_the_same_day_pauses_longer(tmp_path):
+    r = _runner(tmp_path)
+    r.block("Sign in to confirm you're not a bot", NOW)
+    later = NOW + pipeline.FIRST_PAUSE + 3600
+    r.block("Sign in to confirm you're not a bot", later)
+    assert r.db.meta_float("blocked_until") == later + pipeline.BLOCK_PAUSE
+    calm = later + pipeline.BLOCK_PAUSE + pipeline.CALM_DAY + 1
+    r.block("Sign in to confirm you're not a bot", calm)  # a quiet day later it's the short one again
+    assert r.db.meta_float("blocked_until") == calm + pipeline.FIRST_PAUSE
+
+
+def test_while_paused_for_sign_in_the_status_says_so(tmp_path):
+    """The waiting video isn't due until the pause ends, so the status used to read 'Waiting for the next
+    check' for hours, which looked stuck."""
+    clock = Clock()
+    r = _runner(tmp_path, settings=_settings(youtube_api_key=""), clock=clock)
+    r.add_manual("https://youtu.be/ddddddddddd")
+    FakeEngine.plan["https://youtu.be/ddddddddddd"] = RuntimeError("Sign in to confirm you're not a bot")
+    r.tick()
+    clock.t = NOW + 600
+    r.tick()
+    assert r.db.meta("state").startswith("Paused until") and "sign in" in r.db.meta("state")
+
+
+def test_try_now_ends_the_pause_and_frees_the_waiting_videos(tmp_path):
+    r = _runner(tmp_path)
+    r.add_manual("https://youtu.be/ddddddddddd")
+    r.add_manual("https://youtu.be/eeeeeeeeeee")
+    FakeEngine.plan["https://youtu.be/ddddddddddd"] = RuntimeError("Sign in to confirm you're not a bot")
+    r.process(r.db.next_due(NOW), r.load())
+    r.db.update("eeeeeeeeeee", NOW, next_try=NOW + 900, stage="Try 2 in 15 min")  # a retry: left alone
+    assert pipeline.end_pause(r.db, NOW + 60) == 1
+    assert not r.blocked(NOW + 61)
+    assert r.db.get("ddddddddddd").next_try == 0 and r.db.get("ddddddddddd").stage == "Waiting"
+    assert r.db.get("eeeeeeeeeee").next_try == NOW + 900
+    assert r.gap_factor(NOW + 61) == 2  # still spaced out further for the day
+    assert r.db.meta("nudge") == "1"
+
+
+def test_picking_a_browser_login_ends_the_pause(tmp_path):
+    s = _settings()
+    r = _runner(tmp_path, settings=s)
+    r.block("Sign in to confirm you're not a bot", NOW)
+    r.lift_pause_for_sign_in(s, NOW + 60)
+    assert r.blocked(NOW + 60)  # no browser set: it waits
+    s.cookies_browser = "firefox"
+    r.lift_pause_for_sign_in(s, NOW + 120)
+    assert not r.blocked(NOW + 120) and "firefox" in r.logs[-1]
+    r.block("Sign in to confirm you're not a bot", NOW + 600)  # asked again even with firefox
+    r.lift_pause_for_sign_in(s, NOW + 660)
+    assert r.blocked(NOW + 660)  # the same browser doesn't end it again
+
+
+def test_the_runner_wakes_when_the_app_ends_a_pause(tmp_path):
+    r = _runner(tmp_path, settings=_settings(youtube_api_key=""))
+    slept = []
+
+    def sleep(step):
+        slept.append(step)
+        if len(slept) == 3:
+            r.db.set_meta("nudge", "1")
+        if len(slept) > 10:
+            r.db.set_meta("stop", "1")
+
+    r.tick = lambda: 300.0 if len(slept) < 3 else 0.5
+    r.run(sleep=sleep)
+    assert len(slept) <= 11 and r.db.meta("nudge") == "0"
 
 
 def test_after_a_bot_check_downloads_slow_down_then_recover(tmp_path):
@@ -363,7 +433,28 @@ def test_tick_scans_then_clips_then_waits(tmp_path):
     assert r.tick() == 1.0  # scanned, queued "a" and clipped it
     assert r.db.get("a").status == "done"
     assert r.tick() == pipeline.IDLE  # next scan is 30 min away; it checks in at least every 5
-    assert r.db.meta("state") == "Waiting for the next check"
+    assert r.db.meta("state") == "Waiting for the next check at " + datetime.fromtimestamp(NOW + 1800).strftime("%H:%M")
+
+
+def test_a_check_that_picks_nothing_says_why(tmp_path):
+    scans = []
+
+    def scan(*a, **k):
+        scans.append(1)
+        return _scan_result("aaaaaaaaaaa", "bbbbbbbbbbb", score=80 if len(scans) == 1 else 10)
+
+    clock = Clock()
+    r = _runner(tmp_path, scan=scan, clock=clock)
+    r.research(r.load())
+    assert r.db.meta("pick_note") == ""
+    clock.t = NOW + 3600
+    r.research(r.load())  # the same two: already picked, now low too
+    assert r.db.meta("pick_note") == "2 videos: 2 already picked"
+    for j in r.db.jobs():
+        r.db.update(j.id, status="done")
+    r.tick()
+    assert r.db.meta("state").startswith("Nothing new to pick in the last check (2 videos: 2 already picked)")
+    assert pipeline.why_none([]) == "no videos found"
 
 
 def test_paused_runner_does_nothing(tmp_path):

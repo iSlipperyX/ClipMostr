@@ -23,7 +23,7 @@ from typing import Callable
 from . import learn, niches, research
 from .download import is_blocked
 from .engine import Cancelled, Engine, Project
-from .jobs import Job, JobDB
+from .jobs import SIGN_IN_WAIT, Job, JobDB
 from .policy import PickLog, Policy, decide, picks_path
 from .settings import Settings, all_layouts, all_presets, app_dir, find_layout
 from .trending import CATEGORIES, History
@@ -32,7 +32,8 @@ Log = Callable[[str], None]
 
 DAY = 86400.0
 BACKOFF = (15 * 60, 3600, 4 * 3600)  # wait before the 2nd, 3rd, 4th... try
-BLOCK_PAUSE = 6 * 3600  # how long downloads pause after YouTube asks the PC to sign in
+FIRST_PAUSE = 2 * 3600  # how long requests to YouTube pause after it asks the PC to sign in
+BLOCK_PAUSE = 6 * 3600  # ... and after it asks again within a day of the last time
 CALM_DAY = DAY  # after this long with no sign-in request, downloads go back to the usual spacing
 DEEP_PAUSE = 20.0  # seconds between automation's most-replayed checks
 HEARTBEAT_STALE = 180  # a runner silent for this long is gone
@@ -187,6 +188,15 @@ def paused_until(db: JobDB, now: float) -> float:
     return until if now < until else 0.0
 
 
+def end_pause(db: JobDB, now: float) -> int:
+    """Try YouTube again now instead of waiting out a sign-in pause (Automation's Try now, or a
+    browser to sign in with was set). Downloads stay spaced out further for the rest of the day.
+    Returns how many videos that were waiting for the pause are due again."""
+    db.set_meta("blocked_until", 0)
+    db.set_meta("nudge", "1")  # a sleeping runner looks now, not in up to 5 minutes
+    return db.release_waiting(now)
+
+
 def gap_factor(db: JobDB, now: float) -> int:
     """Downloads are spaced out twice as much after each sign-in request (up to 4 times), until a
     day passes without one."""
@@ -195,19 +205,23 @@ def gap_factor(db: JobDB, now: float) -> int:
     return max(1, min(4, int(db.meta_float("gap_factor") or 1)))
 
 
-def record_block(db: JobDB, error: str, now: float) -> str:
-    """YouTube asked this PC to sign in: stop all requests to it for a while, and slow down after.
-    Shared by automation and the Research tab. Returns the line to log."""
-    recent = now - db.meta_float("blocked_at") <= BLOCK_PAUSE + CALM_DAY
+def record_block(db: JobDB, error: str, now: float, cookies: str = "") -> str:
+    """YouTube asked this PC to sign in: stop all requests to it for a while (2 hours, or 6 if it
+    asked again within a day), and slow down after. Shared by automation and the Research tab.
+    `cookies` is the browser it was signing in with, so setting a different one ends the pause.
+    Returns the line to log."""
+    recent = bool(db.meta_float("blocked_at")) and now - db.meta_float("blocked_at") <= BLOCK_PAUSE + CALM_DAY
     factor = min(4, gap_factor(db, now) * 2) if recent else 2
-    until = now + BLOCK_PAUSE
+    until = now + (BLOCK_PAUSE if recent else FIRST_PAUSE)
     db.set_meta("blocked_until", until)
     db.set_meta("blocked_at", now)
+    db.set_meta("blocked_cookies", cookies.strip())
     db.set_meta("gap_factor", factor)
     db.set_meta("last_error", error)
     return (f"⚠ YouTube asked this PC to sign in, so ClipMonster stops asking it for anything until "
             f"{time.strftime('%H:%M', time.localtime(until))} and then spaces downloads {factor}x further "
-            f"apart for a day. Nothing needs doing; it carries on by itself. ({error})")
+            f"apart for a day. It carries on by itself; to carry on sooner, pick a browser that's signed in to "
+            f"YouTube in Settings → Download → Use browser login, or press Try now in Automation. ({error})")
 
 
 class Runner:
@@ -289,6 +303,7 @@ class Runner:
         if s.cleanup_auto and now - self.db.meta_float("last_cleanup") >= DAY:
             self.cleanup(s)
 
+        self.lift_pause_for_sign_in(s, now)
         job = self.db.next_due(now)
         if job:
             wait, why = self.wait_reason(s, now)
@@ -298,8 +313,33 @@ class Runner:
             self.process(job, s)
             return 1.0
         upcoming = self.db.next_try()
-        self.state("Waiting for the next check" if research.youtube_key(s) else "Waiting for videos")
+        blocked = self.blocked(now)
+        if blocked and upcoming:  # the videos waiting are waiting for the sign-in pause: say so
+            self.state(self.wait_reason(s, now)[1])
+        else:
+            self.state(self.idle_text(s, next_scan, upcoming))
         return max(1.0, min(next_scan - now, (upcoming - now) if upcoming else IDLE, IDLE))
+
+    def idle_text(self, s: Settings, next_scan: float, upcoming: float | None = None) -> str:
+        """What the status says with nothing to clip, so an empty queue doesn't look stuck."""
+        if upcoming:
+            return f"Waiting to try a video again at {time.strftime('%H:%M', time.localtime(upcoming))}"
+        if not research.youtube_key(s):
+            return "Waiting for videos"
+        at = time.strftime("%H:%M", time.localtime(next_scan))
+        note = self.db.meta("pick_note")
+        if note:
+            return f"Nothing new to pick in the last check ({note}). Checks again at {at}"
+        return f"Waiting for the next check at {at}"
+
+    def lift_pause_for_sign_in(self, s: Settings, now: float) -> None:
+        """A sign-in pause ends early once a browser to sign in with is set (or changed) after it began."""
+        browser = s.cookies_browser.strip()
+        if not browser or not self.blocked(now) or browser == self.db.meta("blocked_cookies"):
+            return
+        n = end_pause(self.db, now)
+        self.log(f"You set ClipMonster to sign in with {browser}, so it's trying YouTube again now"
+                 + (f" ({n} video{'s' if n != 1 else ''} waiting)." if n else "."))
 
     def blocked(self, now: float) -> float:
         return paused_until(self.db, now)
@@ -323,8 +363,8 @@ class Runner:
                          + (f" (slowed down {factor}x after YouTube asked this PC to sign in)" if factor > 1 else ""))
         return 0.0, ""
 
-    def block(self, error: str, now: float) -> None:
-        self.log(record_block(self.db, error, now))
+    def block(self, error: str, now: float, s: Settings | None = None) -> None:
+        self.log(record_block(self.db, error, now, (s or self.load()).cookies_browser))
 
     # ------------------------------------------------------------ research → queue
     def research(self, s: Settings) -> int:
@@ -354,7 +394,7 @@ class Runner:
                 for p in result.problems:
                     self.log(f"Research: {p}")
                 if getattr(result, "blocked", ""):
-                    self.block(result.blocked, self.now())
+                    self.block(result.blocked, self.now(), s)
         except research.ScanCancelled:
             raise Stopped()
         except Exception as exc:
@@ -367,6 +407,7 @@ class Runner:
         decisions = decide(result.videos, Policy.from_settings(s), picks, now=now, notes=result.notes,
                            lessons=learn.for_settings(s))
         added = 0
+        self.db.set_meta("pick_note", "" if any(d.picked for d in decisions) else why_none(decisions))
         for d in decisions:
             if not d.picked:
                 continue
@@ -486,8 +527,8 @@ class Runner:
         kind = classify(error)
         attempts = job.attempts + 1
         if kind == "blocked":
-            self.block(error, now)
-            self.db.update(job.id, now, status="queued", stage="Waiting: YouTube asked this PC to sign in",
+            self.block(error, now, s)
+            self.db.update(job.id, now, status="queued", stage=SIGN_IN_WAIT,
                            error=error, next_try=self.db.meta_float("blocked_until"))
             return
         if kind == "permanent" or attempts >= s.auto_retries:
@@ -561,6 +602,9 @@ class Runner:
                 while waited < wait:
                     if stop() or self.stop_requested():
                         raise Stopped()
+                    if self.db.meta("nudge") == "1":  # the app ended a pause: look again now
+                        self.db.set_meta("nudge", "0")
+                        break
                     step = min(2.0, wait - waited)
                     sleep(step)
                     waited += step
@@ -573,6 +617,28 @@ class Runner:
             self.log("Automation stopped.")
             self.release()
         return 0
+
+
+# What stopped videos from being picked, in the words the status line uses.
+_RULE_WORDS = {
+    "done": "already picked", "niche": "fit no niche", "length": "too long or short", "score": "low clip-ability",
+    "age": "too old", "word": "blocked words", "category": "blocked category", "channel": "blocked channel",
+    "language": "other languages", "live": "live or not out yet", "source": "not from your sources",
+    "channel_cap": "channel's weekly limit", "niche_cap": "niche's daily limit", "daily_cap": "daily limit",
+}
+
+
+def why_none(decisions) -> str:
+    """'21 videos: 12 already picked, 4 too long or short, 3 fit no niche' for a check that picked nothing."""
+    if not decisions:
+        return "no videos found"
+    counts: dict[str, int] = {}
+    for d in decisions:
+        word = _RULE_WORDS.get(d.rule, "other rules")
+        counts[word] = counts.get(word, 0) + 1
+    top = sorted(counts.items(), key=lambda kv: -kv[1])[:3]
+    n = len(decisions)
+    return f"{n} video{'s' if n != 1 else ''}: " + ", ".join(f"{c} {w}" for w, c in top)
 
 
 def _span(seconds: float) -> str:
