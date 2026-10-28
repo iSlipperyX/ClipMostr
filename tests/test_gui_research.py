@@ -77,8 +77,8 @@ def test_sorting_by_a_column_uses_numbers(app):
     assert [tab._video_at(r).id for r in range(3)] == ["v2", "v1", "v0"]
 
 
-def test_filter_and_hide_sent(app):
-    tab, _ = _make(app, youtube_api_key="k")
+def test_filter_and_hide_used(app):
+    tab, _ = _make(app, youtube_api_key="k", research_hide_used=False)
     tab._scan_done(_result(), auto=False)
     tab.search.setText("pod")
     assert [tab._video_at(r).id for r in range(3) if not tab.table.isRowHidden(r)] == ["v2"]
@@ -92,9 +92,10 @@ def test_filter_and_hide_sent(app):
     assert sent == [["https://www.youtube.com/watch?v=v0"]]
     assert tab.history.videos["v0"]["sent"]
     assert tab.table.item(0, 1).text().startswith("✓ ")
-    tab.hide_sent.setChecked(True)
+    assert not tab.table.isRowHidden(0) and tab.count.text() == "3 videos · 1 already used"
+    tab.hide_used.setChecked(True)
     assert tab.table.isRowHidden(0)
-    assert tab.count.text() == "2 of 3 videos"
+    assert tab.count.text() == "2 of 3 videos · 1 already used, hidden"
 
 
 def test_new_high_scorers_raise_hits_while_hidden(app):
@@ -323,3 +324,81 @@ def test_queue_in_automation_sends_each_videos_niche(app):
     tab.table.selectRow(0)
     tab.queue_btn.click()
     assert got == [[("https://www.youtube.com/watch?v=v0", "Big gaming moment", "")]]
+
+
+def test_used_videos_are_hidden_and_marked_and_new_only_filters(app):
+    from ytclip.gui.research import SEEN_COLUMN
+    from ytclip.jobs import Job, JobDB
+
+    db = JobDB()
+    db.add(Job(id="v2", url="https://www.youtube.com/watch?v=v2"))  # automation clipped it already
+    db.close()
+    tab, host = _make(app, youtube_api_key="k")
+    assert tab.hide_used.isChecked()  # on by default
+    result = _result()
+    result.videos[1].first_seen = result.videos[1].first_seen or 1.0  # seen long ago
+    tab._scan_done(result, auto=False)
+    shown = [tab._video_at(r).id for r in range(3) if not tab.table.isRowHidden(r)]
+    assert shown == ["v0", "v1"] and "1 already used, hidden" in tab.count.text()
+    seen = {tab._video_at(r).id: tab.table.item(r, SEEN_COLUMN).text() for r in range(3)}
+    assert seen["v2"] == "Used" and seen["v0"] == "New" and seen["v1"] != "New"
+    assert tab.decisions["v2"].rule == "done"  # the rules won't pick it again either
+    tab.hide_used.setChecked(False)
+    assert host.changes[-1] == ("research_hide_used", False)
+    assert not any(tab.table.isRowHidden(r) for r in range(3))
+    tab.new_only.setChecked(True)
+    assert [tab._video_at(r).id for r in range(3) if not tab.table.isRowHidden(r)] == ["v0", "v2"]
+
+
+def test_find_more_adds_new_videos_and_skips_the_ones_listed(app, monkeypatch):
+    from ytclip import lookup
+    from ytclip.gui import research as tab_module
+
+    tab, _ = _make(app, youtube_api_key="k")
+    tab._find_done(_found())
+    calls = []
+
+    class Instant:  # runs the job on the spot instead of on a thread
+        def __init__(self, fn):
+            self.fn = fn
+            self.succeeded, self.failed, self.finished, self.progress, self.log = (_Sig() for _ in range(5))
+            self.cancel_requested = False
+
+        def start(self):
+            self.succeeded.emit(self.fn(self))
+            self.finished.emit()
+
+        def deleteLater(self):
+            pass
+
+    def fake_find(request, s, key, since, min_minutes, language, log, progress, cancelled, **kw):
+        calls.append(kw)
+        v = video_from_api(api_item("f9", title="MW4 new funny one"))
+        v.match, v.match_why, v.score, v.origins, v.new = 88, "new", 70, ["request"], True
+        plan = lookup.Plan(request, ["MW4 funniest moments"], order="date")
+        return lookup.LookupResult(request, [v], NOW, plan, quota=201)
+
+    monkeypatch.setattr(tab_module, "_Job", Instant)
+    monkeypatch.setattr(lookup, "find", fake_find)
+    notices = []
+    tab.notice.connect(notices.append)
+    assert not tab.more_btn.isHidden()
+    tab.more_btn.click()
+    assert {"f0", "f1", "f2"} <= calls[0]["skip"] and calls[0]["request_key"] == "|mw4 with good comedy"
+    assert tab.table.rowCount() == 4 and tab._video_at(0).id == "f9"  # new, and the best match
+    assert tab.found.quota == 402 and "1 new" in tab.find_text.text() and "newest first" in tab.find_text.text()
+    assert notices[-1].startswith("Found 1 more video")
+    tab.back_btn.click()
+    assert tab.more_btn.isHidden()
+
+
+class _Sig:
+    def __init__(self):
+        self.slots = []
+
+    def connect(self, fn):
+        self.slots.append(fn)
+
+    def emit(self, *a):
+        for fn in self.slots:
+            fn(*a)

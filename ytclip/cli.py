@@ -13,7 +13,7 @@ from rich.markup import escape
 from rich.progress import BarColumn, Progress, TextColumn, TimeElapsedColumn
 from rich.table import Table
 
-from . import __version__, learn
+from . import __version__, fresh, learn
 from .download import expand_sources
 from .engine import Engine, Project
 from .organize import stamp
@@ -362,10 +362,13 @@ def run_find(argv: list[str]) -> int:
     log = (lambda m: None) if args.json else (lambda m: console.print(f"[dim]{escape(m)}[/]"))  # noqa: E731
     try:
         with console.status("Finding videos…") if not args.json else contextlib.nullcontext():
+            memory = fresh.load()  # each run of the same request searches the next way (fresh.py)
             result = lookup.find(request, s, key, args.since,
                                  s.research_min_minutes if args.min_minutes is None else args.min_minutes,
                                  next(iter(language_codes(s.pick_languages)), ""), log,
-                                 use_ai=False if args.no_ai else None)
+                                 use_ai=False if args.no_ai else None, memory=memory,
+                                 request_key=fresh.request_key(request), skip=fresh.used_now())
+            memory.save()
     except (ResearchError, ValueError) as exc:
         console.print(f"[red]{escape(str(exc))}[/]")
         return 1
@@ -375,9 +378,10 @@ def run_find(argv: list[str]) -> int:
         pass
     top = result.videos[:max(1, args.top)]
     if args.json:
-        print(json.dumps({"request": result.request, "searched": result.plan.queries, "quota": result.quota,
-                          "rated_by": result.rated_by, "videos": [
-                              {"url": v.url, "title": v.title, "channel": v.channel, "match": v.match,
+        print(json.dumps({"request": result.request, "searched": result.plan.queries, "order": result.plan.order,
+                          "quota": result.quota, "rated_by": result.rated_by, "left_out_used": result.skipped,
+                          "videos": [
+                              {"url": v.url, "title": v.title, "channel": v.channel, "match": v.match, "new": v.new,
                                "why": v.match_why, "clipability": v.score, "rank": lookup.rank(v),
                                "minutes": round(v.duration / 60, 1), "views": v.views} for v in top]}, indent=1))
     else:
@@ -390,7 +394,9 @@ def run_find(argv: list[str]) -> int:
                                           + ", ".join(f"“{q}”" for q in result.plan.queries), match=True))
             console.print(f"[dim]{result.quota} API units · "
                           + (f"rated by {result.rated_by}" if result.rated_by else "matched by their words")
-                          + (f" · {result.weak} that didn't match left out" if result.weak else "") + "[/]")
+                          + (f" · {result.weak} that didn't match left out" if result.weak else "")
+                          + (f" · {result.skipped} already used left out" if result.skipped else "")
+                          + f" · {len(result.fresh)} new · {fresh.ORDER_WORDS.get(result.plan.order, '')} first[/]")
     if args.queue:
         from .jobs import JobDB
         from .pipeline import Runner

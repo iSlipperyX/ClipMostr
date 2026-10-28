@@ -112,6 +112,12 @@ class JobDB:
                 "CASE status WHEN 'queued' THEN created END ASC, updated DESC LIMIT ?", (limit,)).fetchall()
         return [Job.from_row(r) for r in rows]
 
+    def video_ids(self) -> set[str]:
+        """The YouTube id of every video ever queued, whatever happened to it."""
+        with self._lock:
+            rows = self.con.execute("SELECT id FROM jobs").fetchall()
+        return {r["id"].split("~", 1)[0] for r in rows}
+
     def next_due(self, now: float, skip_niches: set[str] | frozenset = frozenset()) -> Job | None:
         """The oldest waiting job that's due, leaving out the niches in `skip_niches` (paused).
         A clip request's videos go first: you asked for those."""

@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
-from . import learn, lookup, niches, orders, research, youtube_login
+from . import fresh, learn, lookup, niches, orders, research, youtube_login
 from .download import Video, download, is_blocked
 from .engine import Cancelled, Engine, Project, timing_text
 from .jobs import SIGN_IN_WAIT, Job, JobDB
@@ -325,6 +325,7 @@ class Runner:
         self._engine = engine
         self._history = history or (lambda: History(research.history_path()))
         self._picks = picks or (lambda: PickLog(picks_path()))
+        self._fresh = fresh.load  # what each standing request searched and showed (fresh.py)
         self.pid = os.getpid()
         self._last_beat = 0.0
         self._stop: Callable[[], bool] = lambda: False  # run()'s stop check, so a long scan can be stopped
@@ -672,6 +673,9 @@ class Runner:
                 else:  # on the charts too: it counts as found for the request, for the request's niche
                     old.origins = sorted(set(old.origins) | {"request"})
                     old.niche, old.match, old.match_why = v.niche, v.match, v.match_why
+        used = fresh.used_ids(self.db)  # queued or clipped before (picks and sends are checked by the rules)
+        for v in videos:
+            v.used = v.id in used
         policy = Policy.from_settings(s)
         wanted = self.videos_wanted(s)  # clip requests that pick: niche id -> [(request, videos it needs)]
         for nid, asks in wanted.items():  # what requests need comes on top of the daily limits
@@ -712,12 +716,13 @@ class Runner:
             job = Job(id=v.id, url=v.url, title=v.title, channel=v.channel, channel_id=v.channel_id,
                       category=v.category, permission=d.reason, origins=list(v.origins), how="auto",
                       stage="Waiting", niche=v.niche, order=order)
-            if self.db.add(job, now):
-                added += 1
-                niche = niches.name_of(s, v.niche)
-                self.log(f"Picked{' for ' + niche if niche else ''}{' (for a request)' if order else ''}: "
-                         f"{v.title} ({v.channel}, clip-ability {v.score:.0f}). {d.reason}"
-                         + (f" {d.learned}" if d.learned else ""))
+            if not self.db.add(job, now):  # queued before after all: it mustn't use up one of today's picks
+                continue
+            added += 1
+            niche = niches.name_of(s, v.niche)
+            self.log(f"Picked{' for ' + niche if niche else ''}{' (for a request)' if order else ''}: "
+                     f"{v.title} ({v.channel}, clip-ability {v.score:.0f}). {d.reason}"
+                     + (f" {d.learned}" if d.learned else ""))
             picks.record(d, "auto", now)
             history.mark_sent(v.id)
         if added:
@@ -746,6 +751,8 @@ class Runner:
         stop = self._stop
         language = next(iter(language_codes(s.pick_languages)), "")
         out: list = []
+        memory = self._fresh()
+        done = fresh.used_ids(self.db, self._picks(), history)  # never found again: nothing to rate or pick
         try:
             for nid, text in asks:
                 k = f"{nid}|{text.lower()}"
@@ -758,7 +765,8 @@ class Runner:
                 try:
                     r = lookup.find(text, s, key, FIND_SINCE, s.research_min_minutes, language, self.log,
                                     progress=lambda m, f: self.beat(),
-                                    cancelled=lambda: stop() or self.stop_requested(), use_ai=with_ai)
+                                    cancelled=lambda: stop() or self.stop_requested(), use_ai=with_ai,
+                                    memory=memory, request_key=fresh.request_key(text, nid), skip=done)
                 except research.ScanCancelled:
                     raise
                 except ResearchBlocked as exc:  # a bad key or used-up quota: the rest would fail too
@@ -777,13 +785,18 @@ class Runner:
                     v.sent = bool((history.videos.get(v.id) or {}).get("sent"))
                 out += good
                 niche = niches.name_of(s, nid)
+                new = sum(1 for v in good if v.new)
                 self.log(f"Standing request “{text}”{' for ' + niche if niche else ''}: {len(good)} good "
-                         f"match{'es' if len(good) != 1 else ''} of {len(r.videos) + r.weak} found "
-                         f"({r.quota} quota units" + (f", rated by {r.rated_by}" if r.rated_by else "") + ").")
+                         f"match{'es' if len(good) != 1 else ''} ({new} new) of {len(r.videos) + r.weak} found"
+                         + (f", {r.skipped} already used left out" if r.skipped else "")
+                         + f" (searched {', '.join(repr(q) for q in r.plan.queries)}, "
+                         + f"{fresh.ORDER_WORDS.get(r.plan.order, r.plan.order)} first; {r.quota} quota units"
+                         + (f", rated by {r.rated_by}" if r.rated_by else "") + ").")
                 for p in r.problems:
                     self.log(f"Standing request “{text}”: {p}")
         finally:
             self.db.set_meta("finds_last", json.dumps(last))
+            memory.save()
         return out
 
     # ------------------------------------------------------------ clip requests (orders.py)

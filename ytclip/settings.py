@@ -167,6 +167,8 @@ class Settings:
     research_auto: bool = True
     research_interval: int = 30
     research_alert: int = 75
+    research_niche_charts: bool = True  # also check the trending chart of each category your niches use
+    research_hide_used: bool = True  # Research hides videos already picked, queued, clipped or sent
     # Picking rules (policy.py): which researched videos may be clipped without asking
     pick_from: str = "watchlist"
     pick_languages: str = "en"  # only pick videos in these spoken languages (when YouTube knows it); "" = any
@@ -755,6 +757,9 @@ SCHEMA: list[Field] = [
     Field("research_interval", "Check every (minutes)", "Research", "int", lo=10, hi=720, step=5),
     Field("research_alert", "Highlight new videos scoring at least", "Research", "int", lo=0, hi=100,
           help="New arrivals above this score are counted on the Research tab"),
+    Field("research_niche_charts", "Also check my niches' category charts", "Research", "bool",
+          help="With All categories, each region's chart for the categories your niches use (up to 4) is checked "
+               "too, 1 unit each: more videos for each niche than the main chart shows"),
 
     Field("pick_from", "Pick videos from", "Picking", "choice", choices=PICK_FROM,
           help="Creators on your channel list, or Creative Commons videos, have said clips are fine. "

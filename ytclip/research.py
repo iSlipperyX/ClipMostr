@@ -47,6 +47,9 @@ class ScanOptions:
     deep_workers: int = 4  # most-replayed checks at once
     deep_pause: float = 0.0  # seconds between them (automation spaces them out)
     niches: list[Niche] = field(default_factory=list)  # every niche (switched off too), to sort the videos into
+    # Charts of the categories your niches use, besides the all-categories chart: trending videos
+    # for each niche that the overall chart, crowded with music and sports, never shows.
+    niche_charts: list[str] = field(default_factory=list)
 
     @classmethod
     def from_settings(cls, s: Settings) -> "ScanOptions":
@@ -56,13 +59,32 @@ class ScanOptions:
                    min_minutes=s.research_min_minutes, deep_count=s.research_deep_count,
                    cookies=s.cookies_browser or None, channels=channels,
                    searches=searches, unreadable=bad,
-                   language=next(iter(language_codes(s.pick_languages)), ""), niches=niches.load(s))
+                   language=next(iter(language_codes(s.pick_languages)), ""), niches=niches.load(s),
+                   niche_charts=niche_charts(s) if s.research_niche_charts else [])
+
+    @property
+    def charts(self) -> list[str]:
+        """Every chart checked in each region: the chosen category, then the niches' own."""
+        extra = [] if self.category else [c for c in self.niche_charts if c]
+        return [self.category] + extra
 
     @property
     def quota(self) -> int:
         """YouTube API units the charts use each scan (deep checks go through yt-dlp and cost none).
         The channel list and searches add their own, only when due; see sources.py."""
-        return len(self.regions) * math.ceil(self.per_region / 50)
+        return len(self.regions) * (math.ceil(self.per_region / 50) + len(self.charts) - 1)
+
+
+MAX_NICHE_CHARTS = 4  # category charts checked for niches, each 1 quota unit per region
+
+
+def niche_charts(s: Settings) -> list[str]:
+    """The categories switched-on niches use, most used first (at most MAX_NICHE_CHARTS)."""
+    count: dict[str, int] = {}
+    for n in niches.active(s):
+        for c in sorted(n.category_ids()):
+            count[c] = count.get(c, 0) + 1
+    return sorted(count, key=lambda c: (-count[c], int(c) if c.isdigit() else 0))[:MAX_NICHE_CHARTS]
 
 
 @dataclass
@@ -111,27 +133,36 @@ def scan(opts: ScanOptions, history: History, log: Log | None = None, progress: 
     problems: list[str] = []
     category = CATEGORIES.get(opts.category, "")
     quota = 0
+    charts = opts.charts
     for i, region in enumerate(opts.regions):
-        step(f"Checking what's popular in {region}", i / (len(opts.regions) + 1))
-        try:
-            chart = fetch(opts.api_key, region, opts.category, opts.per_region)
-        except ChartUnavailable:
-            problems.append(f"{region} has no {category} chart." if opts.category
-                            else f"{region} has no chart (is it a YouTube region?).")
-            quota += 1
-            continue
-        except ResearchError as exc:
-            if not merged:  # a bad key or used-up quota fails every region the same way
-                raise
-            problems.append(f"{region}: {exc}")
-            continue
-        quota += math.ceil(max(1, len(chart)) / 50)
-        for v in chart:
-            if v.id in merged:
-                merged[v.id].regions.update(v.regions)
-                merged[v.id].views = max(merged[v.id].views, v.views)
-            else:
-                merged[v.id] = v
+        for j, cat in enumerate(charts):
+            name = CATEGORIES.get(cat, cat)
+            step(f"Checking what's popular in {region}" + (f" ({name})" if j else ""),
+                 (i + j / len(charts)) / (len(opts.regions) + 1))
+            try:
+                chart = fetch(opts.api_key, region, cat, opts.per_region if not j else min(50, opts.per_region))
+            except ChartUnavailable:
+                quota += 1
+                if not j:
+                    problems.append(f"{region} has no {category} chart." if opts.category
+                                    else f"{region} has no chart (is it a YouTube region?).")
+                    break
+                continue  # not every category has a chart everywhere: nothing to report
+            except ResearchError as exc:
+                if not merged:  # a bad key or used-up quota fails every region the same way
+                    raise
+                problems.append(f"{region}{f' ({name})' if j else ''}: {exc}")
+                if not j:
+                    break
+                continue
+            quota += math.ceil(max(1, len(chart)) / 50)
+            for v in chart:
+                if v.id in merged:
+                    for code, rank in v.regions.items():  # the place on the all-categories chart counts first
+                        merged[v.id].regions.setdefault(code, rank)
+                    merged[v.id].views = max(merged[v.id].views, v.views)
+                else:
+                    merged[v.id] = v
 
     extra = Gathered()
     if opts.channels or opts.searches:

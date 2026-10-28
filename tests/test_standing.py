@@ -37,7 +37,7 @@ class FakeFind:
         videos = []
         for i, (vid, match) in enumerate(self.answers.get(request, [])):
             v = video_from_api(api_item(vid, title=f"Found {vid}", minutes=25, hours_old=48, channel=f"F{vid}"))
-            v.origins, v.match, v.match_why, v.score = ["request"], match, "test", 70
+            v.origins, v.match, v.match_why, v.score, v.new = ["request"], match, "test", 70, True
             videos.append(v)
         plan = lookup.Plan(request, [request])
         return lookup.LookupResult(request, videos, NOW, plan, quota=201, weak=1, ai_calls=2 if use_ai else 0,
@@ -57,7 +57,8 @@ def test_good_matches_are_queued_for_the_requests_niche(tmp_path, monkeypatch):
     assert set(jobs) == {"m1", "m2"}  # m3 doesn't match well enough
     assert jobs["m1"].niche == "game01" and jobs["m1"].permission == "Found for your request (90 match)"
     assert find.calls == [{"request": "MW4 with good comedy", "since": "month", "use_ai": False}]
-    assert any("Standing request “MW4 with good comedy” for Gaming: 2 good matches of 4 found (201 quota units)"
+    assert any("Standing request “MW4 with good comedy” for Gaming: 2 good matches (2 new) of 4 found (searched "
+               "'MW4 with good comedy', best match first; 201 quota units)"
                in m for m in r.logs)
 
 

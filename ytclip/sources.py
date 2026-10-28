@@ -29,6 +29,9 @@ SEARCH_EVERY = 6 * 3600  # Creative Commons searches cost 100 units, so at most 
 RESOLVE_RETRY = 24 * 3600  # try a channel that couldn't be found again after a day
 CHANNEL_VIDEOS = 5  # newest uploads taken from each channel
 SEARCH_VIDEOS = 15  # results taken from each search
+SEARCH_ORDERS = ("viewCount", "date", "relevance")  # each check of a search sorts the next way, for new videos
+SEARCH_KEEP = 45  # videos a search remembers across its checks
+ORDER_NAMES = {"viewCount": "most viewed", "date": "newest", "relevance": "best match"}
 MAX_AGE_DAYS = 14  # older uploads aren't worth clipping for trend-driven posting
 
 _UC = re.compile(r"UC[\w-]{22}")
@@ -140,12 +143,12 @@ def latest_uploads(api_key: str, playlist: str, limit: int = CHANNEL_VIDEOS,
 
 
 def search_cc(api_key: str, query: str, published_after: float, limit: int = SEARCH_VIDEOS,
-              get: Callable[[str], dict] = _get, language: str = "") -> list[str]:
-    """Creative Commons video ids matching a search, most viewed first; 100 quota units."""
+              get: Callable[[str], dict] = _get, language: str = "", order: str = "viewCount") -> list[str]:
+    """Creative Commons video ids matching a search, most viewed first (or `order`); 100 quota units."""
     from datetime import datetime, timezone
 
     after = datetime.fromtimestamp(published_after, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    params = {"part": "id", "type": "video", "videoLicense": "creativeCommon", "q": query, "order": "viewCount",
+    params = {"part": "id", "type": "video", "videoLicense": "creativeCommon", "q": query, "order": order,
               "publishedAfter": after, "maxResults": str(max(1, min(50, limit))), "key": api_key.strip()}
     if language:
         params["relevanceLanguage"] = language  # favours that language; the picking rules still check it
@@ -228,15 +231,23 @@ def gather(api_key: str, channels: list[ChannelRef], searches: list[str], histor
         with history.lock:
             rec = dict(known_searches.get(key) or {})
         if now - rec.get("checked", 0) >= SEARCH_EVERY:
+            # The same search the same way finds the same videos: each check sorts the next way, and
+            # what earlier checks found stays (until it's too old), so the list grows instead of repeating.
+            turn = int(rec.get("turn") or 0)
+            order = SEARCH_ORDERS[turn % len(SEARCH_ORDERS)]
             try:
                 g.quota += 100
-                rec = {"videos": search_cc(api_key, query, oldest, SEARCH_VIDEOS, get, language), "checked": now}
-                log(f"Searched Creative Commons videos for \"{query}\" (100 quota units).")
+                got = search_cc(api_key, query, oldest, SEARCH_VIDEOS, get, language, order)
+                before = list(rec.get("videos") or [])
+                rec = {"videos": list(dict.fromkeys(got + before))[:SEARCH_KEEP], "checked": now, "turn": turn + 1}
+                log(f"Searched Creative Commons videos for \"{query}\", {ORDER_NAMES[order]} first "
+                    f"({sum(x not in before for x in got)} new; 100 quota units).")
             except ResearchBlocked:
                 raise
             except ResearchError as exc:
                 g.problems.append(f"Creative Commons search \"{query}\": {exc}")
                 rec["checked"] = now  # don't spend another 100 units on it until it's due again
+                rec["turn"] = turn + 1
         for vid in rec.get("videos") or []:
             found.setdefault(vid, set()).add("cc")
         with history.lock:

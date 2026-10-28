@@ -265,6 +265,8 @@ def _check(v: TrendingVideo, p: Policy, log: PickLog, now: float, notes: dict[st
         return skip("done", f"Already picked {_ago(now - earlier.get('time', now))}.")
     if v.sent:
         return skip("done", "Already sent to the Studio.")
+    if v.used:
+        return skip("done", "Already clipped, or waiting in the automation queue.")
     if v.live == "live":
         return skip("live", "Live right now; it can be picked once the stream ends.")
     if v.live == "upcoming":
