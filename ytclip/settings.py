@@ -282,43 +282,45 @@ def migrate(data: dict) -> dict:
 
 # ---------------------------------------------------------------- presets
 
+# Presets leave clip length alone: it's yours (Min/Max clip length), so picking a look never makes
+# the clips shorter or longer than you asked.
 PRESETS: dict[str, dict] = {
     "Balanced highlights": {
-        "aspect": "vertical_blur", "min_len": 20, "max_len": 60, "clip_count": 5, "burn_captions": False,
+        "aspect": "vertical_blur", "clip_count": 5, "burn_captions": False,
         "mode": "auto",
     },
     "Shorts / TikTok / Reels": {
-        "aspect": "vertical_blur", "min_len": 15, "max_len": 58, "clip_count": 6, "burn_captions": True,
+        "aspect": "vertical_blur", "clip_count": 6, "burn_captions": True,
         "caption_position": "lower", "normalize_audio": True, "title_overlay": False, "mode": "auto",
     },
     "Vertical crop (talking head)": {
-        "aspect": "vertical_crop", "min_len": 15, "max_len": 58, "clip_count": 6, "burn_captions": True,
+        "aspect": "vertical_crop", "clip_count": 6, "burn_captions": True,
         "normalize_audio": True, "mode": "auto",
     },
     "Podcast moments": {
-        "aspect": "vertical_blur", "min_len": 45, "max_len": 120, "clip_count": 5, "w_reactions": 0.35,
+        "aspect": "vertical_blur", "clip_count": 5, "w_reactions": 0.35,
         "w_scenes": 0.0, "burn_captions": False, "mode": "auto",
     },
     "Gaming / action": {
-        "aspect": "vertical_blur", "min_len": 15, "max_len": 45, "clip_count": 8, "w_audio": 0.5,
+        "aspect": "vertical_blur", "clip_count": 8, "w_audio": 0.5,
         "w_scenes": 0.3, "mode": "auto",
     },
     "Square posts": {
-        "aspect": "square", "min_len": 15, "max_len": 60, "clip_count": 5, "burn_captions": True,
+        "aspect": "square", "clip_count": 5, "burn_captions": True,
         "caption_position": "lower", "mode": "auto", "tiktok_ready": False,  # 1:1 is for Instagram/X
     },
     "Stacked (gameplay below)": {
-        "aspect": "vertical_crop", "min_len": 15, "max_len": 58, "clip_count": 6, "burn_captions": True,
+        "aspect": "vertical_crop", "clip_count": 6, "burn_captions": True,
         "caption_position": "middle", "normalize_audio": True, "stack_enabled": True, "stack_position": "bottom",
         "stack_split": 0.5, "banner_top": False, "banner_bottom": False, "mode": "auto",
     },
     "Banner top + bottom": {
-        "aspect": "vertical_blur", "min_len": 15, "max_len": 58, "clip_count": 6, "burn_captions": True,
+        "aspect": "vertical_blur", "clip_count": 6, "burn_captions": True,
         "caption_position": "lower", "normalize_audio": True, "banner_top": True, "banner_bottom": True,
         "banner_mode": "bar", "stack_enabled": False, "title_overlay": False, "mode": "auto",
     },
     "Split by chapters": {"mode": "chapters", "aspect": "vertical_blur", "burn_captions": False},
-    "AI picks (Claude)": {"mode": "ai", "min_len": 20, "max_len": 75, "clip_count": 6},
+    "AI picks (Claude)": {"mode": "ai", "clip_count": 6},
 }
 # Every built-in that picks a format also says whether it's for TikTok, so choosing "Square posts" and
 # then another preset doesn't leave TikTok-ready output switched off.

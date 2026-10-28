@@ -120,3 +120,14 @@ def test_settings_dialog_automation_page(app):
     assert dlg._editors["auto_preset"].get() == "Shorts / TikTok / Reels"
     dlg._editors["auto_layout"].widget.setCurrentIndex(dlg._editors["auto_layout"].widget.findData("Gameplay below"))
     assert dlg.result_settings.auto_layout == "Gameplay below"
+
+
+def test_settings_dialog_keeps_the_longest_at_least_the_shortest(app):
+    from ytclip.gui.settings_dialog import SettingsDialog
+
+    dlg = SettingsDialog(Settings(min_len=20, max_len=58))
+    dlg._editors["min_len"].widget.setValue(60)
+    assert (dlg.result_settings.min_len, dlg.result_settings.max_len) == (60, 60)
+    assert dlg._editors["max_len"].get() == 60
+    dlg._editors["max_len"].widget.setValue(45)
+    assert (dlg.result_settings.min_len, dlg.result_settings.max_len) == (45, 45)

@@ -743,7 +743,7 @@ def test_a_recipe_still_wins_over_the_niche_style(tmp_path):
     s = _settings(niches=[GAMING], auto_recipes="@Pod = Podcast moments", auto_output_dir=str(tmp_path / "out"))
     pod, label = settings_for(Job("a", "u", channel="Pod", niche="game01"), s)
     assert pod.output_path == tmp_path / "out" / "Gaming"  # still the niche's folder
-    assert pod.min_len == 45 and label == "Podcast moments · Gameplay below (niche: Gaming, recipe: @Pod)"
+    assert pod.w_reactions == 0.35 and label == "Podcast moments · Gameplay below (niche: Gaming, recipe: @Pod)"
 
 
 def test_research_queues_each_pick_for_its_niche(tmp_path):

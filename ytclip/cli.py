@@ -37,7 +37,8 @@ def build_parser() -> argparse.ArgumentParser:
         prog="ytclip",
         description="Download YouTube videos (or open local files) and cut them into their best clips.",
         epilog='Example: ytclip "https://youtu.be/VIDEO" --preset "Shorts / TikTok / Reels"\n'
-           "Trending research: ytclip research --help\nAutomation: ytclip auto --help\n"
+           "Trending research: ytclip research --help\nFind videos for a request: ytclip find --help\n"
+           "Automation: ytclip auto --help\n"
            "Quality check: ytclip qc --help\nWhat's working: ytclip results --help",
     formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -268,11 +269,12 @@ def _category_id(text: str) -> str:
 ORIGIN_LABELS = {"watchlist": "your list", "cc": "CC search"}
 
 
-def _research_table(videos: list, title: str, decisions: dict | None = None) -> Table:
+def _research_table(videos: list, title: str, decisions: dict | None = None, match: bool = False) -> Table:
     from .clipability import age_text, compact
 
     table = Table(title=title, show_edge=False, header_style="bold", title_justify="left")
-    cols = ["Score", "Video", "Found in", "Views/h", "Length", "Posted", "Why"] + (["Pick"] if decisions else [])
+    cols = (["Match"] if match else []) + ["Score", "Video", "Found in", "Views/h", "Length", "Posted", "Why"] + (
+        ["Pick"] if decisions else [])
     for col in cols:
         table.add_column(col, overflow="fold" if col in ("Video", "Why", "Pick") else "ellipsis")
     for v in videos:
@@ -283,12 +285,107 @@ def _research_table(videos: list, title: str, decisions: dict | None = None) -> 
                " ".join(where), ("↑" if v.recent else "") + compact(v.velocity),
                stamp(v.duration) if v.live == "none" else v.live, age_text(v.age_hours()),
                escape(v.reasons[0]) if v.reasons else ""]
+        if match:
+            row.insert(0, f"[bold]{v.match:.0f}[/]")
         if decisions:
             d = decisions.get(v.id)
             row.append(("[green]✓ " if d.picked else "[dim]– ") + escape(d.reason)
                        + (f"\n📈 {escape(d.learned)}" if d.learned else "") + "[/]" if d else "")
         table.add_row(*row)
     return table
+
+
+def build_find_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(
+        prog="ytclip find",
+        description="Find YouTube videos for a request you describe, scored for how well they match it and how "
+                    "well they'll clip. With an AI key, Claude writes the searches and rates the matches.",
+        epilog='Example: ytclip find "Call of Duty MW4 with good comedy" --since month   (about 200 of the '
+               "YouTube API's 10,000 free daily units)",
+    )
+    p.add_argument("request", nargs="+", help="what you want, in your own words")
+    p.add_argument("-n", "--top", type=int, default=20, help="how many videos to list (default 20)")
+    p.add_argument("--since", choices=("any", "year", "month", "week"), default="any",
+                   help="only videos posted in this time")
+    p.add_argument("--min-minutes", type=float, help="skip videos shorter than this (default: your settings)")
+    p.add_argument("--no-ai", action="store_true", help="match by the request's words, without Claude")
+    p.add_argument("--queue", type=int, metavar="N", help="add the best N to Automation's queue")
+    p.add_argument("--niche", help="the niche (name or id) videos added with --queue are for")
+    p.add_argument("--json", action="store_true", help="print results as JSON")
+    p.add_argument("--api-key", help="YouTube Data API key (otherwise from settings or YOUTUBE_API_KEY)")
+    return p
+
+
+def run_find(argv: list[str]) -> int:
+    import contextlib
+    import json
+
+    from . import lookup, niches
+    from .policy import language_codes
+    from .research import youtube_key
+    from .trending import ResearchError
+
+    args = build_find_parser().parse_args(argv)
+    s = Settings.load()
+    key = (args.api_key or youtube_key(s)).strip()
+    if not key:
+        console.print("[red]Needs a YouTube Data API key:[/] --api-key, the YOUTUBE_API_KEY variable, or "
+                      "Settings → Research in the app.")
+        return 2
+    niche = None
+    if args.niche:
+        niche = niches.find(s, args.niche) or next((n for n in niches.load(s)
+                                                    if n.name.lower() == args.niche.strip().lower()), None)
+        if niche is None:
+            console.print(f"[red]No niche called {escape(args.niche)}.[/]")
+            return 2
+    request = " ".join(args.request)
+    log = (lambda m: None) if args.json else (lambda m: console.print(f"[dim]{escape(m)}[/]"))  # noqa: E731
+    try:
+        with console.status("Finding videos…") if not args.json else contextlib.nullcontext():
+            result = lookup.find(request, s, key, args.since,
+                                 s.research_min_minutes if args.min_minutes is None else args.min_minutes,
+                                 next(iter(language_codes(s.pick_languages)), ""), log,
+                                 use_ai=False if args.no_ai else None)
+    except (ResearchError, ValueError) as exc:
+        console.print(f"[red]{escape(str(exc))}[/]")
+        return 1
+    try:
+        lookup.remember(result)
+    except OSError:
+        pass
+    top = result.videos[:max(1, args.top)]
+    if args.json:
+        print(json.dumps({"request": result.request, "searched": result.plan.queries, "quota": result.quota,
+                          "rated_by": result.rated_by, "videos": [
+                              {"url": v.url, "title": v.title, "channel": v.channel, "match": v.match,
+                               "why": v.match_why, "clipability": v.score, "rank": lookup.rank(v),
+                               "minutes": round(v.duration / 60, 1), "views": v.views} for v in top]}, indent=1))
+    else:
+        for p in result.problems:
+            console.print(f"[yellow]{escape(p)}[/]")
+        if not top:
+            console.print(f"Nothing matched “{escape(result.request)}”. Try other words or a longer --since.")
+        else:
+            console.print(_research_table(top, f"Found for “{result.request}” · searched "
+                                          + ", ".join(f"“{q}”" for q in result.plan.queries), match=True))
+            console.print(f"[dim]{result.quota} API units · "
+                          + (f"rated by {result.rated_by}" if result.rated_by else "matched by their words")
+                          + (f" · {result.weak} that didn't match left out" if result.weak else "") + "[/]")
+    if args.queue:
+        from .jobs import JobDB
+        from .pipeline import Runner
+
+        db = JobDB()
+        try:
+            runner = Runner(db)
+            added = sum(runner.add_manual(v.url, v.title, niche.id if niche else "")
+                        for v in result.videos[:args.queue])
+        finally:
+            db.close()
+        if not args.json:
+            console.print(f"Queued {added} in Automation" + (f" for {escape(niche.name)}" if niche else "") + ".")
+    return 0
 
 
 def run_research(argv: list[str]) -> int:
@@ -1008,6 +1105,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_results(argv[1:])
     if argv[:1] == ["research"]:
         return run_research(argv[1:])
+    if argv[:1] == ["find"]:
+        return run_find(argv[1:])
     if argv[:1] == ["auto"]:
         return run_auto(argv[1:])
     if argv[:1] == ["qc"]:

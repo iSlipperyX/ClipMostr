@@ -187,6 +187,7 @@ class MainWindow(QMainWindow):
         self.tabs.currentChanged.connect(lambda i: self.library.refresh() if i == 1 else None)
         self.research = Research(lambda: self.settings, self._setting_changed)
         self.research.send.connect(self._research_send)
+        self.research.queue.connect(self._research_queue)
         self.research.notice.connect(self._notice)
         self.research.log.connect(self._log)
         self.research.hits_changed.connect(self._research_hits)
@@ -232,6 +233,18 @@ class MainWindow(QMainWindow):
         self.add_sources(urls)
         self.tabs.setCurrentIndex(0)
         self._notice(f"Sent {len(urls)} video{'s' if len(urls) != 1 else ''} from Research to the Studio.")
+
+    def _research_queue(self, videos: list) -> None:
+        from .. import niches as niche_list
+        from .. import pipeline
+
+        runner = pipeline.Runner(self.automation.db)
+        added = sum(runner.add_manual(url, title, niche if niche_list.find(self.settings, niche) else "")
+                    for url, title, niche in videos)
+        self.automation.refresh()
+        again = len(videos) - added
+        self._notice(f"Queued {added} video{'s' if added != 1 else ''} from Research in Automation."
+                     + (f" {again} {'was' if again == 1 else 'were'} queued before." if again else ""))
 
     def _research_hits(self, n: int) -> None:
         self.tabs.setTabText(self.research_tab, f"{RESEARCH_TAB}  ({n} new)" if n else RESEARCH_TAB)
@@ -1277,6 +1290,11 @@ class MainWindow(QMainWindow):
     # ================================================================== settings & re-detect
     def _setting_changed(self, name: str, value) -> None:
         self.settings = self.settings.apply({name: value})
+        if name in ("min_len", "max_len") and self.settings.min_len > self.settings.max_len:
+            other = "max_len" if name == "min_len" else "min_len"  # the other end follows along
+            self.settings = self.settings.apply({other: value})
+            if other in self.tune_editors:
+                forms.refresh({other: self.tune_editors[other]}, self.settings)
         self._save_timer.start()
         self.layout_tab.set_settings(self.settings)
         self._update_preview_frame()

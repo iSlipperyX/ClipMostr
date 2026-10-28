@@ -44,7 +44,7 @@ Every second gets a score from up to five signals. You decide how much each one 
 
 Clips grow outward from the peaks. When there's a transcript, their edges are aligned to whole sentences, so a clip never starts or ends mid-sentence; without one, they snap to natural pauses. Intros, credits and end screens count for less. **Trim dead air** (on by default) then pulls each clip in so it starts a quarter of a second before the first word and ends half a second after the last, instead of opening on silence. Clips you've edited by hand are never trimmed.
 
-**Clean cut points.** As a last step, ClipMonster listens to the audio around each clip edge. An edge that would land in the middle of a word moves into the nearest pause, preferring the longer pause between sentences, without making the clip longer than your maximum or running into the next clip. This matters most for YouTube's auto-generated captions, which have no punctuation: the pauses the audio shows are used to find where sentences end. A clip is never longer than *Max clip length* either: when rounding out to a whole sentence would run over, it ends on the last sentence that fits.
+**Clean cut points.** As a last step, ClipMonster listens to the audio around each clip edge. An edge that would land in the middle of a word moves into the nearest pause, preferring the longer pause between sentences, without making the clip longer than your maximum or running into the next clip. This matters most for YouTube's auto-generated captions, which have no punctuation: the pauses the audio shows are used to find where sentences end. A clip is never longer than *Max clip length* either: when rounding out to a whole sentence would run over, it ends on the last sentence that fits. Nor is it ever shorter than *Min clip length*: a clip that comes out short grows to the end of a later sentence (or back to the start of an earlier one), and one with no room to grow is dropped. Clip length is always yours: presets and Automation's style don't change it, only a niche's or a clip request's own length does.
 
 **Part series.** When a great moment runs longer than one clip, it carries on in **Part 2** (and Part 3), each starting on the next sentence where the last part stopped and ending when the moment does. Parts count towards *Clips per video*, so a series takes the place of the weakest stand-alone clips, and a weak last part never pushes out a better clip. Every part except the last shows your "Follow for part 2" bottom text; if the quality check rejects a part, the part before it is made again without the promise. The clip list marks parts (P1, P2…), and `clips.json` records each clip's `series`, `part` and `parts`, counting only the parts that passed the quality check. Set the most parts in *Find clips → Part series* (3 to start with; 1 turns it off).
 
@@ -126,6 +126,26 @@ Parts that can't be measured, such as hidden like counts or a brand-new video wi
 **Setup:** it needs a free YouTube Data API key. In the [Google Cloud console](https://console.cloud.google.com/apis/library/youtube.googleapis.com), enable *YouTube Data API v3* for a project and create an API key under *Credentials*. Paste it into the Research tab, or under **Settings → Research**, or set the `YOUTUBE_API_KEY` environment variable. Each region checked costs 1 unit of the 10,000-unit daily quota (per 50 videos), so four regions every 30 minutes uses about 2% of it. Replay checks go through yt-dlp and use no quota.
 
 New arrivals scoring at least your alert level (75 by default) are counted on the tab, as **🔥 Research (3 new)**, when you're on another tab. Videos you've sent to the studio are ticked, and **Hide sent** hides them. History and the last results are kept in `%APPDATA%\ClipMonster\research.json`, so the tab opens with your last results.
+
+### Find videos for a request
+
+Type what you want into **Find videos** at the top of the Research tab, in your own words, and press **Find**. For example: *Call of Duty MW4 with good comedy*.
+
+- **Searches.** ClipMonster turns the request into one or two YouTube searches, such as "Call of Duty MW4 funny moments" and then "Call of Duty MW4". With a Claude or Gemini key (Settings → AI), the AI writes the searches instead. It knows that MW4 is Modern Warfare 4, and which words funny videos put in their titles.
+- **Match.** Every video found gets a **Match** score out of 100: how well it is what you asked for. With a key, the AI rates each one from its title, channel, tags and description. Without a key, the request's words in the title count most, then the tags and description. Videos about something else, such as another game, are left out.
+- **Order.** The list is ordered mostly by Match, then by clip-ability, so a funny MW4 video that will clip well comes first.
+- **Shorts are left out.** So is anything shorter than the tab's length filter.
+- **Time limit.** The menu next to the box limits results to this week, this month or this year.
+- **What's left out.** The bar above the table says what was searched and how many videos were left out. **← Back to trending** returns to the charts. Your last request stays one click away, and the box suggests your earlier requests.
+- **Using the results.** Send them to the Studio, or use **Queue in Automation** (also on any trending video). Automation then clips them next, in their niche's style and with your clip length.
+- **Cost.** A request uses about 200 of the YouTube API's 10,000 free daily units, because each search costs 100. Claude's rating is one short call.
+
+```
+ytclip find "Call of Duty MW4 with good comedy"            # the best 20, with why each matches
+ytclip find "Minecraft hardcore funny" --since month -n 10
+ytclip find "Kai Cenat rage" --queue 3 --niche Streamers   # add the best 3 to Automation's queue
+ytclip find "MW4 funny" --no-ai --json
+```
 
 ### Picking rules
 
@@ -240,7 +260,7 @@ Every picked video goes into one niche: the one that lists its channel, then the
 - **Fair shares.** Each niche picks at most its own number of videos a day. **Videos picked per day** (Settings → Picking) is the limit for all of them together, handed out one pick at a time, and the niche with the fewest picks in the last day goes first. One busy niche can't take every pick.
 - **A paused niche** holds its own channels' and searches' videos back. They aren't handed to another account.
 - **Run from the Automation tab.** **Automation → Niches** shows each niche's picks today against its limit, its videos waiting and its clips today. Pause or resume it there, press **Find videos now** to check its sources straight away, or **Request clips for it**.
-- **Its own clips.** A niche can set its own **clips per video** and **clip length**, over its style's. Its **special requests** note tells the AI clip finder and the AI polish what makes a good clip for that account; with a Claude or Gemini key, a niche with a note uses the AI clip finder (within *AI calls per day*).
+- **Its own clips.** A niche can set its own **clips per video** and **clip length**, over Automation's (clip length is otherwise Settings → Clip finding's). Its **special requests** note tells the AI clip finder and the AI polish what makes a good clip for that account; with a Claude or Gemini key, a niche with a note uses the AI clip finder (within *AI calls per day*).
 - **Style.** A recipe for the video's channel or category comes first, then the niche's own style and view, then a catch-all (`*`) recipe, then Settings → Automation.
 - **Folders.** Each niche's clips go to `Automation\<niche>\`, and `clips.json` records the niche and its TikTok account, so TikTok Manager can stage each folder for its own account. Renaming a niche sends new clips to its new folder. Clips already made stay where they are.
 

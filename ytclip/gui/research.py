@@ -8,25 +8,28 @@ from typing import Any, Callable
 from PySide6.QtCore import QRectF, QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QFrame, QGridLayout,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QCompleter, QFrame, QGridLayout,
                                QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMenu, QProgressBar,
                                QPushButton, QScrollArea, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
-from .. import clipability, learn, niches
+from .. import clipability, learn, lookup, niches
 from ..clipability import FIT, PART_LABELS, WEIGHTS, age_text, compact, verdict
 from ..organize import stamp
-from ..policy import Decision, PickLog, Policy, decide, picks_path
+from ..policy import Decision, PickLog, Policy, decide, language_codes, picks_path
 from ..research import ScanCancelled, ScanOptions, ScanResult, history_path, last_result, scan, youtube_key
 from ..settings import Settings
 from ..trending import CATEGORIES, KEY_HELP_URL, REGIONS, History, TrendingVideo, deep_check, parse_regions
 from . import theme
 
 COLUMNS = ("Score", "Video", "Channel", "Found in", "Views", "Views / h", "Engagement", "Length", "Posted", "Niche",
-           "Pick")
+           "Pick", "Match")
 PICK_COLUMN = COLUMNS.index("Pick")
 NICHE_COLUMN = COLUMNS.index("Niche")
-ORIGIN_LABELS = {"watchlist": "Your list", "cc": "CC search"}
+MATCH_COLUMN = COLUMNS.index("Match")  # only for a request's results
+ORIGIN_LABELS = {"watchlist": "Your list", "cc": "CC search", "request": "Your request"}
+SINCE_CHOICES = (("any", "Any time"), ("year", "This year"), ("month", "This month"), ("week", "This week"))
+FIND_EXAMPLE = "Call of Duty MW4 with good comedy"
 MIN_LENGTHS = ((0.0, "Any length"), (3.0, "3 min +"), (8.0, "8 min +"), (20.0, "20 min +"), (45.0, "45 min +"))
 SORT_ROLE = Qt.UserRole + 1
 
@@ -69,8 +72,8 @@ class _SortItem(QTableWidgetItem):
 
     def __lt__(self, other: QTableWidgetItem) -> bool:
         a, b = self.data(SORT_ROLE), other.data(SORT_ROLE)
-        if a is None or b is None:
-            return super().__lt__(other)
+        if a is None or b is None:  # (QTableWidgetItem's own __lt__ comes back here: compare the text)
+            return self.text() < other.text()
         return a < b
 
 
@@ -97,6 +100,7 @@ class _Bar(QWidget):
 
 class Research(QWidget):
     send = Signal(list)  # video URLs for the Studio
+    queue = Signal(list)  # (url, title, niche) for Automation's queue
     notice = Signal(str)  # a line for the main status bar
     log = Signal(str)
     hits_changed = Signal(int)  # new high scorers the user hasn't looked at yet
@@ -108,7 +112,9 @@ class Research(QWidget):
         self._change = change
         self.history = History(history_path())
         self.picks = PickLog(picks_path())
-        self.result: ScanResult | None = None
+        self.result: ScanResult | None = None  # the last trending check
+        self.found: lookup.LookupResult | None = None  # the last request's results
+        self.mode = "trending"  # what the table shows: "trending" or "find" (a request's results)
         self.videos: list[TrendingVideo] = []
         self._niche_names: dict[str, str] = {}
         self.decisions: dict[str, Decision] = {}
@@ -133,9 +139,12 @@ class Research(QWidget):
 
         self._build()
         self.sync_from_settings()
+        self.found = lookup.last_result()
+        self._recent.model().setStringList(lookup.recent_requests())
         self.result = last_result(self.history)
         if self.result:
             self._show_result(self.result)
+        self._update_find_bar()
         self._update_summary()
         self._schedule(first=True)
 
@@ -162,6 +171,50 @@ class Research(QWidget):
         top.addWidget(self.cancel_btn)
         top.addWidget(self.check_btn)
         layout.addLayout(top)
+
+        finder = QHBoxLayout()
+        ask = QLabel("🔎  Find videos")
+        ask.setToolTip("Describe the videos you want and ClipMonster searches YouTube for them")
+        self.find_box = QLineEdit()
+        self.find_box.setPlaceholderText(f"Describe what you want, like: {FIND_EXAMPLE}")
+        self.find_box.setClearButtonEnabled(True)
+        self.find_box.setMaxLength(lookup.MAX_REQUEST)
+        self.find_box.setToolTip("What the videos are about and what kind you want. With a Claude or Gemini key "
+                                 "(Settings → AI), the AI writes the searches and rates how well each video matches; without one, the words do. "
+                                 "Each request uses about 200 of the YouTube API's 10,000 free daily units")
+        self.find_box.returnPressed.connect(self.find)
+        self._recent = QCompleter([], self)
+        self._recent.setCaseSensitivity(Qt.CaseInsensitive)
+        self._recent.setFilterMode(Qt.MatchContains)
+        self.find_box.setCompleter(self._recent)
+        self.find_since = QComboBox()
+        for key, name in SINCE_CHOICES:
+            self.find_since.addItem(name, key)
+        self.find_since.setToolTip("Only videos posted in this time")
+        self.find_btn = QPushButton("Find")
+        self.find_btn.setObjectName("primary")
+        self.find_btn.clicked.connect(self.find)
+        finder.addWidget(ask)
+        finder.addWidget(self.find_box, 1)
+        finder.addWidget(self.find_since)
+        finder.addWidget(self.find_btn)
+        layout.addLayout(finder)
+
+        self.find_bar = QFrame()
+        self.find_bar.setObjectName("panel")
+        fb = QHBoxLayout(self.find_bar)
+        fb.setContentsMargins(12, 6, 8, 6)
+        self.find_text = QLabel()
+        self.find_text.setWordWrap(True)
+        self.find_text.setTextFormat(Qt.RichText)
+        self.back_btn = QPushButton("← Back to trending")
+        self.back_btn.clicked.connect(self.show_trending)
+        self.last_find_btn = QPushButton()
+        self.last_find_btn.clicked.connect(self.show_found)
+        fb.addWidget(self.find_text, 1)
+        fb.addWidget(self.last_find_btn)
+        fb.addWidget(self.back_btn)
+        layout.addWidget(self.find_bar)
 
         filters = QHBoxLayout()
         self.regions_btn = QPushButton()
@@ -242,6 +295,7 @@ class Research(QWidget):
         head.setSectionResizeMode(QHeaderView.ResizeToContents)
         head.setSectionResizeMode(1, QHeaderView.Stretch)
         head.setSectionsClickable(True)
+        head.moveSection(head.visualIndex(MATCH_COLUMN), 1)  # a request's match goes beside the score
         self.table.verticalHeader().setDefaultSectionSize(30)
         self.table.itemSelectionChanged.connect(self._selected)
         self.table.itemDoubleClicked.connect(lambda _item: self._send_selected())
@@ -261,6 +315,9 @@ class Research(QWidget):
         row = QHBoxLayout()
         self.send_btn = QPushButton("➜  Send selected to Studio")
         self.send_btn.clicked.connect(self._send_selected)
+        self.queue_btn = QPushButton("⏵  Queue in Automation")
+        self.queue_btn.setToolTip("Automation clips these next, in their niche's style, with your clip length")
+        self.queue_btn.clicked.connect(lambda: self._queue(self._selected_videos()))
         self.send_picks_btn = QPushButton()
         self.send_picks_btn.setToolTip("Send every video your picking rules picked to the Studio. They count "
                                        "towards your daily and per-channel limits")
@@ -269,6 +326,7 @@ class Research(QWidget):
         self.count.setProperty("muted", True)
         row.addWidget(self.count, 1)
         row.addWidget(self.send_picks_btn)
+        row.addWidget(self.queue_btn)
         row.addWidget(self.send_btn)
         lv.addLayout(row)
 
@@ -531,13 +589,106 @@ class Research(QWidget):
         job.succeeded.connect(lambda r: self._scan_done(r, auto))
         job.failed.connect(self._scan_failed)
         job.finished.connect(self._job_finished)
+        self._start(job, "Checking…")
+
+    def _start(self, job: "_Job", text: str) -> None:
         self.job = job
         self.check_btn.setEnabled(False)
+        self.find_btn.setEnabled(False)
         self.cancel_btn.setVisible(True)
         self.bar.setVisible(True)
         self.bar.setRange(0, 0)
-        self.summary.setText("Checking…")
+        self.summary.setText(text)
         job.start()
+
+    # ================================================================== finding videos for a request
+    def find(self) -> None:
+        """Search YouTube for what's typed in the Find box (lookup.py)."""
+        request = lookup.tidy(self.find_box.text())
+        if not request:
+            self.find_box.setFocus()
+            self.notice.emit(f"Type what you're looking for, like: {FIND_EXAMPLE}")
+            return
+        if self.job:
+            self.notice.emit("Research is busy checking. Find again when it's done.")
+            return
+        s = self._settings()
+        key = youtube_key(s)
+        if not key:
+            self.key_panel.setVisible(True)
+            self.key_input.setFocus()
+            return
+        since = self.find_since.currentData() or "any"
+        language = next(iter(language_codes(s.pick_languages)), "")
+        job = _Job(lambda j: lookup.find(request, s, key, since, s.research_min_minutes, language, j.log.emit,
+                                         lambda m, f: j.progress.emit(m, -1.0 if f is None else float(f)),
+                                         lambda: j.cancel_requested))
+        job.progress.connect(self._progress)
+        job.log.connect(self.log.emit)
+        job.succeeded.connect(self._find_done)
+        job.failed.connect(self._find_failed)
+        job.finished.connect(self._job_finished)
+        self._start(job, f"Finding videos for “{_esc(request[:60])}”…")
+
+    def _find_done(self, result: "lookup.LookupResult") -> None:
+        try:
+            lookup.remember(result)
+        except OSError:
+            pass  # next time it just isn't suggested
+        self._recent.model().setStringList(lookup.recent_requests())
+        for v in result.videos:
+            v.sent = bool((self.history.videos.get(v.id) or {}).get("sent"))
+        self.found = result
+        for p in result.problems:
+            self.log.emit(f"Find: {p}")
+        self.show_found()
+        n = len(result.videos)
+        self.notice.emit(f"Found {n} video{'s' if n != 1 else ''} for “{_esc(result.request[:60])}”."
+                         + (f" Best: {_esc(result.videos[0].title[:60])}" if n else " Try other words."))
+
+    def _find_failed(self, msg: str) -> None:
+        if msg != "Cancelled":
+            self.notice.emit(f"<span style='color:{theme.WARN}'>⚠ Find: {_esc(msg)}</span>")
+            self.log.emit(f"⚠ Find: {msg}")
+
+    def show_found(self) -> None:
+        if not self.found:
+            return
+        self.mode = "find"
+        self.find_box.setText(self.found.request)
+        self._display(self.found.videos, {})
+        self._update_find_bar()
+
+    def show_trending(self) -> None:
+        self.mode = "trending"
+        self._display(self.result.videos if self.result else [], self.result.notes if self.result else {})
+        self._update_find_bar()
+
+    def _update_find_bar(self) -> None:
+        finding = self.mode == "find" and self.found is not None
+        self.table.setColumnHidden(MATCH_COLUMN, not finding)
+        self.back_btn.setVisible(finding)
+        self.last_find_btn.setVisible(not finding and self.found is not None)
+        if self.found is not None:
+            self.last_find_btn.setText(f"Show “{self.found.request[:40]}” again")
+        self.find_bar.setVisible(self.found is not None)
+        if not finding:
+            if self.found is not None:
+                self.find_text.setText(f"<span style='color:{theme.MUTED}'>Showing what's trending. Your last "
+                                       f"request found {len(self.found.videos)} videos.</span>")
+            return
+        r = self.found
+        bits = [f"<b>{len(r.videos)} video{'s' if len(r.videos) != 1 else ''}</b> for “{_esc(r.request)}”"]
+        if r.weak:
+            bits.append(f"{r.weak} that didn't match left out")
+        bits.append(f"rated by {_esc(r.rated_by)}" if r.rated_by else "matched by their words (add a Claude or Gemini "
+                    "key in Settings → AI to have them rated)")
+        bits.append(f"found {age_text((time.time() - r.time) / 3600)} ago" if time.time() - r.time >= 60
+                    else "found just now")
+        searched = ", ".join(f"“{_esc(q)}”" for q in r.plan.queries)
+        about = f"<br><span style='color:{theme.MUTED}'>{_esc(r.plan.about)} · " if r.plan.about else \
+            f"<br><span style='color:{theme.MUTED}'>"
+        self.find_text.setText(" · ".join(bits) + about + f"searched {searched}, {r.quota} API units</span>")
 
     def cancel(self) -> None:
         if self.job:
@@ -556,6 +707,7 @@ class Research(QWidget):
             self.job.deleteLater()
         self.job = None
         self.check_btn.setEnabled(True)
+        self.find_btn.setEnabled(True)
         self.cancel_btn.setVisible(False)
         self.bar.setVisible(False)
         self._schedule()
@@ -637,18 +789,27 @@ class Research(QWidget):
         self.summary.setToolTip(self._error)
 
     def _show_result(self, result: ScanResult) -> None:
+        """A trending check finished (or the last one, at startup): show it, unless a request's
+        results are showing, which stay until Back to trending."""
+        self.result = result
+        if self.mode == "trending":
+            self._display(result.videos, result.notes)
+        else:
+            self._update_find_bar()
+
+    def _display(self, videos: list[TrendingVideo], notes: dict) -> None:
         keep = self._shown.id if self._shown else None
-        self.videos = result.videos
+        self.videos = videos
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(self.videos))
         s = self._settings()
         niches.assign_from_settings(self.videos, s, self.history)
         self.decisions = {d.video.id: d for d in decide(self.videos, Policy.from_settings(s), self.picks,
-                                                        notes=result.notes, lessons=learn.for_settings(s))}
+                                                        notes=notes, lessons=learn.for_settings(s))}
         for r, v in enumerate(self.videos):
             self._fill_row(r, v)
         self.table.setSortingEnabled(True)
-        self.table.sortItems(0, Qt.DescendingOrder)
+        self.table.sortItems(MATCH_COLUMN if self.mode == "find" else 0, Qt.DescendingOrder)
         self._apply_filter()
         rows = [r for r in range(self.table.rowCount()) if not self.table.isRowHidden(r)]
         target = next((r for r in rows if self._video_at(r) and self._video_at(r).id == keep), None)
@@ -656,8 +817,7 @@ class Research(QWidget):
             target = rows[0]
         if target is not None:
             self.table.selectRow(target)
-        else:
-            self._show_detail(None)
+        self._show_detail(self._video_at(target) if target is not None else None)  # also when the row stays 0
 
     def _fill_row(self, r: int, v: TrendingVideo) -> None:
         def item(text: str, sort=None, tip: str = "") -> QTableWidgetItem:
@@ -702,6 +862,7 @@ class Research(QWidget):
             item(age_text(v.age_hours()), -v.published),
             self._niche_item(v),
             self._pick_item(v),
+            self._match_item(v),
         ]
         for c, cell in enumerate(cells):
             if 4 <= c < NICHE_COLUMN:
@@ -715,6 +876,22 @@ class Research(QWidget):
         it.setToolTip(f"Fits the {name} niche" if name else "Fits none of your niches")
         if not name:
             it.setForeground(QColor(theme.MUTED))
+        return it
+
+    def _match_item(self, v: TrendingVideo) -> QTableWidgetItem:
+        if v.match < 0:
+            it = _SortItem("")
+            it.setData(SORT_ROLE, -1.0)
+            return it
+        it = _SortItem(f"{v.match:.0f}")
+        it.setData(SORT_ROLE, lookup.rank(v))  # sorts by the match, then by how well it will clip
+        it.setToolTip(f"How well it's what you asked for, out of 100: {v.match_why}\n"
+                      f"Listed by the match first, then by clip-ability")
+        it.setForeground(QColor(score_colour(v.match)))
+        f = it.font()
+        f.setBold(True)
+        it.setFont(f)
+        it.setTextAlignment(Qt.AlignCenter)
         return it
 
     def _pick_item(self, v: TrendingVideo) -> QTableWidgetItem:
@@ -772,9 +949,13 @@ class Research(QWidget):
         self.empty.setVisible(not has_rows)
         self.count.setVisible(has_rows)
         self.send_btn.setVisible(has_rows)
+        self.queue_btn.setVisible(has_rows)
         self.send_picks_btn.setVisible(has_rows and n_picked > 0)
         self.send_picks_btn.setText(f"➜  Send {n_picked} pick{'s' if n_picked != 1 else ''} to Studio")
-        if not has_rows:
+        if not has_rows and self.mode == "find" and self.found:
+            self.empty.setText(f"Nothing matched “{_esc(self.found.request)}”. Try other words, a longer time, "
+                               "or a shorter Skip videos shorter than.")
+        elif not has_rows:
             self.empty.setText("Nothing yet. Press Check now to see what's trending."
                                if youtube_key(self._settings()) else
                                "Add your YouTube Data API key above, then ClipMonster checks the trending charts "
@@ -792,6 +973,8 @@ class Research(QWidget):
     def _selected(self) -> None:
         sel = self._selected_videos()
         self.send_btn.setEnabled(bool(sel))
+        self.queue_btn.setEnabled(bool(sel))
+        self.queue_btn.setText(f"⏵  Queue {len(sel)} in Automation" if len(sel) > 1 else "⏵  Queue in Automation")
         self.send_btn.setText(f"➜  Send {len(sel)} to Studio" if len(sel) > 1 else "➜  Send selected to Studio")
         self._show_detail(sel[0] if sel else None)
 
@@ -814,10 +997,14 @@ class Research(QWidget):
         self.d_title.setText(v.title)
         where = ", ".join([f"#{rank} in {REGIONS.get(code, code)}" for code, rank in
                            sorted(v.regions.items(), key=lambda kv: kv[1])]
-                          + [{"watchlist": "on your channel list", "cc": "from a Creative Commons search"}[o]
+                          + [{"watchlist": "on your channel list", "cc": "from a Creative Commons search",
+                              "request": "found for your request"}[o]
                              for o in v.origins if o in ORIGIN_LABELS])
         if v.license == "creativeCommon":
             where += " · Creative Commons licence"
+        if v.match >= 0:
+            where += (f"<br><span style='color:{score_colour(v.match)}'><b>Match {v.match:.0f}</b></span>"
+                      f" · {_esc(v.match_why)}")
         if self._niche_names.get(v.niche):
             where += f" · fits the <b>{_esc(self._niche_names[v.niche])}</b> niche"
         length = stamp(v.duration) if v.live == "none" else v.live
@@ -901,6 +1088,8 @@ class Research(QWidget):
             v.deep = deep
             self.history.store_deep(v.id, deep)
             clipability.score(v, [x.velocity for x in self.videos])
+            if v.match >= 0:  # a request's result: its match stays first
+                v.reasons.insert(0, f"Match {v.match:.0f}: {v.match_why}")
             self.history.save()
             self._refresh_video(v)
             self.refresh_picks()  # a new score can change what the rules pick
@@ -950,6 +1139,11 @@ class Research(QWidget):
             self._refresh_video(v)
         self.refresh_picks()
 
+    def _queue(self, videos: list[TrendingVideo]) -> None:
+        """To Automation's queue, each in the niche it fits (or none)."""
+        if videos:
+            self.queue.emit([(v.url, v.title, v.niche) for v in videos])
+
     def _send_selected(self) -> None:
         self._send(self._selected_videos())
 
@@ -964,6 +1158,8 @@ class Research(QWidget):
         sel = self._selected_videos()
         menu = QMenu(self)
         menu.addAction(f"Send {len(sel)} to Studio" if len(sel) > 1 else "Send to Studio", self._send_selected)
+        menu.addAction(f"Queue {len(sel)} in Automation" if len(sel) > 1 else "Queue in Automation",
+                       lambda: self._queue(sel))
         if v:
             menu.addAction("Open on YouTube", lambda: QDesktopServices.openUrl(QUrl(v.url)))
             menu.addAction("Copy link", lambda: QApplication.clipboard().setText(v.url))
