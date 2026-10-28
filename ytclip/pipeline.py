@@ -20,7 +20,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
-from . import learn, research
+from . import learn, niches, research
 from .download import is_blocked
 from .engine import Cancelled, Engine, Project
 from .jobs import Job, JobDB
@@ -85,9 +85,13 @@ class Recipe:
     preset: str
     view: str
 
+    @property
+    def catch_all(self) -> bool:
+        return self.match.strip().lower() in ("*", "any", "everything")
+
     def matches(self, job: Job) -> bool:
         m = self.match.strip().lower()
-        if m in ("*", "any", "everything"):
+        if self.catch_all:
             return True
         if CATEGORIES.get(job.category, "").lower() == m:
             return True
@@ -116,11 +120,19 @@ def parse_recipes(text: str) -> tuple[list[Recipe], list[str]]:
 
 
 def settings_for(job: Job, s: Settings) -> tuple[Settings, str]:
-    """The settings a job is clipped with, and a label saying which recipe gave them."""
+    """The settings a job is clipped with, and a label saying what gave them: a recipe matching
+    the video's channel or category comes first, then the style of its niche, then a catch-all
+    recipe (*), then Automation's. A niche's clips go to its own folder inside the Automation folder."""
     recipes, _ = parse_recipes(s.auto_recipes)
-    rule = next((r for r in recipes if r.matches(job)), None)
-    preset = (rule.preset if rule and rule.preset else s.auto_preset)
-    view = (rule.view if rule and rule.view else s.auto_layout)
+    niche = niches.find(s, job.niche)
+    matching = [r for r in recipes if r.matches(job)]
+    rule = next((r for r in matching if not (niche and r.catch_all)), None)
+    fallback = next((r for r in matching if r.catch_all), None) if niche else None
+    layers = [x for x in (rule, niche, fallback) if x]  # strongest first; each has .preset and .view
+    preset_from = next((x for x in layers if x.preset), None)
+    view_from = next((x for x in layers if x.view), None)
+    preset = preset_from.preset if preset_from else s.auto_preset
+    view = view_from.view if view_from else s.auto_layout
     out = s
     presets = all_presets()
     if preset in presets:
@@ -129,7 +141,23 @@ def settings_for(job: Job, s: Settings) -> tuple[Settings, str]:
         name = find_layout(view)
         if name:
             out = out.apply(all_layouts()[name])
-    overrides = {"output_dir": str(s.auto_output_path), "cache_dir": str(s.cache_path)}
+    folder = s.auto_output_path / niche.folder if niche else s.auto_output_path
+    overrides = {"output_dir": str(folder), "cache_dir": str(s.cache_path)}
+    # The niche's second videos, unless a channel or category recipe's own preset or view brings its own.
+    own = ""
+    if rule is not None:
+        mine = (presets.get(preset) if preset_from is rule else None,
+                all_layouts().get(find_layout(view) or "") if view_from is rule else None)
+        for values in mine:  # the view goes on after the preset
+            if values and "stack_folder" in values:
+                own = str(values["stack_folder"] or "").strip()
+    if own:
+        overrides["stack_folder"] = own
+    elif niche and niche.stack_folder.strip():
+        overrides["stack_folder"] = niche.stack_folder.strip()
+    if niche and niche.instructions.strip():
+        overrides["ai_instructions"] = (f"{out.ai_instructions.strip()}\nThese clips are for a TikTok account about "
+                                        f"{niche.name}: {niche.instructions.strip()}").strip()
     if s.auto_captions:
         overrides["burn_captions"] = True
     if s.auto_bleep:
@@ -140,8 +168,13 @@ def settings_for(job: Job, s: Settings) -> tuple[Settings, str]:
     overrides["ai_polish"] = s.auto_polish and bool(s.ai_api_key.strip() or os.environ.get("ANTHROPIC_API_KEY"))
     out = out.apply(overrides)
     label = " · ".join(x for x in (preset or "My settings", view) if x)
+    why = [f"niche: {niche.name}"] if niche else []
     if rule:
-        label += f" (recipe: {rule.match})"
+        why.append(f"recipe: {rule.match}")
+    if fallback and any(fallback is x for x in (preset_from, view_from)):
+        why.append(f"recipe: {fallback.match}")
+    if why:
+        label += f" ({', '.join(why)})"
     return out, label
 
 
@@ -246,11 +279,15 @@ class Runner:
         next_scan = self.db.meta_float("last_scan") + max(10, s.research_interval) * 60
         if research.youtube_key(s) and now >= next_scan:
             self.research(s)
+            s = self.load()  # a scan takes minutes: niches made meanwhile count (see research)
             now = self.now()
             next_scan = now + max(10, s.research_interval) * 60
         elif not research.youtube_key(s) and not self.db.meta("warned_key"):
             self.log("No YouTube Data API key, so nothing new is picked. Queued videos are still clipped.")
             self.db.set_meta("warned_key", "1")
+
+        if s.cleanup_auto and now - self.db.meta_float("last_cleanup") >= DAY:
+            self.cleanup(s)
 
         job = self.db.next_due(now)
         if job:
@@ -325,6 +362,8 @@ class Runner:
             self.db.set_meta("last_error", f"Research: {exc}")
             return 0
         picks = self._picks()
+        s = self.load()  # a scan takes minutes: niches and rules may have changed since it started
+        niches.assign_from_settings(result.videos, s, history)
         decisions = decide(result.videos, Policy.from_settings(s), picks, now=now, notes=result.notes,
                            lessons=learn.for_settings(s))
         added = 0
@@ -334,11 +373,12 @@ class Runner:
             v = d.video
             job = Job(id=v.id, url=v.url, title=v.title, channel=v.channel, channel_id=v.channel_id,
                       category=v.category, permission=d.reason, origins=list(v.origins), how="auto",
-                      stage="Waiting")
+                      stage="Waiting", niche=v.niche)
             if self.db.add(job, now):
                 added += 1
-                self.log(f"Picked: {v.title} ({v.channel}, clip-ability {v.score:.0f}). {d.reason}"
-                         + (f" {d.learned}" if d.learned else ""))
+                niche = niches.name_of(s, v.niche)
+                self.log(f"Picked{' for ' + niche if niche else ''}: {v.title} ({v.channel}, clip-ability "
+                         f"{v.score:.0f}). {d.reason}" + (f" {d.learned}" if d.learned else ""))
             picks.record(d, "auto", now)
             history.mark_sent(v.id)
         if added:
@@ -346,18 +386,29 @@ class Runner:
             history.save()
         return added
 
-    def add_manual(self, url: str, title: str = "") -> bool:
+    def add_manual(self, url: str, title: str = "", niche: str = "") -> bool:
         from .download import is_url
 
         if not is_url(url):
             raise ValueError("Give a video link (https://…).")
         vid = _video_id(url)
         return self.db.add(Job(id=vid, url=url, title=title or url, permission="Added by you", how="manual",
-                               stage="Waiting"), self.now())
+                               stage="Waiting", niche=niche), self.now())
 
     # ------------------------------------------------------------ one video
     def process(self, job: Job, s: Settings) -> None:
         now = self.now()
+        if job.niche and niches.find(s, job.niche) is None:
+            s = self.load()  # the settings we were given may be older than the niche
+            if niches.find(s, job.niche) is None:
+                if niches.load(s):  # deleted while it waited (or mid-scan)
+                    self.db.remove(job.id)
+                    self.log(f"Took {job.title or job.url} out of the queue: its niche was deleted.")
+                else:  # no niches at all: settings.json may not have been readable, so don't lose the video
+                    self.db.update(job.id, now, status="failed", error="Its niche isn't in your settings",
+                                   stage="Its niche is missing")
+                    self.log(f"✗ {job.title or job.url}: its niche isn't in your settings. Retry it once it's back.")
+                return
         settings, label = settings_for(job, s)
         used = self.db.count("ai", now - DAY)
         if settings.mode == "ai" and used >= s.auto_ai_daily:
@@ -373,14 +424,21 @@ class Runner:
         self.state(f"Clipping: {job.title or job.url}")
         self.log(f"Clipping {job.title or job.url} with {label}")
 
-        last = {"t": 0.0, "msg": ""}
+        last = {"t": 0.0, "msg": "", "video": ""}
+        self.db.set_meta("working_video", "")
 
         def progress(msg: str, frac: float | None) -> None:
             t = self.now()
             if msg != last["msg"] or t - last["t"] >= 2:
                 last.update(t=t, msg=msg)
                 self.db.update(job.id, t, stage=msg + (f" {frac:.0%}" if frac is not None else ""))
+            mark_busy()
             self.beat()
+
+        def mark_busy() -> None:  # the video's real id, once known: a clean-up mustn't touch it
+            if p.video is not None and p.video.id != last["video"]:
+                last["video"] = p.video.id
+                self.db.set_meta("working_video", p.video.id)
 
         def cancelled() -> bool:
             t = self.now()
@@ -393,8 +451,12 @@ class Runner:
         p = Project(job.url)
         p.meta = {"automation": {"permission": job.permission, "origins": job.origins, "how": job.how,
                                  "recipe": label, "picked_at": job.created}}
+        niche = niches.find(s, job.niche)
+        if niche:  # for the Library, and for TikTok Manager to know which account the clips are for
+            p.meta["automation"] |= {"niche": niche.name, "niche_id": niche.id, "account": niche.account}
         try:
             engine.prepare(p)
+            mark_busy()
             if settings.mode == "ai":
                 self.db.note("ai", self.now())
             if p.polished:
@@ -455,6 +517,29 @@ class Runner:
             self.db.update(job.id, job.updated, pruned=1)
         return removed
 
+    def cleanup(self, s: Settings) -> None:
+        """The daily clean-up (Settings → Automation → Clean up by itself): what's ticked there and
+        older than its days (at least one). Never a video that's queued, being clipped or in the
+        Studio, or a clip TikTok Manager still has waiting."""
+        from . import cleanup
+
+        now = self.now()
+        self.db.set_meta("last_cleanup", now)
+        kinds = cleanup.parse_kinds(s.cleanup_kinds)
+        if not kinds:
+            return
+        try:
+            busy = cleanup.busy_ids(self.db)
+            plan = cleanup.plan(s, now, busy=busy, older_than_days=max(1, s.cleanup_days), kinds=kinds)
+            result = cleanup.apply(plan, kinds)
+        except Exception as exc:  # a clean-up problem must never stop the clipping
+            self.log(f"⚠ Clean up failed: {exc}")
+            return
+        if result.removed:
+            self.log(f"Cleaned up: {result.summary()}.")
+        for path, error in result.failed[:5]:
+            self.log(f"⚠ Couldn't remove {path}: {error}")
+
     # ------------------------------------------------------------ the loop
     def run(self, stop: Callable[[], bool] | None = None, sleep: Callable[[float], None] = time.sleep,
             once: bool = False) -> int:
@@ -499,8 +584,9 @@ def glob_escape(text: str) -> str:
 
 
 def _video_id(url: str) -> str:
-    m = re.search(r"(?:v=|youtu\.be/|/shorts/|/live/)([\w-]{11})", url)
-    return m.group(1) if m else url.strip()
+    from .download import video_id
+
+    return video_id(url)
 
 
 # ---------------------------------------------------------------- running it

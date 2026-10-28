@@ -51,6 +51,62 @@ def test_banner_text_override_and_template():
     assert layout.banner_text("odd {brace", "x") == "odd {brace"
 
 
+def test_part_2_only_shows_when_a_clip_carries_this_one_on():
+    from ytclip.analyze import Clip
+
+    for text in ("Follow for part 2", "PART 2 in comments", "pt. 3 tomorrow", "Part two soon", "Next part on my page",
+                 "To be continued", "Part II", "Pt2", "Follow for more parts", "More parts coming", "Part 1/3",
+                 "Part 1 of 3", "Parte 2", "Teil 2", "Partie 2", "Continued in comments", "Stay tuned",
+                 "Story continues on my page", "Follow to see what happens next", "The next one is wild"):
+        assert layout.promises_more(text), text
+    for text in ("Follow for more", "Wait for the end", "Departure 2", "The best part", "{title}", "Discontinued",
+                 "Continue watching", "Who's next?", "1/3 of people", "Follow @part2clips", "The part I love"):
+        assert not layout.promises_more(text), text
+    a, b, c = Clip(0, 10, 80), Clip(12, 20, 80), Clip(60, 70, 80)
+    assert layout.has_next_part(a, [a, b, c]) and not layout.has_next_part(b, [a, b, c])
+    assert not layout.has_next_part(a, [a, Clip(12, 20, 80, enabled=False)])
+    assert layout.has_next_part(a, [a, Clip(9, 20, 80)])  # part 2 replays the last moment of part 1
+    assert not layout.has_next_part(a, [a, Clip(2, 9, 80)])  # inside it: not a part 2
+    s = Settings(banner_bottom_text="Follow for part 2", banner_bottom_alt="Follow for more")
+    assert layout.bottom_banner(s, "T", None, next_part=True) == "Follow for part 2"
+    assert layout.bottom_banner(s, "T", None, next_part=False) == "Follow for more"
+    assert layout.bottom_banner(s, "T", "My own part 2 text", next_part=False) == "My own part 2 text"  # yours stays
+    assert layout.bottom_banner(s.copy(banner_bottom_text="Like it?"), "T", None, False) == "Like it?"
+    titled = s.copy(banner_bottom_text="{title}")  # a title that says "part 2" isn't your promise
+    assert layout.bottom_banner(titled, "The part 2 nobody talks about", None, False) == "The part 2 nobody talks about"
+
+
+def test_a_part_2_the_quality_check_will_reject_doesnt_count():
+    from ytclip.analyze import Clip
+
+    a, b = Clip(0, 10, 80), Clip(11, 20, 80, rating=3)
+    s = Settings(qc_enabled=True, qc_min_rating=5)
+    assert layout.has_next_part(a, [a, b]) and not layout.has_next_part(a, [a, b], s)
+    assert layout.has_next_part(a, [a, b], s.copy(qc_enabled=False))
+    assert layout.has_next_part(a, [a, Clip(11, 20, 80)], s)  # not rated: the check keeps it
+
+
+def test_the_ais_bottom_line_only_replaces_a_part_2_that_isnt_there():
+    s = Settings(banner_bottom=True, banner_bottom_text="Follow for part 2", banner_bottom_alt="Follow for more")
+    assert layout.uses_ai_bottom(s)
+    assert layout.bottom_banner(s, "T", None, False, ai="Would you stay?") == "Would you stay?"
+    assert layout.bottom_banner(s, "T", None, True, ai="Would you stay?") == "Follow for part 2"  # it's true here
+    assert layout.bottom_banner(s, "T", "Mine", False, ai="Would you stay?") == "Mine"
+    assert layout.bottom_banner(s, "T", None, False, ai="Part 2 on my page") == "Follow for more"  # never a promise
+    off = s.copy(polish_bottom_text=False)
+    assert layout.bottom_banner(off, "T", None, False, ai="Would you?") == "Follow for more"
+    blank = s.copy(banner_bottom_alt="")  # no words on a clip with no part 2: the AI doesn't add any
+    assert layout.bottom_banner(blank, "T", None, False, ai="Would you?") == "" and not layout.uses_ai_bottom(blank)
+    for fixed in ("Follow @bigtalkclips", "", "{title}"):  # your own line, a blank bar or the title stays
+        f = s.copy(banner_bottom_text=fixed)
+        assert not layout.uses_ai_bottom(f)
+        assert layout.bottom_banner(f, "Title", None, False, ai="Would you?") == layout.banner_text(fixed, "Title")
+    handle = s.copy(banner_bottom_text="Follow @BigTalk for part 2", banner_bottom_alt="Follow for more")
+    assert layout.bottom_handles(handle) == ["@BigTalk"]
+    assert layout.bottom_banner(handle, "T", None, False, ai="Would you stay? @bigtalk") == "Would you stay? @bigtalk"
+    assert layout.bottom_banner(handle, "T", None, False, ai="Would you stay?") == "Follow for more"  # lost the handle
+
+
 def test_wrap_shrinks_long_text_to_fit():
     box = layout.Box(0, 0, 1080, 200)
     font = "TikTok Sans Black"

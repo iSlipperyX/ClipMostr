@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass, fields, replace
+import time
+from dataclasses import asdict, dataclass, field, fields, replace
 from pathlib import Path
 
 from . import fonts
@@ -77,6 +78,7 @@ class Settings:
     ai_polish: bool = False  # polish.py: one extra Claude call per video for hooks, caption fixes, crops
     ai_polish_model: str = "claude-sonnet-5-5"
     polish_burned_subs: str = "off"  # off = turn our captions off when the video already has subtitles | keep
+    polish_bottom_text: bool = True  # the polish writes a bottom line for each clip with no part 2
     # Export
     aspect: str = "vertical_blur"
     resolution: int = 1080
@@ -109,6 +111,7 @@ class Settings:
     banner_top_size: int = 10
     banner_bottom: bool = False
     banner_bottom_text: str = "Follow for part 2"
+    banner_bottom_alt: str = "Follow for more"  # instead, when the bottom text promises a part 2 that doesn't exist
     banner_bottom_size: int = 8
     banner_mode: str = "bar"
     banner_bg: str = "#000000"
@@ -151,6 +154,8 @@ class Settings:
     pick_block_categories: str = "10, 1"  # Music, Film & Animation: reposts are usually claimed
     pick_block_words: str = "music video, lyric video, lyrics, official audio, trailer, full movie, full album"
     learn_from_results: bool = True  # learn.py: TikTok Manager's results rank channels and guide AI hooks
+    # Niches (niches.py): one TikTok account's topic each, edited in the Niches tab. Empty = no niches
+    niches: list = field(default_factory=list)
     # Automation (pipeline.py): the unattended runner
     auto_output_dir: str = ""  # "" = <output_dir>/Automation
     auto_preset: str = "Shorts / TikTok / Reels"
@@ -167,6 +172,10 @@ class Settings:
     auto_retries: int = 3
     auto_delete_sources: bool = True
     auto_keep_days: int = 14
+    # Clean up (cleanup.py): clear out downloads, rejected clips and clips TikTok Manager is done with
+    cleanup_auto: bool = False  # automation does it once a day
+    cleanup_kinds: str = "partial, previews, rejected, posted, removed"
+    cleanup_days: int = 3
     # 2 = text sizes are letter heights (1 = raw .ass sizes, which looked different in every font)
     text_units: int = 2
 
@@ -205,17 +214,34 @@ class Settings:
 
     # ------------------------------------------------------------ persistence
     @classmethod
-    def load(cls, path: Path | None = None) -> "Settings":
+    def load(cls, path: Path | None = None, tries: int = 3) -> "Settings":
         path = path or app_dir() / "settings.json"
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            return cls()
+        for attempt in range(tries):
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                break
+            except FileNotFoundError:
+                return cls()
+            except (OSError, ValueError):  # held for a moment by another program (a virus scanner), or broken
+                if attempt == tries - 1:
+                    return cls()
+                time.sleep(0.1)
         return cls().apply(migrate(data))
 
     def save(self, path: Path | None = None) -> None:
+        """Write settings.json whole or not at all: automation reads it while you type in the app."""
         path = path or app_dir() / "settings.json"
-        path.write_text(json.dumps(asdict(self), indent=2), encoding="utf-8")
+        text = json.dumps(asdict(self), indent=2)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        for attempt in range(5):
+            try:
+                os.replace(tmp, path)
+                return
+            except PermissionError:  # Windows: open in another program for a moment
+                time.sleep(0.05)
+        tmp.unlink(missing_ok=True)
+        path.write_text(text, encoding="utf-8")
 
 
 # ---------------------------------------------------------------- old files
@@ -426,6 +452,17 @@ PICK_FROM = (
     ("any", "Anything that passes the rules"),
 )
 
+# What Clean up can clear (cleanup.py), in the order it lists them
+CLEANUP_KINDS = (
+    ("partial", "Unfinished downloads"),
+    ("previews", "Preview renders"),
+    ("downloads", "Downloaded videos"),
+    ("analysis", "Saved transcripts and analysis"),
+    ("rejected", "Clips the quality check rejected"),
+    ("posted", "Clips you've posted (TikTok Manager)"),
+    ("removed", "Clips you removed in TikTok Manager"),
+)
+
 BANNER_MODES = (("bar", "Solid bar (video sits between)"), ("overlay", "Text over the video"))
 LAYOUT_FITS = (("auto", "Auto (from Format)"), ("crop", "Crop to fill"), ("blur", "Fit, blurred fill"),
                ("fit", "Fit, banner colour fill"))
@@ -493,9 +530,14 @@ SCHEMA: list[Field] = [
                    ("claude-haiku-5-5", "Claude Haiku 5.5 (cheapest)"))),
     Field("ai_instructions", "What makes a good clip?", "AI", "text"),
     Field("ai_polish", "Polish clips with AI", "AI", "bool",
-          help="One extra Claude call per video, with a frame from each clip: writes a hook for the top banner, "
-               "fixes misheard words in the captions, spots subtitles already in the video and centres "
-               "vertical crops on the speaker"),
+          help="One extra Claude call per video, with a frame from each clip: writes a hook for the top banner and "
+               "bottom lines for clips with no part 2, fixes misheard words in the captions, spots subtitles "
+               "already in the video and centres vertical crops on the speaker"),
+    Field("polish_bottom_text", "AI writes the bottom text when there's no part 2", "AI", "bool",
+          help="When your bottom text promises a part 2 (like 'Follow for part 2'), each clip with no part 2 gets "
+               "a line the AI wrote for it, never promising one, instead of the same 'no part 2' text every time. "
+               "It keeps any @handle in your bottom texts. Clips with a part 2 keep your bottom text. Off: clips "
+               "with no part 2 show the 'no part 2' text (Settings → Layout)"),
     Field("ai_polish_model", "Model for polishing", "AI", "choice",
           choices=(("claude-opus-5-5", "Claude Opus 5.5 (best)"), ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
                    ("claude-haiku-5-5", "Claude Haiku 5.5 (cheapest)"))),
@@ -546,7 +588,14 @@ SCHEMA: list[Field] = [
     Field("banner_top_size", "Top banner height (%)", "Layout", "int", lo=4, hi=35,
           help="Height of the text area. With TikTok-ready output the bar also covers TikTok's tabs above it"),
     Field("banner_bottom", "Bottom banner", "Layout", "bool", help="A bar of text below the video"),
-    Field("banner_bottom_text", "Bottom text", "Layout", "str", help="{title} is replaced with the clip title"),
+    Field("banner_bottom_text", "Bottom text", "Layout", "str",
+          help="{title} is replaced with the clip title. Text that promises a part 2 only shows on a clip that "
+               "another clip carries straight on from; other clips show the AI's line for them (with AI polish) or "
+               "the text below. Each clip can override this in the Layout tab"),
+    Field("banner_bottom_alt", "Bottom text when there's no part 2", "Layout", "str",
+          help="Shown instead of the bottom text on a clip with no part 2, when the bottom text promises one. "
+               "With AI polish the AI writes a line for each such clip instead (Settings → AI). Leave it blank "
+               "for no words on those clips"),
     Field("banner_bottom_size", "Bottom banner height (%)", "Layout", "int", lo=4, hi=35,
           help="Height of the text area. With TikTok-ready output the bar sits above TikTok's caption and "
                "fills the strip behind it, so no video is hidden. Pick 'Text over the video' to keep that video"),
@@ -666,4 +715,12 @@ SCHEMA: list[Field] = [
     Field("auto_delete_sources", "Delete full downloads after clipping", "Automation", "bool"),
     Field("auto_keep_days", "Clear cached analysis after (days)", "Automation", "int", lo=1, hi=365,
           help="Transcripts and measurements of finished videos are removed from the download cache"),
+    Field("cleanup_auto", "Clean up by itself once a day", "Automation", "bool",
+          help="Automation clears out what's ticked below, without asking. Clean up… in the Library or "
+               "Automation tab shows what would go, and how much space it frees, before anything is deleted"),
+    Field("cleanup_kinds", "What to clear", "Automation", "multi", choices=CLEANUP_KINDS,
+          help="Clips TikTok Manager still has waiting are never cleared, and nor is anything for a video "
+               "that's queued, being clipped or in the Studio's list"),
+    Field("cleanup_days", "Only things older than (days)", "Automation", "int", lo=1, hi=365,
+          help="Posted clips count from when you posted them; everything else from when it was made"),
 ]

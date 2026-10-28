@@ -53,6 +53,15 @@ def is_url(text: str) -> bool:
     return text.strip().lower().startswith(("http://", "https://", "www."))
 
 
+_ID_IN_URL = re.compile(r"(?:v=|youtu\.be/|/shorts/|/live/|/embed/|/v/)([\w-]{11})")
+
+
+def video_id(url: str) -> str:
+    """The YouTube video id in a link, or the link itself when it has none."""
+    m = _ID_IN_URL.search(url)
+    return m.group(1) if m else url.strip()
+
+
 def needs_expansion(src: str) -> bool:
     """Playlists, channels and folders turn into many videos; plain videos don't."""
     if is_url(src):
@@ -281,12 +290,19 @@ def _fetch(url: str, cookies: str | None, tries: int = 3, sleep: Callable[[float
     raise AssertionError("unreachable")
 
 
+def local_id(path: Path) -> str:
+    """The id a video file on this PC goes by: its cached transcript and analysis are named after it.
+    Raises OSError when the file isn't there."""
+    path = path.resolve()
+    st = path.stat()
+    return hashlib.sha1(f"{path}|{st.st_size}|{st.st_mtime_ns}".encode()).hexdigest()[:11]
+
+
 def local_video(path: Path) -> Video:
     path = path.resolve()
     if not path.exists():
         raise FileNotFoundError(path)
-    st = path.stat()
-    vid = hashlib.sha1(f"{path}|{st.st_size}|{st.st_mtime_ns}".encode()).hexdigest()[:11]
+    vid = local_id(path)
     info = probe(path)
     subs = next((p for p in (path.with_suffix(".vtt"), path.with_suffix(".en.vtt")) if p.exists()), None)
     return Video(id=vid, title=path.stem, channel="Local files", upload_date="", duration=info.duration,

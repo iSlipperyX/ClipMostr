@@ -65,7 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="stack a second video (gameplay, satisfying clips...) under each clip, 9:16; give a "
                         "folder to use a different video from it for each clip")
     p.add_argument("--polish", action="store_true",
-                   help="AI polish: hooks for the top banner, caption fixes, speaker crops (needs an Anthropic key)")
+                   help="AI polish: hooks for the top banner, bottom lines for clips with no part 2, caption "
+                        "fixes, speaker crops (needs an Anthropic key)")
     p.add_argument("--bleep", action="store_true", help="mask strong swearing in captions (f*ck, sh*t)")
     p.add_argument("--qc", action="store_true", help="check each clip after export; failures move to _rejected")
     p.add_argument("--keywords", help="comma-separated words/phrases to boost")
@@ -358,7 +359,7 @@ def run_research(argv: list[str]) -> int:
             if args.json:
                 keep = ("id", "url", "title", "channel", "score", "parts", "reasons", "moments", "regions",
                         "views", "velocity", "recent", "duration", "published", "category", "new", "origins",
-                        "license")
+                        "license", "niche")
                 rows = []
                 for v in top:
                     row = {k: (v.url if k == "url" else getattr(v, k)) for k in keep}
@@ -426,6 +427,7 @@ def build_auto_parser() -> argparse.ArgumentParser:
     p.add_argument("--once", action="store_true", help="do what's due now, then exit (for scheduled runs)")
     p.add_argument("--status", action="store_true", help="show the queue and what automation is doing")
     p.add_argument("--add", nargs="+", metavar="URL", help="queue videos yourself")
+    p.add_argument("--niche", metavar="NAME", default="", help="with --add: the niche they're for")
     p.add_argument("--retry", nargs="+", metavar="ID", help="try failed videos again (ids from --status)")
     p.add_argument("--remove", nargs="+", metavar="ID", help="take videos out of the queue")
     p.add_argument("--pause", action="store_true", help="pause a running automation")
@@ -455,6 +457,9 @@ def _auto_status(db) -> None:
     if not jobs:
         console.print("Nothing queued yet.")
         return
+    from . import niches
+
+    names = {n.id: n.name for n in niches.load(Settings.load())}
     table = Table(show_edge=False, header_style="bold")
     for col in ("Id", "Video", "Status", "Clips", "Updated", "Why it was picked"):
         table.add_column(col, overflow="fold" if col in ("Video", "Status", "Why it was picked") else "ellipsis")
@@ -465,7 +470,8 @@ def _auto_status(db) -> None:
             status += f": {escape(j.stage)}"
         if j.error and j.status != "done":
             status += f"\n[dim]{escape(j.error[:200])}[/]"
-        table.add_row(j.id, f"{escape(j.title or j.url)}\n[dim]{escape(j.channel)}[/]", status,
+        where = escape(j.channel) + (f" · {escape(names[j.niche])}" if j.niche in names else "")
+        table.add_row(j.id, f"{escape(j.title or j.url)}\n[dim]{where}[/]", status,
                       f"{j.clips} (+{j.rejected} rejected)" if j.rejected else str(j.clips or ""),
                       age_text((now - j.updated) / 3600) + " ago", escape(j.permission))
     console.print(table)
@@ -502,10 +508,21 @@ def run_auto(argv: list[str]) -> int:
         console.print("Done.")
         return 0
     if args.add:
+        from . import niches
+
+        niche = ""
+        if args.niche:
+            mine = niches.load(Settings.load())
+            found = next((n for n in mine if n.name.lower() == " ".join(args.niche.split()).lower()), None)
+            if not found:
+                names = ", ".join(n.name for n in mine) or "none yet"
+                console.print(f"[red]No niche called {escape(args.niche)} (yours: {escape(names)}).[/]")
+                return 2
+            niche = found.id
         runner = pipeline.Runner(db)
         for url in args.add:
             try:
-                added = runner.add_manual(url)
+                added = runner.add_manual(url, niche=niche)
             except ValueError as exc:
                 console.print(f"[red]{escape(url)}: {escape(str(exc))}[/]")
                 return 2
@@ -584,8 +601,120 @@ def run_results(argv: list[str]) -> int:
     return 0
 
 
+def run_clean(argv: list[str]) -> int:
+    from . import cleanup
+    from .jobs import JobDB
+    from .settings import CLEANUP_KINDS
+
+    p = argparse.ArgumentParser(prog="ytclip clean", description="Clear out what nothing needs any more: unfinished "
+                                "downloads, preview renders, downloaded videos and their analysis, rejected clips, "
+                                "and clips TikTok Manager says you posted or removed. Without --delete it only "
+                                "lists what would go.")
+    p.add_argument("--only", metavar="KINDS", default="",
+                   help="comma separated: " + ", ".join(k for k, _ in CLEANUP_KINDS)
+                        + " (default: all but downloads and analysis)")
+    p.add_argument("--older-than", type=float, default=0.0, metavar="DAYS",
+                   help="only things older than this (posted clips count from when you posted them)")
+    p.add_argument("--delete", action="store_true", help="really remove them")
+    p.add_argument("--list", action="store_true", help="list every file")
+    args = p.parse_args(argv)
+    kinds = cleanup.parse_kinds(args.only) if args.only else \
+        [k for k in cleanup.KINDS if k not in ("downloads", "analysis")]
+    if not kinds:
+        console.print(f"[red]Nothing to clear: --only takes {escape(', '.join(cleanup.KINDS))}[/]")
+        return 2
+    s = Settings.load()
+    db = JobDB()
+    try:
+        plan = cleanup.plan(s, busy=cleanup.busy_ids(db), older_than_days=args.older_than, kinds=kinds)
+    finally:
+        db.close()
+    for note in plan.notes:
+        console.print(f"[yellow]{escape(note)}[/]")
+    totals = plan.totals()
+    table = Table(show_edge=False, header_style="bold")
+    for col in ("What", "How many", "Space"):
+        table.add_column(col, justify="left" if col == "What" else "right")
+    for k in kinds:
+        n, size = totals[k]
+        table.add_row(escape(cleanup.LABELS[k]), str(n), cleanup.size_text(size) if n else "")
+    console.print(table)
+    if plan.kept_for_tm:
+        console.print(f"[dim]{plan.kept_for_tm} clip{'s' if plan.kept_for_tm != 1 else ''} stay because TikTok "
+                      "Manager still has them.[/]")
+    if args.list:
+        for it in plan.items:
+            console.print(f"[dim]{escape(cleanup.LABELS[it.kind])}:[/] {escape(str(it.path))}")
+    if not plan.items:
+        console.print("Nothing to clear.")
+        return 0
+    if not args.delete:
+        console.print(f"Run again with --delete to remove {plan.count(kinds)} item"
+                      f"{'s' if plan.count(kinds) != 1 else ''} and free {cleanup.size_text(plan.size(kinds))}.")
+        return 0
+    result = cleanup.apply(plan, kinds)
+    console.print(f"[green]Cleared {escape(result.summary())}.[/]")
+    for path, error in result.failed:
+        console.print(f"[yellow]Couldn't remove {escape(path)}: {escape(error)}[/]")
+    return 1 if result.failed else 0
+
+
+def run_niches(argv: list[str]) -> int:
+    from . import niches
+    from .jobs import JobDB
+    from .policy import PickLog, picks_path
+
+    p = argparse.ArgumentParser(prog="ytclip niches", description="Your niches (one TikTok account's topic each, "
+                                "set up in the app's Niches tab) and how each is doing.")
+    p.add_argument("--json", action="store_true", help="print them as JSON")
+    args = p.parse_args(argv)
+    s = Settings.load()
+    all_niches = niches.load(s)
+    now = time.time()
+    picks = PickLog(picks_path())
+    db = JobDB()
+    try:
+        counts = db.niche_counts(now - 7 * 86400)
+    finally:
+        db.close()
+    rows = []
+    for n in all_niches:
+        refs, _ = n.channel_refs()
+        c = counts.get(n.id, {})
+        rows.append({"id": n.id, "name": n.name, "account": n.account, "on": n.enabled, "per_day": n.daily,
+                     "channels": len(refs), "searches": len(n.search_list()),
+                     "picked_today": picks.count_since(now - 86400, niche=n.id), "waiting": c.get("waiting", 0),
+                     "clips_this_week": c.get("clips", 0), "folder": str(s.auto_output_path / n.folder)})
+    if args.json:
+        import json
+
+        print(json.dumps(rows, indent=1, ensure_ascii=False))
+        return 0
+    if not rows:
+        console.print("No niches yet. Add them in ClipMonster's Niches tab: each one is a TikTok account's topic, "
+                      "with its own channels, searches, look and folder.")
+        return 0
+    table = Table(show_edge=False, header_style="bold")
+    for col in ("Niche", "Account", "Per day", "Sources", "Today", "Waiting", "Clips (7 days)"):
+        table.add_column(col, justify="left" if col in ("Niche", "Account") else "right")
+    for r in rows:
+        table.add_row(escape(r["name"]) + ("" if r["on"] else " [dim](off)[/]"), escape(r["account"]),
+                      str(r["per_day"]), f"{r['channels']} ch · {r['searches']} cc", str(r["picked_today"]),
+                      str(r["waiting"]), str(r["clips_this_week"]))
+    console.print(table)
+    total = sum(r["per_day"] for r in rows if r["on"])
+    if total > s.pick_daily:
+        console.print(f"[yellow]Your niches add up to {total} videos a day, but at most {s.pick_daily} are picked a "
+                      "day in all (Settings → Picking → Videos picked per day).[/]")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
+    if argv[:1] == ["clean"]:
+        return run_clean(argv[1:])
+    if argv[:1] == ["niches"]:
+        return run_niches(argv[1:])
     if argv[:1] == ["results"]:
         return run_results(argv[1:])
     if argv[:1] == ["research"]:

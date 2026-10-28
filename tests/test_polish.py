@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from ytclip import engine as engine_mod
-from ytclip import polish
+from ytclip import polish, qc
 from ytclip.analyze import Clip, Measurements, trim_dead_air
 from ytclip.download import Video
 from ytclip.engine import Engine, Project
@@ -82,7 +82,7 @@ def _export_project(tmp_path, words_=None):
 @pytest.fixture
 def fake_export(monkeypatch):
     calls = []
-    monkeypatch.setattr(engine_mod, "export_clip", lambda src, media, dest, clip, w, s, prog=None:
+    monkeypatch.setattr(engine_mod, "export_clip", lambda src, media, dest, clip, w, s, prog=None, **kw:
                         calls.append((dest.name, s)) or dest.write_bytes(b"clip"))
     return calls
 
@@ -214,6 +214,43 @@ def test_banner_left_alone_when_it_is_off_or_has_no_title():
     assert clips[0].top_text is None and clips[0].hook == "Hook"
 
 
+def test_parse_reads_the_bottom_line():
+    answer = json.dumps({"burned_in_subtitles": False, "clips": [
+        {"clip": 1, "hook": "The #1 mistake #fyp", "bottom_text": ' "Would you   have stayed?" #fyp ', "subject_x": 0.5,
+         "fixes": [], "rating": 8, "rating_note": ""}]})
+    assert parse(answer, 1).clips[0].bottom_text == "Would you have stayed?"
+    assert parse(answer, 1).clips[0].hook == "The #1 mistake"  # a number isn't a hashtag
+    line = "Would you have walked out of that meeting halfway? Follow @bigtalkclips_daily"
+    long = json.dumps({"burned_in_subtitles": False, "clips": [
+        {"clip": 1, "hook": "h", "bottom_text": line, "subject_x": 0.5, "fixes": [], "rating": 8, "rating_note": ""}]})
+    assert parse(long, 1).clips[0].bottom_text == ""  # left out rather than cut through its @handle
+
+
+def test_the_ai_writes_each_clips_bottom_line_but_never_a_part_2():
+    clips = [Clip(0, 10, 80), Clip(11, 20, 80), Clip(40, 50, 80), Clip(60, 70, 80, edited=True),
+             Clip(80, 90, 80, bottom_text="Mine")]
+    result = Polish({0: ClipPolish("a", bottom_text="Part 2 on my page"),  # promises one: never kept
+                     1: ClipPolish("b", bottom_text="Would you stay?"),
+                     2: ClipPolish("c", bottom_text="Would you do it?"),
+                     3: ClipPolish("d", bottom_text="Edited clip"), 4: ClipPolish("e", bottom_text="Not mine")})
+    summary = polish.apply(result, clips, [], "{title}", banner_on=True, bottom_on=True)
+    assert [c.bottom_ai for c in clips] == ["", "Would you stay?", "Would you do it?", "", "Not mine"]
+    assert [c.bottom_text for c in clips] == [None, None, None, None, "Mine"]  # your own text is never touched
+    assert summary["bottom_lines"] == 3
+    off = [Clip(0, 10, 80)]
+    summary = polish.apply(Polish({0: ClipPolish("a", bottom_text="Would you?")}), off, [], "{title}", bottom_on=False)
+    assert off[0].bottom_ai == "Would you?" and summary["bottom_lines"] == 0  # kept, but your settings don't show it
+
+
+def test_the_ai_is_told_the_usual_line_and_the_handles_to_keep(tmp_path):
+    blocks = polish.build_content("Title", [Clip(0, 10, 80), Clip(11, 20, 80)], [], [None] * 2,
+                                  bottom="Follow for more", handles=["@bigtalk"])
+    assert "usual bottom line: Follow for more" in blocks[0]["text"]
+    assert "must include @bigtalk" in blocks[0]["text"]
+    assert "carries on" not in blocks[1]["text"]
+    assert "usual bottom line" not in polish.build_content("Title", [Clip(0, 10, 80)], [], [None])[0]["text"]
+
+
 def test_content_has_a_frame_per_clip_and_the_transcript(tmp_path):
     frame = tmp_path / "f.jpg"
     frame.write_bytes(b"\xff\xd8jpeg")
@@ -233,7 +270,7 @@ def _polish_project():
 def test_engine_polish_applies_the_answer(monkeypatch):
     seen = {}
 
-    def ask(title, clips, w, src, key, model, log=None, check=None, guide=""):
+    def ask(title, clips, w, src, key, model, log=None, check=None, guide="", bottom="", handles=None):
         seen.update(title=title, n=len(clips), model=model, guide=guide)
         return Polish({0: ClipPolish("Hook!", 0.7, [("joe rogen", "Joe Rogan")])}, True, model)
 
@@ -247,6 +284,73 @@ def test_engine_polish_applies_the_answer(monkeypatch):
     p2 = _polish_project()
     Engine(s.copy(polish_burned_subs="keep")).polish(p2)
     assert not p2.captions_off
+
+
+def test_engine_polish_writes_the_bottom_line_when_that_banner_is_on(monkeypatch):
+    seen = {}
+
+    def ask(title, clips, w, src, key, model, log=None, check=None, guide="", bottom="", handles=None):
+        seen.update(bottom=bottom, handles=handles)
+        return Polish({0: ClipPolish("Hook!", bottom_text="Would you stay? @me")}, False, model)
+
+    monkeypatch.setattr(polish, "ask", ask)
+    logs = []
+    s = Settings(ai_api_key="k", banner_bottom=True, banner_bottom_text="Follow @me for part 2",
+                 banner_bottom_alt="Follow for more {title}")
+    p = _polish_project()
+    Engine(s, log=logs.append).polish(p)
+    assert seen == {"bottom": "Follow for more", "handles": ["@me"]}
+    assert p.clips[0].bottom_ai == "Would you stay? @me" and p.clips[0].bottom_text is None
+    assert any("1 bottom lines" in m for m in logs)
+    for other in (s.copy(polish_bottom_text=False), s.copy(banner_bottom_text="Follow @me"),
+                  s.copy(banner_bottom=False)):
+        logs.clear()
+        Engine(other, log=logs.append).polish(_polish_project())
+        assert seen == {"bottom": "", "handles": []} and not any("bottom lines" in m for m in logs)
+
+
+def test_export_tells_each_clip_whether_a_part_2_follows(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(engine_mod, "export_clip", lambda src, media, dest, clip, w, s, prog=None, next_part=True:
+                        calls.append(next_part) or dest.write_bytes(b"clip"))
+    s = Settings(output_dir=str(tmp_path / "out"), thumbnails=False, tiktok_ready=False, write_srt=False)
+    p = _export_project(tmp_path)
+    p.clips = [Clip(0, 10, 80), Clip(11, 20, 70), Clip(50, 60, 60)]
+    Engine(s).export(p)
+    assert calls == [True, False, False]
+
+
+def test_a_clip_never_promises_a_part_2_the_quality_check_rejects(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(engine_mod, "export_clip", lambda src, media, dest, clip, w, s, prog=None, next_part=True:
+                        calls.append((clip.title, next_part)) or dest.write_bytes(b"clip"))
+    monkeypatch.setattr(qc, "measure", lambda path: qc.FileStats(0 if "two" in path.name else 1))
+    monkeypatch.setattr(qc, "judge_file", lambda stats, *a: qc.Verdict() if stats.duration else
+                        qc.Verdict(False, ["The file can't be read"]))
+    s = Settings(output_dir=str(tmp_path / "out"), thumbnails=False, tiktok_ready=False, write_srt=False,
+                 qc_enabled=True, qc_min_rating=5, banner_bottom=True, banner_bottom_text="Follow for part 2")
+
+    def project(rating=0):
+        p = _export_project(tmp_path)
+        p.clips = [Clip(10, 40, 80, "one"), Clip(41, 70, 70, "too", rating=rating), Clip(120, 150, 60, "three")]
+        return p
+
+    Engine(s).export(project(rating=3))  # the AI rated part 2 too low: the check will reject it
+    assert calls == [("one", False), ("too", False), ("three", False)]
+    calls.clear()
+    p = project()
+    p.clips[1].title = "two"  # its file fails the check: part 1 is made again without the promise
+    logs = []
+    out = Engine(s, log=logs.append).export(p)
+    assert calls == [("one", True), ("two", False), ("three", False), ("one", False)]
+    assert any("again without promising a part 2" in m for m in logs)
+    files = [r["file"] for r in json.loads((out / "clips.json").read_text(encoding="utf-8"))["clips"]]
+    assert files[1].startswith("_rejected/") and (out / files[0]).exists()
+    calls.clear()
+    p = project()
+    p.clips[1].title = "two"
+    Engine(s.copy(banner_bottom_text="Follow for more")).export(p)  # the same words either way: made once
+    assert [c for c in calls if c[0] == "one"] == [("one", True)]
 
 
 def test_engine_polish_failure_never_stops_the_video(monkeypatch):

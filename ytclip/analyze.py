@@ -53,6 +53,7 @@ class Clip:
     edited: bool = False  # touched by the user, so re-detection keeps it
     top_text: str | None = None  # banner text for this clip; None = the template in settings, "" = no words
     bottom_text: str | None = None
+    bottom_ai: str = ""  # the AI polish's bottom line, for when the clip has no part 2 (layout.bottom_banner)
     hook: str = ""  # a short line written by the AI polish (polish.py) for the banner and the upload caption
     rating: int = 0  # the AI polish's 1-10 "does it stand alone?" (0 = not rated); qc.py rejects low ones
     rating_note: str = ""  # what holds it back, when rated low

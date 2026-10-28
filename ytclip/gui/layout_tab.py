@@ -129,6 +129,7 @@ class LayoutTab(QWidget):
         super().__init__(parent)
         self.settings = settings
         self.clip: Clip | None = None
+        self.next_part = True
         self.src: Path | None = None
         self.media: MediaInfo | None = None
         self.words: list = []
@@ -269,8 +270,9 @@ class LayoutTab(QWidget):
         self._redraw()
 
     def set_clip(self, clip: Clip | None, src: Path | None = None, media: MediaInfo | None = None,
-                 words: list | None = None) -> None:
+                 words: list | None = None, next_part: bool = True) -> None:
         self.clip, self.src, self.media, self.words = clip, src, media, words or []
+        self.next_part = next_part  # another clip carries this one on (its part 2)
         self._refresh_clip_fields()
         self._redraw()
 
@@ -289,7 +291,10 @@ class LayoutTab(QWidget):
                 none.setChecked(blank)
                 none.blockSignals(False)
             edit.setEnabled(c is not None and on and not blank)
-            default = layout.banner_text(template, title)
+            if edit is self.bottom_edit:
+                default = layout.bottom_banner(s, title, None, self.next_part if c else True, c.bottom_ai if c else "")
+            else:
+                default = layout.banner_text(template, title)
             where = "Top" if edit is self.top_edit else "Bottom"
             if not on:
                 edit.setPlaceholderText(f"{where} banner is off")
@@ -331,7 +336,8 @@ class LayoutTab(QWidget):
         plan = layout.plan(s, w, h)
         title = self.clip.title if self.clip else "Your clip title"
         top = layout.banner_text(s.banner_top_text, title, self.clip.top_text if self.clip else None)
-        bottom = layout.banner_text(s.banner_bottom_text, title, self.clip.bottom_text if self.clip else None)
+        bottom = layout.bottom_banner(s, title, self.clip.bottom_text if self.clip else None,
+                                      self.next_part if self.clip else True, self.clip.bottom_ai if self.clip else "")
         self.sketch.show_plan(plan, s, top, bottom)
         can_render = self.clip is not None and self.src is not None and self.media is not None
         self.still_btn.setEnabled(can_render)
@@ -350,13 +356,14 @@ class LayoutTab(QWidget):
         gen = self._gen
         clip, s = replace(self.clip), self.settings.copy()
         s.stack_video = preview_video(s)
-        src, media, words = self.src, self.media, list(self.words)
+        src, media, words, next_part = self.src, self.media, list(self.words), self.next_part
         dest = Path(tempfile.gettempdir()) / f"{APP_NAME}_layout_{gen}.jpg"
         self.status.setText("Rendering frame…")
 
         def work() -> None:
             try:
-                export_clip(src, media, dest, clip, words, s, still_at=min(1.5, clip.length / 2))
+                export_clip(src, media, dest, clip, words, s, still_at=min(1.5, clip.length / 2),
+                            next_part=next_part)
                 self._bridge.done.emit(gen, str(dest), "")
             except Exception as exc:  # shown in the tab; a still is never worth a dialog
                 self._bridge.done.emit(gen, "", str(exc))

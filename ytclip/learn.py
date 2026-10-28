@@ -61,6 +61,7 @@ class Outcome:
     score: float | None = None  # ClipMonster's clip score
     posted_at: float = 0.0
     account: str = ""
+    niche: str = ""  # id of the ClipMonster niche the clip was made for (see for_settings)
 
     @classmethod
     def from_json(cls, d: dict) -> "Outcome | None":
@@ -76,7 +77,8 @@ class Outcome:
                    hook=str(d.get("hook") or "").strip(),
                    rating=int(rating) if isinstance(rating, (int, float)) else None,
                    score=float(score) if isinstance(score, (int, float)) else None,
-                   posted_at=float(d.get("posted_at") or 0), account=str(d.get("account") or ""))
+                   posted_at=float(d.get("posted_at") or 0), account=str(d.get("account") or ""),
+                   niche=str(d.get("niche") or ""))
 
 
 @dataclass
@@ -153,9 +155,11 @@ class Lessons:
 
     # --------------------------------------------------------------- for the AI polish
 
-    def hook_examples(self, count: int = 3) -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
-        """(hooks that worked, hooks that flopped) as (hook, lift), best and worst first."""
-        hooked = [o for o in self.outcomes if o.hook]
+    def hook_examples(self, count: int = 3,
+                      niche: str = "") -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
+        """(hooks that worked, hooks that flopped) as (hook, lift), best and worst first. For a niche,
+        its own posts once there are enough of them (what works differs between accounts), else all."""
+        hooked = self._hooked(niche)
         if len(hooked) < MIN_EXAMPLES:
             return [], []
         ranked = sorted(hooked, key=lambda o: o.lift, reverse=True)
@@ -163,12 +167,20 @@ class Lessons:
         bad = [(o.hook, o.lift) for o in reversed(ranked) if o.lift <= 0.6][:count]
         return good, bad
 
-    def prompt_text(self) -> str:
+    def _hooked(self, niche: str = "") -> list[Outcome]:
+        hooked = [o for o in self.outcomes if o.hook]
+        own = [o for o in hooked if niche and o.niche == niche]
+        return own if len(own) >= MIN_EXAMPLES else hooked
+
+    def prompt_text(self, niche: str = "") -> str:
         """A paragraph for the polish prompt, or "" when there isn't enough to go on."""
-        good, bad = self.hook_examples()
+        good, bad = self.hook_examples(niche=niche)
         if not good and not bad:
             return ""
-        lines = ["How earlier hooks did on this TikTok account (views compared with the account's usual):"]
+        if niche and any(o.niche != niche for o in self._hooked(niche)):  # too few of its own yet
+            lines = ["How earlier hooks did on your TikTok accounts (views compared with each account's usual):"]
+        else:
+            lines = ["How earlier hooks did on this TikTok account (views compared with the account's usual):"]
         lines += [f'- worked: "{h}" ({_times(lift)})' for h, lift in good]
         lines += [f'- flopped: "{h}" ({_times(lift)})' for h, lift in bad]
         lines.append("Write hooks more like the ones that worked, but always about what happens in this clip.")
@@ -222,5 +234,16 @@ class Lessons:
 
 
 def for_settings(s) -> Lessons | None:
-    """The lessons to use with these settings: None when learning from results is off."""
-    return Lessons.load() if getattr(s, "learn_from_results", False) else None
+    """The lessons to use with these settings: None when learning from results is off. TikTok Manager
+    doesn't say which niche a post was for, so that comes from picks.json (the niche each video was
+    picked for)."""
+    if not getattr(s, "learn_from_results", False):
+        return None
+    lessons = Lessons.load()
+    if any(not o.niche for o in lessons.outcomes):
+        from .policy import PickLog, picks_path
+
+        picked = {p["id"]: str(p.get("niche") or "") for p in PickLog(picks_path()).picks}
+        for o in lessons.outcomes:
+            o.niche = o.niche or picked.get(o.video_id, "")
+    return lessons

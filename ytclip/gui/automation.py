@@ -13,11 +13,11 @@ from typing import Callable
 
 from PySide6.QtCore import Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices
-from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QHBoxLayout, QHeaderView, QLabel,
-                               QLineEdit, QMenu, QPlainTextEdit, QPushButton, QSplitter, QTableWidget,
+from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QHBoxLayout, QHeaderView,
+                               QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QSplitter, QTableWidget,
                                QTableWidgetItem, QVBoxLayout, QWidget)
 
-from .. import learn, pipeline
+from .. import learn, niches, pipeline
 from ..clipability import age_text
 from ..jobs import Job, JobDB
 from ..research import youtube_key
@@ -25,7 +25,9 @@ from ..settings import Settings
 from . import theme
 from .library import reveal
 
-COLUMNS = ("Video", "Channel", "Status", "Clips", "Updated", "Why it was picked")
+COLUMNS = ("Video", "Channel", "Niche", "Status", "Clips", "Updated", "Why it was picked")
+NICHE_COLUMN = COLUMNS.index("Niche")
+STATUS_COLUMN = COLUMNS.index("Status")
 STATUS_COLOURS = {"working": theme.ACCENT_2, "queued": theme.TEXT, "done": theme.GOOD, "failed": theme.BAD}
 STATUS_WORDS = {"working": "Working", "queued": "Waiting", "done": "Done", "failed": "Failed"}
 LOG_LINES = 300
@@ -34,6 +36,7 @@ LOG_LINES = 300
 class Automation(QWidget):
     notice = Signal(str)
     open_settings = Signal(str)
+    clean_up = Signal()  # open the Clean up window
 
     def __init__(self, settings: Callable[[], Settings], db: JobDB | None = None,
                  launch: Callable[[], None] = pipeline.launch_background, parent=None):
@@ -46,7 +49,9 @@ class Automation(QWidget):
         self._log_size = -1
         self._windows_checked = False
         self._lessons_sig: tuple | None = None
+        self._niche_names: dict[str, str] = {}
         self._build()
+        self.niches_changed()
         self.refresh()
         self.timer = QTimer(self, interval=3000)
         self.timer.timeout.connect(self.refresh)
@@ -85,6 +90,8 @@ class Automation(QWidget):
         self.link = QLineEdit()
         self.link.setPlaceholderText("Paste a YouTube link to queue it yourself")
         self.link.returnPressed.connect(self.add_link)
+        self.niche = QComboBox()
+        self.niche.setToolTip("The niche a video you queue is for: its style, and its folder")
         add = QPushButton("Queue")
         add.clicked.connect(self.add_link)
         self.with_windows = QCheckBox("Start with Windows")
@@ -98,13 +105,19 @@ class Automation(QWidget):
         setup.clicked.connect(lambda: self.open_settings.emit("Automation"))
         open_out = QPushButton("Open clips folder")
         open_out.clicked.connect(self._open_output)
+        clean = QPushButton("🧹  Clean up…")
+        clean.setToolTip("Clear out downloads, rejected clips and clips TikTok Manager is done with. Shows what "
+                         "would go first")
+        clean.clicked.connect(self.clean_up.emit)
         row.addWidget(self.link, 1)
+        row.addWidget(self.niche)
         row.addWidget(add)
         row.addSpacing(10)
         row.addWidget(self.with_windows)
         row.addWidget(rules)
         row.addWidget(setup)
         row.addWidget(open_out)
+        row.addWidget(clean)
         layout.addLayout(row)
 
         self.table = QTableWidget(0, len(COLUMNS))
@@ -119,7 +132,7 @@ class Automation(QWidget):
         head = self.table.horizontalHeader()
         head.setSectionResizeMode(QHeaderView.ResizeToContents)
         head.setSectionResizeMode(0, QHeaderView.Stretch)
-        head.setSectionResizeMode(2, QHeaderView.Stretch)
+        head.setSectionResizeMode(STATUS_COLUMN, QHeaderView.Stretch)
         self.table.verticalHeader().setDefaultSectionSize(30)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
         self.table.customContextMenuRequested.connect(self._menu)
@@ -166,6 +179,21 @@ class Automation(QWidget):
         layout.addWidget(hint)
 
     # ================================================================== state
+    def niches_changed(self) -> None:
+        """Niches were added, renamed or removed: the queue's Niche column and the niche picker follow."""
+        all_niches = niches.load(self._settings())
+        self._niche_names = {n.id: n.name for n in all_niches}
+        keep = self.niche.currentData()
+        self.niche.blockSignals(True)
+        self.niche.clear()
+        for n in all_niches:
+            self.niche.addItem(n.name, n.id)
+        self.niche.addItem("No niche", "")
+        self.niche.setCurrentIndex(max(0, self.niche.findData(keep)) if keep is not None else 0)
+        self.niche.blockSignals(False)
+        self.niche.setVisible(bool(all_niches))
+        self._sig = None  # redraw the table with the new names
+
     def running(self) -> bool:
         return pipeline.runner_alive(self.db)
 
@@ -219,7 +247,7 @@ class Automation(QWidget):
 
     def _fill_table(self) -> None:
         jobs = self.db.jobs()
-        sig = [(j.id, j.status, j.stage, j.updated, j.clips, j.rejected) for j in jobs]
+        sig = [(j.id, j.status, j.stage, j.updated, j.clips, j.rejected, j.niche) for j in jobs]
         counts = self.db.counts()
         self.counts.setText(f"{counts['queued']} waiting · {counts['working']} working · {counts['done']} done · "
                             f"{counts['failed']} failed")
@@ -233,9 +261,11 @@ class Automation(QWidget):
             word = STATUS_WORDS.get(j.status, j.status)
             status = word + (f": {j.stage}" if j.stage and j.stage not in (word, "Done") else "")
             tip = j.error if j.error and j.status != "done" else ""
+            niche = self._niche_names.get(j.niche, "(deleted niche)" if j.niche else "")
             cells = [
                 _item(j.title or j.url, j.url),
                 _item(j.channel),
+                _item(niche),
                 _item(status, "\n".join(x for x in (status, tip, j.recipe and f"Style: {j.recipe}") if x)),
                 _item(f"{j.clips} ✓ {j.rejected} ✗" if j.rejected else str(j.clips) if j.clips else "",
                       f"{j.clips} ready to upload, {j.rejected} rejected by the quality check (in the _rejected "
@@ -244,12 +274,13 @@ class Automation(QWidget):
                 _item(j.permission),
             ]
             cells[0].setData(Qt.UserRole, j.id)
-            cells[2].setForeground(QColor(STATUS_COLOURS.get(j.status, theme.TEXT)))
-            cells[3].setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            cells[STATUS_COLUMN].setForeground(QColor(STATUS_COLOURS.get(j.status, theme.TEXT)))
+            cells[STATUS_COLUMN + 1].setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             for c, cell in enumerate(cells):
                 self.table.setItem(r, c, cell)
             if j.id in keep:
                 self.table.selectRow(r)
+        self.table.setColumnHidden(NICHE_COLUMN, not self._niche_names and not any(j.niche for j in jobs))
         has = bool(jobs)
         self.table.setVisible(has)
         self.empty.setVisible(not has)
@@ -310,9 +341,10 @@ class Automation(QWidget):
         if not text:
             return
         added = 0
+        niche = self.niche.currentData() if not self.niche.isHidden() else ""
         for url in text.split():
             try:
-                added += pipeline.Runner(self.db).add_manual(url)
+                added += pipeline.Runner(self.db).add_manual(url, niche=niche or "")
             except ValueError as exc:
                 self.notice.emit(f"<span style='color:{theme.WARN}'>⚠ {_esc(str(exc))}</span>")
                 return
