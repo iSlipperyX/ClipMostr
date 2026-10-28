@@ -258,3 +258,68 @@ def test_a_sign_in_request_during_a_tab_check_pauses_automation_too(app):
     tab._scan_done(result, auto=True)
     import time
     assert paused_until(JobDB(), time.time()) and "carries on by itself" in logs[0]
+
+
+def _found():
+    from ytclip import lookup
+
+    videos = []
+    for i, (title, match, score) in enumerate([("MW4 funny moments", 90, 50), ("MW4 ranked", 60, 80),
+                                               ("MW4 trolling", 85, 70)]):
+        v = video_from_api(api_item(f"f{i}", title=title, hours_old=30))
+        v.match, v.match_why, v.score, v.origins = match, f"why {i}", score, ["request"]
+        v.reasons = [f"Match {match}: why {i}"]
+        videos.append(v)
+    plan = lookup.Plan("MW4 with good comedy", ["MW4 funny moments"], ["mw4"], ["funny"], "Funny MW4")
+    return lookup.LookupResult("MW4 with good comedy", videos, NOW, plan, quota=201, weak=4)
+
+
+def test_a_requests_results_show_by_match_until_back_to_trending(app):
+    from ytclip.gui.research import MATCH_COLUMN
+
+    tab, _ = _make(app, youtube_api_key="k")
+    tab._show_result(_result())
+    tab._find_done(_found())
+    assert tab.mode == "find" and not tab.table.isColumnHidden(MATCH_COLUMN)
+    order = [tab._video_at(r).title for r in range(tab.table.rowCount())]
+    assert order == ["MW4 trolling", "MW4 funny moments", "MW4 ranked"]  # mostly match, then clip-ability
+    text = tab.find_text.text()
+    assert "3 videos" in text and "4 that didn't match" in text and "201 API units" in text
+    assert "Your request" in tab.table.item(0, 3).text()
+    tab._show_result(_result())  # a trending check finishing meanwhile doesn't replace them
+    assert tab.mode == "find" and tab.table.rowCount() == 3
+    tab.back_btn.click()
+    assert tab.mode == "trending" and tab.table.isColumnHidden(MATCH_COLUMN)
+    assert tab._video_at(0).title == "Big gaming moment"
+    assert not tab.last_find_btn.isHidden()
+    tab.last_find_btn.click()
+    assert tab.mode == "find" and tab.find_box.text() == "MW4 with good comedy"
+
+
+def test_a_request_is_remembered_for_next_time(app):
+    tab, _ = _make(app, youtube_api_key="k")
+    tab._find_done(_found())
+    again, _ = _make(app, youtube_api_key="k")
+    assert again.found.request == "MW4 with good comedy" and again.mode == "trending"
+    assert "MW4 with good comedy" in again._recent.model().stringList()
+
+
+def test_find_needs_words_and_a_key(app):
+    tab, _ = _make(app)
+    notices = []
+    tab.notice.connect(notices.append)
+    tab.find()
+    assert tab.job is None and "Call of Duty" in notices[-1]
+    tab.find_box.setText("MW4 funny")
+    tab.find()
+    assert tab.job is None and not tab.key_panel.isHidden()
+
+
+def test_queue_in_automation_sends_each_videos_niche(app):
+    tab, _ = _make(app, youtube_api_key="k")
+    tab._show_result(_result())
+    got = []
+    tab.queue.connect(got.append)
+    tab.table.selectRow(0)
+    tab.queue_btn.click()
+    assert got == [[("https://www.youtube.com/watch?v=v0", "Big gaming moment", "")]]

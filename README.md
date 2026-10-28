@@ -127,6 +127,26 @@ Parts that can't be measured, such as hidden like counts or a brand-new video wi
 
 New arrivals scoring at least your alert level (75 by default) are counted on the tab, as **🔥 Research (3 new)**, when you're on another tab. Videos you've sent to the studio are ticked, and **Hide sent** hides them. History and the last results are kept in `%APPDATA%\ClipMonster\research.json`, so the tab opens with your last results.
 
+### Find videos for a request
+
+Type what you want into **Find videos** at the top of the Research tab, in your own words, and press **Find**. For example: *Call of Duty MW4 with good comedy*.
+
+- **Searches.** ClipMonster turns the request into one or two YouTube searches, such as "Call of Duty MW4 funny moments" and then "Call of Duty MW4". With an Anthropic key (Settings → AI), Claude writes the searches instead. It knows that MW4 is Modern Warfare 4, and which words funny videos put in their titles.
+- **Match.** Every video found gets a **Match** score out of 100: how well it is what you asked for. With a key, Claude rates each one from its title, channel, tags and description. Without a key, the request's words in the title count most, then the tags and description. Videos about something else, such as another game, are left out.
+- **Order.** The list is ordered mostly by Match, then by clip-ability, so a funny MW4 video that will clip well comes first.
+- **Shorts are left out.** So is anything shorter than the tab's length filter.
+- **Time limit.** The menu next to the box limits results to this week, this month or this year.
+- **What's left out.** The bar above the table says what was searched and how many videos were left out. **← Back to trending** returns to the charts. Your last request stays one click away, and the box suggests your earlier requests.
+- **Using the results.** Send them to the Studio, or use **Queue in Automation** (also on any trending video). Automation then clips them next, in their niche's style and with your clip length.
+- **Cost.** A request uses about 200 of the YouTube API's 10,000 free daily units, because each search costs 100. Claude's rating is one short call.
+
+```
+ytclip find "Call of Duty MW4 with good comedy"            # the best 20, with why each matches
+ytclip find "Minecraft hardcore funny" --since month -n 10
+ytclip find "Kai Cenat rage" --queue 3 --niche Streamers   # add the best 3 to Automation's queue
+ytclip find "MW4 funny" --no-ai --json
+```
+
 ### Picking rules
 
 ClipMonster can also decide by itself which videos to clip, so they can be cut without you looking first. The rules are under **Settings → Picking** (or **Picking rules…** on the Research tab), and the **Pick** column shows what they would pick. Hover over a dash to see why a video was skipped. **Picks only** hides the rest, and **Send N picks to Studio** sends them all.
