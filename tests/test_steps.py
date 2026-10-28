@@ -249,7 +249,7 @@ def test_uploads_get_a_bar_while_one_goes_up(app, tmp_path):
 
 def test_studio_queue_items_show_the_step_and_bar(app):
     from ytclip.engine import Project
-    from ytclip.gui.main_window import QueueItem
+    QueueItem = pytest.importorskip("ytclip.gui.main_window", exc_type=ImportError).QueueItem  # no Qt Multimedia libraries
     from ytclip.gui.tasks import Task
 
     task = Task("Analysing", lambda t: None, plan=["download", "analyse", "find"])
