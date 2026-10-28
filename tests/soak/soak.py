@@ -7,7 +7,7 @@ real downloader fetches from a local web server. On a timeline the test:
 * makes an export hang (the watchdog stops it and tries once more);
 * reports the disk nearly full for a few minutes (the disk guard cleans up, pauses, carries on);
 * makes a download fail with YouTube's sign-in request (a pause), then presses Try now;
-* queues a broken link (it fails, and nothing else does);
+* queues a broken link (it fails, or waits to be tried again, and nothing else does);
 * changes settings while it runs (fewer clips per video, a niche paused and resumed);
 * places a clip request with links, and cancels another.
 
@@ -129,8 +129,13 @@ class Soak:
         self.problems.append(f"gave up waiting for {what} after {limit / 60:.0f} min")
         return False
 
+    @staticmethod
+    def retrying(j) -> bool:
+        """A video that failed and waits to be tried again later (the broken link, for hours)."""
+        return j["status"] == "queued" and j["attempts"] > 0 and bool(j["error"])
+
     def busy(self) -> list[sqlite3.Row]:
-        return [j for j in self.jobs() if j["status"] in ("queued", "working")]
+        return [j for j in self.jobs() if j["status"] == "working" or (j["status"] == "queued" and not self.retrying(j))]
 
     # ------------------------------------------------------------ the timeline
     def queue_round(self) -> None:
@@ -194,6 +199,7 @@ class Soak:
         self.set_control(block_downloads=1)
         self.say("the next download meets a sign-in request")
         if self.wait_for("the sign-in pause", lambda: self.count("blocked") >= 1, 900):
+            self.wait_for("the pause to show", lambda: "sign" in self.meta("state").lower(), 60)
             self.say(f"automation paused: {self.meta('state')}")
             time.sleep(60)
             out = self.py("auto", "--try-now")
@@ -236,7 +242,7 @@ class Soak:
         jobs = self.jobs()
         self.summary = {"videos": len(jobs), "done": 0, "failed": 0, "clips": 0, "files_checked": 0}
         for j in jobs:
-            if j["status"] not in ("done", "failed"):
+            if j["status"] not in ("done", "failed") and not ("no-such-video" in j["url"] and self.retrying(j)):
                 self.problems.append(f"{j['id']} ended {j['status']} ({j['stage']})")
             if j["status"] == "failed":
                 self.summary["failed"] += 1
@@ -270,8 +276,8 @@ class Soak:
                 if len(kept) > 3:
                     self.problems.append(f"{j['id']}: {len(kept)} clips after Clips per video went to 3")
         broken = [j for j in jobs if "no-such-video" in j["url"]]
-        if not broken or broken[0]["status"] != "failed":
-            self.problems.append("the broken link didn't end failed")
+        if not broken or not (broken[0]["status"] == "failed" or self.retrying(broken[0])):
+            self.problems.append("the broken link didn't fail (or wait to be tried again)")
         with self.db() as con:
             ok = con.execute("PRAGMA integrity_check").fetchone()[0]
             orders = [json.loads(r[0]) for r in con.execute("SELECT data FROM orders")]
