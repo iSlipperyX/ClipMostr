@@ -165,10 +165,33 @@ class MainWindow(QMainWindow):
                 self._notice(f"✓ {msg}")
             else:
                 self._warn(msg)
+        self._offer_old_copies()
         # Only packaged builds update themselves; from source you'd use git.
         if self.settings.check_updates and updater.install_dir() and \
                 updater.due_for_check(updater.CHECK_HOURS[updater.channel_setting(self.settings)]):
             self.banner.check(manual=False)
+
+    def _offer_old_copies(self) -> None:
+        """Copies of ClipMonster unzipped by hand before the installer: offer to remove each (once)."""
+        for folder in getattr(self, "old_copies", []):
+            box = QMessageBox(QMessageBox.Question, APP_NAME,
+                              f"There's another copy of ClipMonster in {folder}, from before it was installed. "
+                              f"The one you're using now is in {updater.install_dir()}, and it has all your "
+                              "settings, niches and history (they're kept separately from the program).\n\n"
+                              "Remove the old copy? Only ClipMonster's own program files are removed: anything "
+                              "else you keep in that folder stays.", parent=self)
+            remove = box.addButton("Remove old copy", QMessageBox.AcceptRole)
+            box.addButton("Keep it", QMessageBox.RejectRole)
+            box.exec()
+            if box.clickedButton() is remove:
+                why = updater.remove_copy(folder)
+                if why:
+                    self._warn(f"The old copy in {folder} is still there: {why}")
+                    continue
+                self._notice(f"✓ Removed the old copy of ClipMonster in {folder}.")
+            else:
+                updater.keep_copy(folder)
+        self.old_copies = []
 
     # ================================================================== UI
     def _build(self) -> None:

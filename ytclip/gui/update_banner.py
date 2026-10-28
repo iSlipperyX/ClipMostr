@@ -317,8 +317,8 @@ class UpdateBanner(QFrame):
         from ..pipeline import runner_alive
 
         rel, new_app, target = self.release, self.ready, updater.install_dir()
-        if rel is None or new_app is None or target is None or self.task:
-            return False
+        if rel is None or new_app is None or target is None or self.task or updater.setup_running():
+            return False  # (ClipMonster-Setup.exe closing the window installs a version itself)
         try:
             db = JobDB()
             try:

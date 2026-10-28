@@ -553,6 +553,8 @@ def build_auto_parser() -> argparse.ArgumentParser:
     p.add_argument("--pause", action="store_true", help="pause a running automation")
     p.add_argument("--resume", action="store_true", help="carry on after --pause")
     p.add_argument("--stop", action="store_true", help="ask a running automation to stop")
+    p.add_argument("--wait", action="store_true",
+                   help="with --stop: wait (up to 90 s) until it has; exit code 10 = it was running and stopped")
     p.add_argument("--try-now", action="store_true",
                    help="end a pause after YouTube asked this PC to sign in, and try again now")
     p.add_argument("--install", action="store_true", help="start automation whenever you sign in to Windows")
@@ -628,6 +630,17 @@ def run_auto(argv: list[str]) -> int:
         n = pipeline.end_pause(db, time.time())
         console.print("Trying YouTube again now" + (f" ({n} video{'s' if n != 1 else ''} waiting)." if n else "."))
         return 0
+    if args.stop and args.wait:  # the installer, before it replaces the app's files
+        db.close()
+        from . import updater
+
+        was = pipeline.runner_alive(JobDB())
+        if not updater.stop_automation(resume=False):
+            console.print("[red]Automation didn't stop within 90 seconds.[/]")
+            return 1
+        console.print("Automation stopped. A video in progress went back in the queue." if was
+                      else "Automation wasn't running.")
+        return 10 if was else 0
     if args.stop:
         db.set_meta("stop", "1")
         console.print("Asked automation to stop. A video in progress goes back in the queue.")

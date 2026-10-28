@@ -82,7 +82,16 @@ def main() -> int:
     app.setWindowIcon(theme.app_icon())
     theme.apply(app)
     qt_fonts.register()  # bundled fonts, for the font picker and layout sketch
+    old_copies = []
     if getattr(sys, "frozen", False):
+        try:  # copies unzipped by hand before the installer: offered for removing once the window is up
+            from .. import updater
+            from ..pipeline import run_entry
+
+            old_copies = updater.old_copies(run_entry())
+            updater.refresh_uninstall_entry()
+        except Exception:
+            pass
         try:  # after an update or a move, Start with Windows starts this copy
             from ..pipeline import refresh_start_with_windows
 
@@ -91,6 +100,7 @@ def main() -> int:
             pass
 
     win = MainWindow()
+    win.old_copies = old_copies
     win.show()
     _dark_title_bar(int(win.winId()))
     # Anything passed on the command line (e.g. files dropped onto the .exe) gets queued.

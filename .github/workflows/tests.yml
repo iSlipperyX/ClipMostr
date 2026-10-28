@@ -83,7 +83,8 @@ jobs:
           cat build/whisper-cpp/VERSION.txt
 
   # The updater's install step as installed copies run it: a real PyInstaller build's own ytclip.exe
-  # installing itself over another copy of the build.
+  # installing itself over another copy of the build. Then ClipMonster-Setup.exe, for real: install,
+  # install again over itself, uninstall.
   frozen-update:
     runs-on: windows-latest
     steps:
@@ -95,7 +96,16 @@ jobs:
           cache-dependency-path: pyproject.toml
       - name: Install
         run: pip install -e ".[ai,whisper,build]"
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          if (-not (Get-Command iscc -ErrorAction SilentlyContinue) -and
+              -not (Test-Path "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe")) {
+            choco install innosetup -y --no-progress
+          }
       - name: Build
-        run: python build.py
+        run: python build.py --installer
       - name: Update the build with its own helper
         run: python tests/windows/frozen_update.py dist/ClipMonster
+      - name: Install, update and uninstall with ClipMonster-Setup.exe
+        run: python tests/windows/installer_test.py dist/ClipMonster-Setup.exe

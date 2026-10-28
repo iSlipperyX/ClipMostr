@@ -553,13 +553,15 @@ class Runner:
             updater.save_state(last_check=time.time())
             if rel is None or rel.switch or updater.load_state().get("skipped") == rel.version:
                 return  # a switch to an older channel's version is asked about in the window
+            if updater.setup_running():
+                return  # ClipMonster-Setup.exe is installing a version already
             if updater.other_instances(target):
                 self.log(f"ClipMonster {rel.version} is out: it's offered in the ClipMonster window that's open.")
                 return
             self.state(f"Downloading ClipMonster {rel.version}")
             self.log(f"ClipMonster {rel.label} is out: downloading it, to install it while there's nothing to clip.")
             new_app = updater.prepare(rel, target, cancelled=self.stop_requested)
-            if self.stop_requested() or updater.other_instances(target):
+            if self.stop_requested() or updater.other_instances(target) or updater.setup_running():
                 return  # stopped, or the window was opened meanwhile (it offers the downloaded update)
             updater.save_state(pending=rel.version)
             updater.launch_swap(new_app, target, self.pid, relaunch=updater.EXE_NAME, relaunch_args=("--automation",))
@@ -1452,6 +1454,19 @@ def set_start_with_windows(on: bool) -> str:
         return str(exc)
     _remove_old_task()
     return ""
+
+
+def run_entry() -> str:
+    """The command Start with Windows runs, or '' when it's off."""
+    if os.name != "nt":
+        return ""
+    import winreg
+
+    try:
+        with _run_key() as key:
+            return str(winreg.QueryValueEx(key, RUN_VALUE)[0])
+    except OSError:
+        return ""
 
 
 def starts_with_windows() -> bool:

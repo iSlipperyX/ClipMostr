@@ -502,9 +502,10 @@ def other_instances(target: Path) -> list[str]:
     return [f"{'ClipMonster automation' if str(pid) == runner else path.name} (process {pid})" for pid, path in found]
 
 
-def stop_automation(timeout: float = 90.0) -> bool:
+def stop_automation(timeout: float = 90.0, resume: bool = True) -> bool:
     """A background automation run keeps the app folder in use: ask it to stop (its current video
-    goes back in the queue) and have the updated app start it again. False if it didn't stop."""
+    goes back in the queue) and, with `resume`, have the updated app's window start it again. False
+    if it didn't stop."""
     from .jobs import JobDB
     from .pipeline import runner_alive
 
@@ -513,7 +514,8 @@ def stop_automation(timeout: float = 90.0) -> bool:
         if not runner_alive(db):
             return True
         db.set_meta("stop", "1")
-        db.set_meta("resume_after_update", "1")
+        if resume:
+            db.set_meta("resume_after_update", "1")
         end = time.time() + timeout
         while runner_alive(db) and time.time() < end:
             time.sleep(1)
@@ -616,6 +618,142 @@ def tidy(target: Path | None = None) -> int:
     for log in (update_log(), updates_dir() / "apply-update.out"):
         _trim(log)
     return removed
+
+
+# ---------------------------------------------------------------- the installer, and copies from before it
+
+UNINSTALL_KEY = r"Software\Microsoft\Windows\CurrentVersion\Uninstall\{92B949DB-584A-40C4-892B-F7016573CE28}_is1"
+SETUP_MUTEX = "ClipMonsterSetup"  # packaging/ClipMonster.iss SetupMutex
+APP_ITEMS = ("ClipMonster.exe", "ytclip.exe", "_internal", "whisper-cpp")  # what an old copy is made of
+
+
+def setup_running() -> bool:
+    """Whether ClipMonster-Setup.exe is running: it installs, so the app mustn't start an update too."""
+    if sys.platform != "win32":
+        return False
+    try:
+        import ctypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        kernel32.OpenMutexW.restype = ctypes.c_void_p
+        handle = kernel32.OpenMutexW(0x00100000, False, SETUP_MUTEX)  # SYNCHRONIZE
+        if handle:
+            kernel32.CloseHandle(ctypes.c_void_p(handle))
+            return True
+    except (OSError, AttributeError):
+        pass
+    return False
+
+
+def _same_folder(a: str | Path, b: str | Path) -> bool:
+    try:
+        return os.path.normcase(os.path.abspath(str(a).rstrip("\\/"))) == \
+            os.path.normcase(os.path.abspath(str(b).rstrip("\\/")))
+    except (OSError, ValueError):
+        return False
+
+
+def refresh_uninstall_entry() -> None:
+    """In-app updates replace the files the installer put there, so Windows' Installed apps list would
+    keep showing the version installed with ClipMonster-Setup.exe: bring it up to date. Never fails."""
+    target = install_dir()
+    if target is None or sys.platform != "win32":
+        return
+    try:
+        import winreg
+
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, UNINSTALL_KEY, 0,
+                            winreg.KEY_READ | winreg.KEY_SET_VALUE) as key:
+            where, _ = winreg.QueryValueEx(key, "InstallLocation")
+            if not _same_folder(where, target):
+                return
+            try:
+                shown, _ = winreg.QueryValueEx(key, "DisplayVersion")
+            except OSError:
+                shown = ""
+            if shown != __version__:
+                winreg.SetValueEx(key, "DisplayVersion", 0, winreg.REG_SZ, __version__)
+                winreg.SetValueEx(key, "DisplayName", 0, winreg.REG_SZ, "ClipMonster")
+    except OSError:
+        pass
+
+
+def _is_app_folder(folder: Path) -> bool:
+    return (folder / EXE_NAME).is_file() and (folder / "_internal").is_dir()
+
+
+def _old_copy_places(run_command: str = "") -> list[Path]:
+    """Where copies from before the installer usually are: wherever Start with Windows pointed, the
+    folder the last start ran from, and the folders people unzip into."""
+    places = []
+    m = re.match(r'\s*"?([^"]+?)\\ClipMonster\.exe"?', run_command or "", re.I)
+    if m:
+        places.append(Path(m.group(1)))
+    last = load_state().get("install_dir")
+    if last:
+        places.append(Path(last))
+    home = Path.home()
+    roots = [home, home / "Desktop", home / "Documents", home / "Downloads"]
+    for var in ("OneDrive", "OneDriveConsumer", "OneDriveCommercial"):
+        if os.environ.get(var):
+            roots += [Path(os.environ[var]) / "Desktop", Path(os.environ[var]) / "Documents"]
+    places += [r / APP_FOLDER for r in roots]
+    return places
+
+
+def old_copies(run_command: str = "") -> list[Path]:
+    """Other copies of ClipMonster on this PC (unzipped by hand before the installer) that aren't the
+    one running and weren't kept on purpose. Remembers where this one is, for next time."""
+    target = install_dir()
+    if target is None:
+        return []
+    state = load_state()
+    kept = state.get("kept_copies") or []
+    found: list[Path] = []
+    for place in _old_copy_places(run_command):
+        if _same_folder(place, target) or any(_same_folder(place, k) for k in kept) or \
+                any(_same_folder(place, f) for f in found):
+            continue
+        try:
+            if _is_app_folder(place) and target not in place.resolve().parents:
+                found.append(place)
+        except OSError:
+            pass
+    if not _same_folder(state.get("install_dir") or "", target):
+        save_state(install_dir=str(target))
+    return found
+
+
+def keep_copy(folder: Path) -> None:
+    """Don't offer to remove this copy again."""
+    save_state(kept_copies=[*(load_state().get("kept_copies") or []), str(folder)])
+
+
+def remove_copy(folder: Path) -> str:
+    """Remove an old copy's own files (your own files in the folder stay, and so does the folder when
+    they're there). '' when it's gone, else why not."""
+    from .procs import app_processes
+    from .swap import BACKUP
+
+    if not _is_app_folder(folder) or install_dir() is not None and _same_folder(folder, install_dir()):
+        return "That isn't an old copy of ClipMonster."
+    running = app_processes(folder)
+    if running:
+        return "It's running: close " + ", ".join(f"{p.name} (process {pid})" for pid, p in running) + " first."
+    left = []
+    for item in [*(folder / n for n in APP_ITEMS), *folder.glob(BACKUP + "*")]:
+        try:
+            if item.is_dir():
+                shutil.rmtree(item)
+            elif item.exists():
+                item.unlink()
+        except OSError as exc:
+            left.append(f"{item.name} ({exc.strerror or exc})")
+    try:
+        folder.rmdir()  # only when nothing of yours is left in it
+    except OSError:
+        pass
+    return ("Couldn't remove all of it: " + ", ".join(left)) if left else ""
 
 
 # ---------------------------------------------------------------- remembered state
