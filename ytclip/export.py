@@ -148,7 +148,8 @@ def export_clip(src: Path, src_info: MediaInfo, dest: Path, clip: Clip, words: l
                 second_audio = info2.has_audio and s.stack_volume > 0 and src_info.has_audio
             graph, last = layout_graph(p, fps, length, clip.crop_x, s.banner_bg, has_second)
             top = layout.banner_text(s.banner_top_text, clip.title, clip.top_text) if p.top else ""
-            bottom = layout.bottom_banner(s, clip.title, clip.bottom_text, next_part) if p.bottom else ""
+            bottom = (layout.bottom_banner(s, clip.title, clip.bottom_text, next_part, clip.bottom_ai)
+                      if p.bottom else "")
             if top or bottom:
                 Path(tmp, "banners.ass").write_text(layout.banner_ass(p, s, top, bottom), encoding="utf-8")
                 graph += f";[{last}]subtitles=banners.ass{_fontsdir([s.banner_font], tmp)}[lb]"

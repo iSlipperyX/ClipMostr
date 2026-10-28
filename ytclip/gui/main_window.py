@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import tempfile
-from dataclasses import asdict, replace
+from dataclasses import asdict, fields, replace
 from pathlib import Path
 
 from PySide6.QtCore import QSettings, QSize, Qt, QTimer, QUrl
@@ -52,6 +52,7 @@ STATUS_TEXT = {
 REDETECT_FIELDS = {"clip_count", "min_len", "max_len", "min_gap", "quality_floor", "snap_to_pauses",
                    "pad_start", "pad_end", "keywords", "mode", "w_heatmap", "w_audio", "w_reactions",
                    "w_scenes", "w_keywords"}
+CLIP_FIELDS = {f.name for f in fields(Clip)}  # a session saved by another version may differ
 RESCORE_FIELDS = {"keywords", "w_heatmap", "w_audio", "w_reactions", "w_scenes", "w_keywords"}
 RESEARCH_TAB = "🔥  Research"
 SHORTCUTS = [
@@ -718,7 +719,7 @@ class MainWindow(QMainWindow):
             eng.open(p)
             eng.measure(p)
             if saved and saved.get("clips"):
-                p.clips = [Clip(**c) for c in saved["clips"]]
+                p.clips = [Clip(**{k: v for k, v in c.items() if k in CLIP_FIELDS}) for c in saved["clips"]]
                 p.mode_used = saved.get("mode", "auto")
                 eng.rescore(p)
                 if saved.get("polish"):
@@ -1066,7 +1067,7 @@ class MainWindow(QMainWindow):
         p = self._ready()
         if p and 0 <= self.sel < len(p.clips):
             self.layout_tab.set_clip(p.clips[self.sel], p.video.path, p.media, p.words,
-                                     next_part=layout.has_next_part(p.clips[self.sel], p.clips))
+                                     next_part=layout.has_next_part(p.clips[self.sel], p.clips, self.settings))
         self._refresh_export_view()
 
     def _second_media(self, path: str) -> MediaInfo | None:
@@ -1096,7 +1097,7 @@ class MainWindow(QMainWindow):
         second = self._second_media(stack_video) if s.stack_enabled else None
         size = (second.width, second.height) if second and second.width else None
         comp = compose.compose(s, media, clip, p.words if p else None, second=size,
-                               next_part=layout.has_next_part(clip, p.clips) if p and clip else True)
+                               next_part=layout.has_next_part(clip, p.clips, s) if p and clip else True)
         self.preview.set_composition(comp, clip.start if clip else 0.0, clip.end if clip else 0.0)
         self.preview.set_second(str(Path(stack_video).expanduser()) if size else "", clip.start if clip else 0.0,
                                 clip.length if clip else 0.0, s.stack_start, s.stack_offset, s.stack_volume)
@@ -1511,7 +1512,7 @@ class MainWindow(QMainWindow):
         out_dir.mkdir(exist_ok=True)
         dest = out_dir / f"preview_{p.video.id}_{int(clip.start)}.mp4"
 
-        next_part = layout.has_next_part(p.clips[self.sel], p.clips)
+        next_part = layout.has_next_part(p.clips[self.sel], p.clips, settings)
 
         def run(t: Task):
             export_clip(p.video.path, p.media, dest, clip, p.words, settings,

@@ -229,11 +229,14 @@ class Engine:
             about = f"These clips are for a TikTok account about {niche.name}."
             guide = "\n\n".join(x for x in (about + (f" {niche.instructions.strip()}" if niche.instructions.strip()
                                                        else ""), guide) if x)
+        # Bottom lines stand in for the 'no part 2' text on clips with no part 2 (layout.bottom_banner).
+        bottom_on = layout.uses_ai_bottom(self.s)
+        usual = " ".join(layout.own_words(self.s.banner_bottom_alt).split()) if bottom_on else ""
         try:
             result = polish.ask(p.video.title, clips, p.words, p.video.path, self.s.ai_api_key,
                                 self.s.ai_polish_model, self.log,
                                 check=lambda: self.progress("AI is polishing the clips", None), guide=guide,
-                                bottom=self.s.banner_bottom_text if self.s.banner_bottom else "")
+                                bottom=usual, handles=layout.bottom_handles(self.s) if bottom_on else [])
             self.progress("AI is polishing the clips", None)
         except Cancelled:
             raise
@@ -241,8 +244,7 @@ class Engine:
             p.polish_error = str(exc) or exc.__class__.__name__
             self.log(f"AI polish skipped: {p.polish_error}")
             return
-        summary = polish.apply(result, clips, p.words, self.s.banner_top_text, self.s.banner_top,
-                               bottom_on=self.s.banner_bottom and self.s.polish_bottom_text)
+        summary = polish.apply(result, clips, p.words, self.s.banner_top_text, self.s.banner_top, bottom_on=bottom_on)
         p.polished = True
         if result.burned_in_subtitles and self.s.polish_burned_subs == "off" and self.s.burn_captions:
             p.captions_off = True
@@ -327,6 +329,7 @@ class Engine:
             pool = self.stack_pool = self.stack_pool or StackPool()
         files: list[str] = []
         details: list[dict] = []
+        made: list[tuple[Settings, bool]] = []  # what each clip was made with, to make one again
         for i, clip in enumerate(clips, 1):
             name = clip_filename(i, clip, folder, self.s.file_template)
             label = f"Exporting clip {i}/{len(clips)}"
@@ -335,9 +338,10 @@ class Engine:
             if second:
                 s = base.copy(stack_video=str(second))
                 extra["second_video"] = second.name
+            next_part = layout.has_next_part(clip, clips, self.s)  # a part 2 the AI rated too low will be rejected
             export_clip(v.path, media, folder / name, clip, p.words, s,
-                        lambda f, i=i: self.progress(label, (i - 1 + f) / len(clips)),
-                        next_part=layout.has_next_part(clip, clips))
+                        lambda f, i=i: self.progress(label, (i - 1 + f) / len(clips)), next_part=next_part)
+            made.append((s, next_part))
             if self.s.tiktok_ready:
                 for warning in tiktok_warnings(folder / name, clip.length):
                     self.log(f"TikTok: {warning}")
@@ -352,6 +356,7 @@ class Engine:
 
         if self.s.qc_enabled and clips:
             self.check(p, folder, clips, files, details, base)
+            self._unpromise(p, folder, clips, files, made)
         write_index(folder, v, clips, files, self.signal_names(p), p.mode_used or self.s.mode, p.meta, details)
         if not self.s.keep_source and not v.is_local:
             v.path.unlink(missing_ok=True)
@@ -380,6 +385,27 @@ class Engine:
         p.qc = p.meta["qc"] = qc.summary(verdicts)
         self.log(f"Quality check: {p.qc['passed']} ready, {p.qc['rejected']} rejected"
                  + (f", {p.qc['warned']} with warnings" if p.qc["warned"] else ""))
+
+    def _unpromise(self, p: Project, folder: Path, clips: list[Clip], files: list[str],
+                   made: list[tuple[Settings, bool]]) -> None:
+        """A part 2 whose file the quality check rejected won't be posted, so each clip that promised it
+        in its bottom text is made again without the promise."""
+        from .qc import REJECTED
+
+        kept = [i for i, f in enumerate(files) if not f.startswith(f"{REJECTED}/")]
+        survivors = [clips[i] for i in kept]
+
+        def bottom(i: int, next_part: bool) -> str:
+            c = clips[i]
+            return layout.bottom_banner(made[i][0], c.title, c.bottom_text, next_part, c.bottom_ai)
+
+        again = [i for i in kept if made[i][1] and made[i][0].banner_bottom
+                 and not layout.has_next_part(clips[i], survivors) and bottom(i, True) != bottom(i, False)]
+        for n, i in enumerate(again, 1):
+            export_clip(p.video.path, p.media, folder / files[i], clips[i], p.words, made[i][0],
+                        lambda f, n=n: self.progress("Making a clip again", (n - 1 + f) / len(again)),
+                        next_part=False)
+            self.log(f"Made {files[i]} again without promising a part 2: its part 2 was rejected.")
 
     @staticmethod
     def _remove_previous_export(folder: Path) -> None:

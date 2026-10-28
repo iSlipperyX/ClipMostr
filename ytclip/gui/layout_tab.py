@@ -292,7 +292,7 @@ class LayoutTab(QWidget):
                 none.blockSignals(False)
             edit.setEnabled(c is not None and on and not blank)
             if edit is self.bottom_edit:
-                default = layout.bottom_banner(s, title, None, self.next_part if c else True)
+                default = layout.bottom_banner(s, title, None, self.next_part if c else True, c.bottom_ai if c else "")
             else:
                 default = layout.banner_text(template, title)
             where = "Top" if edit is self.top_edit else "Bottom"
@@ -337,7 +337,7 @@ class LayoutTab(QWidget):
         title = self.clip.title if self.clip else "Your clip title"
         top = layout.banner_text(s.banner_top_text, title, self.clip.top_text if self.clip else None)
         bottom = layout.bottom_banner(s, title, self.clip.bottom_text if self.clip else None,
-                                      self.next_part if self.clip else True)
+                                      self.next_part if self.clip else True, self.clip.bottom_ai if self.clip else "")
         self.sketch.show_plan(plan, s, top, bottom)
         can_render = self.clip is not None and self.src is not None and self.media is not None
         self.still_btn.setEnabled(can_render)

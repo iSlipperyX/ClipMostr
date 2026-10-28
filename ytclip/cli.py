@@ -65,7 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="stack a second video (gameplay, satisfying clips...) under each clip, 9:16; give a "
                         "folder to use a different video from it for each clip")
     p.add_argument("--polish", action="store_true",
-                   help="AI polish: hooks for the top banner, caption fixes, speaker crops (needs an Anthropic key)")
+                   help="AI polish: hooks for the top banner, bottom lines for clips with no part 2, caption "
+                        "fixes, speaker crops (needs an Anthropic key)")
     p.add_argument("--bleep", action="store_true", help="mask strong swearing in captions (f*ck, sh*t)")
     p.add_argument("--qc", action="store_true", help="check each clip after export; failures move to _rejected")
     p.add_argument("--keywords", help="comma-separated words/phrases to boost")

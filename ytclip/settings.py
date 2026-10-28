@@ -77,7 +77,7 @@ class Settings:
     ai_polish: bool = False  # polish.py: one extra Claude call per video for hooks, caption fixes, crops
     ai_polish_model: str = "claude-sonnet-5-5"
     polish_burned_subs: str = "off"  # off = turn our captions off when the video already has subtitles | keep
-    polish_bottom_text: bool = True  # the polish writes each clip's bottom banner line too
+    polish_bottom_text: bool = True  # the polish writes a bottom line for each clip with no part 2
     # Export
     aspect: str = "vertical_blur"
     resolution: int = 1080
@@ -513,12 +513,13 @@ SCHEMA: list[Field] = [
     Field("ai_instructions", "What makes a good clip?", "AI", "text"),
     Field("ai_polish", "Polish clips with AI", "AI", "bool",
           help="One extra Claude call per video, with a frame from each clip: writes a hook for the top banner and "
-               "a line for the bottom one, fixes misheard words in the captions, spots subtitles already in the "
-               "video and centres vertical crops on the speaker"),
-    Field("polish_bottom_text", "AI writes each clip's bottom text", "AI", "bool",
-          help="The polish writes the bottom banner's line for every clip, in the spirit of your bottom text "
-               "(Settings → Layout) but true for that clip: it never promises a part 2 that doesn't exist. Off: "
-               "every clip shows your bottom text"),
+               "bottom lines for clips with no part 2, fixes misheard words in the captions, spots subtitles "
+               "already in the video and centres vertical crops on the speaker"),
+    Field("polish_bottom_text", "AI writes the bottom text when there's no part 2", "AI", "bool",
+          help="When your bottom text promises a part 2 (like 'Follow for part 2'), each clip with no part 2 gets "
+               "a line the AI wrote for it, never promising one, instead of the same 'no part 2' text every time. "
+               "It keeps any @handle in your bottom texts. Clips with a part 2 keep your bottom text. Off: clips "
+               "with no part 2 show the 'no part 2' text (Settings → Layout)"),
     Field("ai_polish_model", "Model for polishing", "AI", "choice",
           choices=(("claude-opus-5-5", "Claude Opus 5.5 (best)"), ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
                    ("claude-haiku-5-5", "Claude Haiku 5.5 (cheapest)"))),
@@ -570,11 +571,13 @@ SCHEMA: list[Field] = [
           help="Height of the text area. With TikTok-ready output the bar also covers TikTok's tabs above it"),
     Field("banner_bottom", "Bottom banner", "Layout", "bool", help="A bar of text below the video"),
     Field("banner_bottom_text", "Bottom text", "Layout", "str",
-          help="{title} is replaced with the clip title. Text that promises a part 2 only shows on a clip that the "
-               "next clip carries on from; other clips show the text below"),
+          help="{title} is replaced with the clip title. Text that promises a part 2 only shows on a clip that "
+               "another clip carries straight on from; other clips show the AI's line for them (with AI polish) or "
+               "the text below. Each clip can override this in the Layout tab"),
     Field("banner_bottom_alt", "Bottom text when there's no part 2", "Layout", "str",
-          help="Used instead of the bottom text when that promises a part 2 (or a next part) and no clip carries "
-               "this one on. The AI polish writes its own line for each clip"),
+          help="Shown instead of the bottom text on a clip with no part 2, when the bottom text promises one. "
+               "With AI polish the AI writes a line for each such clip instead (Settings → AI). Leave it blank "
+               "for no words on those clips"),
     Field("banner_bottom_size", "Bottom banner height (%)", "Layout", "int", lo=4, hi=35,
           help="Height of the text area. With TikTok-ready output the bar sits above TikTok's caption and "
                "fills the strip behind it, so no video is hidden. Pick 'Text over the video' to keep that video"),

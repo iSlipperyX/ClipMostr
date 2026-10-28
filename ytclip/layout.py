@@ -172,9 +172,13 @@ def crop_ratio(s: Settings, width: int, height: int) -> float | None:
 
 
 # Bottom text like "Follow for part 2" promises a next part; it's only true when one exists.
-_MORE = re.compile(r"\b(?:part|pt\.?)\s*(?:[2-9]|[1-9]\d+|two|three|four|ii+|iv)\b|\bnext (?:part|one|video)\b"
-                   r"|\bto be continued\b|\bpart\s*(?:\d+\s*)?(?:is\s+)?(?:coming|soon)\b", re.I)
-CARRIES_ON = 3.0  # seconds: a clip starting this soon after another ends is that clip's part 2
+_PART = r"(?:part|pt\.?|parte|partie|teil|deel)"
+_MORE = re.compile(rf"\b{_PART}\s*(?:[1-9]\d*|one|two|three|four|ii+|iv)\b"  # part 2, Pt.3, Teil 2, part II
+                   rf"|\b{_PART}s?\s*(?:\d+\s*)?(?:is\s+|are\s+)?(?:coming|soon)\b"  # part 2 is coming
+                   r"|\bnext (?:part|one|video|clip|episode)\b|\bmore parts\b|\bstay tuned\b"
+                   r"|\bcontinu(?:ed|es)\b|\bwhat happens next\b", re.I)
+_HANDLE = re.compile(r"@[\w.]*\w")
+CARRIES_ON = 3.0  # seconds: a clip starting this close to where another ends is that clip's part 2
 
 
 def promises_more(text: str) -> bool:
@@ -182,18 +186,55 @@ def promises_more(text: str) -> bool:
     return bool(_MORE.search(text or ""))
 
 
-def has_next_part(clip, clips) -> bool:
-    """Whether another clip (switched on) picks up where this one stops: its part 2."""
-    return any(o is not clip and o.enabled and 0 <= o.start - clip.end <= CARRIES_ON for o in clips)
+def has_next_part(clip, clips, s: Settings | None = None) -> bool:
+    """Whether another clip (switched on) picks up where this one stops, maybe replaying its last
+    moment: its part 2. With settings, a clip the quality check will reject (the AI rated it under
+    the check's bar, see qc.judge_content) isn't anyone's part 2."""
+    bar = s.qc_min_rating if s is not None and s.qc_enabled else 0
+    return any(o is not clip and o.enabled and not (bar and 0 < o.rating < bar)
+               and o.start > clip.start and o.end > clip.end and abs(o.start - clip.end) <= CARRIES_ON
+               for o in clips)
 
 
-def bottom_banner(s: Settings, title: str, override: str | None = None, next_part: bool = True) -> str:
-    """The bottom banner's words for a clip: its own text (the AI's or yours), else the bottom text,
-    unless that promises a part 2 the clip doesn't have; then the 'no part 2' text."""
-    text = banner_text(s.banner_bottom_text, title, override)
-    if override is None and not next_part and promises_more(text):
-        return banner_text(s.banner_bottom_alt, title)
-    return text
+def own_words(template: str) -> str:
+    """A banner template without the {title} that each clip fills in: the words you chose."""
+    return template.replace("{title}", " ")
+
+
+def uses_ai_bottom(s: Settings) -> bool:
+    """Whether the AI polish's bottom lines can show: the bottom banner is on, its text promises a part 2
+    (so a clip with none needs other words) and the 'no part 2' text isn't left blank."""
+    return bool(s.banner_bottom and s.polish_bottom_text and promises_more(own_words(s.banner_bottom_text))
+                and own_words(s.banner_bottom_alt).strip())
+
+
+def bottom_handles(s: Settings) -> list[str]:
+    """The @handles in your bottom texts, which the AI's bottom lines have to keep."""
+    found: dict[str, str] = {}
+    for h in _HANDLE.findall(f"{s.banner_bottom_text} {s.banner_bottom_alt}"):
+        found.setdefault(h.lower(), h)
+    return list(found.values())
+
+
+def ai_line_fits(s: Settings, line: str) -> bool:
+    """Whether the AI's bottom line for a clip can stand in for the 'no part 2' text: the setting is on,
+    the line promises no next part, and it keeps every @handle in your bottom texts."""
+    if not (s.polish_bottom_text and line.strip()) or promises_more(line):
+        return False
+    have = {h.lower() for h in _HANDLE.findall(line)}
+    return all(h.lower() in have for h in bottom_handles(s))
+
+
+def bottom_banner(s: Settings, title: str, override: str | None = None, next_part: bool = True,
+                  ai: str = "") -> str:
+    """The bottom banner's words for a clip. Text typed for the clip shows as typed. Otherwise it's the
+    bottom text, unless that promises a part 2 the clip doesn't have (next_part, see has_next_part):
+    then the AI polish's line for the clip (`ai`, when it fits) or else the 'no part 2' text."""
+    if override is not None:
+        return override.strip()
+    if next_part or not promises_more(own_words(s.banner_bottom_text)):
+        return banner_text(s.banner_bottom_text, title)
+    return ai.strip() if ai and uses_ai_bottom(s) and ai_line_fits(s, ai) else banner_text(s.banner_bottom_alt, title)
 
 
 def banner_text(template: str, title: str, override: str | None = None) -> str:

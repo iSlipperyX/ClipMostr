@@ -174,7 +174,8 @@ def compose(s: Settings, media: MediaInfo, clip: Clip | None = None, words: list
     title = clip.title if clip else ""
     if use_layout and plan is not None:
         top = layout.banner_text(s.banner_top_text, title, clip.top_text if clip else None) if plan.top else ""
-        bottom = layout.bottom_banner(s, title, clip.bottom_text if clip else None, next_part) if plan.bottom else ""
+        bottom = layout.bottom_banner(s, title, clip.bottom_text if clip else None, next_part,
+                                      clip.bottom_ai if clip else "") if plan.bottom else ""
         c.banners = layout.banner_texts(plan, s, top, bottom)
     if (s.burn_captions and words) or s.title_overlay:
         area, side = (plan.caption_area, plan.side_margin) if plan is not None else (None, 0)
