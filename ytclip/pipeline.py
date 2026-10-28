@@ -782,7 +782,7 @@ class Runner:
                 try:
                     r = lookup.find(text, s, key, FIND_SINCE, s.research_min_minutes, language, self.log,
                                     progress=lambda m, f, t=text: (self.beat(),
-                                                                   self.activity(f"“{t[:40]}”: {m}", f)),
+                                                                   self.activity(f"Finding videos for “{t[:40]}”: {m}", f)),
                                     cancelled=lambda: stop() or self.stop_requested(), use_ai=with_ai,
                                     memory=memory, request_key=fresh.request_key(text, nid), skip=done)
                 except research.ScanCancelled:
