@@ -8,7 +8,7 @@ real downloader fetches from a local web server. On a timeline the test:
 * reports the disk nearly full for a few minutes (the disk guard cleans up, pauses, carries on);
 * makes a download fail with YouTube's sign-in request (a pause), then presses Try now;
 * queues a broken link (it fails, or waits to be tried again, and nothing else does);
-* changes settings while it runs (fewer clips per video, a niche paused and resumed);
+* changes settings while it runs (a style with fewer clips per video, a niche paused and resumed);
 * places a clip request with links, and cancels another.
 
 Then it checks the end state: every video done or failed for a reason, every clip on disk and
@@ -207,8 +207,8 @@ class Soak:
             self.wait_for("downloads again", lambda: any(j["status"] == "working" for j in self.jobs()), 600)
 
         # 5. settings changed while it runs
-        self.settings(clip_count=3)
-        self.say("changed Clips per video to 3 while it runs")
+        self.settings(auto_preset="Balanced highlights")  # automation clips with its style: 5 clips, not 6
+        self.say("changed Automation's style to Balanced highlights (5 clips a video) while it runs")
         changed_at = time.time()
         self.settings(niches=[{"id": "talk", "name": "Talk", "account": "@talk", "searches": "x", "paused": True}])
         time.sleep(30)
@@ -273,8 +273,8 @@ class Soak:
                                              f"{info.duration:.1f}s (clips.json says {c['length']}s)")
             if j["updated"] > changed_at + 120 and not j["order"] and not j["niche"]:
                 kept = [c for c in data["clips"] if not c["file"].startswith("_rejected/")]
-                if len(kept) > 3:
-                    self.problems.append(f"{j['id']}: {len(kept)} clips after Clips per video went to 3")
+                if len(kept) > 5:
+                    self.problems.append(f"{j['id']}: {len(kept)} clips after the style changed to 5 a video")
         broken = [j for j in jobs if "no-such-video" in j["url"]]
         if not broken or not (broken[0]["status"] == "failed" or self.retrying(broken[0])):
             self.problems.append("the broken link didn't fail (or wait to be tried again)")

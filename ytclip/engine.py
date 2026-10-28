@@ -207,7 +207,7 @@ class Engine:
                       if self.s.series_parts >= 2 else [])
             if align:
                 clips = self._fit(clips, sents, m, v.duration)
-                spares = self._fit(spares, sents, m, v.duration, quiet=True)
+                spares = self._fit(spares, sents, m, v.duration, silent=True)
                 for c in clips + spares:
                     c.score = clip_score(p.score, c.start, c.end)
                 clips.sort(key=lambda c: c.score, reverse=True)
@@ -307,7 +307,7 @@ class Engine:
                  + f"{summary['caption_fixes']} caption fixes, {summary['crops_moved']} crops moved.")
 
     def _fit(self, clips: list[Clip], sents: list[Cue], m: Measurements, duration: float,
-             quiet: bool = False) -> list[Clip]:
+             silent: bool = False) -> list[Clip]:
         """Align edges to sentences (or pauses without a transcript), add a breath of room,
         enforce the minimum length and drop overlaps - best-scoring clips win."""
         quiet = quiet_frames(m.db) if self.s.snap_to_pauses and not sents else np.zeros(0, bool)
@@ -328,7 +328,7 @@ class Engine:
                 dropped += 1
                 continue
             kept.append(c)
-        if dropped and not quiet:
+        if dropped and not silent:
             self.log(f"Skipped {dropped} clip(s) that were too short or overlapped another clip.")
         return kept
 

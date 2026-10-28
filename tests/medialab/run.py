@@ -129,7 +129,10 @@ def run_engine(lab: Path, out: Path, names: list[str], base: str, **extra) -> di
             engine.prepare(p)
             folder = engine.export(p) if [c for c in p.clips if c.enabled] else None
         except Exception as exc:  # report it and carry on with the next video
-            report[name] = {"error": f"{exc.__class__.__name__}: {exc}", "log": log[-15:]}
+            import traceback
+
+            report[name] = {"error": f"{exc.__class__.__name__}: {exc}", "log": log[-15:],
+                            "traceback": traceback.format_exc()}
             print(f"{name}: ERROR {exc}", flush=True)
             continue
         r = check_folder(folder, truths[name], s) if folder else {"clips": 0, "hard": [], "kept": 0}

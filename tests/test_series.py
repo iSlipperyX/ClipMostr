@@ -164,3 +164,14 @@ def test_parts_of_an_ai_pick_are_marked_as_parts_and_scored_on_its_scale():
     parts = [c for c in clips if c is not first]
     assert parts and all(c.origin == "part" for c in parts)
     assert all(abs(c.score - (90.0 + 95.0 - 88.8)) < 0.2 for c in parts)
+
+
+def test_fitting_clips_that_overlap_says_so_without_failing():
+    logs = []
+    db = np.where(np.arange(1200) % 40 < 4, -70.0, -20.0)  # a pause every 20 s
+    m = Measurements(duration=600, db=db)
+    clips = [Clip(10.0, 40.0, 80.0), Clip(30.0, 60.0, 70.0)]  # the second overlaps the first
+    kept = Engine(Settings(), log=logs.append)._fit(clips, [], m, 600)
+    assert len(kept) == 1 and any("Skipped 1" in line for line in logs)
+    assert Engine(Settings(), log=logs.append)._fit([Clip(10.0, 40.0, 80.0), Clip(30.0, 60.0, 70.0)], [], m, 600,
+                                                    silent=True)
