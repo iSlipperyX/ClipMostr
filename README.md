@@ -150,7 +150,7 @@ Type what you want into **Find videos** at the top of the Research tab, in your 
 - **Time limit.** The menu next to the box limits results to this week, this month or this year.
 - **What's left out.** The bar above the table says what was searched and how many videos were left out. **← Back to trending** returns to the charts. Your last request stays one click away, and the box suggests your earlier requests.
 - **Using the results.** Send them to the Studio, or use **Queue in Automation** (also on any trending video). Automation then clips them next, in their niche's style and with your clip length.
-- **Cost.** A request uses about 200 of the YouTube API's 10,000 free daily units, because each search costs 100. The AI's rating is one short call.
+- **Cost.** A request uses about 200 of the YouTube API's 10,000 free daily units, because each search costs 100 (300 when it reads a second page past repeats). The AI's rating is one short call, for the videos it hasn't rated before.
 
 ```
 ytclip find "Call of Duty MW4 with good comedy"            # the best 20, with why each matches

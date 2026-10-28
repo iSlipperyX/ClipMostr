@@ -333,3 +333,38 @@ def test_fresh_json_is_in_the_app_folder():
     m.record("|x", [_video("a")], NOW)
     m.save()
     assert "a" in json.loads(fresh.memory_path().read_text(encoding="utf-8"))["requests"]["|x"]["shown"]
+
+
+def test_a_standing_request_picks_something_new_each_run(tmp_path, monkeypatch):
+    """End to end: automation runs the same standing request twice, a day apart. YouTube answers the
+    first search the same way every time, but the second run searches the next way and picks a new video."""
+    from test_pipeline import Clock, _runner, _settings
+    from test_standing import _empty_scan
+
+    pages = {("MW4 with good comedy", "relevance"): ["a1", "a2"], ("MW4 with good comedy funny moments", "relevance"): ["a1"],
+             ("MW4 with good comedy", "date"): ["a1", "b1"], ("MW4 with good comedy funny moments", "date"): ["b2"]}
+    searched = []
+
+    def search_page(api_key, query, after, language, limit, get, order, token):
+        searched.append((query, order))
+        return pages.get((query, order), []), ""
+
+    items = {i: api_item(i, title=f"MW4 with good comedy funny {i}", minutes=30, hours_old=30, channel=f"Ch{i}")
+             for i in ("a1", "a2", "b1", "b2")}
+    monkeypatch.setattr(lookup, "search_page", search_page)
+    monkeypatch.setattr(lookup, "details", lambda key, ids, get=None: (
+        [video_from_api(items[i]) for i in ids if i in items], {i: "" for i in ids}))
+    monkeypatch.setattr(lookup, "plain_plan", lambda request: lookup.Plan(
+        request, [request, f"{request} funny moments"], ["mw4"], ["funny"]))
+    clock = Clock()
+    s = _settings(niches=[{"id": "g", "name": "Gaming", "daily": 1, "finds": "MW4 with good comedy"}],
+                  pick_min_score=0, pick_channel_weekly=0)
+    r = _runner(tmp_path, s, scan=_empty_scan, clock=clock)
+    assert r.research(s) == 1
+    first = {j.id for j in r.db.jobs()}
+    clock.t += 86400 + 60  # a day later: the daily limit is free again, the request is due again
+    assert r.research(s) == 1
+    second = {j.id for j in r.db.jobs()} - first
+    assert len(second) == 1 and second <= {"a2", "b1", "b2"}
+    assert ("MW4 with good comedy", "date") in searched  # searched the next way, not the same again
+    assert any("new) of" in m and "newest first" in m for m in r.logs)
