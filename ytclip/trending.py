@@ -141,6 +141,7 @@ class TrendingVideo:
     reasons: list[str] = field(default_factory=list)
     moments: list[float] = field(default_factory=list)  # most-replayed peaks, seconds
     sent: bool = False  # already sent to the Studio
+    used: bool = False  # already picked, queued or clipped (fresh.used_ids), so not recommended again
     match: float = -1.0  # 0-100, how well it's what a typed request asked for (lookup.py); -1 = not asked
     match_why: str = ""
 

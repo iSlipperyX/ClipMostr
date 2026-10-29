@@ -9,11 +9,11 @@ from PySide6.QtCore import QRectF, QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QCompleter, QFrame, QGridLayout,
-                               QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMenu, QProgressBar,
+                               QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMenu,
                                QPushButton, QScrollArea, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
-from .. import clipability, learn, lookup, niches
+from .. import clipability, fresh, learn, lookup, niches, steps
 from ..clipability import FIT, PART_LABELS, WEIGHTS, age_text, compact, verdict
 from ..organize import stamp
 from ..policy import Decision, PickLog, Policy, decide, language_codes, picks_path
@@ -21,10 +21,12 @@ from ..research import ScanCancelled, ScanOptions, ScanResult, history_path, las
 from ..settings import Settings
 from ..trending import CATEGORIES, KEY_HELP_URL, REGIONS, History, TrendingVideo, deep_check, parse_regions
 from . import theme
+from .status_bars import LabeledBar
 
 COLUMNS = ("Score", "Video", "Channel", "Found in", "Views", "Views / h", "Engagement", "Length", "Posted", "Niche",
-           "Pick", "Match")
+           "Pick", "Seen", "Match")
 PICK_COLUMN = COLUMNS.index("Pick")
+SEEN_COLUMN = COLUMNS.index("Seen")
 NICHE_COLUMN = COLUMNS.index("Niche")
 MATCH_COLUMN = COLUMNS.index("Match")  # only for a request's results
 ORIGIN_LABELS = {"watchlist": "Your list", "cc": "CC search", "request": "Your request"}
@@ -32,6 +34,7 @@ SINCE_CHOICES = (("any", "Any time"), ("year", "This year"), ("month", "This mon
 FIND_EXAMPLE = "Call of Duty MW4 with good comedy"
 MIN_LENGTHS = ((0.0, "Any length"), (3.0, "3 min +"), (8.0, "8 min +"), (20.0, "20 min +"), (45.0, "45 min +"))
 SORT_ROLE = Qt.UserRole + 1
+NEW_HOURS = 24  # a trending video first seen this recently counts as new
 
 
 def score_colour(value: float) -> str:
@@ -116,6 +119,7 @@ class Research(QWidget):
         self.found: lookup.LookupResult | None = None  # the last request's results
         self.mode = "trending"  # what the table shows: "trending" or "find" (a request's results)
         self.videos: list[TrendingVideo] = []
+        self._used: set[str] = set()  # videos already picked, queued, clipped or sent (fresh.used_ids)
         self._niche_names: dict[str, str] = {}
         self.decisions: dict[str, Decision] = {}
         self.job: _Job | None = None
@@ -211,7 +215,12 @@ class Research(QWidget):
         self.back_btn.clicked.connect(self.show_trending)
         self.last_find_btn = QPushButton()
         self.last_find_btn.clicked.connect(self.show_found)
+        self.more_btn = QPushButton("➕  Find more")
+        self.more_btn.setToolTip("Search again with the request's next searches and another sort order, leaving out "
+                                 "every video already listed or used. About 200 API units")
+        self.more_btn.clicked.connect(lambda: self.find(more=True))
         fb.addWidget(self.find_text, 1)
+        fb.addWidget(self.more_btn)
         fb.addWidget(self.last_find_btn)
         fb.addWidget(self.back_btn)
         layout.addWidget(self.find_bar)
@@ -244,9 +253,15 @@ class Research(QWidget):
         self.search.setPlaceholderText("Filter by title or channel")
         self.search.setClearButtonEnabled(True)
         self.search.textChanged.connect(self._apply_filter)
-        self.hide_sent = QCheckBox("Hide sent")
-        self.hide_sent.setToolTip("Hide videos you've already sent to the Studio")
-        self.hide_sent.toggled.connect(self._apply_filter)
+        self.hide_used = QCheckBox("Hide used")
+        self.hide_used.setToolTip("Hide videos you've already used: picked, queued or clipped by automation, or sent "
+                                  "to the Studio")
+        self.hide_used.toggled.connect(self._hide_used_toggled)
+        self.hide_sent = self.hide_used  # its name before 2.9
+        self.new_only = QCheckBox("New only")
+        self.new_only.setToolTip(f"Only videos first seen in the last {NEW_HOURS} hours (for a request: the ones it "
+                                 "hadn't shown before)")
+        self.new_only.toggled.connect(self._apply_filter)
         self.niche_filter = QComboBox()
         self.niche_filter.setToolTip("Show the videos that fit one niche")
         self.niche_filter.activated.connect(lambda _i: self._apply_filter())
@@ -267,17 +282,17 @@ class Research(QWidget):
         filters.addStretch(1)
         filters.addWidget(self.search, 1)
         filters.addWidget(self.niche_filter)
-        filters.addWidget(self.hide_sent)
+        filters.addWidget(self.hide_used)
+        filters.addWidget(self.new_only)
         filters.addWidget(self.picks_only)
         filters.addWidget(self.rules_btn)
         layout.addLayout(filters)
 
         layout.addWidget(self._build_key_panel())
 
-        self.bar = QProgressBar()
-        self.bar.setFixedHeight(5)
-        self.bar.setRange(0, 1000)
+        self.bar = LabeledBar(height=14)
         self.bar.setVisible(False)
+        self._tracker = steps.Tracker()
         layout.addWidget(self.bar)
 
         self.table = QTableWidget(0, len(COLUMNS))
@@ -451,8 +466,9 @@ class Research(QWidget):
     def sync_from_settings(self) -> None:
         """Show the current settings in the filter controls (after the Settings dialog, too)."""
         s = self._settings()
-        for w in (self.category, self.min_len, self.auto, self.interval):
+        for w in (self.category, self.min_len, self.auto, self.interval, self.hide_used):
             w.blockSignals(True)
+        self.hide_used.setChecked(s.research_hide_used)
         i = self.category.findData(s.research_category)
         self.category.setCurrentIndex(max(0, i))
         i = self.min_len.findData(float(s.research_min_minutes))
@@ -463,7 +479,7 @@ class Research(QWidget):
         self.auto.setChecked(s.research_auto)
         self.interval.setValue(s.research_interval)
         self.interval.setEnabled(s.research_auto)
-        for w in (self.category, self.min_len, self.auto, self.interval):
+        for w in (self.category, self.min_len, self.auto, self.interval, self.hide_used):
             w.blockSignals(False)
         regions = parse_regions(s.research_regions)
         self.regions_btn.setText(", ".join(regions) if regions else "Choose…")
@@ -499,6 +515,11 @@ class Research(QWidget):
         self.sync_from_settings()
         if youtube_key(self._settings()):
             self._debounce.start()  # wait for the user to finish clicking around
+
+    def _hide_used_toggled(self, on: bool) -> None:
+        if self._settings().research_hide_used != on:
+            self._change("research_hide_used", on)
+        self._apply_filter()
 
     def _fill_regions_menu(self) -> None:
         self.regions_menu.clear()
@@ -597,14 +618,19 @@ class Research(QWidget):
         self.find_btn.setEnabled(False)
         self.cancel_btn.setVisible(True)
         self.bar.setVisible(True)
-        self.bar.setRange(0, 0)
+        self.bar.set_fraction(None)
+        self._tracker = steps.Tracker()  # for the time left
         self.summary.setText(text)
         job.start()
 
     # ================================================================== finding videos for a request
-    def find(self) -> None:
-        """Search YouTube for what's typed in the Find box (lookup.py)."""
-        request = lookup.tidy(self.find_box.text())
+    def find(self, more: bool = False) -> None:
+        """Search YouTube for what's typed in the Find box (lookup.py). Each search for the same request
+        takes its next angles and sort order (fresh.py); more=True adds to the request's results,
+        leaving out every video they already list."""
+        if more and not self.found:
+            return
+        request = self.found.request if more else lookup.tidy(self.find_box.text())
         if not request:
             self.find_box.setFocus()
             self.notice.emit(f"Type what you're looking for, like: {FIND_EXAMPLE}")
@@ -620,17 +646,37 @@ class Research(QWidget):
             return
         since = self.find_since.currentData() or "any"
         language = next(iter(language_codes(s.pick_languages)), "")
-        job = _Job(lambda j: lookup.find(request, s, key, since, s.research_min_minutes, language, j.log.emit,
-                                         lambda m, f: j.progress.emit(m, -1.0 if f is None else float(f)),
-                                         lambda: j.cancel_requested))
+        memory = fresh.load()
+        skip = set(fresh.used_now(self.history))
+        if more:
+            skip |= {v.id for v in self.found.videos}
+
+        def run(j: "_Job") -> "lookup.LookupResult":
+            result = lookup.find(request, s, key, since, s.research_min_minutes, language, j.log.emit,
+                                 lambda m, f: j.progress.emit(m, -1.0 if f is None else float(f)),
+                                 lambda: j.cancel_requested, memory=memory,
+                                 request_key=fresh.request_key(request), skip=skip)
+            memory.save()
+            return result
+
+        job = _Job(run)
         job.progress.connect(self._progress)
         job.log.connect(self.log.emit)
-        job.succeeded.connect(self._find_done)
+        job.succeeded.connect(lambda r: self._find_done(r, more))
         job.failed.connect(self._find_failed)
         job.finished.connect(self._job_finished)
-        self._start(job, f"Finding videos for “{_esc(request[:60])}”…")
+        self._start(job, f"Finding {'more ' if more else ''}videos for “{_esc(request[:60])}”…")
 
-    def _find_done(self, result: "lookup.LookupResult") -> None:
+    def _find_done(self, result: "lookup.LookupResult", more: bool = False) -> None:
+        added = len(result.videos)
+        if more and self.found is not None and self.found.request == result.request:
+            before = self.found
+            have = {v.id for v in before.videos}
+            result.videos = before.videos + [v for v in result.videos if v.id not in have]
+            result.videos.sort(key=lambda v: (lookup.rank(v), v.match), reverse=True)
+            result.quota += before.quota
+            result.weak += before.weak
+            result.skipped = max(0, result.skipped - len(have))  # (it left out the listed ones on purpose)
         try:
             lookup.remember(result)
         except OSError:
@@ -642,9 +688,16 @@ class Research(QWidget):
         for p in result.problems:
             self.log.emit(f"Find: {p}")
         self.show_found()
-        n = len(result.videos)
-        self.notice.emit(f"Found {n} video{'s' if n != 1 else ''} for “{_esc(result.request[:60])}”."
-                         + (f" Best: {_esc(result.videos[0].title[:60])}" if n else " Try other words."))
+        n, new = len(result.videos), len(result.fresh)
+        request = _esc(result.request[:60])
+        if more:
+            self.notice.emit(f"Found {added} more video{'s' if added != 1 else ''} for “{request}”."
+                             if added else f"Nothing new for “{request}” this time. Find more again tries the "
+                             "next searches")
+        else:
+            self.notice.emit(f"Found {n} video{'s' if n != 1 else ''} for “{request}”"
+                             + (f" ({new} new)" if new != n else "") + "."
+                             + (f" Best: {_esc(result.videos[0].title[:60])}" if n else " Try other words."))
 
     def _find_failed(self, msg: str) -> None:
         if msg != "Cancelled":
@@ -668,6 +721,7 @@ class Research(QWidget):
         finding = self.mode == "find" and self.found is not None
         self.table.setColumnHidden(MATCH_COLUMN, not finding)
         self.back_btn.setVisible(finding)
+        self.more_btn.setVisible(finding)
         self.last_find_btn.setVisible(not finding and self.found is not None)
         if self.found is not None:
             self.last_find_btn.setText(f"Show “{self.found.request[:40]}” again")
@@ -679,13 +733,20 @@ class Research(QWidget):
             return
         r = self.found
         bits = [f"<b>{len(r.videos)} video{'s' if len(r.videos) != 1 else ''}</b> for “{_esc(r.request)}”"]
+        new = len(r.fresh)
+        if new and new != len(r.videos):
+            bits.append(f"<span style='color:{theme.ACCENT_2}'>{new} new</span>")
         if r.weak:
             bits.append(f"{r.weak} that didn't match left out")
+        if r.skipped:
+            bits.append(f"{r.skipped} you've already used left out")
         bits.append(f"rated by {_esc(r.rated_by)}" if r.rated_by else "matched by their words (add a Claude or Gemini "
                     "key in Settings → AI to have them rated)")
         bits.append(f"found {age_text((time.time() - r.time) / 3600)} ago" if time.time() - r.time >= 60
                     else "found just now")
         searched = ", ".join(f"“{_esc(q)}”" for q in r.plan.queries)
+        if r.plan.order != "relevance":
+            searched += f" ({fresh.ORDER_WORDS.get(r.plan.order, r.plan.order)} first)"
         about = f"<br><span style='color:{theme.MUTED}'>{_esc(r.plan.about)} · " if r.plan.about else \
             f"<br><span style='color:{theme.MUTED}'>"
         self.find_text.setText(" · ".join(bits) + about + f"searched {searched}, {r.quota} API units</span>")
@@ -696,11 +757,7 @@ class Research(QWidget):
 
     def _progress(self, msg: str, frac: float) -> None:
         self.summary.setText(msg)
-        if frac < 0:
-            self.bar.setRange(0, 0)
-        else:
-            self.bar.setRange(0, 1000)
-            self.bar.setValue(int(frac * 1000))
+        self.bar.set_status(self._tracker.update(msg, None if frac < 0 else frac))
 
     def _job_finished(self) -> None:
         if self.job:
@@ -804,6 +861,7 @@ class Research(QWidget):
         self.table.setRowCount(len(self.videos))
         s = self._settings()
         niches.assign_from_settings(self.videos, s, self.history)
+        self._mark_used()
         self.decisions = {d.video.id: d for d in decide(self.videos, Policy.from_settings(s), self.picks,
                                                         notes=notes, lessons=learn.for_settings(s))}
         for r, v in enumerate(self.videos):
@@ -818,6 +876,43 @@ class Research(QWidget):
         if target is not None:
             self.table.selectRow(target)
         self._show_detail(self._video_at(target) if target is not None else None)  # also when the row stays 0
+
+    def _mark_used(self) -> None:
+        """Mark the videos already used (picked, queued, clipped or sent), for Hide used and the rules."""
+        self.picks.reload()
+        self._used = fresh.used_now(self.history)
+        for v in self.videos:
+            v.used = v.id in self._used
+
+    def is_new(self, v: TrendingVideo, now: float | None = None) -> bool:
+        """First seen in the last NEW_HOURS (for a request's results: not shown by it before)."""
+        if self.mode == "find" or v.match >= 0:
+            return v.new
+        return v.new or (bool(v.first_seen) and (now or time.time()) - v.first_seen < NEW_HOURS * 3600)
+
+    def _seen_item(self, v: TrendingVideo) -> QTableWidgetItem:
+        now = time.time()
+        if v.used or v.sent:
+            it = _SortItem("Used")
+            it.setData(SORT_ROLE, -1.0)
+            it.setToolTip("Already picked, queued or clipped by automation, or sent to the Studio")
+            it.setForeground(QColor(theme.MUTED))
+        elif self.is_new(v, now):
+            it = _SortItem("New")
+            it.setData(SORT_ROLE, now + (1 if v.new else 0))
+            it.setToolTip("Not shown before by this request" if v.match >= 0 else
+                          "First seen " + ("in this check" if v.new else
+                                           f"{age_text((now - v.first_seen) / 3600)} ago"))
+            it.setForeground(QColor(theme.ACCENT_2))
+        else:
+            first = v.first_seen or now
+            it = _SortItem(age_text((now - first) / 3600) if v.first_seen else "Before")
+            it.setData(SORT_ROLE, first)
+            it.setToolTip("Shown by this request before" if v.match >= 0 else
+                          f"Showing up in Research for {age_text((now - first) / 3600)}")
+            it.setForeground(QColor(theme.MUTED))
+        it.setTextAlignment(Qt.AlignCenter)
+        return it
 
     def _fill_row(self, r: int, v: TrendingVideo) -> None:
         def item(text: str, sort=None, tip: str = "") -> QTableWidgetItem:
@@ -836,11 +931,12 @@ class Research(QWidget):
         score.setFont(f)
         score.setTextAlignment(Qt.AlignCenter)
         score.setData(Qt.UserRole, v.id)
-        mark = "✓ " if v.sent else ("● " if v.new else "")
+        used = v.sent or v.used
+        mark = "✓ " if used else ("● " if v.new else "")
         title = item(mark + v.title, v.title.lower(), v.title + (f"\n\n{why}" if why else ""))
-        if v.new and not v.sent:
+        if v.new and not used:
             title.setForeground(QColor(theme.ACCENT_2))
-        elif v.sent:
+        elif used:
             title.setForeground(QColor(theme.MUTED))
         regions = sorted(v.regions.items(), key=lambda kv: kv[1])
         found = [f"{code} #{rank}" for code, rank in regions[:3]] + (["…"] if len(regions) > 3 else [])
@@ -862,6 +958,7 @@ class Research(QWidget):
             item(age_text(v.age_hours()), -v.published),
             self._niche_item(v),
             self._pick_item(v),
+            self._seen_item(v),
             self._match_item(v),
         ]
         for c, cell in enumerate(cells):
@@ -907,9 +1004,9 @@ class Research(QWidget):
     def refresh_picks(self) -> None:
         """Run the picking rules over the current results (after a scan or a rules change)."""
         s = self._settings()
-        self.picks.reload()  # the automation runner may have picked videos since
         notes = self.result.notes if self.result else {}
         niches.assign_from_settings(self.videos, s, self.history)  # a niche may have changed
+        self._mark_used()  # the automation runner may have picked or clipped videos since
         self.decisions = {d.video.id: d for d in decide(self.videos, Policy.from_settings(s), self.picks,
                                                         notes=notes, lessons=learn.for_settings(s))}
         self.table.setSortingEnabled(False)
@@ -918,6 +1015,7 @@ class Research(QWidget):
             if v:
                 self.table.setItem(r, NICHE_COLUMN, self._niche_item(v))
                 self.table.setItem(r, PICK_COLUMN, self._pick_item(v))
+                self.table.setItem(r, SEEN_COLUMN, self._seen_item(v))
         self.table.setSortingEnabled(True)
         if self._shown:
             self._show_detail(self._shown)
@@ -928,22 +1026,27 @@ class Research(QWidget):
 
     def _apply_filter(self) -> None:
         text = self.search.text().strip().lower()
-        hide_sent = self.hide_sent.isChecked()
+        hide_used = self.hide_used.isChecked()
+        only_new = self.new_only.isChecked()
         only_picks = self.picks_only.isChecked()
         niche = self.niche_filter.currentData() if not self.niche_filter.isHidden() else None
-        shown = 0
+        shown = used = 0
+        now = time.time()
         for r in range(self.table.rowCount()):
             v = self._video_at(r)
             d = self.decisions.get(v.id) if v else None
-            hidden = v is None or (hide_sent and v.sent) or (only_picks and not (d and d.picked)) or bool(
+            is_used = v is not None and (v.sent or v.used)
+            used += is_used
+            hidden = v is None or (hide_used and is_used) or (only_picks and not (d and d.picked)) or bool(
                 text and text not in v.title.lower() and text not in v.channel.lower()) or (
-                niche is not None and v.niche != niche)
+                niche is not None and v.niche != niche) or (only_new and not self.is_new(v, now))
             self.table.setRowHidden(r, hidden)
             shown += not hidden
         total = len(self.videos)
         n_picked = len(self.picked_videos())
         self.count.setText((f"{shown} of {total} videos" if shown != total else f"{total} videos")
-                           + (f" · {n_picked} picked" if n_picked else ""))
+                           + (f" · {n_picked} picked" if n_picked else "")
+                           + (f" · {used} already used{', hidden' if hide_used else ''}" if used else ""))
         has_rows = total > 0
         self.table.setVisible(has_rows)
         self.empty.setVisible(not has_rows)

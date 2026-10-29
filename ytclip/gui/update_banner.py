@@ -14,12 +14,13 @@ import time
 
 from PySide6.QtCore import Qt, QTimer, QUrl
 from PySide6.QtGui import QDesktopServices
-from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QLabel, QMessageBox, QProgressBar,
+from PySide6.QtWidgets import (QDialog, QDialogButtonBox, QFrame, QHBoxLayout, QLabel, QMessageBox,
                                QPushButton, QTextBrowser, QVBoxLayout)
 
-from .. import __version__, updater
+from .. import __version__, steps, updater
 from ..settings import APP_NAME, UPDATE_CHANNELS
 from . import theme
+from .status_bars import LabeledBar
 from .tasks import Task
 
 CHANNEL_NAMES = {k: v.split(" (")[0] for k, v in UPDATE_CHANNELS}
@@ -39,9 +40,9 @@ class UpdateBanner(QFrame):
 
         self.text = QLabel()
         self.text.setTextFormat(Qt.RichText)
-        self.bar = QProgressBar()
-        self.bar.setRange(0, 1000)
-        self.bar.setFixedWidth(220)
+        self.bar = LabeledBar(height=16)
+        self.bar.setFixedWidth(240)
+        self._tracker = steps.Tracker()
         self.notes_btn = QPushButton("What's new")
         self.install_btn = QPushButton("Update now")
         self.install_btn.setObjectName("primary")
@@ -276,11 +277,9 @@ class UpdateBanner(QFrame):
         self.show()
 
     def _progress(self, msg: str, frac: float) -> None:
-        if frac < 0:
-            self.bar.setRange(0, 0)
-        else:
-            self.bar.setRange(0, 1000)
-            self.bar.setValue(int(frac * 1000))
+        if frac <= 0:
+            self._tracker = steps.Tracker()  # a new download: the time left starts again
+        self.bar.set_status(self._tracker.update(msg, None if frac < 0 else frac))
         size = self.release.asset_size if self.release else 0
         mb = f" ({frac * size / 1e6:.0f} of {size / 1e6:.0f} MB)" if frac >= 0 and size else ""
         self.text.setText(f"{msg} ClipMonster {self.release.version if self.release else ''}…{mb}")

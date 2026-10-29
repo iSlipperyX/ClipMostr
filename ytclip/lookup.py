@@ -6,6 +6,12 @@ how well it matches the request (the AI rates each one, or the words in its titl
 description are counted) and how well it will clip (clipability.py). Best first.
 
 A search costs 100 of the YouTube API's 10,000 free daily units, so a request uses about 200.
+
+So that running a request again finds new videos rather than the same ones (fresh.py): a request
+keeps up to eight search angles and each run takes the next ones with the next sort order (best
+match, newest, most viewed); a page that's all repeats is followed by the next page; videos you've
+already used are left out before anything is rated; and videos the request showed before keep
+their match (the AI isn't asked again) and go below new ones.
 """
 
 from __future__ import annotations
@@ -19,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
-from . import clipability
+from . import clipability, fresh
 from .settings import Settings, app_dir
 from .trending import API_URL, VIDEO_PARTS, ResearchBlocked, ResearchError, TrendingVideo, _get, video_from_api
 
@@ -28,7 +34,10 @@ Progress = Callable[[str, "float | None"], None]
 
 SEARCH_COST = 100  # quota units per search.list call
 PER_SEARCH = 50  # results asked of each search (the most one call gives)
-MAX_SEARCHES = 3
+MAX_SEARCHES = fresh.MAX_ANGLES  # search angles a request keeps; each run uses fresh.PER_TURN of them
+DIG_BELOW = 10  # a page with fewer new videos than this is followed by the next page...
+MAX_DIGS = 1  # ...this many times a run (each page is another 100 units)
+REPEAT = 8.0  # rank points a video the request showed before loses, so new ones come first
 MAX_REQUEST = 300  # characters
 RECENT = 12  # requests remembered for the box's suggestions
 RATE_AT_ONCE = 60  # videos the AI rates in one call
@@ -54,6 +63,16 @@ VIBES: list[tuple[tuple[str, ...], str, tuple[str, ...]]] = [
                                                                        "intense", "unbelievable")),
     (("tips", "tutorial", "guide", "howto"), "tips", ("tips", "tutorial", "guide", "how")),
 ]
+# Other ways titles say the same kind of video, for later runs of a request (fresh.py).
+ALTERNATES: dict[str, tuple[str, ...]] = {
+    "funny moments": ("funniest moments", "hilarious moments", "try not to laugh"),
+    "rage moments": ("rage quit", "biggest rage"), "clutch moments": ("clutch plays", "insane clutch"),
+    "fails": ("fail compilation", "epic fails"), "highlights": ("best moments", "best plays"),
+    "scary moments": ("jumpscares", "scariest moments"), "wholesome moments": ("heartwarming moments",),
+    "reaction": ("reacts", "reacting to"), "drama": ("drama explained",),
+    "insane moments": ("craziest moments", "wild moments"), "tips": ("guide", "tutorial"),
+}
+OTHER_ANGLES = ("highlights", "best moments", "stream highlights")  # for a request that names no kind of video
 FILLER = {"a", "an", "the", "some", "any", "find", "me", "show", "get", "i", "want", "need", "looking", "look",
           "for", "please", "video", "videos", "clip", "clips", "youtube", "good", "great", "really", "very",
           "lots", "lot", "of", "with", "that", "has", "have", "having", "and", "or", "in", "on", "to", "is", "are",
@@ -81,6 +100,21 @@ class Plan:
     vibe: list[str] = field(default_factory=list)  # words that show it's the kind asked for
     about: str = ""  # one line: what the AI understood
     by_ai: bool = False
+    angles: list[str] = field(default_factory=list)  # every search it takes turns with (queries = this run's)
+    order: str = "relevance"  # this run's sort order (fresh.ORDERS)
+
+    def __post_init__(self) -> None:
+        self.angles = self.angles or list(self.queries)
+
+    def to_json(self) -> dict:
+        return {"queries": self.queries, "subject": self.subject, "vibe": self.vibe, "about": self.about,
+                "by_ai": self.by_ai, "angles": self.angles, "order": self.order}
+
+    @classmethod
+    def from_json(cls, request: str, p: dict) -> "Plan":
+        return cls(request, list(p.get("queries") or []), list(p.get("subject") or []), list(p.get("vibe") or []),
+                   p.get("about", ""), bool(p.get("by_ai")), list(p.get("angles") or []),
+                   p.get("order") or "relevance")
 
 
 @dataclass
@@ -94,22 +128,26 @@ class LookupResult:
     problems: list[str] = field(default_factory=list)
     rated_by: str = ""  # the model that rated the matches, "" = by their words
     ai_calls: int = 0  # calls made to Claude (automation counts them against AI calls per day)
+    skipped: int = 0  # found but left out: already used (or already in the list, for Find more)
+    pages: int = 0  # search pages read (a run reads another when a page is all repeats)
+
+    @property
+    def fresh(self) -> list[TrendingVideo]:
+        """The videos this request hadn't shown before."""
+        return [v for v in self.videos if v.new]
 
     def to_json(self) -> dict:
         return {"request": self.request, "time": self.time, "quota": self.quota, "weak": self.weak,
-                "problems": self.problems, "rated_by": self.rated_by,
-                "plan": {"queries": self.plan.queries, "subject": self.plan.subject, "vibe": self.plan.vibe,
-                         "about": self.plan.about, "by_ai": self.plan.by_ai},
-                "videos": [v.to_json() for v in self.videos]}
+                "problems": self.problems, "rated_by": self.rated_by, "skipped": self.skipped, "pages": self.pages,
+                "plan": self.plan.to_json(), "videos": [v.to_json() for v in self.videos]}
 
     @classmethod
     def from_json(cls, d: dict) -> "LookupResult":
-        p = d.get("plan") or {}
-        plan = Plan(d.get("request", ""), list(p.get("queries") or []), list(p.get("subject") or []),
-                    list(p.get("vibe") or []), p.get("about", ""), bool(p.get("by_ai")))
+        plan = Plan.from_json(d.get("request", ""), d.get("plan") or {})
         return cls(d.get("request", ""), [TrendingVideo.from_json(v) for v in d.get("videos") or []],
                    float(d.get("time") or 0), plan, int(d.get("quota") or 0), int(d.get("weak") or 0),
-                   list(d.get("problems") or []), d.get("rated_by", ""))
+                   list(d.get("problems") or []), d.get("rated_by", ""), skipped=int(d.get("skipped") or 0),
+                   pages=int(d.get("pages") or 0))
 
 
 # ---------------------------------------------------------------- the request → searches
@@ -144,20 +182,32 @@ def plain_plan(request: str) -> Plan:
     subject = [w for w in _words(subject_text) if w not in FILLER]
     if not subject and not vibes:
         raise FindError("Type what you're looking for, like \"Call of Duty MW4 with good comedy\".")
+    vibe = sorted({w for _, shows in vibes for w in shows})
     if not subject:  # the request is only the kind of video ("funny fails"): search it as typed
-        return Plan(text, [text], [], sorted({w for _, shows in vibes for w in shows}))
+        return Plan(text, [text], [], vibe, angles=_unique([text] + [a for p, _ in vibes for a in ALTERNATES.get(p, ())]))
     queries = [f"{subject_text} {phrase}" for phrase, _ in vibes[:2]]
     queries.append(subject_text if vibes else text)
+    queries = _unique(queries)[:2]
+    more = [f"{subject_text} {phrase}" for phrase, _ in vibes[2:]]
+    more += [f"{subject_text} {alt}" for phrase, _ in vibes for alt in ALTERNATES.get(phrase, ())]
+    if not vibes:
+        more += [f"{subject_text} {alt}" for alt in OTHER_ANGLES]
+    return Plan(text, queries, subject, vibe, angles=_unique(queries + more)[:MAX_SEARCHES])
+
+
+def _unique(queries: list[str]) -> list[str]:
+    """Each search once (whatever its case), order kept."""
     seen: set[str] = set()
-    queries = [q for q in queries if not (q.lower() in seen or seen.add(q.lower()))][:2]
-    return Plan(text, queries, subject, sorted({w for _, shows in vibes for w in shows}))
+    return [q for q in queries if q.strip() and not (q.lower() in seen or seen.add(q.lower()))]
 
 
 PLAN_SCHEMA = {
     "type": "object",
     "properties": {
         "queries": {"type": "array", "items": {"type": "string"},
-                    "description": "1-3 YouTube searches, most likely to find it first"},
+                    "description": "4-8 YouTube searches, most likely to find it first, each a different angle "
+                                   "(other names, other kinds of title, other creators) so that running them in turn "
+                                   "keeps finding new videos"},
         "subject": {"type": "array", "items": {"type": "string"},
                     "description": "Words a matching video's title would use for what it's about, lowercase, "
                                    "including other names for it"},
@@ -212,17 +262,24 @@ def _ask(prompt: str, system: str, schema: dict, s: Settings, check: Callable[[]
     return answer.data, answer.model
 
 
-def ai_plan(request: str, s: Settings, check: Callable[[], None] | None = None) -> Plan:
+def ai_plan(request: str, s: Settings, check: Callable[[], None] | None = None, tried: list[str] | None = None
+            ) -> Plan:
+    """The AI's searches for a request. `tried`: searches earlier runs used, so it finds new angles."""
     text = tidy(request)
     if not text:
         return plain_plan(request)
-    answer, _ = _ask(f"Request: {text}", PLAN_SYSTEM, PLAN_SCHEMA, s, check, max_tokens=1500)
-    queries = [" ".join(str(q).split())[:100] for q in answer.get("queries") or [] if str(q).strip()]
+    prompt = f"Request: {text}"
+    if tried:
+        prompt += ("\n\nThese searches were run before and keep finding the same videos, so write different "
+                   "ones:\n" + "\n".join(f"- {q}" for q in tried[-12:]))
+    answer, _ = _ask(prompt, PLAN_SYSTEM, PLAN_SCHEMA, s, check, max_tokens=1500)
+    queries = _unique([" ".join(str(q).split())[:100] for q in answer.get("queries") or [] if str(q).strip()])
     if not queries:
         return plain_plan(request)
     words = lambda key: sorted({w for x in answer.get(key) or [] for w in _words(str(x)) if w not in FILLER})  # noqa: E731
-    return Plan(text, queries[:MAX_SEARCHES], words("subject"), words("vibe"),
-                " ".join(str(answer.get("about") or "").split())[:200], by_ai=True)
+    angles = queries[:MAX_SEARCHES]
+    return Plan(text, angles[:fresh.PER_TURN], words("subject"), words("vibe"),
+                " ".join(str(answer.get("about") or "").split())[:200], by_ai=True, angles=angles)
 
 
 # ---------------------------------------------------------------- YouTube
@@ -231,8 +288,18 @@ def ai_plan(request: str, s: Settings, check: Callable[[], None] | None = None) 
 def search_ids(api_key: str, query: str, published_after: float = 0.0, language: str = "",
                limit: int = PER_SEARCH, get: Callable[[str], dict] = _get) -> list[str]:
     """Video ids for a search, most relevant first; 100 quota units."""
-    params = {"part": "id", "type": "video", "q": query, "order": "relevance",
+    return search_page(api_key, query, published_after, language, limit, get)[0]
+
+
+def search_page(api_key: str, query: str, published_after: float = 0.0, language: str = "",
+                limit: int = PER_SEARCH, get: Callable[[str], dict] = _get, order: str = "relevance",
+                page: str = "") -> tuple[list[str], str]:
+    """One page of a search, in `order` (relevance | date | viewCount), and the next page's token
+    ("" for none); 100 quota units."""
+    params = {"part": "id", "type": "video", "q": query, "order": order if order in fresh.ORDERS else "relevance",
               "maxResults": str(max(1, min(50, limit))), "key": api_key.strip()}
+    if page:
+        params["pageToken"] = page
     if published_after:
         from datetime import datetime, timezone
 
@@ -242,7 +309,7 @@ def search_ids(api_key: str, query: str, published_after: float = 0.0, language:
         params["relevanceLanguage"] = language
     data = get(f"{API_URL}/search?{urllib.parse.urlencode(params)}")
     ids = [((it.get("id") or {}).get("videoId") or "") for it in data.get("items") or []]
-    return [i for i in ids if i]
+    return [i for i in ids if i], str(data.get("nextPageToken") or "")
 
 
 def details(api_key: str, ids: list[str], get: Callable[[str], dict] = _get
@@ -315,14 +382,21 @@ def ai_rate(videos: list[TrendingVideo], text: dict[str, str], plan: Plan, s: Se
 def find(request: str, s: Settings, api_key: str, since: str = "any", min_minutes: float | None = None,
          language: str = "", log: Log | None = None, progress: Progress | None = None,
          cancelled: Callable[[], bool] | None = None, get: Callable[[str], dict] = _get,
-         use_ai: bool | None = None, now: float | None = None) -> LookupResult:
-    """Search YouTube for the request and score what comes back, best match first."""
+         use_ai: bool | None = None, now: float | None = None, memory: "fresh.Memory | None" = None,
+         request_key: str = "", skip: set[str] | frozenset = frozenset()) -> LookupResult:
+    """Search YouTube for the request and score what comes back, best match first.
+
+    memory (fresh.Memory) and request_key (fresh.request_key): the request's earlier runs, so this run
+    searches the next angles in the next order, and videos it showed before are known (their match
+    is kept, and they go below new ones). Without them every run is a first run. skip: video ids
+    to leave out (already used, or already listed for Find more)."""
     from . import ai
     from .ai import AIError
 
     log = log or (lambda m: None)
     cancelled = cancelled or (lambda: False)
     now = now or time.time()
+    key = request_key or fresh.request_key(request)
 
     def step(msg: str, frac: float | None) -> None:
         if cancelled():
@@ -338,35 +412,62 @@ def find(request: str, s: Settings, api_key: str, since: str = "any", min_minute
     with_ai = ai.has_key(s) if use_ai is None else use_ai
     calls = 0
     plan = None
-    if with_ai:
-        step("The AI is working out what to search for", None)
+    saved = memory.plan(key, now) if memory is not None else None
+    if saved and (saved.get("by_ai") or not with_ai):  # angles written earlier: no need to ask again
+        plan = Plan.from_json(tidy(request) or request, saved)
+    elif with_ai:
+        step("The AI is working out what to search for", 0.0)
         try:
             calls += 1
-            plan = ai_plan(request, s, check=lambda: step("The AI is working out what to search for", None))
+            plan = ai_plan(request, s, check=lambda: step("The AI is working out what to search for", None),
+                           tried=memory.tried(key) if memory is not None and saved is None else None)
         except AIError as exc:
             problems.append(f"The AI couldn't plan the search ({exc}), so it searched your words.")
     plan = plan or plain_plan(request)
-    log(f"Find: searching YouTube for {', '.join(repr(q) for q in plan.queries)}")
+    if memory is not None and plan is not None and not saved:
+        memory.store_plan(key, plan.to_json(), now)
+    turn = memory.next_turn(key, plan.angles) if memory is not None else fresh.turn_for(plan.angles, 0)
+    plan.queries, plan.order = turn.queries, turn.order
+    shown = memory.shown(key, now) if memory is not None else {}
+    log(f"Find: searching YouTube for {', '.join(repr(q) for q in plan.queries)}"
+        + (f" ({turn.order_words} first)" if turn.order != "relevance" else ""))
     after = now - SINCE.get(since, 0) * 86400 if SINCE.get(since) else 0.0
     ids: list[str] = []
-    quota = 0
+    quota = pages = digs = 0
+    steps = len(plan.queries) + 2
     for i, query in enumerate(plan.queries):
-        step(f"Searching YouTube: {query}", i / (len(plan.queries) + 2))
-        try:
-            got = search_ids(api_key, query, after, language, PER_SEARCH, get)
-        except ResearchBlocked:  # a bad key or used-up quota fails every search the same way
-            raise
-        except ResearchError as exc:
-            if not ids and i == len(plan.queries) - 1:
+        step(f"Searching YouTube: {query}", i / steps)
+        token, page_no = "", 1
+        while True:
+            try:
+                got, token = search_page(api_key, query, after, language, PER_SEARCH, get, plan.order, token)
+            except ResearchBlocked:  # a bad key or used-up quota fails every search the same way
+                quota += SEARCH_COST
                 raise
-            problems.append(f"Search \"{query}\": {exc}")
-            continue
-        finally:
+            except ResearchError as exc:
+                quota += SEARCH_COST
+                if not ids and i == len(plan.queries) - 1:
+                    raise
+                problems.append(f"Search \"{query}\": {exc}")
+                break
             quota += SEARCH_COST
-        ids += [x for x in got if x not in ids]
+            pages += 1
+            new = [x for x in got if x not in ids and x not in skip and x not in shown]
+            ids += [x for x in got if x not in ids]
+            # A page of videos already used or already shown: the next page has new ones.
+            if len(new) >= DIG_BELOW or not token or digs >= MAX_DIGS or not got:
+                break
+            digs += 1
+            page_no += 1
+            step(f"Searching YouTube: {query} (page {page_no}: the first was all repeats)", i / steps)
+    skipped = sum(1 for x in ids if x in skip)
+    ids = [x for x in ids if x not in skip]
+    if skipped:
+        log(f"Find: left out {skipped} video{'s' if skipped != 1 else ''} already used.")
     if not ids:
-        return LookupResult(plan.request, [], now, plan, quota, 0, problems, ai_calls=calls)
-    step(f"Reading {len(ids)} videos", len(plan.queries) / (len(plan.queries) + 2))
+        return LookupResult(plan.request, [], now, plan, quota, 0, problems, ai_calls=calls, skipped=skipped,
+                            pages=pages)
+    step(f"Reading {len(ids)} videos", len(plan.queries) / steps)
     videos, text = details(api_key, ids, get)
     quota += math.ceil(len(ids) / 50)
     shortest = 60.0 if min_minutes is None else max(60.0, min_minutes * 60)
@@ -378,31 +479,41 @@ def find(request: str, s: Settings, api_key: str, since: str = "any", min_minute
     for v in videos:
         v.origins = ["request"]
         v.velocity = v.views / max(1.0, v.age_hours(now))
+        v.new = v.id not in shown
+        if not v.new:
+            v.first_seen = shown[v.id][0]
     velocities = [v.velocity for v in videos]
     for v in videos:
         clipability.score(v, velocities, now)
-    rated, rated_by = {}, ""
-    if with_ai and videos:
-        step(f"The AI is rating how well {len(videos)} videos match", (len(plan.queries) + 1) / (len(plan.queries) + 2))
-        calls += math.ceil(len(videos) / RATE_AT_ONCE)
+    rated: dict[str, tuple[float, str]] = {v.id: shown[v.id][1:] for v in videos if v.id in shown}
+    rated_by = ""
+    unrated = [v for v in videos if v.id not in rated]
+    if with_ai and unrated:
+        step(f"The AI is rating how well {len(unrated)} videos match", (len(plan.queries) + 1) / steps)
+        calls += math.ceil(len(unrated) / RATE_AT_ONCE)
         try:
-            rated, rated_by = ai_rate(videos, text, plan, s,
-                                      check=lambda: step("The AI is rating the videos", None))
+            got_rated, rated_by = ai_rate(unrated, text, plan, s,
+                                          check=lambda: step("The AI is rating the videos", None))
+            rated |= got_rated
         except AIError as exc:
             problems.append(f"The AI couldn't rate the videos ({exc}), so they're matched by their words.")
     for v in videos:
         v.match, v.match_why = rated.get(v.id) or word_match(v, text.get(v.id, ""), plan)
         v.reasons = [f"Match {v.match:.0f}: {v.match_why}"] + [r for r in v.reasons if not r.startswith("Match ")]
+    if memory is not None:
+        memory.record(key, videos, now)
     weak = [v for v in videos if v.match < WEAK]
     videos = [v for v in videos if v.match >= WEAK]
     videos.sort(key=lambda v: (rank(v), v.match), reverse=True)
     step("Done", 1.0)
-    return LookupResult(plan.request, videos, now, plan, quota, len(weak), problems, rated_by, calls)
+    return LookupResult(plan.request, videos, now, plan, quota, len(weak), problems, rated_by, calls,
+                        skipped=skipped, pages=pages)
 
 
 def rank(v: TrendingVideo) -> float:
-    """Where a found video goes in the list: mostly how well it matches, then how well it will clip."""
-    return round(MATCH_WEIGHT * max(0.0, v.match) + (1 - MATCH_WEIGHT) * v.score, 1)
+    """Where a found video goes in the list: mostly how well it matches, then how well it will clip;
+    a video the request showed before goes a little lower, so new ones come first."""
+    return round(MATCH_WEIGHT * max(0.0, v.match) + (1 - MATCH_WEIGHT) * v.score - (0.0 if v.new else REPEAT), 1)
 
 
 # ---------------------------------------------------------------- remembered requests

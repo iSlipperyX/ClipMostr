@@ -8,6 +8,7 @@ from typing import Any, Callable
 
 from PySide6.QtCore import QObject, QThread, Signal
 
+from .. import steps
 from ..engine import Cancelled, Engine
 from ..settings import Settings
 
@@ -18,12 +19,18 @@ class Task(QThread):
     succeeded = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, label: str, fn: Callable[["Task"], Any], owner: Any = None):
+    def __init__(self, label: str, fn: Callable[["Task"], Any], owner: Any = None, plan: list[str] | None = None):
         super().__init__()
         self.label = label
         self.fn = fn
         self.owner = owner  # usually the Project this task works on
         self.cancel_requested = False
+        # For the status bars: the steps it goes through (steps.plan_for), or None for a single step.
+        self.tracker = steps.Tracker(plan)
+
+    def status(self, msg: str, frac: float) -> "steps.Status":
+        """Where this task is, from a progress signal (frac -1 = can't tell)."""
+        return self.tracker.update(msg, None if frac < 0 else frac)
 
     def engine(self, settings: Settings) -> Engine:
         return Engine(settings, log=self.log.emit,

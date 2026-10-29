@@ -200,6 +200,9 @@ def download(url: str, cache_dir: Path, max_height: int, cookies: str | None = N
             total = d.get("total_bytes") or d.get("total_bytes_estimate")
             done = d.get("downloaded_bytes", 0)
             mb = f"{done / 1e6:.0f} / {total / 1e6:.0f} MB" if total else f"{done / 1e6:.0f} MB"
+            speed = d.get("speed")
+            if speed:
+                mb += f", {speed / 1e6:.1f} MB/s"
             progress(f"Downloading ({mb})", done / total if total else None)
         elif d["status"] == "finished":
             progress("Merging audio and video", None)

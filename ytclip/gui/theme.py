@@ -79,6 +79,8 @@ QSlider::handle:horizontal {{ background: white; width: 14px; height: 14px; marg
 
 QProgressBar {{ background: {BG}; border: 1px solid {BORDER}; border-radius: 5px; height: 8px; text-align: center; color: transparent; }}
 QProgressBar::chunk {{ background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {ACCENT}, stop:1 {ACCENT_2}); border-radius: 4px; }}
+QProgressBar#labeled {{ height: 18px; border-radius: 9px; color: {TEXT}; font-size: 8pt; font-weight: 600; }}
+QProgressBar#labeled::chunk {{ border-radius: 8px; }}
 
 QCheckBox::indicator {{ width: 16px; height: 16px; border-radius: 4px; border: 1px solid {BORDER}; background: {BG}; }}
 QCheckBox::indicator:checked {{ background: {ACCENT}; border-color: {ACCENT}; }}

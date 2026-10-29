@@ -134,20 +134,23 @@ Parts that can't be measured, such as hidden like counts or a brand-new video wi
 
 **Setup:** it needs a free YouTube Data API key. In the [Google Cloud console](https://console.cloud.google.com/apis/library/youtube.googleapis.com), enable *YouTube Data API v3* for a project and create an API key under *Credentials*. Paste it into the Research tab, or under **Settings → Research**, or set the `YOUTUBE_API_KEY` environment variable. Each region checked costs 1 unit of the 10,000-unit daily quota (per 50 videos), so four regions every 30 minutes uses about 2% of it. Replay checks go through yt-dlp and use no quota.
 
-New arrivals scoring at least your alert level (75 by default) are counted on the tab, as **🔥 Research (3 new)**, when you're on another tab. Videos you've sent to the studio are ticked, and **Hide sent** hides them. History and the last results are kept in `%APPDATA%\ClipMonster\research.json`, so the tab opens with your last results.
+New arrivals scoring at least your alert level (75 by default) are counted on the tab, as **🔥 Research (3 new)**, when you're on another tab. History and the last results are kept in `%APPDATA%\ClipMonster\research.json`, so the tab opens with your last results.
+
+**Fresh results, not the same ones.** Videos you've already used (picked, queued or clipped by automation, or sent to the Studio) are ticked, and **Hide used** (on to start with) hides them. The **Seen** column says when Research first saw each video: **New** for the last day, otherwise how long it's been showing up, or **Used**. **New only** shows just the new ones. With your niches set up, each region's chart for the categories your niches use (up to four) is checked too, at 1 unit each, so a Gaming niche sees the Gaming chart and not just the all-categories one (Settings → Research → *Also check my niches' category charts*).
 
 ### Find videos for a request
 
 Type what you want into **Find videos** at the top of the Research tab, in your own words, and press **Find**. For example: *Call of Duty MW4 with good comedy*.
 
-- **Searches.** ClipMonster turns the request into one or two YouTube searches, such as "Call of Duty MW4 funny moments" and then "Call of Duty MW4". With a Claude or Gemini key (Settings → AI), the AI writes the searches instead. It knows that MW4 is Modern Warfare 4, and which words funny videos put in their titles.
+- **Searches.** ClipMonster turns the request into two YouTube searches, such as "Call of Duty MW4 funny moments" and then "Call of Duty MW4". With a Claude or Gemini key (Settings → AI), the AI writes the searches instead. It knows that MW4 is Modern Warfare 4, and which words funny videos put in their titles.
+- **Something new every time.** A request keeps up to eight searches ("funniest moments", "hilarious moments", "try not to laugh"…; the AI writes new ones once a week) and each run takes the next two, sorted the next way: best match, then newest, then most viewed. When a page of results is all videos you've seen or used, it reads the next page. Videos you've already used are left out before anything is rated, and videos the request showed before keep their Match (the AI isn't asked again) and go below the new ones, which are marked **New**. **➕ Find more** under the bar searches again and adds only videos not in the list yet. All of this is remembered per request in `%APPDATA%\ClipMonster\fresh.json`, and standing requests use it too.
 - **Match.** Every video found gets a **Match** score out of 100: how well it is what you asked for. With a key, the AI rates each one from its title, channel, tags and description. Without a key, the request's words in the title count most, then the tags and description. Videos about something else, such as another game, are left out.
 - **Order.** The list is ordered mostly by Match, then by clip-ability, so a funny MW4 video that will clip well comes first.
 - **Shorts are left out.** So is anything shorter than the tab's length filter.
 - **Time limit.** The menu next to the box limits results to this week, this month or this year.
 - **What's left out.** The bar above the table says what was searched and how many videos were left out. **← Back to trending** returns to the charts. Your last request stays one click away, and the box suggests your earlier requests.
 - **Using the results.** Send them to the Studio, or use **Queue in Automation** (also on any trending video). Automation then clips them next, in their niche's style and with your clip length.
-- **Cost.** A request uses about 200 of the YouTube API's 10,000 free daily units, because each search costs 100. The AI's rating is one short call.
+- **Cost.** A request uses about 200 of the YouTube API's 10,000 free daily units, because each search costs 100 (300 when it reads a second page past repeats). The AI's rating is one short call, for the videos it hasn't rated before.
 
 ```
 ytclip find "Call of Duty MW4 with good comedy"            # the best 20, with why each matches
@@ -163,7 +166,7 @@ ClipMonster can also decide by itself which videos to clip, so they can be cut w
 **Where videos come from.** Besides the trending charts, Research can watch two more sources:
 
 - **Channel list:** new uploads from channels you choose, one per line, as `@handle`, a channel link or a channel id. Put a note after `#` saying why clips are allowed, e.g. `@somepodcast  # clipping programme, credit in caption`. The note is kept with every pick from that channel. Each channel costs about 1 quota unit an hour.
-- **Creative Commons searches:** YouTube searches limited to videos under a Creative Commons licence, which allows reuse with credit. Each search costs 100 quota units, so it runs at most every 6 hours.
+- **Creative Commons searches:** YouTube searches limited to videos under a Creative Commons licence, which allows reuse with credit. Each search costs 100 quota units, so it runs at most every 6 hours. Each run sorts the next way (most viewed, newest, best match), and what earlier runs found stays a candidate until it's two weeks old, so the list grows instead of repeating.
 
 **Pick videos from** decides what may be picked:
 
@@ -194,6 +197,7 @@ ytclip research --list-categories
 
 The **Automation** tab runs the whole job without you: it checks Research on your schedule, queues whatever your [picking rules](#picking-rules) pick, and clips one video at a time. Press **Start**. Automation runs as its own background process, so it keeps going after you close ClipMonster. Tick **Start with Windows** to have it start every time you sign in (it shows up in Task Manager → Startup apps as "ClipMonster Automation"). Keep the ClipMonster folder outside OneDrive, for example in `C:\Users\<you>\ClipMonster`: the health check warns when it isn't.
 
+- **Status bars.** While a video is clipped, the panel above the queue shows its steps (Download, Analyse, Transcribe, Find clips, AI polish, Export, Quality check: done ones ticked, the current one with its own percent), a bar for the whole video and about how long is left. The estimate learns from how long each step took on the last video. Between videos it shows what automation is checking (the charts, a standing request's searches). The video's row in the queue has a bar too, so does a video downloading early, and so does the clip being uploaded. The Studio's list and status line, Research and update downloads show the same kind of bar.
 - **The queue** shows every video, what it's doing now, how many clips it made and why it was picked. Right-click a video to show its clips, try it again or remove it, or paste a link above the queue to add one yourself. Finished clips go to an `Automation` folder in your output folder, in a folder for each [niche](#niches) when you have them. Each video's `clips.json` records why it was picked, the style it was cut with, and its niche and TikTok account.
 - **It survives anything.** The queue lives in `%APPDATA%\ClipMonster\jobs.db`. If the PC restarts or the process is killed halfway through a video, that video starts again next time. Downloads and analysis are cached, so the second try is quick. No video is ever queued twice.
 - **It's gentle with YouTube.** It does one download at a time, 10 minutes apart. When YouTube asks the PC to "sign in to confirm you're not a bot", it stops asking YouTube for anything for 2 hours (6 if it asks again within a day) instead of pushing harder. Press **Try now** in the Automation tab (or run `ytclip auto --try-now`) to end the pause early. Signing in ends it by itself (see below). A video that fails is tried again after 15 minutes, then after 1 hour. Videos that can never work (private, removed, members-only) are marked failed straight away.
