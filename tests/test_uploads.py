@@ -536,3 +536,38 @@ def test_clean_up_clears_uploaded_clips_tikTok_manager_does_not_need(tmp_path):
     cleanup.apply(p, ["uploaded"])
     assert not (folder / "01.mp4").exists() and (folder / "02.mp4").exists()
     assert (nas / "Automation" / "V" / "01.mp4").exists()  # the uploaded copy stays
+
+
+def test_each_folders_clips_json_goes_up_first_for_tiktok_manager(google, tmp_path):
+    signed_in(google)
+    s = settings(tmp_path)
+    folder = make_video(s.auto_output_path, "Gaming/Chan/V", {"01.mp4": b"a", "02.mp4": b"b"})
+    os.utime(folder / "clips.json", (OLD, OLD))
+    db = JobDB()
+    assert uploads.sync(db, s) == 3
+    logs = []
+    assert uploads.upload_next(db, s, "1:t", logs.append)
+    assert logs[-1].startswith("Uploaded clips.json")  # ahead of its clips, so they arrive with their details
+    while uploads.upload_next(db, s, "1:t", logs.append):
+        pass
+    got = google.uploads()
+    index = got["ClipMonster/Automation/Gaming/Chan/V/clips.json"]
+    assert json.loads(index["data"])["clips"][0]["title"] == "Clip 1"
+    st = uploads.status(db)
+    assert st.done == 2 and "2 uploaded today" in st.text()  # the list isn't counted as a clip
+    # it changes (a clip exported again, say): the copy in Drive is replaced, not doubled
+    (folder / "clips.json").write_text(json.dumps({"clips": [{"file": "01.mp4", "hook": "New hook"}]}))
+    os.utime(folder / "clips.json", (OLD + 10, OLD + 10))
+    assert uploads.sync(db, s) == 1
+    while uploads.upload_next(db, s, "1:t", logs.append):
+        pass
+    got = google.uploads()
+    assert json.loads(got["ClipMonster/Automation/Gaming/Chan/V/clips.json"]["data"])["clips"][0]["hook"] == "New hook"
+    assert len([p for p in got if p.endswith("clips.json")]) == 1
+
+
+def test_a_clips_json_being_written_waits_for_the_next_look(tmp_path):
+    s = settings(tmp_path)
+    make_video(s.auto_output_path, "V", {"01.mp4": b"x"})  # clips.json written just now
+    assert [i.name for i in uploads.finished(s)] == ["01.mp4"]
+    assert [i.name for i in uploads.finished(s, now=time.time() + 120)] == ["clips.json", "01.mp4"]
