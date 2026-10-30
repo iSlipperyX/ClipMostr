@@ -50,6 +50,11 @@ That's it. Clips go into a `ClipMonster` folder in your Drive (change the name u
 - A clip exported again replaces its copy in Drive.
 - The Automation tab shows what's uploading, what's waiting and what failed. `ytclip upload` shows the same.
 - If Google stops accepting the sign-in, or your Drive is full, uploads pause and say why. Fix it, then click **Retry failed uploads** in Settings → Upload.
+- Each video folder's `clips.json` goes up too, just before its clips. It doesn't count as a clip in the
+  status, and it's replaced when it changes.
+- **TikTok Manager** (1.9+) can download the clips from Drive by itself, with their titles, scores, hooks,
+  niche and part series from that `clips.json`: on this PC or another one. It signs in with this same OAuth
+  client, so there's nothing new to set up: see [its guide](https://github.com/iSlipperyX/TTUpdates/blob/main/docs/google-drive.md).
 - Clean up's **Clips safely uploaded** clears clips from the PC once the same file is in Drive and TikTok Manager doesn't need it any more. The copy in Drive stays.
 
 ## Command line

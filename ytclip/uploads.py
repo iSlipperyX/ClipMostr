@@ -1,7 +1,9 @@
 """Upload finished clips to a storage server (Settings → Upload).
 
 Every clip that's exported and passed the quality check is uploaded once, in the same folders it has
-on this PC (Automation/<Niche>/<channel>/<video>/...), under one folder on the server. Uploading
+on this PC (Automation/<Niche>/<channel>/<video>/...), under one folder on the server. Each video
+folder's clips.json goes up too, ahead of its clips, so TikTok Manager on another PC (which
+downloads the clips from Drive) gets their titles, scores, hooks, niche and part series. Uploading
 runs on a thread of its own, in automation and in the open window, so it never holds up clipping;
 the queue is the `uploads` table in jobs.db, so the two never upload the same clip twice and an
 upload cut off by closing ClipMonster carries on next time. A clip that's exported again replaces
@@ -33,6 +35,7 @@ BACKOFF = (60, 5 * 60, 30 * 60, 2 * 3600, 6 * 3600)  # waits after each failed t
 GIVE_UP = 8  # tries before a clip waits for Retry
 HOLD = 15 * 60  # after a problem no clip can upload past, uploads wait this long (or until the settings change)
 REJECTED_DIR = "_rejected"
+INDEX = "clips.json"  # uploaded with the clips; not counted as a clip in the status
 MIME = {".mp4": "video/mp4", ".mov": "video/quicktime", ".webm": "video/webm", ".mkv": "video/x-matroska",
         ".srt": "application/x-subrip", ".jpg": "image/jpeg", ".json": "application/json"}
 
@@ -262,6 +265,7 @@ def finished(s: Settings, now: float | None = None) -> list[Item]:
             except ValueError:
                 continue
             video = data.get("video") if isinstance(data.get("video"), dict) else {}
+            clips: list[Item] = []
             for rec in data["clips"]:
                 file = rec.get("file") if isinstance(rec, dict) else None
                 if not isinstance(file, str) or not file or file.replace("\\", "/").startswith(f"{REJECTED_DIR}/"):
@@ -275,8 +279,19 @@ def finished(s: Settings, now: float | None = None) -> list[Item]:
                     continue
                 if not path.is_file() or now - st.st_mtime < FRESH or not _inside(path, folder):
                     continue
-                found.append(Item(path, prefix + rel + list(Path(file).parent.parts), path.name,
+                clips.append(Item(path, prefix + rel + list(Path(file).parent.parts), path.name,
                                   _describe(rec, video, data), size=st.st_size))
+            index = folder / INDEX
+            try:
+                ist = index.stat()
+            except OSError:
+                ist = None
+            # Ahead of its clips (claim() takes it first), unless it's being written right now: then it goes
+            # up next time. An export writes it together with the clip, so normally both wait and it's first.
+            if clips and ist is not None and now - ist.st_mtime >= FRESH:
+                found.append(Item(index, prefix + rel, INDEX, "ClipMonster's list of the clips in this folder, for "
+                                  "TikTok Manager: titles, scores, hooks, niche and part series.", size=ist.st_size))
+            found += clips
     return found
 
 
@@ -362,7 +377,7 @@ def claim(db, owner: str, target: str, now: float | None = None) -> dict | None:
             if not pid or not process_alive(pid):  # its uploader ended mid-upload: it carries on from here
                 db.con.execute("UPDATE uploads SET state = 'waiting', owner = '' WHERE path = ?", (row["path"],))
         row = db.con.execute("SELECT * FROM uploads WHERE state = 'waiting' AND next_try <= ? AND target = ? "
-                             "ORDER BY updated LIMIT 1", (now, target)).fetchone()
+                             "ORDER BY updated, name != ? LIMIT 1", (now, target, INDEX)).fetchone()
         if row is None:
             return None
         cur = db.con.execute("UPDATE uploads SET state = 'uploading', owner = ? WHERE path = ? AND state = 'waiting'",
@@ -431,10 +446,11 @@ def status(db, now: float | None = None) -> Status:
     now = time.time() if now is None else now
     st = Status()
     with db._lock:
-        for row in db.con.execute("SELECT state, COUNT(*) AS n FROM uploads GROUP BY state"):
+        for row in db.con.execute("SELECT state, COUNT(*) AS n FROM uploads WHERE name != ? GROUP BY state",
+                                  (INDEX,)):
             st.counts[row["state"]] = row["n"]
-        st.done_today = db.con.execute("SELECT COUNT(*) FROM uploads WHERE state = 'done' AND updated >= ?",
-                                       (now - 86400,)).fetchone()[0]
+        st.done_today = db.con.execute("SELECT COUNT(*) FROM uploads WHERE state = 'done' AND updated >= ? "
+                                       "AND name != ?", (now - 86400, INDEX)).fetchone()[0]
         last = db.con.execute("SELECT error FROM uploads WHERE state = 'failed' ORDER BY updated DESC LIMIT 1"
                               ).fetchone()
         cur = db.con.execute("SELECT name FROM uploads WHERE state = 'uploading' LIMIT 1").fetchone()
