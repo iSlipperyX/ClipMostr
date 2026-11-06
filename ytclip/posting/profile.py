@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import time
+import uuid
 from pathlib import Path
 
 from .accounts import Account
@@ -44,7 +45,7 @@ def prepare_photo(src: Path, account_id: str) -> Path:
     """
     if not src.is_file():
         raise FileNotFoundError(f"The picture is missing: {src}")
-    dest = photos_dir() / f"{account_id}-{time.strftime('%Y%m%d-%H%M%S')}-{time.time_ns() % 1000:03d}.jpg"
+    dest = photos_dir() / f"{account_id}-{time.strftime('%Y%m%d-%H%M%S')}-{uuid.uuid4().hex[:6]}.jpg"
     tmp = dest.with_name(dest.stem + ".part.jpg")
     try:
         _run([ffmpeg_exe(), "-hide_banner", "-y", "-v", "error", "-i", str(src), "-frames:v", "1",
