@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "ytclip"
 dynamic = ["version"]
-description = "ClipMonster: download YouTube videos and automatically cut them into their most interesting clips."
+description = "ClipMonster: finds YouTube videos, cuts them into clips and posts them to TikTok by itself."
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
@@ -15,10 +15,12 @@ dependencies = [
     "rich>=13",
     "PySide6-Essentials>=6.7",
     "PySide6-Addons>=6.7",
+    "playwright>=1.48",  # posting to TikTok, in your installed Edge or Chrome
+    "anthropic>=1.0",
 ]
 
 [project.optional-dependencies]
-ai = ["anthropic>=1.0"]
+ai = []  # the AI is always included now; kept so `pip install -e .[ai,…]` still works
 whisper = ["faster-whisper>=1.0"]
 build = ["pyinstaller>=6.10"]
 test = ["pytest>=8.2"]
@@ -33,7 +35,7 @@ clipmonster = "ytclip.gui.app:main"
 testpaths = ["tests"]
 
 [tool.setuptools]
-packages = ["ytclip", "ytclip.gui"]
+packages = ["ytclip", "ytclip.gui", "ytclip.posting", "ytclip.posting.tiktok"]
 package-data = { ytclip = ["fonts/*.ttf", "fonts/licenses/*.txt"] }
 
 [tool.setuptools.dynamic]

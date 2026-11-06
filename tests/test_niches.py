@@ -332,7 +332,7 @@ def test_hook_examples_come_from_the_niche_once_it_has_enough():
 
 
 def test_each_posts_niche_comes_from_what_it_was_picked_for():
-    """TikTok Manager's results don't say which niche a post was for; picks.json does."""
+    """Posting's results don't say which niche a post was for; picks.json does."""
     from ytclip.policy import picks_path
 
     rows = [{"lift": 3.0, "hook": f"game hook {i}", "video_id": f"g{i}", "channel": "G"} for i in range(6)]

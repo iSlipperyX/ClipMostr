@@ -81,7 +81,7 @@ def test_cleaning_removes_clips_their_extras_and_emptied_folders(setup):
     data = json.loads((a / "clips.json").read_text(encoding="utf-8"))
     assert [c["file"] for c in data["clips"]] == ["01.mp4"] and data["cleaned_up"]
     assert sorted(f.name for f in (a / "thumbnails").iterdir()) == ["01.jpg"]
-    # B had nothing left: it goes, but the niche folder stays (TikTok Manager may watch it).
+    # B had nothing left: it goes, but the niche folder stays (new clips for that niche go there).
     assert not b.exists() and r.folders == 1
     assert (s.output_path / "Automation" / "Gaming").is_dir()
 

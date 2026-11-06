@@ -1,8 +1,10 @@
 # ClipMonster
 
-ClipMonster turns long videos into ready-to-post clips. Paste YouTube links (or drop in your own video files) and it finds the best moments. You fine-tune them on a timeline, then export with animated captions in landscape, vertical or square format.
+ClipMonster runs TikTok clip accounts by itself. It finds YouTube videos worth clipping, cuts and edits them into vertical clips with captions, posts each one to the right TikTok account on a schedule, reads how they do, keeps a record of every posted video and deletes its file once it's up. Set it up once and leave it running.
 
-It comes as a Windows desktop app, **`ClipMonster.exe`**, plus a command-line tool, **`ytclip.exe`**, for batch jobs and scripts.
+You can still do it by hand: paste YouTube links (or drop in your own video files), fine-tune the clips on a timeline and export them in landscape, vertical or square format.
+
+It comes as a Windows desktop app, **`ClipMonster.exe`**, plus a command-line tool, **`ytclip.exe`**, for batch jobs and scripts. Since 3.0.0 it includes what used to be the separate TikTok Manager app: one install, one set of updates.
 
 ---
 
@@ -10,14 +12,29 @@ It comes as a Windows desktop app, **`ClipMonster.exe`**, plus a command-line to
 
 Download **`ClipMonster-Setup.exe`** from the [newest release](https://github.com/iSlipperyX/ClipMostr/releases/latest) and run it. It installs for you only, with no admin prompt, into `%LOCALAPPDATA%\Programs\ClipMonster`, and adds ClipMonster to the Start menu and to Windows' Installed apps (uninstall it from there). Python isn't needed: ffmpeg, Qt, Whisper and the YouTube downloader are all inside.
 
+**The first start opens Set up ClipMonster**, about ten minutes, every step skippable:
+
+1. **Tools.** It checks for what it can't bring along: [Node.js](https://nodejs.org) (YouTube downloads), Firefox (the YouTube sign-in) and Microsoft Edge or Chrome (posting to TikTok).
+2. **Keys.** A Gemini key (free) or a Claude key for the AI, and a YouTube Data API key for finding videos. **Test keys** tries them.
+3. **YouTube sign-in**, in a Firefox profile of ClipMonster's own.
+4. **TikTok accounts.** Add each account and log in to it once.
+5. **Your first niche:** what it clips and which account it posts to.
+6. **The posting schedule:** 2 posts a day, between 11:00 and 21:00, and a warm-up for new accounts.
+7. **Start with Windows**, and start automation.
+
+**Finish later** keeps what you filled in, and the setup opens again next time. **Settings → General → Set up again** opens it whenever you like.
+
 Where things live:
 
 | | Where |
 |---|---|
 | The program | `%LOCALAPPDATA%\Programs\ClipMonster` |
 | Settings, niches, the automation queue and history, sign-ins | `%APPDATA%\ClipMonster` |
+| TikTok accounts, the posting queue and what was posted | `%APPDATA%\ClipMonster\posting` |
+| Each TikTok account's browser login | `%LOCALAPPDATA%\ClipMonster\posting\browser-profiles` |
 | Updates, the previous version, models and temporary work | `%LOCALAPPDATA%\ClipMonster` |
-| Your clips | the output folder in Settings → General |
+| Your clips, until they're posted | the output folder in Settings → General |
+| A record of every posted video | `Documents\ClipMonster\Posted videos` |
 
 None of it is in OneDrive. A copy unzipped by hand (before 2.8.0) offers **Install now**, which moves it to the installer in one step and then offers to remove the old copy.
 
@@ -197,7 +214,7 @@ ytclip research --list-categories
 
 The **Automation** tab runs the whole job without you: it checks Research on your schedule, queues whatever your [picking rules](#picking-rules) pick, and clips one video at a time. Press **Start**. Automation runs as its own background process, so it keeps going after you close ClipMonster. Tick **Start with Windows** to have it start every time you sign in (it shows up in Task Manager → Startup apps as "ClipMonster Automation"). Keep the ClipMonster folder outside OneDrive, for example in `C:\Users\<you>\ClipMonster`: the health check warns when it isn't.
 
-- **Status bars.** While a video is clipped, the panel above the queue shows its steps (Download, Analyse, Transcribe, Find clips, AI polish, Export, Quality check: done ones ticked, the current one with its own percent), a bar for the whole video and about how long is left. The estimate learns from how long each step took on the last video. Between videos it shows what automation is checking (the charts, a standing request's searches). The video's row in the queue has a bar too, so does a video downloading early, and so does the clip being uploaded. The Studio's list and status line, Research and update downloads show the same kind of bar.
+- **Status bars.** While a video is clipped, the panel above the queue shows its steps (Download, Analyse, Transcribe, Find clips, AI polish, Export, Quality check: done ones ticked, the current one with its own percent), a bar for the whole video and about how long is left. The estimate learns from how long each step took on the last video. Between videos it shows what automation is checking (the charts, a standing request's searches). The video's row in the queue has a bar too, and so does a video downloading early. The line under the queue says what posting is doing: the next post, clips waiting, and anything that needs you. The Studio's list and status line, Research and update downloads show the same kind of bar.
 - **The queue** shows every video, what it's doing now, how many clips it made and why it was picked. Right-click a video to show its clips, try it again or remove it, or paste a link above the queue to add one yourself. Finished clips go to an `Automation` folder in your output folder, in a folder for each [niche](#niches) when you have them. Each video's `clips.json` records why it was picked, the style it was cut with, and its niche and TikTok account.
 - **It survives anything.** The queue lives in `%APPDATA%\ClipMonster\jobs.db`. If the PC restarts or the process is killed halfway through a video, that video starts again next time. Downloads and analysis are cached, so the second try is quick. No video is ever queued twice.
 - **It's gentle with YouTube.** It does one download at a time, 10 minutes apart. When YouTube asks the PC to "sign in to confirm you're not a bot", it stops asking YouTube for anything for 2 hours (6 if it asks again within a day) instead of pushing harder. Press **Try now** in the Automation tab (or run `ytclip auto --try-now`) to end the pause early. Signing in ends it by itself (see below). A video that fails is tried again after 15 minutes, then after 1 hour. Videos that can never work (private, removed, members-only) are marked failed straight away.
@@ -258,13 +275,13 @@ A request goes ahead of everything else in the queue, and its videos don't count
 
 **Automation → Overnight report** tells you what happened while you were away: clips made per niche and per request, how many the quality check rejected and the usual reasons, videos that failed and why, and any pauses (YouTube sign-in requests, a full disk, stuck work stopped), for the last 12 hours, 24 hours or 7 days. The tab tells you when there's something new to read. `ytclip report` prints the same.
 
-Below it, the **health check** looks at everything automation needs: ffmpeg, how old the downloader is, your YouTube and AI keys (**Check now** tries them online), the folders and free space, whether TikTok Manager watches your Automation folder, niches with nothing to find videos with, and requests that can't be filled. Each problem comes with the fix. Automation runs the offline part every time it starts and puts what it finds in the log. `ytclip doctor` runs it from the command line.
+Below it, the **health check** looks at everything automation needs: ffmpeg, how old the downloader is, your YouTube and AI keys (**Check now** tries them online), the folders and free space, TikTok posting (an account for every niche, logins, the last upload-page check, a browser to post with), niches with nothing to find videos with, and requests that can't be filled. Each problem comes with the fix. Automation runs the offline part every time it starts and puts what it finds in the log. `ytclip doctor` runs it from the command line.
 
 ### Niches
 
 Run a TikTok account for each topic? Give each account a niche in the **🎯 Niches** tab. A niche has:
 
-- **The account:** a name, the TikTok account it's for, how many videos a day it gets (2 to start with), and a switch to pause it.
+- **The account:** a name, the TikTok account it **posts to** (picked from your accounts, or **Add an account…**), how many videos a day it gets (2 to start with), and a switch to pause it. A niche with no account yet keeps its clips waiting.
 - **Where its videos come from:** its own channel list and Creative Commons searches. Title words and YouTube categories catch videos from the trending charts. **Standing requests** add the videos you describe (see below).
 - **How its clips look:** its own style, top/bottom view and folder of second videos (blank ones use Settings → Automation), and a note telling the AI what makes a good clip for that account. AI picks and AI polish both read the note.
 
@@ -275,7 +292,7 @@ Every picked video goes into one niche: the one that lists its channel, then the
 - **Run from the Automation tab.** **Automation → Niches** shows each niche's picks today against its limit, its videos waiting and its clips today. Pause or resume it there, press **Find videos now** to check its sources straight away, or **Request clips for it**.
 - **Its own clips.** A niche can set its own **clips per video** and **clip length**, over Automation's (clip length is otherwise Settings → Clip finding's). Its **special requests** note tells the AI clip finder and the AI polish what makes a good clip for that account; with a Claude or Gemini key, a niche with a note uses the AI clip finder (within *AI calls per day*).
 - **Style.** A recipe for the video's channel or category comes first, then the niche's own style and view, then a catch-all (`*`) recipe, then Settings → Automation.
-- **Folders.** Each niche's clips go to `Automation\<niche>\`, and `clips.json` records the niche and its TikTok account, so TikTok Manager can stage each folder for its own account. Renaming a niche sends new clips to its new folder. Clips already made stay where they are.
+- **Folders.** Each niche's clips go to `Automation\<niche>\`, and `clips.json` records the niche and its TikTok account, so each clip is queued for that account's posts. Renaming a niche sends new clips to its new folder. Clips already made stay where they are.
 
 **Standing requests.**
 - **What they are.** A niche's standing requests are what you'd type into Research's **Find videos**, one per line, such as *Call of Duty MW4 with good comedy*. Automation runs each one every few hours (6 by default; set it under Settings → Picking → Run standing requests every). Each run looks at videos posted in the last month.
@@ -291,13 +308,39 @@ Making your first niche moves your channel list, Creative Commons searches and s
 
 ### Learning from results
 
-TikTok Manager shares how your posted clips did: after each stats refresh it writes `%APPDATA%\ClipMonster\results.json`, with the views of every ClipMonster clip that has been up for two days, compared with the usual views on that TikTok account (so "2×" means twice your usual). With **Settings → Picking → Learn from how my clips do** on (the default), ClipMonster uses it in three ways:
+Posting keeps track of how your posted clips do: every half hour it writes `%APPDATA%\ClipMonster\results.json`, with the views of every ClipMonster clip that has been up for two days, compared with the usual views on that TikTok account (so "2×" means twice your usual). With **Settings → Picking → Learn from how my clips do** on (the default), ClipMonster uses it in three ways:
 
 - **Picking.** Channels whose clips beat your usual views get up to 12 extra clip-ability points when ranking and checking the minimum score, and channels whose clips flop lose up to 12. One lucky clip counts for little; the effect grows as a channel gets more posts. Research shows why in the Pick tooltip and the video's details, e.g. "Your clips from Some Pod get 2.4× your usual views (5 posts): +8."
 - **AI polish.** Once six or more clips with hooks have results, the polish sees the hooks that worked and the ones that flopped, and writes new hooks more like the hits. Once a niche has six of its own, its videos learn from just those.
 - **Tips.** The Automation tab shows **What's working**: the best and worst channels, which clip length does best, and whether the AI rating predicts views (and so whether a higher quality-check minimum would help). Settings are never changed for you.
 
 `ytclip results` prints the same, with every channel's numbers (`--json` for scripts). Results older than 90 days are ignored.
+
+## Posting to TikTok
+
+Posting runs inside automation's background process, so it keeps going with the window closed and starts with Windows. For every clip that passed the quality check, it:
+
+1. **Queues it for its niche's account.** A clip from a niche goes to the account the niche posts to. Without niches, a single account takes everything. Parts of a series stay in order, back to back.
+2. **Gets it ready.** The caption is the clip's hook, plus a credit line for Creative Commons clips (the licence requires it). The AI writes hashtags for it, fitted to the account's niche and leaning on the tags that got your posts the most views; the account's own hashtags (`#fyp` to start with) are added to every post.
+3. **Posts it when its time comes**, in TikTok Studio, in Microsoft Edge (or Chrome) with that account's own login. Leave **Show the browser window** on: TikTok is less likely to block a browser you can see, and you can solve a captcha if one appears.
+4. **Reads the profile** every 5 minutes, in the background: views, likes, comments, shares and followers, and which TikTok video each post became. A post that shows up on the profile is marked posted, even one you posted from your phone.
+5. **Writes a record and deletes the clip.** Once a post is on the profile, a `.txt` to read and a `.json` beside it go to `Documents\ClipMonster\Posted videos\<account>`: when it posted and its link, the caption and hashtags, the clip (title, hook, length, part), where it came from (the YouTube video, its channel and licence, where in it the clip starts and ends), why it was made (niche, how the video was picked, the clip finder's score, the AI's rating, the quality check) and how it did. The numbers are added 1 hour, 24 hours and 7 days after posting. Then the clip, its captions and thumbnail are deleted, and its row leaves the video's `clips.json`. A post that hasn't shown on the profile after 2 days keeps its files, and the record says why.
+6. **Keeps an eye on TikTok.** Once a day it opens each account's upload page without posting, so a change on TikTok's side is caught before a post fails. A post that fails isn't tried again by itself (it might be half up): it waits in the Queue tab with the reason, a notification says so, and **Try again** posts it.
+
+**The schedule.** Each account posts 2 clips a day between 11:00 and 21:00, at least 3 hours apart, and each post time moves by up to 15 minutes from day to day so it doesn't look automated. More than 3 a day is past what posting studies support, and the Accounts tab says so. A **new account warms up** for two weeks: no posts for the first 3 days, then 1 a day, then 2 from day 7.
+
+The tabs:
+
+- **👤 Accounts.** Add, log in (a normal Edge window opens on TikTok's login page; log in there, with the QR code from the TikTok app if you like, and it closes by itself), log out or remove each account. Each has its own niches, schedule, who can watch, hashtags, an autopilot switch, and its profile picture, name and bio (**Apply to TikTok** fills in TikTok's Edit profile box and checks it took). **Test posting** walks the upload page with a 3-second black clip, up to just before Post, then throws it away.
+- **📤 Queue.** What each account will post and when. Pick a clip to change its caption or hashtags, move it up or down, **Post now**, **Try again** after a failure, or **Don't post**. Below it, what was posted, with its views and likes, its record and its TikTok link.
+- **📈 Performance.** Views, likes and followers today and over 30 days, your best videos, what's working, and a live feed. Notifications pop up when a clip posts, a post fails, a login runs out or a video takes off.
+
+ClipMonster never sees your TikTok password: each account's login stays in its own browser profile on this PC. If the app closes in the middle of an upload, that clip is marked failed rather than posted again, because it may already be on TikTok; the next profile reading marks it posted if it is. Automating TikTok's website is against the spirit of its terms, so keep the pace human.
+
+```
+ytclip posting             # each account, its login, what's waiting and the next post; the last posts
+ytclip posting --posted 30
+```
 
 ## Output layout
 
@@ -327,14 +370,13 @@ Clips, downloads and previews pile up. **🧹 Clean up…**, in the Library and 
 | Preview renders | Clips made by Render preview and the Layout tab's preview, in the work folder | yes |
 | Downloaded videos | Full videos kept after clipping. Clipping one again downloads it again | no |
 | Saved transcripts and analysis | A video opened again is measured again without them | no |
-| Clips the quality check rejected | The `_rejected` folders. TikTok Manager never takes these | yes |
-| Clips you've posted | Clips TikTok Manager says you've posted. Its post history and stats stay | yes |
-| Clips you removed in TikTok Manager | It never brings them back | yes |
-| Clips safely uploaded | Clips whose same file is on your storage server (see [Uploading clips](#uploading-clips)). The uploaded copy stays | yes |
+| Clips the quality check rejected | The `_rejected` folders. These are never posted | yes |
+| Posted clips whose files were kept | Posting normally deletes a clip once it's up; this catches any it kept (say, one TikTok never showed on the profile). Records and stats stay | yes |
+| Clips you took out of the posting queue | **Don't post** in the Queue tab. They never come back | yes |
 
 Nothing goes until you've seen it: the window lists every file and how much space it frees. You can untick whole kinds or single files, choose **Only things older than** (posted clips count from when you posted them), or send everything to the Recycle Bin instead. Each video's `clips.json` and `README.md` are updated to match. Some things always stay:
 
-- clips TikTok Manager still has waiting;
+- clips still waiting to be posted;
 - anything for a video that's queued, being clipped or in the Studio's list;
 - anything changed in the last 10 minutes;
 - anything that isn't ClipMonster's own.
@@ -349,22 +391,6 @@ ytclip clean --only posted,rejected --older-than 7 --delete
 
 Nothing is removed without `--delete`. Without `--only`, it leaves downloaded videos and analysis alone.
 
-## Uploading clips
-
-ClipMonster can upload every finished clip to **Google Drive**, or copy it to a **folder** (a NAS share, a mapped drive, or a folder Dropbox or OneDrive syncs). Pick one in **Settings → Upload**.
-
-- Google Drive needs a free OAuth client from your own Google Cloud project, made once: follow the [Google Drive setup guide](docs/google-drive-setup.md) (about 10 minutes). ClipMonster only gets the `drive.file` permission, so it sees nothing in your Drive but what it uploaded. The sign-in is kept encrypted for your Windows account.
-- Clips upload a few minutes after they're exported, while the window or automation runs, into the same folders as on your PC (`ClipMonster/Automation/<niche>/<channel>/<video>/`). Rejected clips never upload. *Which clips* can limit it to Automation's.
-- Big clips go up in pieces, and carry on from where they stopped after a dropped connection or a restart. A clip exported again replaces its upload.
-- The Automation tab shows what's uploading, waiting or failed. If the sign-in stops working or the Drive is full, uploads pause and say why; **Retry failed uploads** in Settings → Upload tries again.
-
-```
-ytclip upload               # what's uploading, waiting and failed
-ytclip upload --sign-in     # sign in to Google Drive
-ytclip upload --now         # upload everything waiting, then stop
-ytclip upload --retry
-```
-
 ## Command line (`ytclip.exe`)
 
 `ytclip.exe` uses the same settings as the app, and the options below override them for that run.
@@ -378,7 +404,8 @@ ytclip "C:\Videos\stream.mp4" --layout "Gameplay below + title" --captions
 ytclip "C:\Videos\stream.mp4" --stack "C:\Videos\parkour.mp4" --top-text "{title}" --bottom-text "Follow for part 2" --captions
 ytclip "https://youtu.be/VIDEO" --stack "C:\Videos\Gameplay" --polish --captions --bleep --qc
 ytclip qc "C:\Users\me\Videos\ClipMonster"      # check exported clips again
-ytclip results                                  # what's working, from TikTok Manager's stats
+ytclip results                                  # what's working, from your posted clips' stats
+ytclip posting                                  # TikTok accounts, what's waiting, what was posted
 ytclip niches                                   # your niches and how each is doing
 ytclip clean                                    # what Clean up would clear (--delete clears it)
 ytclip --list-presets
@@ -430,7 +457,7 @@ Pull requests that change the build also run the workflow, without publishing, a
 Needs Python 3.10+.
 
 ```
-pip install -e .[ai,whisper,build]
+pip install -e .[whisper,build]
 python build.py
 ```
 
@@ -454,8 +481,11 @@ Run the tests with `pip install -e .[test]` and then `pytest`. They need no netw
 | `ytclip/policy.py` | Picking rules, each niche's share, and the log of picks |
 | `ytclip/niches.py` | Niches: each TikTok account's sources, look and folder, and which niche a video goes in |
 | `ytclip/cleanup.py` | Clean up: what nothing needs any more, and clearing it; the work folder's startup sweep |
-| `ytclip/uploads.py` | The upload queue (in `jobs.db`), its background uploader, and the folder target |
-| `ytclip/gdrive.py` | Google Drive over plain HTTPS: desktop sign-in (PKCE), folders, resumable uploads |
+| `ytclip/posting/service.py` | The posting worker, a thread of automation's background process: intake, posting, readings, records |
+| `ytclip/posting/intake.py`, `store.py`, `jobs.py`, `schedule.py` | New clips into the posting queue for their account; the library; what posts when |
+| `ytclip/posting/accounts.py`, `actions.py` | TikTok accounts; the window's requests to the worker (log in, post now, test posting) |
+| `ytclip/posting/tiktok/` | TikTok Studio in Edge or Chrome (Playwright): login, posting, the upload-page check |
+| `ytclip/posting/live.py`, `results.py`, `records.py` | Profile readings and the feed; results for learning; each posted video's record, then its files deleted |
 | `ytclip/updater.py`, `swap.py` | Update channels, background downloads, going back, the installer and old copies; the helper that swaps the files |
 | `ytclip/pipeline.py` | Automation: the unattended runner, recipes, pacing and retries |
 | `ytclip/jobs.py` | `jobs.db`, the automation queue shared by the runner and the app |
