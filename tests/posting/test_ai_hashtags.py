@@ -1,6 +1,5 @@
 """AI hashtags: the quick text-only call, learning from the account's best posts, and the Ready page button."""
 
-import json
 import os
 
 import pytest

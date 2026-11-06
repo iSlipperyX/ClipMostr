@@ -60,7 +60,16 @@ def test_editing_a_niche_saves_it(app, tmp_path):
     tab.add()
     tab.name.setText("Gaming")
     tab.name.editingFinished.emit()
-    tab.account.setText(" @gameclips ")
+    from ytclip.posting.accounts import Accounts
+
+    accs = Accounts.load()
+    acc = accs.add("")
+    acc.username = "gameclips"
+    accs.save()
+    tab.accounts_changed()
+    i = tab.account.findData(acc.id)
+    tab.account.setCurrentIndex(i)
+    tab.account.activated.emit(i)
     tab.daily.setValue(4)
     tab.channels.setPlainText("@GameChan")
     tab.searches.setPlainText("minecraft highlights")
@@ -74,6 +83,7 @@ def test_editing_a_niche_saves_it(app, tmp_path):
     tab.instructions.setPlainText("clutch plays")
     tab.enabled.setChecked(False)
     [n] = niches.load(host.settings)
+    assert n.account_id == acc.id
     assert (n.name, n.account, n.daily, n.channels, n.searches, n.keywords, n.categories) == (
         "Gaming", "@gameclips", 4, "@GameChan", "minecraft highlights", "fortnite", "20")
     assert (n.preset, n.view, n.instructions, n.enabled) == ("Gaming / action", "Gameplay below", "clutch plays",
@@ -91,10 +101,15 @@ def test_text_still_being_typed_is_saved_before_settings_are_copied(app, tmp_pat
     assert (n.name, n.stack_folder) == ("Games", "D:/gameplay")
 
 
-def test_the_account_text_doesnt_promise_tiktok_manager_sorts_by_it(app, tmp_path):
+def test_add_an_account_from_the_niche(app, tmp_path):
     tab, *_ = _tab(app, tmp_path, niches=[{"id": "a", "name": "Gaming"}])
-    assert "can send" not in tab.account.toolTip() and "can send" not in tab.hint.text()
-    assert "doesn't queue clips by" in tab.account.toolTip()
+    asked = []
+    tab.add_account.connect(lambda: asked.append(1))
+    assert tab.account.itemText(0).startswith("No account yet")
+    i = tab.account.findData(tab.ADD_ACCOUNT)
+    tab.account.setCurrentIndex(i)
+    tab.account.activated.emit(i)
+    assert asked == [1] and tab.account.currentIndex() == 0
 
 
 def test_names_must_be_there_and_be_different(app, tmp_path):

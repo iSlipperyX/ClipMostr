@@ -1,7 +1,6 @@
 """Multi-account: the account list, upgrading a single-account install, per-account queues and autopilot."""
 
 import datetime as dt
-import json
 
 import pytest
 

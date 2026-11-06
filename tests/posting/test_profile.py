@@ -6,7 +6,6 @@ import pytest
 
 from ytclip.posting import profile
 from ytclip.posting.accounts import Accounts
-from ytclip.posting.config import Settings
 from ytclip.posting.media import ffmpeg_exe, probe
 
 

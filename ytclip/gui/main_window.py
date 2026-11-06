@@ -16,7 +16,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleS
                                QPushButton, QScrollArea, QSlider, QSplitter, QTableWidget, QTableWidgetItem,
                                QTabWidget, QTextEdit, QVBoxLayout, QWidget)
 
-from .. import __version__, compose, layout, pipeline, series, steps, updater, uploads, youtube_login
+from .. import __version__, compose, layout, series, steps, updater, youtube_login
 from ..analyze import SIGNAL_LABELS, Clip, clip_score
 from ..download import VIDEO_EXTS, expand_sources, is_url, needs_expansion
 from ..engine import Engine, Project
@@ -34,6 +34,8 @@ from .player import Preview
 from .automation import Automation
 from .cleanup_dialog import CleanupDialog
 from .niches import Niches
+from .posting_pages import AccountsPage, PerformancePage, QueuePage
+from .posting_state import PostingState
 from .research import Research
 from .settings_dialog import SettingsDialog
 from .status_bars import LabeledBar
@@ -170,12 +172,6 @@ class MainWindow(QMainWindow):
         self._restore()
         self.library.refresh()
         QTimer.singleShot(2500, self._startup_updates)
-        # Finished clips go up to the storage server (Settings → Upload), here while automation isn't running.
-        self._upload_log = _Relay(self)
-        self._upload_log.line.connect(self._log)
-        self.uploader = uploads.Uploader(lambda: self.settings, self._upload_log.line.emit,
-                                         idle_when=pipeline.runner_alive)
-        self.uploader.start()
 
     def _startup_updates(self) -> None:
         finished = updater.finished_update_message()
@@ -307,7 +303,15 @@ class MainWindow(QMainWindow):
         self.research.hits_changed.connect(self._research_hits)
         self.research.open_settings.connect(self._open_settings)
         self.research_tab = self.tabs.addTab(self.research, RESEARCH_TAB)
-        self.niches = Niches(lambda: self.settings, self._setting_changed)
+        # Posting: the accounts, the queue and how it's doing. The TikTok work is done by automation's posting
+        # worker in the background; these tabs show what it saved and ask it for things (posting_state.py).
+        self.posting = PostingState(self)
+        self.posting.message.connect(self._log)
+        self.posting.alert.connect(self._alert)
+        self.tray = None
+        self.niches = Niches(lambda: self.settings, self._setting_changed,
+                             accounts=lambda: list(self.posting.accounts))
+        self.niches.add_account.connect(self._add_account)
         self.niches.notice.connect(self._notice)
         self.niches.changed.connect(self._niches_changed)
         self.tabs.addTab(self.niches, "🎯  Niches")
@@ -318,9 +322,48 @@ class MainWindow(QMainWindow):
         self.automation.clean_up.connect(self._clean_up)
         self.library.clean_up.connect(self._clean_up)
         self.tabs.addTab(self.automation, "🤖  Automation")
+        self.accounts_page = AccountsPage(self.posting, lambda: self.settings)
+        self.accounts_page.notice.connect(self._notice)
+        self.accounts_page.open_niches.connect(lambda: self.tabs.setCurrentWidget(self.niches))
+        self.posting.accounts_changed.connect(self._accounts_changed)
+        self.tabs.addTab(self.accounts_page, "👤  Accounts")
+        self.queue_page = QueuePage(self.posting)
+        self.queue_page.notice.connect(self._notice)
+        self.queue_page.open_niches.connect(lambda: self.tabs.setCurrentWidget(self.niches))
+        self.tabs.addTab(self.queue_page, "📤  Queue")
+        self.performance = PerformancePage(self.posting)
+        self.tabs.addTab(self.performance, "📈  Performance")
         outer.addWidget(self.tabs, 1)
         outer.addWidget(self._build_footer())
         self.setCentralWidget(root)
+
+    def _add_account(self) -> None:
+        """"Add an account…" from a niche: the Accounts tab adds one and starts its login."""
+        self.tabs.setCurrentWidget(self.accounts_page)
+        self.accounts_page.add()
+
+    def _accounts_changed(self) -> None:
+        from .. import niches as niche_list
+
+        self.niches.accounts_changed()
+        if niche_list.link_accounts(self.settings, self.posting.accounts):  # a renamed @handle shows everywhere
+            self.settings.save()
+            self.niches.reload()
+
+    def _alert(self, title: str, text: str) -> None:
+        """A post went up or failed, a login ran out, a video took off: a notification, and the log."""
+        from PySide6.QtWidgets import QSystemTrayIcon
+
+        self._log(f"{title}: {text}")
+        if not QSystemTrayIcon.isSystemTrayAvailable():
+            return
+        if self.tray is None:
+            self.tray = QSystemTrayIcon(theme.app_icon(), self)
+            self.tray.setToolTip(APP_NAME)
+            self.tray.messageClicked.connect(lambda: (self.showNormal(), self.activateWindow(),
+                                                      self.tabs.setCurrentWidget(self.performance)))
+            self.tray.show()
+        self.tray.showMessage(f"{APP_NAME} · {title}", text, QSystemTrayIcon.Information, 8000)
 
     def _niches_changed(self) -> None:
         """A niche was added, edited or removed: everything that shows niches follows."""
@@ -999,7 +1042,6 @@ class MainWindow(QMainWindow):
         self._status_is_progress = False
 
     def _idle(self) -> None:
-        self.uploader.nudge()  # an export may have just finished
         self.progress.setVisible(False)
         self.cancel_btn.setVisible(False)
         if self._status_is_progress:
@@ -1547,7 +1589,6 @@ class MainWindow(QMainWindow):
         old = self.settings
         self.settings = new
         self.settings.save()
-        self.uploader.nudge()
         forms.refresh(self.tune_editors, new)
         forms.refresh(self.export_editors, new)
         self.research.settings_changed()
@@ -1589,9 +1630,6 @@ class MainWindow(QMainWindow):
                 self.banner.check(manual=False)  # a new channel: see what it has straight away
         elif dlg.signed_in:  # cancelled, but the sign-in just made still counts
             self._apply_settings(self.settings.copy(cookies_browser=youtube_login.CHOICE))
-        if dlg.drive_changed:
-            self.uploader.nudge()
-            pipeline.request_uploads(self.automation.db)
         if dlg.signed_in and self.settings.cookies_browser == youtube_login.CHOICE:
             self.automation.end_pause_after_sign_in()
 
@@ -1757,7 +1795,9 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e) -> None:
         self._closing = True
-        self.uploader.stop(wait=3)  # an upload cut off carries on next time, from where it stopped
+        self.posting.stop()
+        if self.tray is not None:
+            self.tray.hide()
         self.banner.shutdown()
         self.research.shutdown()
         self.niches.shutdown()

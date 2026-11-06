@@ -266,7 +266,7 @@ def record_data(store: Store, it: VideoItem, account: Account | None, s: Setting
                  "size_bytes": info.get("size_bytes"), "file": it.path, "hook": it.hook,
                  "part": it.part, "parts": it.parts, "posting_score": it.total,
                  "ai_rating": it.ai.get("appeal") if it.ai else None},
-        "source": dict(it.facts) | {k: v2 for k, v2 in (("channel", it.source_channel), ("url", it.source_url),
+        "source": {k.removeprefix("source_"): v2 for k, v2 in it.facts.items()} | {k: v2 for k, v2 in (("channel", it.source_channel), ("url", it.source_url),
                                                           ("reason", it.source_reason),
                                                           ("permission", it.source_permission),
                                                           ("clip_score", it.source_score),
