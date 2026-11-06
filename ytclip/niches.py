@@ -9,7 +9,7 @@ With no niches the app works as it always did: one channel list and one set of s
 (Settings → Picking), and every clip in the Automation folder.
 
 Niches are saved in settings.json as a list of plain dicts (Settings.niches). A niche's id never
-changes, so renaming one keeps its queued videos, its picks and TikTok Manager's link to it.
+changes, so renaming one keeps its queued videos, its picks and the account its clips post to.
 """
 
 from __future__ import annotations
@@ -61,7 +61,8 @@ def folder_name(name: str) -> str:
 class Niche:
     id: str = ""
     name: str = ""
-    account: str = ""  # the TikTok account it's for, e.g. @gamingclips (shown, and passed to TikTok Manager)
+    account: str = ""  # the TikTok account it's for, as shown: "@gamingclips" (kept up to date from account_id)
+    account_id: str = ""  # the posting account (posting.accounts) its clips are queued for
     enabled: bool = True  # off: nothing new is picked for it
     daily: int = DEFAULT_DAILY  # videos picked per day
     channels: str = ""  # channel list lines, as Settings.pick_channels
@@ -189,6 +190,36 @@ def find(s, niche_id: str) -> Niche | None:
 def name_of(s, niche_id: str) -> str:
     n = find(s, niche_id)
     return n.name if n else ""
+
+
+def for_account(s, account_id: str) -> list[Niche]:
+    """The niches whose clips post to this account."""
+    return [n for n in load(s) if account_id and n.account_id == account_id]
+
+
+def link_accounts(s, accounts) -> bool:
+    """Keep each niche's account in step with the posting accounts (`accounts`: posting.accounts.Account
+    objects): the shown name follows the account's @username, a niche whose account was removed loses
+    it, and a niche from before 3.0 that names an @username an account now has is linked to it.
+    Changes `s.niches`; True if anything changed (the caller saves)."""
+    accounts = list(accounts)
+    by_id = {a.id: a for a in accounts}
+    by_name = {a.username.lower(): a for a in accounts if a.username}
+    out, changed = [], False
+    for n in load(s):
+        a = by_id.get(n.account_id)
+        if a is None and n.account_id:
+            n.account_id, changed = "", True
+        if a is None and n.account:
+            a = by_name.get(n.account.strip().lstrip("@").lower())
+            if a is not None:
+                n.account_id, changed = a.id, True
+        if a is not None and n.account != a.handle:
+            n.account, changed = a.handle, True
+        out.append(n)
+    if changed:
+        s.niches = to_settings(out)
+    return changed
 
 
 def to_settings(niches: list[Niche]) -> list[dict]:

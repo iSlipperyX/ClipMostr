@@ -30,7 +30,6 @@ from .policy import PickLog, Policy, decide, language_codes, picks_path
 from .procs import boot_time, process_alive, process_name  # noqa: F401 (tests patch them here)
 from .settings import Settings, all_layouts, all_presets, app_dir, find_layout
 from .trending import CATEGORIES, History, ResearchBlocked
-from .uploads import Uploader
 
 Log = Callable[[str], None]
 
@@ -316,7 +315,7 @@ class Runner:
                  scan: Callable | None = None, engine: Callable[..., Engine] = Engine,
                  history: Callable[[], History] | None = None, picks: Callable[[], PickLog] | None = None,
                  priority: Callable[[str], str] | None = None,
-                 fetch: Callable[..., Video] = download, self_update: bool = False):
+                 fetch: Callable[..., Video] = download, self_update: bool = False, posting: bool = False):
         self.db = db or JobDB()
         self.load = load
         self._log = log or (lambda m: None)
@@ -335,6 +334,8 @@ class Runner:
         self._fetch = fetch
         self._self_update = self_update  # the headless runner installs updates itself (self_update())
         self.prefetch: Prefetch | None = None  # the next video, downloading while this one is clipped
+        self._posting = posting  # run the posting worker alongside (posting/service.py)
+        self.poster = None  # its thread while run() runs
 
     # ------------------------------------------------------------ bookkeeping
     def log(self, msg: str) -> None:
@@ -440,6 +441,8 @@ class Runner:
                 self.state(low)
                 return max(1.0, min(DISK_RECHECK, scan_wait))
             self.process(job, s)
+            if self.poster is not None:  # the new clips go to their account's queue now, not in a few minutes
+                self.poster.service.nudge()
             return 1.0
         if self._self_update:
             self.self_update(s)
@@ -994,8 +997,9 @@ class Runner:
         p.meta = {"automation": {"permission": job.permission, "origins": job.origins, "how": job.how,
                                  "recipe": label, "picked_at": job.created}}
         niche = niches.find(s, job.niche)
-        if niche:  # for the Library, and for TikTok Manager to know which account the clips are for
-            p.meta["automation"] |= {"niche": niche.name, "niche_id": niche.id, "account": niche.account}
+        if niche:  # for the Library, and for posting to know which account the clips are for
+            p.meta["automation"] |= {"niche": niche.name, "niche_id": niche.id, "account": niche.account,
+                                     "account_id": niche.account_id}
         if order is not None:
             p.meta["automation"]["request"] = {"id": order.id, "count": order.count, "min_len": order.min_len,
                                                "max_len": order.max_len, "notes": order.notes}
@@ -1125,6 +1129,19 @@ class Runner:
                      + (f". Fix: {c.fix}" if c.fix else ""))
 
     # ------------------------------------------------------------ the loop
+    def start_posting(self):
+        """The posting worker on its own thread: posts each account's queue on its schedule, reads the
+        stats, writes the records and clears posted clips away. It logs to the automation log."""
+        try:
+            from .posting.service import Service, Thread
+
+            t = Thread(Service(log=lambda m: self.log(m), main_load=self.load))
+            t.start()
+        except Exception as exc:  # noqa: BLE001 - clipping goes on without posting
+            self.log(f"⚠ Posting couldn't start: {type(exc).__name__}: {exc}")
+            return None
+        return t
+
     def run(self, stop: Callable[[], bool] | None = None, sleep: Callable[[float], None] = time.sleep,
             once: bool = False) -> int:
         why = self.claim()
@@ -1136,9 +1153,8 @@ class Runner:
         # reporting progress) never makes automation look stopped, or lets a second one take over.
         pulse = Pulse(lambda: self.beat(force=True), PULSE)
         pulse.start()
-        # Finished clips go up to the storage server alongside, never holding up clipping (uploads.py).
-        uploader = Uploader(self.load, lambda m: self.log(m), db_factory=lambda: JobDB(self.db.path))
-        uploader.start()
+        # Finished clips are posted to TikTok alongside, never holding up clipping (posting/service.py).
+        self.poster = self.start_posting() if self._posting else None
         stop = self._stop = stop or (lambda: False)
         try:
             self.health()
@@ -1166,7 +1182,9 @@ class Runner:
             pass
         finally:
             self.stop_prefetch()
-            uploader.stop()  # an upload cut off here carries on next time, from where it stopped
+            if self.poster is not None:
+                self.poster.stop()  # a post cut off here is marked failed next time (it may be up already)
+                self.poster = None
             pulse.stop()  # before release, so a last beat can't mark it running again
             self.log("Automation stopped.")
             self.release()
@@ -1409,7 +1427,7 @@ def run_headless() -> int:
         sweep_work()  # what a crash left in the work folder
     except Exception:
         pass
-    return Runner(log=file_logger(), priority=speed.set_priority, self_update=True).run()
+    return Runner(log=file_logger(), priority=speed.set_priority, self_update=True, posting=True).run()
 
 
 def request_scan(db: JobDB, niche_id: str = "") -> None:

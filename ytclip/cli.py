@@ -688,7 +688,7 @@ def run_auto(argv: list[str]) -> int:
     log = pipeline.file_logger(lambda line: console.print(escape(line), highlight=False))
     from . import speed
 
-    return pipeline.Runner(db, log=log, priority=speed.set_priority).run(once=args.once)
+    return pipeline.Runner(db, log=log, priority=speed.set_priority, posting=not args.once).run(once=args.once)
 
 
 def run_qc(argv: list[str]) -> int:
