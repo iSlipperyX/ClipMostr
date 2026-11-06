@@ -229,22 +229,15 @@ def test_automation_tab_shows_the_video_now_its_steps_and_a_bar_in_its_row(app, 
     tab.shutdown()
 
 
-def test_uploads_get_a_bar_while_one_goes_up(app, tmp_path):
-    from ytclip import uploads
-    from ytclip.gui.automation import Automation
+def test_the_automation_tab_says_how_posting_is_going(app, tmp_path):
+    from ytclip.gui.automation import posting_summary
+    from ytclip.posting.accounts import Accounts
 
-    db = JobDB(tmp_path / "jobs.db")
-    s = Settings().apply({"upload_target": "folder", "upload_folder": str(tmp_path)})
-    tab = Automation(lambda: s, db, launch=lambda: None)
-    uploads._table(db)
-    with db._lock:
-        db.con.execute("INSERT INTO uploads (path, state, name) VALUES (?, 'uploading', 'clip 01.mp4')",
-                       (str(tmp_path / "a.mp4"),))
-    db.set_meta("upload_progress", 0.37)
-    tab.refresh()
-    assert not tab.upload_bar.isHidden() and tab.upload_bar.value() == 370
-    assert tab.upload_bar.format() == "37%" and "clip 01.mp4" in tab.upload_bar.toolTip()
-    tab.shutdown()
+    assert "No TikTok account yet" in posting_summary()
+    accs = Accounts.load()
+    accs.add("")
+    accs.save()
+    assert posting_summary().startswith("0 clips waiting to post · 0 posted today · no account logged in")
 
 
 def test_studio_queue_items_show_the_step_and_bar(app):

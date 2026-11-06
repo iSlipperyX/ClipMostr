@@ -678,7 +678,7 @@ def test_clips_json_carries_why_a_video_was_picked(tmp_path):
     write_index(tmp_path, v, [Clip(0, 30, 80)], ["01.mp4"], [], "auto", {"automation": {"permission": "ok"}})
     data = json.loads((tmp_path / "clips.json").read_text(encoding="utf-8"))
     assert data["automation"] == {"permission": "ok"} and data["clips"][0]["file"] == "01.mp4"
-    # TikTok Manager reads the licence to add a credit line for videos added by hand
+    # posting reads the licence to add a credit line for videos added by hand
     assert data["video"]["license"].startswith("Creative Commons")
 
 

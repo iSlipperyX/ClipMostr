@@ -11,7 +11,7 @@ A next part starts within layout.CARRIES_ON seconds of the part before, so layou
 already says every part but the last has a next part, and the bottom banner promises it. When the
 quality check rejects a part, the clip before it is made again without the promise (see
 Engine._unpromise), and the parts are numbered again from what survived (labels(), written to
-clips.json as "series", "part" and "parts" for TikTok Manager).
+clips.json as "series", "part" and "parts" for posting, which queues the parts in order).
 """
 
 from __future__ import annotations

@@ -7,22 +7,22 @@ plan() only looks; apply() removes what a plan lists, for the kinds you pick (CL
 * downloads: full videos in the download cache
 * analysis: the transcripts, captions and measurements saved beside them (a video opens again
   instantly with them; without them it is measured again)
-* rejected: clips the quality check rejected (TikTok Manager never takes those)
-* posted: clips TikTok Manager says you've posted
-* removed: clips you removed from TikTok Manager's library (it never brings those back)
-* uploaded: clips that are safely on your storage server (uploads.py), the same file that went up
+* rejected: clips the quality check rejected (they're never posted)
+* posted: posted clips whose files were kept (deleting after posting is off, say), once they're on TikTok
+* removed: clips you took out of the posting queue ("Don't post"; they're never brought back)
 
-It never touches a video that's queued, being clipped or open in the Studio, a clip TikTok Manager
-still has (in its library, queued, failed or uploading), anything changed in the last few minutes,
+Posting clears a clip's files itself once the post is up (posting/records.py); this is for the rest.
+It never touches a video that's queued, being clipped or open in the Studio, a clip waiting to post
+(or posting, failed, or posted but not seen on TikTok yet), anything changed in the last few minutes,
 or anything that isn't ClipMonster's own: a clip must be listed in a clips.json, a cache file must
 be named after a video (in a download cache folder you picked yourself, one ClipMonster saved the
 details of, or named as only ClipMonster or yt-dlp would). Unfinished downloads keep to the age
 picked too. A download goes with its details (.video.json); a clip goes with its .srt and
 thumbnail, and leaves its clips.json (its counts and README follow); a video
 folder with no clips left goes altogether, and so do folders it leaves empty (not the Automation
-folder or a niche's folder, which TikTok Manager may be watching).
+folder or a niche's folder).
 
-TikTok Manager's library (library.json in its settings folder) is only ever read.
+The posting library (posting/library.json) is only ever read here.
 """
 
 from __future__ import annotations
@@ -47,8 +47,8 @@ KINDS = tuple(k for k, _ in CLEANUP_KINDS)
 LABELS = dict(CLEANUP_KINDS)
 NOUNS = {"partial": "unfinished download", "previews": "preview render", "downloads": "downloaded video",
          "analysis": "saved analysis file", "rejected": "rejected clip", "posted": "posted clip",
-         "removed": "removed clip", "uploaded": "uploaded clip"}
-CLIP_KINDS = ("rejected", "posted", "removed", "uploaded")
+         "removed": "skipped clip"}
+CLIP_KINDS = ("rejected", "posted", "removed")
 CACHE_KINDS = ("partial", "downloads", "analysis")
 REJECTED_DIR = "_rejected"
 FRESH = 10 * 60  # anything changed this recently may still be in use
@@ -78,7 +78,7 @@ def size_text(n: float) -> str:
 
 
 def _key(path) -> str:
-    """How TikTok Manager names a file in its library (store._key) for a path on this PC."""
+    """How the posting library names a file (posting.store._key) for a path on this PC."""
     try:
         path = Path(path).resolve()
     except (OSError, RuntimeError):
@@ -94,69 +94,52 @@ def _inside(path: Path, folder: Path) -> bool:
         return False
 
 
-# ---------------------------------------------------------------- TikTok Manager's side
+# ---------------------------------------------------------------- the posting library
 
 
 @dataclass
-class TikTokManager:
-    """What TikTok Manager's library says about clip files, by their _key()."""
+class PostingLibrary:
+    """What the posting library says about clip files, by their _key()."""
 
-    found: bool = False  # its library was read
+    found: bool = False  # it was read
     unreadable: bool = False  # it exists but couldn't be read, so nothing it might hold is cleared
-    keep: set[str] = field(default_factory=set)  # still in its library and not posted
-    posted: dict[str, float] = field(default_factory=dict)  # posted -> when
-    removed: set[str] = field(default_factory=set)  # taken out of its library by you
-    watch_folders: list[str] = field(default_factory=list)
+    keep: set[str] = field(default_factory=set)  # waiting to post, posting, failed, or not seen on TikTok yet
+    posted: dict[str, float] = field(default_factory=dict)  # posted and seen on TikTok -> when
+    removed: set[str] = field(default_factory=set)  # taken out of the queue by you
 
 
-def tiktok_manager_dir() -> Path:
-    base = os.environ.get("APPDATA") or str(Path.home() / ".config")
-    return Path(base) / "TikTokManager"
+def posting_library_path() -> Path:
+    return app_dir() / "posting" / "library.json"
 
 
-def read_tiktok_manager(folder: Path | None = None) -> TikTokManager:
-    folder = folder or tiktok_manager_dir()
-    library = folder / "library.json"
+def read_posting(path: Path | None = None) -> PostingLibrary:
+    library = path or posting_library_path()
     if not library.is_file():
-        return TikTokManager()
+        return PostingLibrary()
     try:
         data = json.loads(library.read_text(encoding="utf-8"))
         if not isinstance(data, dict) or not isinstance(data.get("items", []), list):
             raise ValueError("not a library")
     except (OSError, ValueError):
-        return TikTokManager(unreadable=True)
-    tm = TikTokManager(found=True)
+        return PostingLibrary(unreadable=True)
+    lib = PostingLibrary(found=True)
     for d in data.get("items") or []:
         if not isinstance(d, dict) or not isinstance(d.get("path"), str) or not d["path"]:
             continue
         key = _key(d["path"])
-        if d.get("status") == "posted":
+        if d.get("status") == "posted" and d.get("tiktok_id"):
             try:
-                tm.posted[key] = float(d.get("posted_at") or 0)
+                lib.posted[key] = float(d.get("posted_at") or 0)
             except (TypeError, ValueError):
-                tm.posted[key] = 0.0
+                lib.posted[key] = 0.0
         else:
-            tm.keep.add(key)
+            lib.keep.add(key)
     ignored = data.get("ignored") if isinstance(data.get("ignored"), list) else []
-    # A path can be in more than one entry: anything still in the library wins over posted or removed.
-    tm.removed = {os.path.normcase(str(k)) for k in ignored if isinstance(k, str)} - tm.keep - set(tm.posted)
-    for key in tm.keep:
-        tm.posted.pop(key, None)
-    try:
-        cfg = json.loads((folder / "settings.json").read_text(encoding="utf-8"))
-        tm.watch_folders = [str(f) for f in cfg.get("watch_folders") or [] if f] if isinstance(cfg, dict) else []
-    except (OSError, ValueError, TypeError):
-        pass
-    return tm
-
-
-def _watched(folder: Path, watch_folders: list[str]) -> bool:
-    """TikTok Manager watches this folder, a folder around it, or a folder inside it."""
-    for w in watch_folders:
-        wp = Path(os.path.expanduser(w))
-        if _inside(folder, wp) or _inside(wp, folder):
-            return True
-    return False
+    # A path can be in more than one entry: anything still waiting wins over posted or removed.
+    lib.removed = {os.path.normcase(str(k)) for k in ignored if isinstance(k, str)} - lib.keep - set(lib.posted)
+    for key in lib.keep:
+        lib.posted.pop(key, None)
+    return lib
 
 
 # ---------------------------------------------------------------- the plan
@@ -178,8 +161,8 @@ class Item:
 class Plan:
     items: list[Item] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)  # what the plan couldn't do, and why
-    kept_for_tm: int = 0  # clips left alone because TikTok Manager still has them
-    tm_found: bool = False
+    kept_for_posting: int = 0  # clips left alone because they're still waiting to post
+    posting_found: bool = False
     roots: list[Path] = field(default_factory=list)  # folders never removed, even when empty
 
     def totals(self) -> dict[str, tuple[int, int]]:
@@ -235,40 +218,31 @@ def studio_ids(session: Path | None = None) -> set[str]:
 
 
 def plan(s: Settings, now: float | None = None, busy: set[str] | frozenset = frozenset(),
-         older_than_days: float = 0.0, kinds=KINDS, tm: TikTokManager | None = None,
-         temp_dirs: list[Path] | None = None, uploaded: dict | None = None) -> Plan:
-    """What a clean-up of these kinds would remove. Changes nothing. `uploaded`: uploads.uploaded()
-    (read from jobs.db when it's needed and not given)."""
+         older_than_days: float = 0.0, kinds=KINDS, posting: PostingLibrary | None = None,
+         temp_dirs: list[Path] | None = None) -> Plan:
+    """What a clean-up of these kinds would remove. Changes nothing."""
     now = time.time() if now is None else now
     kinds = set(kinds)
-    if "uploaded" in kinds and uploaded is None:
-        uploaded = _uploaded()
     cutoff = now - max(0.0, older_than_days) * DAY
     p = Plan()
-    tm = tm if tm is not None else read_tiktok_manager()
-    p.tm_found = tm.found
+    lib = posting if posting is not None else read_posting()
+    p.posting_found = lib.found
     roots = [s.output_path]
     if not _inside(s.auto_output_path, s.output_path):
         roots.append(s.auto_output_path)
     p.roots = roots + [s.auto_output_path] + [s.auto_output_path / n.folder for n in niches.load(s)]
 
     if kinds & set(CLIP_KINDS):
-        if tm.unreadable:
-            p.notes.append("TikTok Manager's library couldn't be read just now, so no clips are cleared (it might "
-                           "still need them). Try again with TikTok Manager closed.")
+        if lib.unreadable:
+            p.notes.append("The posting library couldn't be read just now, so no clips are cleared (some may "
+                           "still be waiting to post). Try again in a minute.")
         else:
-            if not tm.found and kinds & {"posted", "removed"}:
-                p.notes.append("TikTok Manager isn't set up on this PC, so ClipMonster can't tell which clips "
-                               "you've posted or removed. Only rejected and uploaded clips can be cleared.")
-            elif tm.found and s.auto_output_path.is_dir() and not _watched(s.auto_output_path, tm.watch_folders):
-                p.notes.append("TikTok Manager isn't watching your Automation folder, so its clips never reach "
-                               "it. Add the folder in TikTok Manager (Settings → Ready to upload).")
             seen: set[str] = set()
             for root in roots:
                 for folder, data in _video_folders(root, s):
                     if _key(folder) not in seen:
                         seen.add(_key(folder))
-                        _plan_folder(p, folder, data, tm, kinds, busy, cutoff, now, uploaded or {})
+                        _plan_folder(p, folder, data, lib, kinds, busy, cutoff, now)
     if kinds & set(CACHE_KINDS):
         _plan_cache(p, s.cache_path, kinds, busy, cutoff, now, own_folder=not s.cache_dir)
     if "previews" in kinds:
@@ -303,25 +277,8 @@ def _video_folders(root: Path, s: Settings):
             yield folder, data
 
 
-def _uploaded() -> dict:
-    from . import uploads
-    from .jobs import JobDB
-
-    try:
-        db = JobDB()
-    except Exception:
-        return {}
-    try:
-        return uploads.uploaded(db)
-    finally:
-        db.close()
-
-
-def _plan_folder(p: Plan, folder: Path, data: dict, tm: TikTokManager, kinds: set[str], busy, cutoff: float,
-                 now: float, uploaded: dict | None = None) -> None:
-    from .uploads import _norm
-
-    uploaded = uploaded or {}
+def _plan_folder(p: Plan, folder: Path, data: dict, lib: PostingLibrary, kinds: set[str], busy, cutoff: float,
+                 now: float) -> None:
     video = data.get("video") if isinstance(data.get("video"), dict) else {}
     if video.get("id") in busy:
         return  # being clipped again right now
@@ -337,18 +294,16 @@ def _plan_folder(p: Plan, folder: Path, data: dict, tm: TikTokManager, kinds: se
             continue
         size, mtime = st
         key = _key(path)
-        if key in tm.keep:
-            p.kept_for_tm += 1
+        if key in lib.keep:
+            p.kept_for_posting += 1
             continue
         check = rec.get("qc") if isinstance(rec.get("qc"), dict) else {}
         if check.get("ok") is False or file.replace("\\", "/").startswith(f"{REJECTED_DIR}/"):
             kind, when = "rejected", mtime
-        elif key in tm.posted:
-            kind, when = "posted", tm.posted[key] or mtime
-        elif key in tm.removed:
+        elif key in lib.posted:
+            kind, when = "posted", lib.posted[key] or mtime
+        elif key in lib.removed:
             kind, when = "removed", mtime
-        elif (up := uploaded.get(_norm(path))) and up[0] == size and abs(up[1] - mtime) < 1:
-            kind, when = "uploaded", up[2]  # the very file that went up, as long ago as it went
         else:
             continue
         if kind not in kinds or when > cutoff or now - mtime < FRESH:
@@ -365,7 +320,7 @@ def _plan_folder(p: Plan, folder: Path, data: dict, tm: TikTokManager, kinds: se
             if f.suffix.lower() not in VIDEO_EXTS or _key(f) in listed or not f.is_file():
                 continue
             st = _stat(f)
-            if st is None or st[1] > cutoff or now - st[1] < FRESH or _key(f) in tm.keep:
+            if st is None or st[1] > cutoff or now - st[1] < FRESH or _key(f) in lib.keep:
                 continue
             srt = f.with_suffix(".srt")
             companions = [srt] if srt.is_file() else []

@@ -1,4 +1,4 @@
-"""Learning from results: TikTok Manager's results.json -> channel bonuses, hook examples and notes."""
+"""Learning from results: posting's results.json -> channel bonuses, hook examples and notes."""
 
 import json
 from pathlib import Path

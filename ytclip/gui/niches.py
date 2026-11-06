@@ -31,14 +31,25 @@ STATS_EVERY = 5000  # ms between refreshes of the counts while the tab is showin
 CHANNELS_HINT = "@somepodcast  # clipping programme, credit in caption\nhttps://www.youtube.com/@streamer"
 
 
+def _saved_accounts() -> list:
+    from ..posting.accounts import Accounts
+
+    try:
+        return list(Accounts.load())
+    except OSError:
+        return []
+
+
 class Niches(QWidget):
     notice = Signal(str)
     changed = Signal()  # niches were edited (other tabs re-sort their videos)
     open_settings = Signal(str)
+    add_account = Signal()  # "Add an account…" was picked: the Accounts tab takes over
 
     def __init__(self, settings: Callable[[], Settings], change: Callable[[str, Any], None],
-                 db: JobDB | None = None, parent=None):
+                 db: JobDB | None = None, parent=None, accounts: Callable[[], list] | None = None):
         super().__init__(parent)
+        self._accounts = accounts or _saved_accounts
         self._settings = settings
         self._change = change
         self.db = db or JobDB()
@@ -147,13 +158,11 @@ class Niches(QWidget):
         self.name.setPlaceholderText("e.g. Gaming, Podcasts, Science")
         self.name.editingFinished.connect(self._rename)
         form.addRow("Name", self.name)
-        self.account = QLineEdit()
-        self.account.setPlaceholderText("@youraccount")
-        self.account.setToolTip("The TikTok account these clips are for. It's saved with every clip (clips.json) "
-                                "and shown in the Library. TikTok Manager doesn't queue clips by it yet: check "
-                                "which account it queues them for")
-        self.account.textChanged.connect(lambda v: self._set("account", v.strip()))
-        form.addRow("TikTok account", self.account)
+        self.account = QComboBox()
+        self.account.setToolTip("The TikTok account this niche's clips post to. Each clip goes to that account's "
+                                "queue as soon as it's made. Add and log in to accounts in the Accounts tab")
+        self.account.activated.connect(self._pick_account)
+        form.addRow("Posts to", self.account)
         self.enabled = QCheckBox("Pick videos for this niche")
         self.enabled.setToolTip("Off: nothing new is picked for it. Videos already waiting are still clipped")
         self.enabled.toggled.connect(lambda v: self._set("enabled", bool(v)))
@@ -356,7 +365,7 @@ class Niches(QWidget):
                 sources.append(f"{len(n.search_list())} search{'es' if len(n.search_list()) != 1 else ''}")
             if n.keyword_list() or n.category_ids():
                 sources.append("trending")
-            line2 = " · ".join([n.account or "no account set"] + (sources or ["no sources yet"]))
+            line2 = " · ".join([n.account or "no account yet"] + (sources or ["no sources yet"]))
             line3 = (f"Today {today}/{n.daily} · {c.get('waiting', 0)} waiting · {c.get('clips', 0)} clips this week"
                      if n.on else "Off: nothing new is picked" if not n.enabled else
                      "Paused in Automation: nothing is picked or clipped")
@@ -376,7 +385,7 @@ class Niches(QWidget):
         self._filling = True
         try:
             self.name.setText(n.name)
-            self.account.setText(n.account)
+            self._fill_accounts(n)
             self.enabled.setChecked(n.enabled)
             self.daily.setValue(n.daily)
             self.channels.setPlainText(n.channels)
@@ -445,9 +454,8 @@ class Niches(QWidget):
                 "then title words, then categories. Title words and categories matter for Creative Commons videos "
                 "on the charts" + (", and for trending ones, since you pick from anything"
                                    if s.pick_from == "any" else "") + ".")
-        self.hint.setText(f"Each niche's clips go to their own folder in {s.auto_output_path}, and every clip records "
-                          "its niche's TikTok account. TikTok Manager doesn't queue clips by account yet, so check "
-                          "which account it puts them under. Picking rules (Settings → Picking) still apply to "
+        self.hint.setText(f"Each niche's clips go to their own folder in {s.auto_output_path} and straight into "
+                          "its TikTok account's posting queue. Picking rules (Settings → Picking) still apply to "
                           "every niche.")
 
     # ================================================================== editing
@@ -457,6 +465,46 @@ class Niches(QWidget):
             self._current = self._niches[row].id
             self._fill_form()
             self._update_notes()
+
+    # ------------------------------------------------------------ the account it posts to
+    ADD_ACCOUNT = "+add"
+
+    def _fill_accounts(self, n: Niche) -> None:
+        self.account.blockSignals(True)
+        self.account.clear()
+        self.account.addItem("No account yet: clips wait", "")
+        known = False
+        for a in self._accounts():
+            self.account.addItem(a.label if a.label == a.handle else f"{a.label} ({a.handle})", a.id)
+            known = known or a.id == n.account_id
+        if n.account_id and not known:  # removed since
+            self.account.addItem("Removed account", n.account_id)
+        self.account.insertSeparator(self.account.count())
+        self.account.addItem("Add an account…", self.ADD_ACCOUNT)
+        i = self.account.findData(n.account_id) if n.account_id else 0
+        self.account.setCurrentIndex(max(0, i))
+        self.account.blockSignals(False)
+
+    def _pick_account(self, index: int) -> None:
+        n = self._niche()
+        if n is None or self._filling:
+            return
+        aid = self.account.itemData(index) or ""
+        if aid == self.ADD_ACCOUNT:
+            self._fill_accounts(n)
+            self.add_account.emit()
+            return
+        a = next((a for a in self._accounts() if a.id == aid), None)
+        self._replace(replace(n, account_id=aid, account=a.handle if a else ""))
+        self.notice.emit(f"{n.name}'s clips now post to {a.handle}." if a else
+                         f"{n.name}'s clips wait in the queue until it has an account.")
+
+    def accounts_changed(self) -> None:
+        """Accounts were added, renamed or removed in the Accounts tab."""
+        n = self._niche()
+        if n is not None:
+            self._fill_accounts(n)
+        self._refresh_stats()
 
     def _set(self, name: str, value) -> None:
         if self._filling:

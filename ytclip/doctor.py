@@ -1,7 +1,7 @@
 """Health check: is everything automation needs in place? Each check says what's wrong and the fix.
 
 check() looks at the PC and the settings without going online: ffmpeg, the downloader's age, the
-keys, the folders and free space, TikTok Manager, niches and clip requests. With online=True it
+keys, the folders and free space, TikTok posting, niches and clip requests. With online=True it
 also asks the YouTube Data API, Anthropic and Google whether the keys work (no quota or tokens used
 for the AI keys; one quota unit for YouTube).
 
@@ -20,7 +20,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import niches, youtube_login
-from .cleanup import read_tiktok_manager, size_text, tiktok_manager_dir
+from .cleanup import size_text
 from .settings import Settings
 
 GOOD, WARN, BAD = "good", "warn", "bad"
@@ -170,19 +170,42 @@ def _folders(s: Settings) -> list[Check]:
     return out
 
 
-def _tiktok_manager(s: Settings) -> Check:
-    tm = read_tiktok_manager()
-    if tm.unreadable:
-        return Check("TikTok Manager", WARN, "Its library couldn't be read just now", "Try again with it closed")
-    if not tm.found:
-        return Check("TikTok Manager", WARN, f"Not found on this PC ({tiktok_manager_dir()})",
-                     "Install it to queue and post the clips, or ignore this if you upload by hand")
-    from .cleanup import _watched
+def _posting(s: Settings) -> list[Check]:
+    """TikTok posting: accounts logged in, every niche with an account, a browser to post with."""
+    from .posting import config as posting_config
+    from .posting.accounts import Accounts
+    from .posting.tiktok.login import find_browser
 
-    if not _watched(s.auto_output_path, tm.watch_folders):
-        return Check("TikTok Manager", WARN, "It isn't watching your Automation folder, so new clips don't reach it",
-                     f"In TikTok Manager, add {s.auto_output_path} under Settings → Ready to upload")
-    return Check("TikTok Manager", GOOD, "Watching your Automation folder")
+    try:
+        accounts = list(Accounts.load())
+    except Exception as exc:  # noqa: BLE001
+        return [Check("TikTok posting", WARN, f"The account list couldn't be read: {exc}", "Try again in a minute")]
+    if not accounts:
+        return [Check("TikTok posting", WARN, "No TikTok account yet, so clips aren't posted",
+                      "Add one in the Accounts tab and log in to TikTok")]
+    out = []
+    out_of = [a.label for a in accounts if not a.logged_in]
+    if out_of:
+        out.append(Check("TikTok login", WARN, f"Not logged in: {', '.join(out_of)}. Nothing posts to "
+                         f"{'it' if len(out_of) == 1 else 'them'}", "Log in on the Accounts tab"))
+    failing = [a.label for a in accounts if a.logged_in and a.upload_check == "fail"]
+    if failing:
+        out.append(Check("TikTok upload page", WARN, f"The last posting test failed for {', '.join(failing)}",
+                         "Press Test posting on the Accounts tab to see which step"))
+    ids = {a.id for a in accounts}
+    loose = [n.name for n in niches.load(s) if n.enabled and n.account_id not in ids]
+    if loose and len(accounts) > 1:
+        out.append(Check("Niche accounts", WARN, f"No account picked for {', '.join(loose)}: their clips wait",
+                         "Pick the account each niche posts to in the Niches tab"))
+    ps = posting_config.Settings.load()
+    if find_browser(ps.browser_channel) is None and find_browser("chrome" if ps.browser_channel == "msedge"
+                                                                 else "msedge") is None and os.name == "nt":
+        out.append(Check("Posting browser", BAD, "Neither Microsoft Edge nor Google Chrome was found",
+                         "Install Edge or Chrome: posting uses it, with each account's own login"))
+    if not out:
+        n = len(accounts)
+        out.append(Check("TikTok posting", GOOD, f"{n} account{'s' * (n != 1)} logged in; clips post by themselves"))
+    return out
 
 
 def _niches_and_requests(s: Settings, db) -> list[Check]:
@@ -242,7 +265,7 @@ def check(s: Settings, db=None, online: bool = False, now: float | None = None) 
     checks += _install_place(install_dir())
     checks += _keys(s, online)
     checks += _folders(s)
-    checks.append(_tiktok_manager(s))
+    checks += _posting(s)
     checks += _niches_and_requests(s, db)
     checks += _youtube_sign_in(s, db, now)
     checks += _whisper_speed(s)

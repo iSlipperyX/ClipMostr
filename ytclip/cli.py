@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 import sys
 import time
 from pathlib import Path
@@ -41,7 +40,7 @@ def build_parser() -> argparse.ArgumentParser:
            "Trending research: ytclip research --help\nFind videos for a request: ytclip find --help\n"
            "Automation: ytclip auto --help\n"
            "Quality check: ytclip qc --help\nWhat's working: ytclip results --help\n"
-           "Upload to a storage server: ytclip upload --help\nClear out space: ytclip clean --help",
+           "TikTok posting: ytclip posting --help\nClear out space: ytclip clean --help",
     formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("sources", nargs="*", help="video/playlist/channel URLs, video files or folders")
@@ -688,7 +687,7 @@ def run_auto(argv: list[str]) -> int:
     log = pipeline.file_logger(lambda line: console.print(escape(line), highlight=False))
     from . import speed
 
-    return pipeline.Runner(db, log=log, priority=speed.set_priority).run(once=args.once)
+    return pipeline.Runner(db, log=log, priority=speed.set_priority, posting=not args.once).run(once=args.once)
 
 
 def run_qc(argv: list[str]) -> int:
@@ -726,7 +725,7 @@ def run_qc(argv: list[str]) -> int:
 
 def run_results(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="ytclip results", description="What's working: how your posted clips did, "
-                                "from the results TikTok Manager shares after each stats refresh.")
+                                "from the stats posting reads from TikTok.")
     p.add_argument("--json", action="store_true", help="print the lessons as JSON")
     args = p.parse_args(argv)
     import json
@@ -738,8 +737,8 @@ def run_results(argv: list[str]) -> int:
                           "notes": lessons.summary_lines(top=0)[1:], "polish_guide": lessons.prompt_text()}, indent=1))
         return 0
     if lessons.empty:
-        console.print("No results yet. In TikTok Manager, post some clips, refresh stats and give it 48 hours: "
-                      f"it shares how they did in {escape(str(learn.results_path()))}.")
+        console.print("No results yet. Once clips have been posted for 48 hours, how they did is written to "
+                      f"{escape(str(learn.results_path()))} and shows here.")
         return 0
     for line in lessons.summary_lines(top=0):
         console.print(escape(line))
@@ -764,7 +763,8 @@ def run_clean(argv: list[str]) -> int:
 
     p = argparse.ArgumentParser(prog="ytclip clean", description="Clear out what nothing needs any more: unfinished "
                                 "downloads, preview renders, downloaded videos and their analysis, rejected clips, "
-                                "and clips TikTok Manager says you posted or removed. Without --delete it only "
+                                "posted clips whose files were kept, and clips taken out of the posting queue. "
+                                "Without --delete it only "
                                 "lists what would go.")
     p.add_argument("--only", metavar="KINDS", default="",
                    help="comma separated: " + ", ".join(k for k, _ in CLEANUP_KINDS)
@@ -795,9 +795,9 @@ def run_clean(argv: list[str]) -> int:
         n, size = totals[k]
         table.add_row(escape(cleanup.LABELS[k]), str(n), cleanup.size_text(size) if n else "")
     console.print(table)
-    if plan.kept_for_tm:
-        console.print(f"[dim]{plan.kept_for_tm} clip{'s' if plan.kept_for_tm != 1 else ''} stay because TikTok "
-                      "Manager still has them.[/]")
+    if plan.kept_for_posting:
+        n = plan.kept_for_posting
+        console.print(f"[dim]{n} clip{'s' if n != 1 else ''} stay because they're still waiting to post.[/]")
     if args.list:
         for it in plan.items:
             console.print(f"[dim]{escape(cleanup.LABELS[it.kind])}:[/] {escape(str(it.path))}")
@@ -990,7 +990,7 @@ def run_doctor(argv: list[str]) -> int:
     from .jobs import JobDB
 
     p = argparse.ArgumentParser(prog="ytclip doctor", description="Check that everything automation needs is in "
-                                "place: ffmpeg, the downloader, keys, folders, free space, TikTok Manager, niches.")
+                                "place: ffmpeg, the downloader, keys, folders, free space, TikTok posting, niches.")
     p.add_argument("--offline", action="store_true", help="don't test the keys online")
     p.add_argument("--json", action="store_true", help="print the checks as JSON")
     args = p.parse_args(argv)
@@ -1069,64 +1069,50 @@ def run_whisper_test(argv: list[str]) -> int:
     return 0
 
 
-def run_upload(argv: list[str]) -> int:
-    from . import gdrive, pipeline, uploads
-    from .jobs import JobDB
+def run_posting(argv: list[str]) -> int:
+    from .posting import jobs, live, records, schedule
+    from .posting import config as posting_config
+    from .posting.accounts import Accounts
+    from .posting.store import Store
 
     p = argparse.ArgumentParser(
-        prog="ytclip upload", description="Upload finished clips to your storage server (Settings → Upload). "
-        "Automation and the app upload by themselves; this shows how it's going or does it now.")
-    p.add_argument("--sign-in", action="store_true", help="sign in to Google Drive (opens your browser)")
-    p.add_argument("--sign-out", action="store_true", help="forget the Google Drive sign-in")
-    p.add_argument("--now", action="store_true", help="upload everything waiting now, then exit")
-    p.add_argument("--retry", action="store_true", help="try failed uploads again")
+        prog="ytclip posting", description="TikTok posting: each account, its queue, and what was posted. Posting "
+        "runs by itself in automation's background process (ytclip auto run); accounts are added and logged in "
+        "in the app's Accounts tab.")
+    p.add_argument("--posted", type=int, default=10, metavar="N", help="show the last N posts (default 10)")
     args = p.parse_args(argv)
-    s = Settings.load()
-    if args.sign_out:
-        gdrive.sign_out()
-        console.print("Signed out of Google Drive. Nothing is uploaded there until you sign in again.")
+    accounts = Accounts.load()
+    if not len(accounts):
+        console.print("No TikTok account yet. Add one in the app's Accounts tab and log in to TikTok.")
         return 0
-    if args.sign_in:
-        console.print("Your browser is opening Google's sign-in page. Sign in and allow ClipMonster to add files "
-                      "to your Drive…")
-        try:
-            account = gdrive.sign_in(s.gdrive_client_id, s.gdrive_client_secret)
-        except gdrive.DriveError as exc:
-            console.print(f"[red]✗ {escape(str(exc))}[/]")
-            return 1
-        if not s.upload_target:
-            s.copy(upload_target="gdrive").save()
-        console.print(f"[green]✓ Signed in to Google Drive as {escape(account.email or 'your account')}.[/] Clips "
-                      "upload by themselves from now on.")
-        return 0
-    db = JobDB()
-    try:
-        if args.retry:
-            n = uploads.retry_failed(db)
-            pipeline.request_uploads(db)
-            console.print(f"{n} failed upload{'s' if n != 1 else ''} will be tried again.")
-        target = uploads.target_for(s)
-        if target is None:
-            console.print("Uploading is off. Pick a server in Settings → Upload.")
-            return 0
-        problem = target.problem(s)
-        if problem:
-            console.print(f"[yellow]⚠ {escape(problem)}[/]")
-            return 1
-        if args.now:
-            uploads.sync(db, s)
-            db.set_meta("upload_hold", 0)
-            sent = 0
-            with Progress(TextColumn("[cyan]{task.description}"), BarColumn(), console=console, transient=True) as bar:
-                task = bar.add_task("Uploading", total=None)
-                while uploads.upload_next(db, s, f"{os.getpid()}:cli",
-                                          lambda m: (bar.update(task, description=escape(m)), console.print(escape(m)))):
-                    sent += 1
-            console.print(f"{sent} clip{'s' if sent != 1 else ''} uploaded.")
-        console.print(escape(uploads.status(db).text()))
-        return 0
-    finally:
-        db.close()
+    store = Store()
+    s = posting_config.Settings.load()
+    now = time.time()
+    jobs.replan(store, accounts, s, now)
+    table = Table(show_edge=False, header_style="bold")
+    for col in ("Account", "Login", "Waiting", "Next post", "Followers"):
+        table.add_column(col)
+    for a in accounts:
+        q = [i for i in store.queue(a.id) if i.status == "queued"]
+        nxt = jobs.next_post(store, a.id)
+        prof = store.profile(a.id)
+        table.add_row(escape(a.label), "[green]logged in[/]" if a.logged_in else "[yellow]not logged in[/]",
+                      str(len(q)), "paused" if not a.autopilot else schedule.fmt_when(nxt.planned_at, now) if nxt
+                      else "—", live.fmt(prof.followers) if prof.fetched_at else "—")
+    console.print(table)
+    posted = store.posted()[:max(0, args.posted)]
+    if posted:
+        t2 = Table(show_edge=False, header_style="bold", title="Posted")
+        for col in ("When", "Clip", "Account", "Views", "Files"):
+            t2.add_column(col)
+        for it in posted:
+            v = store.video_for(it)
+            t2.add_row(schedule.fmt_when(it.posted_at, now), escape(it.headline), escape(accounts.label_for(it.account)),
+                       live.fmt(v.views) if v else "", "cleared" if it.cleaned_at else "kept" if it.keep_reason
+                       else "waiting to see it on TikTok" if not it.tiktok_id else "")
+        console.print(t2)
+    console.print(f"[dim]Records: {escape(str(records.records_folder(s)))}[/]")
+    return 0
 
 
 def run_sign_in(argv: list[str], wait: float = 1800.0, poll: float = 2.0) -> int:
@@ -1197,8 +1183,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_whisper_test(argv[1:])
     if argv[:1] == ["sign-in"]:
         return run_sign_in(argv[1:])
-    if argv[:1] == ["upload"]:
-        return run_upload(argv[1:])
+    if argv[:1] == ["posting"]:
+        return run_posting(argv[1:])
     if argv[:1] == ["doctor"]:
         return run_doctor(argv[1:])
     if argv[:1] == ["results"]:
