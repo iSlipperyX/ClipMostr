@@ -17,8 +17,7 @@ from __future__ import annotations
 import shutil
 from typing import Callable
 
-from PySide6.QtCore import Qt, QTime, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import Qt, QTime
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QFormLayout, QHBoxLayout, QLabel,
                                QLineEdit, QListWidget, QPlainTextEdit, QPushButton, QSpinBox, QStackedWidget,
                                QTimeEdit, QVBoxLayout, QWidget)
@@ -80,6 +79,7 @@ class SetupWizard(QDialog):
         self._change = change  # (name, value): the window's own settings change
         self.posting = posting
         self.start_now = False  # Finish with "Start automation now" ticked
+        self.problems: list[str] = []  # for the window to show once this closes
         lay = QVBoxLayout(self)
         self.crumbs = QLabel()
         self.crumbs.setTextFormat(Qt.RichText)
@@ -96,7 +96,8 @@ class SetupWizard(QDialog):
             self.pages.addWidget(page)
         row = QHBoxLayout()
         self.later = QPushButton("Finish later")
-        self.later.setToolTip("Close this; Settings → General → Set up again opens it")
+        self.later.setToolTip("What you've filled in is kept. The setup opens again the next time ClipMonster "
+                              "starts, or from Settings → General → Set up again")
         self.later.clicked.connect(self.reject)
         row.addWidget(self.later)
         row.addStretch(1)
@@ -227,12 +228,10 @@ class SetupWizard(QDialog):
                 ok = False
         if self.s.youtube_api_key:
             try:
-                from ..research import check_youtube_key
+                from ..trending import fetch_chart
 
-                check_youtube_key(self.s.youtube_api_key)
+                fetch_chart(self.s.youtube_api_key, "US", limit=1)  # 1 quota unit of 10,000 a day
                 lines.append("✓ YouTube key works")
-            except ImportError:
-                pass
             except Exception as exc:  # noqa: BLE001
                 lines.append(f"✗ YouTube: {exc}")
                 ok = False
@@ -293,8 +292,9 @@ class SetupWizard(QDialog):
             return
         self.account_list.clear()
         for a in self.posting.accounts:
-            self.account_list.addItem(f"{'✓' if a.logged_in else '○'}  {a.label}"
-                                      + ("" if a.logged_in else "  (not logged in)"))
+            shown = a.label + (f"  ·  @{a.username}" if a.username and a.name.strip() else "")
+            self.account_list.addItem(f"{'✓' if a.logged_in else '○'}  {shown}"
+                                      + ("" if a.logged_in else "  (not logged in yet)"))
         self.relogin.setEnabled(len(self.posting.accounts) > 0)
         if hasattr(self, "niche_account"):
             keep = self.niche_account.currentData()
@@ -355,10 +355,12 @@ class SetupWizard(QDialog):
         form.addRow("Standing requests", self.niche_finds)
         self.niche_daily = QSpinBox(minimum=1, maximum=niches.MAX_DAILY, value=n.daily if n else 2)
         self.niche_daily.setSuffix(" videos a day")
-        form.addRow("Clip", self.niche_daily)
+        form.addRow("Videos to clip", self.niche_daily)
         lens = QHBoxLayout()
         self.min_len = QDoubleSpinBox(minimum=5, maximum=600, value=(n.min_len if n and n.min_len else 62), suffix=" s")
         self.max_len = QDoubleSpinBox(minimum=5, maximum=600, value=(n.max_len if n and n.max_len else 90), suffix=" s")
+        for box in (self.min_len, self.max_len):
+            box.setDecimals(0)
         lens.addWidget(self.min_len)
         lens.addWidget(QLabel("to"))
         lens.addWidget(self.max_len)
@@ -443,10 +445,6 @@ class SetupWizard(QDialog):
         self.go_now = QCheckBox("Start automation now")
         self.go_now.setChecked(True)
         pl.addWidget(self.go_now)
-        self.start_note = QLabel()
-        self.start_note.setWordWrap(True)
-        self.start_note.setStyleSheet(f"color: {theme.WARN}")
-        pl.addWidget(self.start_note)
 
     def _finish(self) -> None:
         from .. import pipeline
@@ -454,7 +452,7 @@ class SetupWizard(QDialog):
         if self.with_windows.isChecked():
             why = pipeline.set_start_with_windows(True)
             if why and "only works on Windows" not in why:
-                self.start_note.setText(f"Start with Windows didn't take: {why}")
+                self.problems.append(f"Start with Windows didn't take: {why}")
         self.start_now = self.go_now.isChecked()
         self._set("setup_done", True)
         self.accept()
@@ -464,7 +462,3 @@ class SetupWizard(QDialog):
         if STEPS[i] in ("Keys", "First niche", "Posting schedule"):
             self._leave(i)
         super().reject()
-
-
-def open_link(url: str) -> None:
-    QDesktopServices.openUrl(QUrl(url))

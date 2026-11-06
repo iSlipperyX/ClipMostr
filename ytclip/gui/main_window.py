@@ -184,10 +184,33 @@ class MainWindow(QMainWindow):
         self._offer_old_copies()
         if self._offer_install():
             return
+        if not self.settings.setup_done:
+            self._open_setup()
         # Only packaged builds update themselves; from source you'd use git.
         if self.settings.check_updates and updater.install_dir() and \
                 updater.due_for_check(updater.CHECK_HOURS[updater.channel_setting(self.settings)]):
             self.banner.check(manual=False)
+
+    def _open_setup(self) -> None:
+        """The first-run setup (again from Settings → General). Each step's changes are saved as it's left,
+        so Finish later keeps what was done."""
+        from .setup_wizard import SetupWizard
+
+        self.niches.commit()
+        dlg = SetupWizard(self.settings, self._setup_changed, self.posting, self)
+        dlg.exec()
+        self._apply_settings(self.settings)
+        self._accounts_changed()
+        for problem in dlg.problems:
+            self._warn(problem)
+        if self.settings.cookies_browser == youtube_login.CHOICE:
+            self.automation.end_pause_after_sign_in()
+        if dlg.start_now:
+            self.automation.start()
+
+    def _setup_changed(self, name: str, value) -> None:
+        self.settings = self.settings.apply({name: value})
+        self.settings.save()
 
     def _offer_old_copies(self) -> None:
         """Copies of ClipMonster unzipped by hand before the installer: offer to remove each (once)."""
@@ -1624,7 +1647,9 @@ class MainWindow(QMainWindow):
         channel = self.settings.update_channel
         if dlg.exec():
             self._apply_settings(dlg.result_settings)
-            if dlg.go_back:
+            if dlg.run_setup:
+                QTimer.singleShot(0, self._open_setup)
+            elif dlg.go_back:
                 self.banner.go_back()
             elif self.settings.update_channel != channel and self.settings.check_updates:
                 self.banner.check(manual=False)  # a new channel: see what it has straight away

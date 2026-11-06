@@ -55,6 +55,7 @@ class Settings:
     folder_template: str = "{channel}/{date} {title} [{id}]"
     file_template: str = "{rank:02d} - {time} - {label}"
     auto_export: bool = False
+    setup_done: bool = False  # the first-run setup was finished (Settings → General → Set up again reopens it)
     # Updates
     check_updates: bool = True
     update_channel: str = "stable"  # stable | beta | dev (updater.CHANNELS)

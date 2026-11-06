@@ -29,6 +29,7 @@ class SettingsDialog(QDialog):
         self._editors: dict[str, forms.Editor] = {}
         self.signed_in = False  # signed in to YouTube from here: the caller ends a sign-in pause
         self.go_back = False  # Go back to the previous version was pressed: the caller does it after saving
+        self.run_setup = False  # Set up again was pressed: the caller opens the setup after saving
         # Posting has its own settings file (posting/settings.json): saved with Save, like the rest
         from ..posting import config as posting_config
 
@@ -113,6 +114,15 @@ class SettingsDialog(QDialog):
                 row.addWidget(self._gpu_state, 1)
                 row.addWidget(again)
                 page.layout().addRow("", row)
+            if group == "General":
+                row = QHBoxLayout()
+                again = QPushButton("Set up again…")
+                again.setToolTip("The first-run setup: tools, keys, YouTube sign-in, TikTok accounts, a niche, the "
+                                 "posting schedule. What you've set up already is filled in")
+                again.clicked.connect(self._run_setup)
+                row.addWidget(again)
+                row.addStretch(1)
+                page.layout().addRow("Setup", row)
             if group == "Updates":
                 repo = updater.configured_repo(self.result_settings.update_repo)
                 where = updater.install_dir()
@@ -248,13 +258,18 @@ class SettingsDialog(QDialog):
             pass
         super().accept()
 
+    def _run_setup(self) -> None:
+        self.run_setup = True
+        self.accept()
+
     def _go_back(self) -> None:
         self.go_back = True
         self.accept()
 
     def _reset(self) -> None:
         # Niches are your content, edited in their own tab, not a setting to reset.
-        self.result_settings = Settings(niches=self.result_settings.niches)
+        self.result_settings = Settings(niches=self.result_settings.niches,
+                                        setup_done=self.result_settings.setup_done)
         forms.refresh(self._editors, self.result_settings)
         self.posting_settings = type(self.posting_settings)()
         forms.refresh(self._posting_editors, self.posting_settings)
