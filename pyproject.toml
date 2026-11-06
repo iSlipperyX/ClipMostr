@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "yt-dlp[default]>=2025.11.12",
-    "imageio-ffmpeg>=0.5",
+    "imageio-ffmpeg>=0.5,<0.8",  # 0.8 (ffmpeg 9) draws caption text 1-2 px off the editor's preview: tests/test_export_view.py
     "numpy>=1.24",
     "rich>=13",
     "PySide6-Essentials>=6.7",
