@@ -1,6 +1,6 @@
 """Learning from results: how the clips did once they were posted, fed back into picking and polish.
 
-TikTok Manager writes results.json into ClipMonster's settings folder after each stats refresh:
+Posting (posting/results.py) writes results.json into ClipMonster's settings folder as it reads stats:
 one record per posted clip that has been up long enough (48 hours), with its views and its
 "lift", which is its views divided by the usual (median) views on that TikTok account, so clips
 from a big account and a small one can be compared.
@@ -49,7 +49,7 @@ def _times(lift: float) -> str:
 
 @dataclass
 class Outcome:
-    """One posted clip, as TikTok Manager saw it."""
+    """One posted clip, as posting saw it on TikTok."""
 
     channel: str = ""
     video_id: str = ""
@@ -109,7 +109,7 @@ class Lessons:
 
     @classmethod
     def load(cls, path: Path | None = None, now: float | None = None) -> "Lessons":
-        """Lessons from TikTok Manager's results file (empty when there is none yet)."""
+        """Lessons from the results file posting writes (empty when there is none yet)."""
         now = time.time() if now is None else now
         try:
             data = json.loads((path or results_path()).read_text(encoding="utf-8"))
@@ -234,9 +234,9 @@ class Lessons:
 
 
 def for_settings(s) -> Lessons | None:
-    """The lessons to use with these settings: None when learning from results is off. TikTok Manager
-    doesn't say which niche a post was for, so that comes from picks.json (the niche each video was
-    picked for)."""
+    """The lessons to use with these settings: None when learning from results is off. A post
+    without its niche (from before posting carried it) gets it from picks.json (the niche each video
+    was picked for)."""
     if not getattr(s, "learn_from_results", False):
         return None
     lessons = Lessons.load()

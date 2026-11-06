@@ -454,9 +454,8 @@ class Niches(QWidget):
                 "then title words, then categories. Title words and categories matter for Creative Commons videos "
                 "on the charts" + (", and for trending ones, since you pick from anything"
                                    if s.pick_from == "any" else "") + ".")
-        self.hint.setText(f"Each niche's clips go to their own folder in {s.auto_output_path}, and every clip records "
-                          "its niche's TikTok account. TikTok Manager doesn't queue clips by account yet, so check "
-                          "which account it puts them under. Picking rules (Settings → Picking) still apply to "
+        self.hint.setText(f"Each niche's clips go to their own folder in {s.auto_output_path} and straight into "
+                          "its TikTok account's posting queue. Picking rules (Settings → Picking) still apply to "
                           "every niche.")
 
     # ================================================================== editing

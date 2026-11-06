@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QHeaderView, QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QSplitter,
                                QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
-from .. import learn, niches, pipeline, uploads, youtube_login
+from .. import learn, niches, pipeline, youtube_login
 from ..clipability import age_text
 from ..jobs import Job, JobDB
 from ..research import youtube_key
@@ -29,7 +29,7 @@ from .library import reveal
 from .overnight import OvernightPanel
 from .requests_panel import NichePanel, RequestDialog, RequestPanel
 from .sign_in_dialog import SignInDialog
-from .status_bars import BAR_ROLE, LabeledBar, NowPanel, ProgressDelegate
+from .status_bars import BAR_ROLE, NowPanel, ProgressDelegate
 
 REPORT_EVERY = 30.0  # seconds between refreshes of the Overnight page while it's showing
 NOW_EVERY = 1000  # ms between updates of the status bars while automation runs
@@ -135,7 +135,7 @@ class Automation(QWidget):
         open_out = QPushButton("Open clips folder")
         open_out.clicked.connect(self._open_output)
         clean = QPushButton("🧹  Clean up…")
-        clean.setToolTip("Clear out downloads, rejected clips and clips TikTok Manager is done with. Shows what "
+        clean.setToolTip("Clear out downloads, rejected clips and clips that won't be posted. Shows what "
                          "would go first")
         clean.clicked.connect(self.clean_up.emit)
         row.addWidget(self.link, 1)
@@ -190,20 +190,15 @@ class Automation(QWidget):
         self.counts = QLabel()
         self.counts.setProperty("muted", True)
         uv.addWidget(self.counts)
-        self.uploads = QLabel()
-        self.uploads.setWordWrap(True)
-        self.uploads.setToolTip("Finished clips going up to your storage server (Settings → Upload)")
-        self.upload_bar = LabeledBar(height=14)
-        self.upload_bar.setVisible(False)
-        up = QHBoxLayout()
-        up.addWidget(self.uploads, 1)
-        up.addWidget(self.upload_bar)
-        self.upload_bar.setFixedWidth(260)
-        uv.addLayout(up)
+        self.posting = QLabel()
+        self.posting.setWordWrap(True)
+        self.posting.setToolTip("Clips posting to TikTok by themselves (Queue tab), from automation's background "
+                                "process")
+        uv.addWidget(self.posting)
         self.learned = QLabel()
         self.learned.setTextFormat(Qt.RichText)
         self.learned.setWordWrap(True)
-        self.learned.setToolTip("From the views TikTok Manager reads for your posted clips (Settings → Picking → "
+        self.learned.setToolTip("From the views posting reads for your posted clips (Settings → Picking → "
                                 "Learn from how my clips do). Details: ytclip results")
         uv.addWidget(self.learned)
 
@@ -299,26 +294,23 @@ class Automation(QWidget):
                                                             "progress carries on")
         self._fill_table()
         self._show_now()
-        self._show_uploads()
+        self._show_posting()
         self.niche_panel.refresh()
         self.request_panel.refresh()
         self._refresh_report()
         self._tail_log()
         self._show_lessons()
 
-    def _show_uploads(self) -> None:
-        if not self._settings().upload_target:
-            self.uploads.setVisible(False)
+    def _show_posting(self) -> None:
+        """One line on posting: how many wait, the next post, how many went up today (looked at every 10 s)."""
+        import time as _time
+
+        if _time.monotonic() - getattr(self, "_posting_at", -99.0) < 10:
             return
-        st = uploads.status(self.db)
-        colour = theme.WARN if st.problem or st.failed else theme.MUTED
-        self.uploads.setText(f"<span style='color:{colour}'>☁ {_esc(st.text())}</span>")
-        self.uploads.setVisible(True)
-        busy = bool(st.uploading and not st.problem)
-        self.upload_bar.setVisible(busy)
-        if busy:
-            self.upload_bar.set_fraction(st.progress)
-            self.upload_bar.setToolTip(f"Uploading {st.current}")
+        self._posting_at = _time.monotonic()
+        text = posting_summary()
+        self.posting.setText(f"<span style='color:{theme.MUTED}'>📤 {_esc(text)}</span>" if text else "")
+        self.posting.setVisible(bool(text))
 
     def _show_now(self) -> None:
         """The Now panel and the working video's row: its steps, a bar for the whole video, time left."""
@@ -338,8 +330,6 @@ class Automation(QWidget):
                         cell.setText(text)
                     cell.setData(BAR_ROLE, status.overall if status else None)
                     break
-            if self.db.meta("paused") != "1":
-                self._show_uploads()
             return
         try:
             act = json.loads(self.db.meta("activity") or "{}")
@@ -360,7 +350,7 @@ class Automation(QWidget):
         return word + (f": {j.stage}" if j.stage and j.stage not in (word, "Done") else "")
 
     def _show_lessons(self) -> None:
-        """What's working, from TikTok Manager's results (re-read only when the file changes)."""
+        """What's working, from how posted clips did (results.json) (re-read only when the file changes)."""
         path = learn.results_path()
         try:
             stamp = path.stat().st_mtime
@@ -401,7 +391,7 @@ class Automation(QWidget):
                 _item(niche),
                 _item(status, "\n".join(x for x in (status, tip, j.recipe and f"Style: {j.recipe}") if x)),
                 _item(f"{j.clips} ✓ {j.rejected} ✗" if j.rejected else str(j.clips) if j.clips else "",
-                      f"{j.clips} ready to upload, {j.rejected} rejected by the quality check (in the _rejected "
+                      f"{j.clips} ready to post, {j.rejected} rejected by the quality check (in the _rejected "
                       "folder)" if j.rejected else ""),
                 _item(age_text((now - j.updated) / 3600) + " ago" if j.updated else ""),
                 _item(j.permission),
@@ -642,3 +632,34 @@ def _item(text: str, tip: str = "") -> QTableWidgetItem:
 
 def _esc(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def posting_summary(now: float | None = None) -> str:
+    """'4 clips waiting to post · next on @cats Today 16:05 · 2 posted today' ('' before any account)."""
+    import datetime as dt
+    import time as _time
+
+    from ..posting import jobs, schedule
+    from ..posting.accounts import Accounts
+    from ..posting.store import Store
+
+    now = _time.time() if now is None else now
+    try:
+        accounts = Accounts.load()
+        if not len(accounts):
+            return "No TikTok account yet: add one in the Accounts tab and clips post by themselves."
+        store = Store()
+    except Exception:  # noqa: BLE001 - a locked or half-written file: next refresh
+        return ""
+    waiting = [i for i in store.queue() if i.status == "queued"]
+    midnight = dt.datetime.combine(dt.date.fromtimestamp(now), dt.time()).timestamp()
+    today = store.posts_since(midnight)
+    parts = [f"{len(waiting)} clip{'s' * (len(waiting) != 1)} waiting to post"]
+    nxt = jobs.next_post(store)
+    if nxt is not None and nxt.planned_at:
+        a = accounts.get(nxt.account)
+        parts.append(f"next on {a.handle if a else '?'} {schedule.fmt_when(nxt.planned_at, now)}")
+    parts.append(f"{today} posted today")
+    if not any(a.logged_in for a in accounts):
+        parts.append("no account logged in")
+    return " · ".join(parts)

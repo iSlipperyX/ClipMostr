@@ -1087,7 +1087,7 @@ class Runner:
     def cleanup(self, s: Settings, kinds: list[str] | None = None, days: float | None = None) -> None:
         """The daily clean-up (Settings → Automation → Clean up by itself): what's ticked there and
         older than its days (at least one). Never a video that's queued, being clipped or in the
-        Studio, or a clip TikTok Manager still has waiting. The disk guard passes its own kinds, of
+        Studio, or a clip waiting to post. The disk guard passes its own kinds, of
         any age."""
         from . import cleanup
 
@@ -1436,13 +1436,6 @@ def request_scan(db: JobDB, niche_id: str = "") -> None:
     asked = db.meta("scan_now")
     db.set_meta("scan_now", niche_id if niche_id and asked in ("", niche_id) else "1")
     db.set_meta("nudge", "1")  # a running automation looks now, not after its wait
-
-
-def request_uploads(db: JobDB) -> None:
-    """Ask the uploader (in automation, or in the window) to look again now: the Upload settings
-    changed, Google Drive was signed in to, or failed uploads should be tried again."""
-    db.set_meta("upload_hold", 0)
-    db.set_meta("upload_nudge", "1")
 
 
 def is_app_process(pid: str | int) -> bool:

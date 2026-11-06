@@ -26,13 +26,12 @@ HELP = {
     "previews": "Clips made by Render preview and the Layout tab's preview, in ClipMonster's work folder",
     "downloads": "Full videos kept after clipping. Clipping one again downloads it again",
     "analysis": "Transcripts, captions and measurements. A video opened again is measured again without them",
-    "rejected": "Clips the quality check moved to a _rejected folder. TikTok Manager never takes these",
-    "posted": "Clips TikTok Manager says you've posted. Its post history and stats stay",
-    "removed": "Clips you removed from TikTok Manager's library. It never brings them back",
-    "uploaded": "Clips that are safely on your storage server (Settings → Upload), unless TikTok Manager still "
-                "needs them. The uploaded copies stay",
+    "rejected": "Clips the quality check moved to a _rejected folder. They're never posted",
+    "posted": "Posted clips whose files were kept (deleting after posting is off in Settings → Posting, say), "
+              "once they're on TikTok. Their records, post history and stats stay",
+    "removed": "Clips you took out of the posting queue (Don't post). They're never brought back",
 }
-ON_BY_DEFAULT = ("partial", "previews", "rejected", "posted", "removed", "uploaded")
+ON_BY_DEFAULT = ("partial", "previews", "rejected", "posted", "removed")
 ITEM_ROLE = Qt.UserRole + 1  # a file row's index in the plan
 
 
@@ -95,7 +94,7 @@ class CleanupDialog(QDialog):
         self._poll.timeout.connect(self._check_look)
 
         layout = QVBoxLayout(self)
-        intro = QLabel("Clears out what nothing needs any more. Clips TikTok Manager still has waiting, and "
+        intro = QLabel("Clears out what nothing needs any more. Clips waiting to post, and "
                        "anything for a video that's queued, being clipped or open in the Studio, always stay. "
                        "Nothing goes until you press Clean up.")
         intro.setWordWrap(True)
@@ -202,8 +201,6 @@ class CleanupDialog(QDialog):
         totals = plan.totals()
         for kind in cleanup.KINDS:
             n, size = totals[kind]
-            if kind in ("posted", "removed") and not plan.tm_found:
-                continue
             top = QTreeWidgetItem([cleanup.LABELS[kind], str(n) if n else "–", cleanup.size_text(size) if n else ""])
             top.setData(0, Qt.UserRole, kind)
             top.setToolTip(0, HELP.get(kind, ""))
@@ -226,10 +223,11 @@ class CleanupDialog(QDialog):
             self.tree.addTopLevelItem(top)
         self.tree.blockSignals(False)
         notes = [f"<span style='color:{theme.WARN}'>⚠ {_esc(x)}</span>" for x in plan.notes]
-        if plan.kept_for_tm:
-            notes.append(f"<span style='color:{theme.MUTED}'>{plan.kept_for_tm} clip"
-                         f"{'s stay' if plan.kept_for_tm != 1 else ' stays'} because TikTok Manager still has "
-                         f"{'them' if plan.kept_for_tm != 1 else 'it'}.</span>")
+        if plan.kept_for_posting:
+            n = plan.kept_for_posting
+            notes.append(f"<span style='color:{theme.MUTED}'>{n} clip{'s stay' if n != 1 else ' stays'} because "
+                         f"{'they are' if n != 1 else 'it is'} still waiting to post (or not seen on TikTok "
+                         "yet).</span>")
         self.notes.setText("<br>".join(notes))
         self.notes.setVisible(bool(notes))
         self.status.setText("")
@@ -290,7 +288,7 @@ class CleanupDialog(QDialog):
             first = result.failed[0]
             text += (f"<br><span style='color:{theme.WARN}'>⚠ {len(result.failed)} couldn't be removed, e.g. "
                      f"{_esc(Path(first[0]).name)}: {_esc(first[1])}. A file that's open somewhere (a player, "
-                     f"TikTok Manager) stays until it's closed.</span>")
+                     f"say) stays until it's closed.</span>")
         self.result.setText(text)
         self.cleaned.emit(f"Cleared {summary}.")
         self.look()
@@ -318,7 +316,7 @@ class CleanupDialog(QDialog):
             top = self.tree.topLevelItem(i)
             if top.data(0, Qt.UserRole) == kind:
                 return top.checkState(0) != Qt.Unchecked
-        return kind in self._chosen  # not shown (TikTok Manager isn't on this PC)
+        return kind in self._chosen
 
     def done(self, r: int) -> None:
         self._save_auto()

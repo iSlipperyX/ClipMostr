@@ -56,7 +56,7 @@ class Library(QWidget):
         self.niche.setToolTip("Show one niche's videos")
         self.niche.activated.connect(lambda _i: self._fill())
         clean = QPushButton("🧹  Clean up…")
-        clean.setToolTip("Clear out downloads, rejected clips and clips TikTok Manager is done with. Shows what "
+        clean.setToolTip("Clear out downloads, rejected clips and clips that won't be posted. Shows what "
                          "would go first")
         clean.clicked.connect(self.clean_up.emit)
         top.addWidget(title)

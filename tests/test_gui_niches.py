@@ -286,7 +286,7 @@ def test_cleanup_window_previews_then_cleans_what_is_ticked(app, tmp_path):
     plan = cleanup.Plan(items=[cleanup.Item("rejected", files[0], 2048, title="Clip A"),
                                cleanup.Item("rejected", files[1], 2048, title="Clip B"),
                                cleanup.Item("downloads", files[2], 2048, title="c.mp4")],
-                        notes=["A note"], kept_for_tm=3, tm_found=False)
+                        notes=["A note"], kept_for_posting=3)
     looked = []
 
     def look(s, now, busy=(), older_than_days=0):
@@ -301,12 +301,12 @@ def test_cleanup_window_previews_then_cleans_what_is_ticked(app, tmp_path):
     app.processEvents()
     assert dlg.clean_btn.isEnabled() and dlg.clean_btn.text() == "Clean up 2 items (4 KB)"  # ready once it has looked
     kinds = [dlg.tree.topLevelItem(i).data(0, Qt.UserRole) for i in range(dlg.tree.topLevelItemCount())]
-    assert "posted" not in kinds and "removed" not in kinds  # no TikTok Manager here
+    assert "posted" in kinds and "removed" in kinds and "uploaded" not in kinds
     rejected = dlg.tree.topLevelItem(kinds.index("rejected"))
     downloads = dlg.tree.topLevelItem(kinds.index("downloads"))
     assert rejected.checkState(0) == Qt.Checked and downloads.checkState(0) == Qt.Unchecked
     assert rejected.text(1) == "2" and rejected.text(2) == "4 KB"
-    assert "A note" in dlg.notes.text() and "3 clips stay because TikTok Manager" in dlg.notes.text()
+    assert "A note" in dlg.notes.text() and "3 clips stay because they are still waiting to post" in dlg.notes.text()
     rejected.child(1).setCheckState(0, Qt.Unchecked)  # keep clip B
     app.processEvents()
     assert dlg.clean_btn.text() == "Clean up 1 item (2 KB)"
@@ -326,7 +326,7 @@ def test_cleanup_window_previews_then_cleans_what_is_ticked(app, tmp_path):
     dlg.days.setValue(5)
     dlg.done(0)
     assert host.settings.cleanup_auto and host.settings.cleanup_days == 5
-    assert host.settings.cleanup_kinds == "previews, rejected, posted, removed, uploaded"
+    assert host.settings.cleanup_kinds == "previews, rejected, posted, removed"
     dlg.dispose()
 
 
@@ -344,7 +344,7 @@ def test_cleanup_window_keeps_single_ticks_and_saves_what_it_shows(app, tmp_path
         files[-1].write_bytes(b"x" * 1024)
     downloads = [cleanup.Item("downloads", f, 1024, title=f.name) for f in files[:3]]
     rejected = [cleanup.Item("rejected", f, 1024, title=f.name) for f in files[3:]]
-    plans = [cleanup.Plan(items=downloads + rejected, tm_found=False)]
+    plans = [cleanup.Plan(items=downloads + rejected)]
     host = Host()
     dlg = CleanupDialog(host.get, host.change, set, look=lambda s, now, busy=(), older_than_days=0: plans[-1])
     _wait(app, dlg)
@@ -360,7 +360,7 @@ def test_cleanup_window_keeps_single_ticks_and_saves_what_it_shows(app, tmp_path
     assert [rows["downloads"].child(i).checkState(0) for i in range(3)] == [Qt.Checked, Qt.Unchecked, Qt.Unchecked]
     assert {it.path for it in dlg.selected()} == {files[0], files[3]}  # the other downloads stay unticked
     dlg.trash.setChecked(False)
-    plans.append(cleanup.Plan(items=downloads[1:] + rejected[1:], tm_found=False))  # what's left after
+    plans.append(cleanup.Plan(items=downloads[1:] + rejected[1:]))  # what's left after
     dlg.clean()
     _wait(app, dlg)
     rows = _rows(dlg)
@@ -383,7 +383,7 @@ def test_closing_the_cleanup_window_never_waits_for_a_look(app):
     def slow(s, now, busy=(), older_than_days=0):
         release.wait(5)
         finished.set()
-        return cleanup.Plan(tm_found=False)
+        return cleanup.Plan()
 
     host = Host()
     dlg = CleanupDialog(host.get, host.change, set, look=slow)

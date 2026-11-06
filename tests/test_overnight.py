@@ -82,7 +82,7 @@ def test_the_health_check_finds_what_automation_needs(tmp_path, monkeypatch):
     assert got["Automation folder"] == doctor.GOOD and not out.exists()  # checking makes no folders
     assert got["Niche Gaming"] == doctor.WARN and got["Paused niches"] == doctor.WARN
     assert got["Clip requests"] == doctor.BAD and got["YouTube sign-in"] == doctor.WARN
-    assert got["TikTok Manager"] == doctor.WARN
+    assert got["TikTok posting"] == doctor.WARN  # no account yet
 
 
 def test_low_disk_and_an_old_downloader_are_flagged(tmp_path, monkeypatch):
@@ -114,15 +114,20 @@ def test_an_app_installed_inside_onedrive_is_flagged(tmp_path, monkeypatch):
     assert "App folder" not in _levels(doctor.check(s, None, now=NOW))
 
 
-def test_tiktok_manager_watching_the_folder_is_good(tmp_path, monkeypatch):
-    tm = tmp_path / "roaming" / "TikTokManager"
-    tm.mkdir(parents=True)
-    (tm / "library.json").write_text(json.dumps({"items": []}))
-    out = tmp_path / "out"
-    out.mkdir()
-    (tm / "settings.json").write_text(json.dumps({"watch_folders": [str(out)]}))
-    s = _settings(auto_output_dir=str(out))
-    assert _levels(doctor.check(s, None, now=NOW))["TikTok Manager"] == doctor.GOOD
+def test_posting_is_good_once_every_account_is_logged_in(tmp_path, monkeypatch):
+    from ytclip.posting.accounts import Accounts
+    from ytclip.posting.tiktok import login
+
+    monkeypatch.setattr(login, "find_browser", lambda channel: tmp_path / "msedge.exe")
+    accs = Accounts.load()
+    a = accs.add("")
+    accs.save()
+    s = _settings()
+    assert _levels(doctor.check(s, None, now=NOW))["TikTok login"] == doctor.WARN
+    a.logged_in = True
+    accs.save()
+    got = _levels(doctor.check(s, None, now=NOW))
+    assert got["TikTok posting"] == doctor.GOOD and "TikTok login" not in got
 
 
 def test_automation_runs_the_check_as_it_starts(tmp_path):
