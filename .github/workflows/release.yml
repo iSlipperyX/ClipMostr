@@ -7,6 +7,9 @@
 #   versioned "<last release>+dev.<commits since it>". Only the Dev channel gets it.
 # - A pull request that touches the build, or a manual run, only builds, and keeps the files as a
 #   workflow artifact, so packaging problems show up before a release.
+# - A manual run on main with "Publish" ticked (Actions > Release > Run workflow) publishes main's
+#   ytclip.__version__ as a release, tagging it v<version>: the same as release.py's tag, without a git
+#   copy. Set the version and notes first, through a pull request.
 name: Release
 
 on:
@@ -16,13 +19,18 @@ on:
   pull_request:
     paths: ["packaging/**", "build.py", "pyproject.toml", ".github/workflows/release.yml"]
   workflow_dispatch:
+    inputs:
+      publish:
+        description: "Publish main's version (ytclip.__version__) as a release. Leave unticked to only build."
+        type: boolean
+        default: false
 
 permissions:
   contents: write  # needed to create the release
 
 concurrency:  # a newer push to main replaces a dev build still being made; releases always finish
-  group: release-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref == 'refs/heads/main' }}
+  group: release-${{ github.ref }}-${{ github.event_name }}
+  cancel-in-progress: ${{ github.ref == 'refs/heads/main' && github.event_name == 'push' }}
 
 jobs:
   build:
@@ -54,6 +62,8 @@ jobs:
       - name: Work out the version
         id: version
         shell: bash
+        env:
+          PUBLISH: ${{ inputs.publish }}
         run: |
           source=$(python -c "import ytclip; print(ytclip.__version__)")
           if [[ "$GITHUB_REF" == refs/tags/* ]]; then
@@ -62,6 +72,19 @@ jobs:
               exit 1
             fi
             echo "version=$source" >> "$GITHUB_OUTPUT"
+            echo "tag=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+            echo "kind=release" >> "$GITHUB_OUTPUT"
+          elif [ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ] && [ "$PUBLISH" == "true" ]; then
+            if [ "$GITHUB_REF" != "refs/heads/main" ]; then
+              echo "::error::Publish only from main (this run is on $GITHUB_REF_NAME)"
+              exit 1
+            fi
+            if git rev-parse -q --verify "refs/tags/v$source" >/dev/null; then
+              echo "::error::v$source is already released. Raise ytclip.__version__ for a new release."
+              exit 1
+            fi
+            echo "version=$source" >> "$GITHUB_OUTPUT"
+            echo "tag=v$source" >> "$GITHUB_OUTPUT"
             echo "kind=release" >> "$GITHUB_OUTPUT"
           elif [ "$GITHUB_REF" == "refs/heads/main" ] && [ "$GITHUB_EVENT_NAME" == "push" ]; then
             last=$(git describe --tags --abbrev=0 --match 'v[0-9]*' HEAD)
@@ -150,14 +173,17 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.version.outputs.tag }}
         run: |
           prerelease=""
-          if [[ "$GITHUB_REF_NAME" == *-* ]]; then prerelease="--prerelease"; fi
+          if [[ "$TAG" == *-* ]]; then prerelease="--prerelease"; fi
           # Hand-written notes in release-notes/<tag>.md go first; GitHub's change list follows them.
           notes=()
-          if [ -f "release-notes/$GITHUB_REF_NAME.md" ]; then notes=(--notes-file "release-notes/$GITHUB_REF_NAME.md"); fi
-          gh release create "$GITHUB_REF_NAME" dist/ClipMonster-Setup.exe dist/ClipMonster-windows.zip dist/SHA256SUMS.txt \
-            --title "ClipMonster ${GITHUB_REF_NAME#v}" "${notes[@]}" --generate-notes $prerelease
+          if [ -f "release-notes/$TAG.md" ]; then notes=(--notes-file "release-notes/$TAG.md"); fi
+          # --target makes the tag on this commit when a manual run publishes (a tag push already has it).
+          # A tag made with the workflow's own token doesn't start this workflow again.
+          gh release create "$TAG" dist/ClipMonster-Setup.exe dist/ClipMonster-windows.zip dist/SHA256SUMS.txt \
+            --title "ClipMonster ${TAG#v}" "${notes[@]}" --generate-notes --target "$GITHUB_SHA" $prerelease
 
       - name: Publish the dev build
         if: steps.version.outputs.kind == 'dev'
