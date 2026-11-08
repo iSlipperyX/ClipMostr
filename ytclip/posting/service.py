@@ -299,6 +299,12 @@ class Service:
             for aid, n in got.items():
                 a = self.accounts.get(aid)
                 self.event(a, "queued", f"{n} new clip{'s' * (n != 1)} queued for {a.handle if a else aid}.")
+            for it in items:
+                if it.review == "waiting":
+                    a = self.accounts.get(it.account)
+                    self.event(a, "review", f"⏸ “{it.headline}” waits for your OK before it posts to "
+                                            f"{a.handle if a else 'its account'}: watch it in the Queue tab "
+                                            "(or on Telegram) and OK it there.", alert=True)
             self.save()
         waiting = len(intake.unassigned(self.store))
         if waiting and waiting != self._unassigned_said:

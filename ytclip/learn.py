@@ -32,6 +32,7 @@ MAX_BONUS = 12.0  # clip-ability points, either way
 BONUS_PER_DOUBLING = 8.0  # points for clips that get twice the usual views
 SHRINK = 2  # a channel's lift counts n / (n + SHRINK): 1 post a third, 4 posts two thirds
 MIN_EXAMPLES = 6  # posts with hooks before the polish gets examples
+CREATOR_MIN = 4  # Creator videos with results before their own hooks and titles are examples
 LENGTHS = ((0, 20, "under 20 s"), (20, 35, "20–35 s"), (35, 50, "35–50 s"), (50, 10_000, "over 50 s"))
 
 
@@ -62,6 +63,12 @@ class Outcome:
     posted_at: float = 0.0
     account: str = ""
     category_id: str = ""  # id of the ClipMonster category the clip was made for (see for_settings)
+    origin: str = ""  # "creator" (made by the Video Creator) or "clip"; "" from before posting said
+    title: str = ""
+
+    @property
+    def creator(self) -> bool:
+        return self.origin == "creator"
 
     @classmethod
     def from_json(cls, d: dict) -> "Outcome | None":
@@ -78,7 +85,8 @@ class Outcome:
                    rating=int(rating) if isinstance(rating, (int, float)) else None,
                    score=float(score) if isinstance(score, (int, float)) else None,
                    posted_at=float(d.get("posted_at") or 0), account=str(d.get("account") or ""),
-                   category_id=str(d.get("category_id") or d.get("niche") or ""))
+                   category_id=str(d.get("category_id") or d.get("niche") or ""),
+                   origin=str(d.get("origin") or ""), title=str(d.get("clip") or d.get("title") or "").strip())
 
 
 @dataclass
@@ -127,7 +135,7 @@ class Lessons:
     def from_outcomes(cls, outcomes: list[Outcome]) -> "Lessons":
         groups: dict[str, list[Outcome]] = {}
         for o in outcomes:
-            if _squash(o.channel):
+            if _squash(o.channel) and not o.creator:  # the Creator's videos have no YouTube channel to rank
                 groups.setdefault(_squash(o.channel), []).append(o)
         channels = {}
         for key, rows in groups.items():
@@ -168,7 +176,7 @@ class Lessons:
         return good, bad
 
     def _hooked(self, category_id: str = "") -> list[Outcome]:
-        hooked = [o for o in self.outcomes if o.hook]
+        hooked = [o for o in self.outcomes if o.hook and not o.creator]  # clips' hooks (the Creator has its own)
         own = [o for o in hooked if category_id and o.category_id == category_id]
         return own if len(own) >= MIN_EXAMPLES else hooked
 
@@ -185,6 +193,58 @@ class Lessons:
         lines += [f'- flopped: "{h}" ({_times(lift)})' for h, lift in bad]
         lines.append("Write hooks more like the ones that worked, but always about what happens in this clip.")
         return "\n".join(lines)
+
+    # --------------------------------------------------------------- for the Video Creator
+
+    def creator_examples(self, category_id: str = "", count: int = 3) -> tuple[list[Outcome], list[Outcome], bool]:
+        """(Creator videos that worked, that flopped, whether they're this category's own), best and worst
+        first; empty until there are CREATOR_MIN of them."""
+        made = [o for o in self.outcomes if o.creator and (o.hook or o.title)]
+        own = [o for o in made if category_id and o.category_id == category_id]
+        pool = own if len(own) >= CREATOR_MIN else made
+        if len(pool) < CREATOR_MIN:
+            return [], [], False
+        ranked = sorted(pool, key=lambda o: o.lift, reverse=True)
+        good = [o for o in ranked if o.lift >= 1.5][:count]
+        bad = [o for o in reversed(ranked) if o.lift <= 0.6][:count]
+        return good, bad, pool is own and bool(own)
+
+    def creator_text(self, category_id: str = "") -> str:
+        """A paragraph for the Creator's script writer: the hooks and titles of earlier videos that worked and
+        flopped (its own once there are a few, else your clips' hooks), or "" when there's too little yet."""
+        good, bad, own = self.creator_examples(category_id)
+
+        def line(kind: str, o: Outcome) -> str:
+            what = f'"{o.title}"' if o.title else ""
+            hook = f'hook "{o.hook}"' if o.hook and o.hook != o.title else ""
+            return f"- {kind}: " + ", ".join(x for x in (what, hook) if x) + f" ({_times(o.lift)})"
+
+        lines: list[str] = []
+        if good or bad:
+            where = "this account" if own else "your accounts"
+            lines.append(f"How your earlier videos from this creator did on {where} (views compared with the "
+                         "account's usual):")
+            lines += [line("worked", o) for o in good] + [line("flopped", o) for o in bad]
+        else:
+            hooks_good, hooks_bad = self.hook_examples(category_id=category_id)
+            if hooks_good or hooks_bad:
+                lines.append("Hooks that worked and flopped on your TikTok clips (views compared with the "
+                             "account's usual):")
+                lines += [f'- worked: "{h}" ({_times(x)})' for h, x in hooks_good]
+                lines += [f'- flopped: "{h}" ({_times(x)})' for h, x in hooks_bad]
+        if lines:
+            lines.append("Learn from how the ones that worked open, how long they are and what they promise; "
+                         "don't copy them, and keep to this video's topic and the facts.")
+        return "\n".join(lines)
+
+    def origin_note(self) -> str:
+        """Creator videos against clips, once both have 3+ results."""
+        made = [o.lift for o in self.outcomes if o.creator]
+        clips = [o.lift for o in self.outcomes if not o.creator]  # older rows say nothing: all clips
+        if len(made) < 3 or len(clips) < 3:
+            return ""
+        return (f"Creator videos get {_times(statistics.median(made))} your usual views ({len(made)} posts); "
+                f"clips {_times(statistics.median(clips))} ({len(clips)} posts).")
 
     # --------------------------------------------------------------- notes for people
 
@@ -229,7 +289,7 @@ class Lessons:
         ranked = sorted((c for c in self.channels.values() if abs(c.bonus) >= 1), key=lambda c: c.bonus, reverse=True)
         lines += [c.note() for c in ranked if c.bonus > 0][:top]
         lines += [c.note() for c in reversed(ranked) if c.bonus < 0][:top]
-        lines += [t for t in (self.length_note(), self.rating_note()) if t]
+        lines += [t for t in (self.length_note(), self.rating_note(), self.origin_note()) if t]
         return lines
 
 

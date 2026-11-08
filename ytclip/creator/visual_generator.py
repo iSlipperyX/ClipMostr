@@ -7,9 +7,11 @@ Backends (Settings → Creator → Pictures; "auto" takes the first that's ready
   manages its own models, so it's the way to Stable Diffusion in the installed app. Your own exported
   workflow (API format) can be used instead of the built-in one: {{prompt}}, {{negative}}, {{seed}},
   {{width}} and {{height}} in it are filled in.
-* diffusers: SDXL-Turbo (1-4 steps, 576x1024) or FLUX.1-schnell (4 steps, 768x1344) in this Python, on an
-  NVIDIA card (CUDA), an Apple GPU, or DirectML. Needs torch and diffusers (pip install "ytclip[diffusion]",
-  so from a source install); the model downloads once from Hugging Face.
+* diffusers: SDXL-Turbo (4 steps, 576x1024) or FLUX.1-schnell (4 steps, 768x1344) on an NVIDIA card (CUDA),
+  an AMD or Intel card (DirectML) or an Apple GPU. In the installed app that's the picture engine
+  (picture_engine.py: Creator tab -> Set up AI pictures), a Python of its own with PyTorch for this PC's card;
+  from a source install with torch and diffusers (pip install "ytclip[diffusion]") it runs in this Python.
+  The model downloads once from Hugging Face.
 * Your B-roll: clips and pictures in your B-roll folder (Settings → Editing) whose file or folder names
   match the scene's keywords ("money/counting cash.mp4"). Only footage you have the right to use goes there.
 * Textures: abstract moving backgrounds drawn here in the style's colours: always works, instantly, on any
@@ -34,6 +36,7 @@ from typing import Callable
 import numpy as np
 
 from ..settings import models_dir
+from . import picture_engine
 from ..vision.broll_selector import VIDEO_EXTS, _stem, tags_for
 
 Log = Callable[[str], None]
@@ -332,11 +335,29 @@ class Diffusers:
     def __init__(self, s, key: str, log: Log, progress: Progress, check=None):
         self.s, self.key, self.log, self.progress, self.check = s, key, log, progress, check
 
+    def via_engine(self) -> bool:
+        """True when the picture engine makes this model's pictures (no PyTorch in this Python)."""
+        device, why = torch_device()
+        if device or (getattr(self.s, "creator_cpu_pictures", False) and "graphics card" in why):
+            return False
+        return picture_engine.ready()
+
     def missing(self) -> str:
         device, why = torch_device()
-        if not device and getattr(self.s, "creator_cpu_pictures", False) and "graphics card" in why:
+        if device:
             return ""
-        return why
+        if getattr(self.s, "creator_cpu_pictures", False) and "graphics card" in why:
+            return ""
+        st = picture_engine.status()
+        if not st:
+            return "AI pictures aren't set up (Creator tab: Set up AI pictures)"
+        engine = st.get("device", "")
+        if self.key == "flux_schnell" and engine != "cuda":
+            return "FLUX.1-schnell needs an NVIDIA card (SDXL-Turbo is used instead)"
+        if engine == "cpu" and not getattr(self.s, "creator_cpu_pictures", False):
+            return ("the picture engine found no graphics card it can use; turn on \"Let Stable Diffusion use "
+                    "the CPU\" in Settings: Creator to draw on the processor (minutes a picture)")
+        return ""
 
     def pipeline(self):
         global _pipe, _pipe_key
@@ -375,9 +396,21 @@ class Diffusers:
         return pipe
 
     def generate(self, prompt: str, negative: str, seed: int, dest: Path) -> Path:
+        repo, w, h, steps, guidance = DIFFUSERS_MODELS[self.key]
+        if self.via_engine():
+            engine = picture_engine.worker(self.log)
+            if not engine.alive():
+                self.progress(f"Loading {BACKEND_NAMES[self.key]} (the first time, it downloads about 7 GB)", None)
+                self.log(f"Pictures: {BACKEND_NAMES[self.key]} in the picture engine "
+                         f"({picture_engine.describe().removeprefix('set up: ')}).")
+            cache = models_dir() / "diffusers"
+            return engine.generate(repo, prompt, negative, seed, dest, width=w, height=h, steps=steps,
+                                   guidance=guidance, cache=cache,
+                                   local_only=not getattr(self.s, "creator_downloads", True), check=self.check,
+                                   waiting=picture_engine.download_watch(cache, repo, "Making pictures",
+                                                                         self.progress))
         import torch
 
-        _, w, h, steps, guidance = DIFFUSERS_MODELS[self.key]
         pipe = self.pipeline()
         gen = torch.Generator("cpu").manual_seed(seed)
         args = dict(prompt=prompt, num_inference_steps=steps, guidance_scale=guidance, width=w, height=h, generator=gen)
@@ -392,8 +425,9 @@ class Diffusers:
 
 
 def unload() -> None:
-    """Let go of the diffusion model and its graphics memory."""
+    """Let go of the diffusion model and its graphics memory (in this Python, and the picture engine's)."""
     global _pipe, _pipe_key
+    picture_engine.stop()
     if _pipe is None:
         return
     _pipe, _pipe_key = None, None

@@ -177,6 +177,8 @@ class Settings:
     # Video Creator (creator/): original videos made from a prompt, on this PC
     creator_ai: str = "local"  # who writes scripts: local (this PC's AI only) | any (Settings → AI's order)
     creator_web: bool = True  # look the topic up online (news, Wikipedia) before the script is written
+    creator_factcheck: str = "fix"  # check the script against what was found: fix | flag | off
+    creator_review: str = "new"  # Creator videos wait for your OK before posting: new (first 2 weeks) | always | off
     creator_voice: str = "en_male_deep"  # creator/voice_engine.VOICES
     creator_tts: str = "auto"  # auto | kokoro | piper | windows | espeak
     creator_kokoro_model: str = "full"  # full (310 MB, best) | compact (88 MB)
@@ -627,9 +629,12 @@ CREATOR_TTS = (("auto", "Best available"), ("kokoro", "Kokoro-82M (natural)"), (
 CREATOR_STYLES = (("", "Pick from the category"), ("cinematic", "Cinematic dark"), ("documentary", "Documentary"),
                   ("history", "Old-world painting"), ("horror", "Horror"), ("bright", "Bright and bold"),
                   ("dreamy", "Calm and dreamy"))
-CREATOR_VISUALS = (("auto", "Best available"), ("comfyui", "ComfyUI on this PC"), ("sdxl_turbo", "SDXL-Turbo (Python)"),
-                   ("flux_schnell", "FLUX.1-schnell (Python)"), ("local_broll", "My B-roll folder"),
+CREATOR_VISUALS = (("auto", "Best available"), ("comfyui", "ComfyUI on this PC"),
+                   ("sdxl_turbo", "AI pictures: SDXL-Turbo"), ("flux_schnell", "AI pictures: FLUX.1-schnell (NVIDIA)"),
+                   ("local_broll", "My B-roll folder"),
                    ("texture", "Built-in moving textures"))
+CREATOR_REVIEW = (("new", "For an account's first two weeks"), ("always", "Always"), ("off", "Never"))
+CREATOR_FACTCHECK = (("fix", "Fix what the sources contradict"), ("flag", "Mark it only"), ("off", "Off"))
 CREATOR_TRANSITIONS = (("mixed", "Varied (dissolves, dips, slides)"), ("fade", "Cross-dissolve"),
                        ("fadeblack", "Dip to black"), ("dissolve", "Grainy dissolve"))
 CREATOR_MUSIC = (("auto", "My music folder, else composed"), ("folder", "My music folder only"),
@@ -883,6 +888,14 @@ SCHEMA: list[Field] = [
           help="Before the script is written, the topic is searched on Google News, Bing News and Wikipedia, and "
                "the newest stories go to the AI with today's date. Without it, a local AI only knows what it "
                "learnt in training, which can be a year or more out of date"),
+    Field("creator_factcheck", "Fact check", "Creator", "choice", choices=CREATOR_FACTCHECK,
+          help="After the script is written, the AI checks each date, number, name and quote against what was "
+               "found online. Fix rewrites what a source contradicts (and softens unconfirmed numbers and dates); "
+               "Mark only lists them in the storyboard and the video's README. Needs Look it up online first"),
+    Field("creator_review", "Check videos before they post", "Creator", "choice", choices=CREATOR_REVIEW,
+          help="A Creator video waits in its account's queue until you OK it (Queue tab, or Telegram), so you see "
+               "what the AI made before your followers do. \"First two weeks\" stops asking two weeks after an "
+               "account's first Creator video posted"),
     Field("creator_voice", "Voice", "Creator", "choice", choices=CREATOR_VOICES),
     Field("creator_tts", "Voice engine", "Creator", "choice", choices=CREATOR_TTS,
           help="Kokoro sounds most natural and downloads once (about 340 MB). Piper is lighter. Windows' own "
@@ -898,11 +911,11 @@ SCHEMA: list[Field] = [
     Field("creator_style", "Look", "Creator", "choice", choices=CREATOR_STYLES,
           help="The pictures' style, the textures' colours and the music's mood"),
     Field("creator_visuals", "Pictures from", "Creator", "choice", choices=CREATOR_VISUALS,
-          help="Auto uses ComfyUI when it's running, then Stable Diffusion in Python (source installs), then your "
+          help="Auto uses ComfyUI when it's running, then AI pictures (set up from the Creator tab), then your "
                "B-roll, then built-in moving textures. A scene that fails in one moves on to the next"),
-    Field("creator_image_model", "Stable Diffusion model (Python)", "Creator", "choice",
-          choices=(("sdxl_turbo", "SDXL-Turbo (fast, 8 GB+ card)"),
-                   ("flux_schnell", "FLUX.1-schnell (best, 16 GB+ card)"))),
+    Field("creator_image_model", "AI pictures model", "Creator", "choice",
+          choices=(("sdxl_turbo", "SDXL-Turbo (fast, 8 GB+ card, any brand)"),
+                   ("flux_schnell", "FLUX.1-schnell (best, NVIDIA 16 GB+)"))),
     Field("creator_comfy_url", "ComfyUI address", "Creator", "str"),
     Field("creator_comfy_checkpoint", "ComfyUI checkpoint", "Creator", "str",
           help="Empty = the fastest one ComfyUI has (a turbo, schnell or lightning model first)",

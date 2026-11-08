@@ -688,6 +688,25 @@ class QueuePage(QWidget):
         self.retry_btn.clicked.connect(self._retry)
         for b in (self.up_btn, self.down_btn, self.now_btn, self.retry_btn, self.skip_btn):
             row.addWidget(b)
+        self.review_box = QFrame(objectName="panel")
+        rl = QVBoxLayout(self.review_box)
+        rl.setContentsMargins(10, 8, 10, 8)
+        self.review_text = QLabel("⏸ <b>Waiting for your OK.</b> The Video Creator made this: watch it, then OK it "
+                                  "to post when its time comes, or don't post it.")
+        self.review_text.setWordWrap(True)
+        self.review_text.setTextFormat(Qt.RichText)
+        rl.addWidget(self.review_text)
+        rrow = QHBoxLayout()
+        self.watch_btn = QPushButton("▶  Watch")
+        self.watch_btn.clicked.connect(lambda: self._item() and _open(self._item().path))
+        self.approve_btn = QPushButton("✓  OK to post")
+        self.approve_btn.setObjectName("primary")
+        self.approve_btn.clicked.connect(self._approve)
+        rrow.addWidget(self.watch_btn)
+        rrow.addWidget(self.approve_btn, 1)
+        rl.addLayout(rrow)
+        sl.addWidget(self.review_box)
+        self.review_box.setVisible(False)
         sl.addLayout(row)
         self.open_btn = QPushButton("Show the file")
         self.open_btn.clicked.connect(lambda: self._item() and _open(str(Path(self._item().path).parent)))
@@ -779,7 +798,9 @@ class QueuePage(QWidget):
                 when = {"uploading": "Posting now…", "failed": "✖ Failed"}.get(it.status) or \
                     (schedule.fmt_when(it.planned_at, now) if it.planned_at else "Waiting")
                 a = self.state.accounts.get(it.account)
-                if a is not None and not a.autopilot and it.status == "queued":
+                if it.status == "queued" and it.review == "waiting":
+                    when = "⏸ Needs your OK"
+                elif a is not None and not a.autopilot and it.status == "queued":
                     when = "Paused"
                 elif a is not None and not a.logged_in and it.status == "queued":
                     when = "Needs login"
@@ -792,6 +813,9 @@ class QueuePage(QWidget):
                     if it.status == "failed":
                         cell.setForeground(QColor(theme.BAD))
                         cell.setToolTip(it.last_error)
+                    elif it.review == "waiting" and it.status == "queued":
+                        cell.setForeground(QColor(theme.WARN))
+                        cell.setToolTip("The Video Creator made this: it posts once you OK it")
                     self.queue.setItem(r, c, cell)
                 if it.id == keep:
                     self.queue.selectRow(r)
@@ -799,7 +823,9 @@ class QueuePage(QWidget):
             self._filling = False
         queued = [i for i in rows if i.status == "queued"]
         today = sum(1 for i in queued if i.planned_at and dt.date.fromtimestamp(i.planned_at) == dt.date.today())
-        self.summary.setText(f"   {len(queued)} waiting · {today} posting today")
+        held = sum(1 for i in queued if i.review == "waiting")
+        self.summary.setText(f"   {len(queued)} waiting · {today} posting today" +
+                             (f" · {held} need{'s' if held == 1 else ''} your OK" if held else ""))
         waiting = intake.unassigned(self.state.store)
         if waiting:
             categories_ = sorted({i.category_name or "no category" for i in waiting})
@@ -872,6 +898,7 @@ class QueuePage(QWidget):
         if it is None:
             self.clip_title.setText("Pick a clip to change its caption, order or post it now.")
             self.clip_info.setText("")
+            self.review_box.setVisible(False)
             return
         self._filling = True
         try:
@@ -894,6 +921,7 @@ class QueuePage(QWidget):
         finally:
             self._filling = False
         queued = it.status == "queued"
+        self.review_box.setVisible(queued and it.review == "waiting")
         self.up_btn.setEnabled(queued)
         self.down_btn.setEnabled(queued)
         self.now_btn.setEnabled(queued)
@@ -932,8 +960,18 @@ class QueuePage(QWidget):
         if a is None or not a.logged_in:
             QMessageBox.information(self, "Post now", "Log the account in to TikTok first (Accounts tab).")
             return
+        if self.state.store.approve([it.id]):  # posting it now is your OK
+            self.state.save()
         self.state.ask("post_now", account=a.id, item=it.id)
         self.notice.emit(f"Posting “{it.headline}” to {a.handle} now…")
+
+    def _approve(self) -> None:
+        it = self._item()
+        if it is None or not self.state.store.approve([it.id]):
+            return
+        self.state.save()
+        self.notice.emit(f"OK: “{it.headline}” posts when its time comes.")
+        self.refresh()
 
     def _request_done(self, req) -> None:
         if req.kind == "post_now":

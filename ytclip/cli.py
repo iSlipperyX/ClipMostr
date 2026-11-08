@@ -1353,8 +1353,22 @@ def run_create(argv: list[str]) -> int:
     p.add_argument("--storyboard-only", action="store_true", help="only write the script and storyboard (JSON)")
     p.add_argument("--list-voices", action="store_true", help="the voices, and which engines work here")
     p.add_argument("--check", action="store_true", help="what's ready on this PC: AI, voices, pictures")
+    p.add_argument("--setup-pictures", action="store_true",
+                   help="set up AI pictures: PyTorch for this PC's graphics card and SDXL-Turbo (about 10 GB)")
     args = p.parse_args(argv)
     s = Settings.load()
+    if args.setup_pictures:
+        from .creator import picture_engine
+
+        try:
+            with console.status("Setting up AI pictures") as spin:
+                picture_engine.install(log=lambda m: console.print(escape(m)),
+                                       progress=lambda m, f: spin.update(escape(m) + (f" {f:.0%}" if f else "")))
+        except (picture_engine.EngineError, OSError) as exc:
+            console.print(f"[red]✗ Couldn't set up AI pictures:[/] {escape(str(exc))}")
+            return 1
+        console.print(f"[green]✓ AI pictures are {escape(picture_engine.describe())}.[/]")
+        return 0
     if args.list_voices or args.check:
         engines = voice_engine.available(s)
         console.print("[bold]Voices[/] (--voice):")
@@ -1371,6 +1385,10 @@ def run_create(argv: list[str]) -> int:
             writers = director.script_writers(s)
             console.print("[bold]Script writer:[/] " + (", ".join(writers) if writers else
                                                        f"[yellow]{escape(director.no_writer_text(s))}[/]"))
+            from .creator import picture_engine
+
+            console.print("[bold]AI pictures engine:[/] " + escape(picture_engine.describe()) +
+                          ("" if picture_engine.ready() else " [dim](ytclip create --setup-pictures)[/]"))
             console.print("[bold]Look it up online first:[/] " + ("on (Google News, Bing News, Wikipedia)" if
                                                                 s.creator_web else "off"))
         return 0

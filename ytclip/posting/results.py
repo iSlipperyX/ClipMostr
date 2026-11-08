@@ -44,6 +44,7 @@ class Outcome:
     shares: int
     lift: float  # views / the account's usual views
     category_id: str = ""  # ClipMonster's category id for the clip (clips.json "automation" → "category_id"), "" if none
+    origin: str = ""  # "creator" (the Video Creator made it) or "clip" (cut from a YouTube video)
 
 
 def from_clipmonster(item: VideoItem) -> bool:
@@ -82,7 +83,7 @@ def outcomes(store: Store, now: float | None = None, min_age_hours: float = MIN_
                     hook=it.hook, caption=it.caption, length=round(it.duration or v.duration, 1),
                     rating=it.source_rating, score=it.source_score, posted_at=posted, views=v.views,
                     likes=v.likes, comments=v.comments, shares=v.shares, lift=round(v.views / usual, 3),
-                    category_id=it.category_id))
+                    category_id=it.category_id, origin="creator" if it.ai_generated else "clip"))
     out.sort(key=lambda o: o.posted_at, reverse=True)
     return out
 

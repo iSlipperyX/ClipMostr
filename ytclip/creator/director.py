@@ -160,6 +160,7 @@ class Storyboard:
     written_by: str = ""  # the model that wrote it, or "your script"
     notes: list[str] = field(default_factory=list)  # what normalise() changed
     sources: list[dict] = field(default_factory=list)  # what was looked up online (web.Source.short())
+    factcheck: dict = field(default_factory=dict)  # the fact check against them (factcheck.Report.to_json())
 
     @property
     def word_count(self) -> int:
@@ -473,6 +474,7 @@ class Brief:
     style: str = ""  # STYLES key; "" = from the category
     avoid: list[str] = field(default_factory=list)  # titles of earlier videos on this, to take a new angle
     facts: str = ""  # today's date and what was found online (web.brief); "" = just today's date
+    lessons: str = ""  # how earlier videos did (learn.Lessons.creator_text); "" = nothing to go on yet
 
 
 def write(s, brief: Brief, *, log: Log | None = None, check: Callable[[], None] | None = None,
@@ -496,6 +498,8 @@ def write(s, brief: Brief, *, log: Log | None = None, check: Callable[[], None] 
     from . import web
 
     base += "\n\n" + (brief.facts or web.brief(None))
+    if brief.lessons.strip():
+        base += "\n\n" + brief.lessons.strip()
     if brief.avoid:
         base += "\nEarlier videos on this already exist; take a clearly different angle from: " + \
                 "; ".join(f'"{t}"' for t in brief.avoid[:5])
