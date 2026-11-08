@@ -134,8 +134,9 @@ def export_clip(src: Path, src_info: MediaInfo, dest: Path, clip: Clip, words: l
         if still_picture is not None and Path(still_picture).is_file():
             cmd = [ffmpeg_exe(), "-y", "-v", "error", "-i", str(Path(still_picture).resolve())]
         elif picture is not None:
-            cmd = [ffmpeg_exe(), "-y", "-v", "error", "-ss", f"{inside:.3f}", "-i", str(Path(picture).resolve()),
-                   "-t", f"{length:.3f}"]
+            # -t before -i: an input option, so it can't apply to the source's sound added after it
+            cmd = [ffmpeg_exe(), "-y", "-v", "error", "-ss", f"{inside:.3f}", "-t", f"{length:.3f}", "-i",
+                   str(Path(picture).resolve())]
         else:
             cmd = [ffmpeg_exe(), "-y", "-v", "error", "-ss", f"{seek:.3f}", "-i", str(src.resolve()),
                    "-t", f"{length:.3f}"]
@@ -235,7 +236,7 @@ def _edit_audio(edit, src: Path, clip: Clip, cmd: list[str], graph: str, n_input
     from .rendering import filtergraph
 
     if separate:
-        cmd += ["-ss", f"{clip.start:.3f}", "-i", str(src.resolve()), "-t", f"{clip.length:.3f}"]
+        cmd += ["-ss", f"{clip.start:.3f}", "-t", f"{clip.length:.3f}", "-i", str(src.resolve())]
         source, n_inputs = f"{n_inputs}:a", n_inputs + 1
     else:
         source = "0:a"

@@ -17,11 +17,15 @@ dependencies = [
     "PySide6-Addons>=6.7",
     "playwright>=1.48",  # posting to TikTok, in your installed Edge or Chrome
     "anthropic>=1.0",
+    "opencv-python-headless>=4.9,<5",  # face tracking for the pro edit (OpenCV 5 dropped the Haar fallback)
 ]
 
 [project.optional-dependencies]
 ai = []  # the AI is always included now; kept so `pip install -e .[ai,…]` still works
 whisper = ["faster-whisper>=1.0"]
+# The local AI runs llama.cpp's llama-server (bundled with the app; packaging/build_llama_cpp.py). From
+# source without that build, the Python binding works too:
+local = ["llama-cpp-python>=0.3"]
 build = ["pyinstaller>=6.10"]
 test = ["pytest>=8.2"]
 
@@ -35,7 +39,8 @@ clipmonster = "ytclip.gui.app:main"
 testpaths = ["tests"]
 
 [tool.setuptools]
-packages = ["ytclip", "ytclip.gui", "ytclip.posting", "ytclip.posting.tiktok"]
+packages = ["ytclip", "ytclip.gui", "ytclip.posting", "ytclip.posting.tiktok", "ytclip.intelligence",
+            "ytclip.vision", "ytclip.audio", "ytclip.rendering", "ytclip.compliance"]
 package-data = { ytclip = ["fonts/*.ttf", "fonts/licenses/*.txt"] }
 
 [tool.setuptools.dynamic]

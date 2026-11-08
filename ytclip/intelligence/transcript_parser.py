@@ -13,6 +13,7 @@ uses: stories and curiosity get a slow push-in, the others punchier cuts.
 
 from __future__ import annotations
 
+import json
 from typing import Callable
 
 import numpy as np
@@ -164,8 +165,6 @@ def find_clips(title: str, duration: float, sents: list[Cue], score: np.ndarray,
             log(f"The local AI's answer for part {n} was cut off; skipped that part.")
             continue
         model = reply.model
-        import json
-
         try:
             data = json.loads(reply.text)
         except ValueError:

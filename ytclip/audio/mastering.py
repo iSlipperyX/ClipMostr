@@ -4,7 +4,11 @@
 * a soft-knee compressor (3:1 above -20 dB, 6 dB knee): quiet words come forward, shouting stays in check;
 * EBU R128 loudness to -14 LUFS with a -1 dBTP true-peak ceiling and LRA 7, TikTok's own playback target,
   in two passes: the first measures the finished mix, the second applies exactly the gain it needs in
-  linear mode, so the result lands within half a LU of the target without pumping.
+  linear mode, so the result lands within half a LU of the target without pumping. loudnorm only works
+  linearly when the mix's loudness range already fits the target range; when it doesn't (a whisper and a
+  shout in one clip), the second pass widens the range to what was measured rather than letting loudnorm
+  fall back to its dynamic mode, which pumps and misses the target by a LU or two. The compressor has
+  already narrowed the range; the level is what TikTok's player cares about.
 """
 
 from __future__ import annotations
@@ -26,6 +30,8 @@ def loudnorm(measured: dict | None = None) -> str:
     if not measured:
         return base + ":print_format=json"
     try:
+        lra = max(TARGET_LRA, min(20.0, float(measured["input_lra"]) + 1.0))
+        base = f"loudnorm=I={TARGET_I:g}:TP={TARGET_TP:g}:LRA={lra:g}"
         return (base + f":measured_I={float(measured['input_i']):.2f}:measured_TP={float(measured['input_tp']):.2f}"
                 f":measured_LRA={float(measured['input_lra']):.2f}:measured_thresh={float(measured['input_thresh']):.2f}"
                 f":offset={float(measured['target_offset']):.2f}:linear=true:print_format=summary")

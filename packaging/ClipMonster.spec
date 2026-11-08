@@ -15,12 +15,16 @@ datas = (
     + collect_data_files("yt_dlp_ejs")  # YouTube challenge-solver scripts
     + collect_data_files("faster_whisper")  # Silero VAD model
     + collect_data_files("playwright")  # Playwright's Node driver; posting drives your installed Edge/Chrome
+    + collect_data_files("cv2", includes=["data/*.xml"])  # OpenCV's face detector (the fallback to YuNet)
     + [(os.path.join(ROOT, "ytclip", "fonts"), os.path.join("ytclip", "fonts"))]  # bundled caption/banner fonts
 )
 binaries = collect_dynamic_libs("ctranslate2")
 hiddenimports = (
     collect_submodules("yt_dlp_ejs")
-    + ["faster_whisper", "ctranslate2", "anthropic", "playwright.sync_api", "PySide6.QtNetwork",
+    + collect_submodules("ytclip.intelligence") + collect_submodules("ytclip.vision")
+    + collect_submodules("ytclip.audio") + collect_submodules("ytclip.rendering")
+    + collect_submodules("ytclip.compliance")
+    + ["cv2", "faster_whisper", "ctranslate2", "anthropic", "playwright.sync_api", "PySide6.QtNetwork",
        "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets"]
 )
 excludes = [

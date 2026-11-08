@@ -18,7 +18,7 @@ from typing import Callable
 
 import numpy as np
 
-from ..ffmpeg import NO_WINDOW, Cancelled, ffmpeg_exe, tracked
+from ..ffmpeg import NO_WINDOW, ffmpeg_exe, tracked
 from .broll_selector import Insert
 from .camera import Window
 

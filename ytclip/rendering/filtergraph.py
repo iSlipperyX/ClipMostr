@@ -23,7 +23,7 @@ from ..ffmpeg import NO_WINDOW, ffmpeg_exe
 
 JOIN_FADE = 0.005  # 5 ms at each join
 BEEP_HZ = 800
-BEEP_LEVEL = 0.22  # about -13 dBFS: clearly a bleep, never louder than the speech
+BEEP_LEVEL = 0.1  # about -20 dBFS, near speech level before mastering: masks the word without a jolt
 BLEEP_PAD = 0.03
 
 

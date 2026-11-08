@@ -146,6 +146,13 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Included whisper.cpp from {whisper_cpp}")
     else:
         print("No whisper.cpp build, so Whisper runs on the CPU only (packaging/build_whisper_cpp.py makes one)")
+    # The local AI's llama-server (packaging/build_llama_cpp.py --vulkan), when it was built
+    llama_cpp = Path(os.environ.get("LLAMA_CPP_DIR") or ROOT / "build" / "llama-cpp")
+    if (llama_cpp / "llama-server.exe").is_file():
+        shutil.copytree(llama_cpp, app_dir / "llama-cpp", dirs_exist_ok=True)
+        print(f"Included llama.cpp from {llama_cpp}")
+    else:
+        print("No llama.cpp build, so the local AI isn't included (packaging/build_llama_cpp.py makes one)")
     archive = shutil.make_archive(str(DIST / ZIP_NAME.removesuffix(".zip")), "zip", DIST, "ClipMonster")
     size = sum(f.stat().st_size for f in app_dir.rglob("*") if f.is_file()) / 1e6
     print(f"\nBuilt {app_dir / 'ClipMonster.exe'} ({size:.0f} MB folder)\nZip: {archive}")

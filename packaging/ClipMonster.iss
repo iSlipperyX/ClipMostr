@@ -76,6 +76,7 @@ Source: "{#SourceDir}\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs 
 ; A clean copy each time, so files a newer version dropped don't linger.
 Type: filesandordirs; Name: "{app}\_internal"
 Type: filesandordirs; Name: "{app}\whisper-cpp"
+Type: filesandordirs; Name: "{app}\llama-cpp"
 
 [Icons]
 Name: "{autoprograms}\ClipMonster"; Filename: "{app}\ClipMonster.exe"
