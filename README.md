@@ -477,6 +477,8 @@ python release.py 2.9.0-beta.1
 
 `release.py` checks you're on an up-to-date, clean `main`, sets the version, commits, tags, and pushes `main` and the tag. The **Release** workflow in GitHub Actions then builds on Windows (about 15 minutes) and publishes `ClipMonster-Setup.exe`, `ClipMonster-windows.zip` (what updates install) and `SHA256SUMS.txt`. Never make releases by hand on GitHub's website: installed copies only trust what the workflow publishes with checksums.
 
+**Without a git copy:** merge a pull request that sets `__version__` in `ytclip/__init__.py` and adds the release notes, then go to **Actions → Release → Run workflow** on GitHub, keep the branch on `main`, tick **Publish** and run it. The workflow builds main, tags it `v<version>` and publishes it, exactly as a tag from `release.py` would. It refuses a version that's already released.
+
 Pull requests that change the build also run the workflow, without publishing, and keep the files as a workflow artifact. Builds record which repository they came from, so they need no update configuration.
 
 ## Building from source
