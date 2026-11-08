@@ -101,33 +101,50 @@ def _audio_filters(s: Settings, dur: float) -> list[str]:
 
 def export_clip(src: Path, src_info: MediaInfo, dest: Path, clip: Clip, words: list[Word], s: Settings,
                 progress: Callable[[float], None] | None = None, still_at: float | None = None,
-                next_part: bool = True) -> None:
+                next_part: bool = True, edit=None) -> None:
     """Render one clip. With `still_at` (seconds into the clip), write a single JPEG frame instead:
     the layout and captions are drawn exactly as the export would draw them. next_part: another
-    clip carries this one on (layout.has_next_part), so bottom text promising a part 2 is true."""
-    dur = clip.length
+    clip carries this one on (layout.has_next_part), so bottom text promising a part 2 is true.
+
+    `edit` is the clip's rendering.plan.EditPlan (the pro editing): its rendered picture stands in for
+    the source, its words (in the edited clip's time) make the captions, and its sound plan replaces the
+    plain audio filters. None = the clip as it is in the source."""
+    dur = edit.duration if edit is not None else clip.length
     aspect, w, h = frame(s, src_info)
     reframed = aspect != "original"
     overlay = (s.burn_captions and words) or s.title_overlay
     use_layout = layout.active(s)
     if (s.fast_copy and not reframed and not overlay and not s.normalize_audio and not use_layout
-            and still_at is None):
+            and still_at is None and edit is None):
         run([ffmpeg_exe(), "-y", "-v", "error", "-ss", f"{clip.start:.3f}", "-i", str(src), "-t", f"{dur:.3f}",
              "-c", "copy", "-avoid_negative_ts", "make_zero", "-movflags", "+faststart", str(dest)])
         if progress:
             progress(1.0)
         return
 
-    fps = min(src_info.fps or 30.0, TIKTOK_MAX_FPS) if s.tiktok_ready else (src_info.fps or 30.0)
-    seek = clip.start if still_at is None else clip.start + min(max(0.0, still_at), max(0.0, dur - 0.05))
+    src_fps = edit.fps if edit is not None and edit.video is not None else (src_info.fps or 30.0)
+    fps = min(src_fps, TIKTOK_MAX_FPS) if s.tiktok_ready else src_fps
+    inside = 0.0 if still_at is None else min(max(0.0, still_at), max(0.0, dur - 0.05))
+    seek = clip.start + inside
     length = dur if still_at is None else 0.5
+    picture = edit.video if edit is not None else None
+    still_picture = edit.still if edit is not None and still_at is not None else None
 
     with work_folder("export-") as tmp:
-        cmd = [ffmpeg_exe(), "-y", "-v", "error", "-ss", f"{seek:.3f}", "-i", str(src.resolve()),
-               "-t", f"{length:.3f}"]
+        if still_picture is not None and Path(still_picture).is_file():
+            cmd = [ffmpeg_exe(), "-y", "-v", "error", "-i", str(Path(still_picture).resolve())]
+        elif picture is not None:
+            cmd = [ffmpeg_exe(), "-y", "-v", "error", "-ss", f"{inside:.3f}", "-i", str(Path(picture).resolve()),
+                   "-t", f"{length:.3f}"]
+        else:
+            cmd = [ffmpeg_exe(), "-y", "-v", "error", "-ss", f"{seek:.3f}", "-i", str(src.resolve()),
+                   "-t", f"{length:.3f}"]
+        n_inputs = 1
         second_audio = False
+        second_index = -1
         area, side = None, 0
         font_names = [s.caption_font] if overlay else []
+        p = None
         if use_layout or layout.uses_safe_zone(s, w, h):
             p = layout.plan(s, w, h)
             area, side = p.caption_area, p.side_margin
@@ -141,11 +158,13 @@ def export_clip(src: Path, src_info: MediaInfo, dest: Path, clip: Clip, words: l
                 info2 = probe(second)
                 offset = layout.second_offset(clip.start, dur, info2.duration, s.stack_start, s.stack_offset)
                 if still_at is not None and info2.duration:
-                    offset = (offset + still_at) % info2.duration
+                    offset = (offset + inside) % info2.duration
                 cmd += ["-stream_loop", "-1", "-ss", f"{offset:.3f}", "-i", str(second.resolve()),
                         "-t", f"{length:.3f}"]
+                second_index, n_inputs = n_inputs, n_inputs + 1
                 second_audio = info2.has_audio and s.stack_volume > 0 and src_info.has_audio
-            graph, last = layout_graph(p, fps, length, clip.crop_x, s.banner_bg, has_second)
+            graph, last = layout_graph(p, fps, length, 0.5 if picture or still_picture else clip.crop_x, s.banner_bg,
+                                       has_second)
             top = layout.banner_text(s.banner_top_text, clip.title, clip.top_text) if p.top else ""
             bottom = (layout.bottom_banner(s, clip.title, clip.bottom_text, next_part, clip.bottom_ai)
                       if p.bottom else "")
@@ -154,16 +173,30 @@ def export_clip(src: Path, src_info: MediaInfo, dest: Path, clip: Clip, words: l
                 graph += f";[{last}]subtitles=banners.ass{_fontsdir([s.banner_font], tmp)}[lb]"
                 last = "lb"
         else:
-            graph, last = f"[0:v]{_video_filter(aspect, w, h, clip.crop_x)}[v0]", "v0"
+            graph, last = f"[0:v]{_video_filter(aspect, w, h, 0.5 if picture or still_picture else clip.crop_x)}[v0]", "v0"
 
+        if edit is not None and (edit.cards_intro or edit.cards_lower):
+            from .rendering import cards
+
+            reserved = p.top.bottom if (p is not None and use_layout and p.top is not None and p.bars) else 0
+            text = cards.build(w, h, s, clip, intro=edit.cards_intro, lower=edit.cards_lower, channel=edit.channel,
+                               topic=edit.topic, duration=dur, offset=inside if still_at is not None else 0.0,
+                               top_reserved=reserved)
+            if text:
+                Path(tmp, "cards.ass").write_text(text, encoding="utf-8")
+                graph += f";[{last}]subtitles=cards.ass{_fontsdir([s.banner_font], tmp)}[vk]"
+                last = "vk"
         if overlay:
             # libass reads the file relative to ffmpeg's working directory, which
             # sidesteps Windows drive-letter escaping in filter arguments.
-            Path(tmp, "captions.ass").write_text(
-                build_ass(words, clip.start, clip.end, w, h, s, clip.title, area, side, seek - clip.start), encoding="utf-8")
+            if edit is not None:
+                text = build_ass(edit.words, 0.0, dur, w, h, s, clip.title, area, side, inside if still_at is not None else 0.0)
+            else:
+                text = build_ass(words, clip.start, clip.end, w, h, s, clip.title, area, side, seek - clip.start)
+            Path(tmp, "captions.ass").write_text(text, encoding="utf-8")
             graph += f";[{last}]subtitles=captions.ass{_fontsdir(font_names, tmp)}[vc]"
             last = "vc"
-        cap_fps = f"fps={TIKTOK_MAX_FPS}," if s.tiktok_ready and (src_info.fps or 0) > TIKTOK_MAX_FPS + 0.5 else ""
+        cap_fps = f"fps={TIKTOK_MAX_FPS}," if s.tiktok_ready and src_fps > TIKTOK_MAX_FPS + 0.5 else ""
         graph += f";[{last}]{cap_fps}format=yuv420p[vout]"
 
         if still_at is not None:
@@ -172,13 +205,17 @@ def export_clip(src: Path, src_info: MediaInfo, dest: Path, clip: Clip, words: l
             return
 
         if src_info.has_audio:
-            af = _audio_filters(s, dur)
-            if second_audio:
-                graph += (f";[1:a]volume={s.stack_volume / 100:.2f}[a2];"
-                          f"[0:a][a2]amix=inputs=2:duration=first:dropout_transition=0:normalize=0"
-                          f"{',' + ','.join(af) if af else ''}[aout]")
+            if edit is not None:
+                graph, cmd = _edit_audio(edit, src, clip, cmd, graph, n_inputs, second_index if second_audio else -1,
+                                         picture is not None, s, Path(tmp))
             else:
-                graph += f";[0:a]{','.join(af) or 'anull'}[aout]"
+                af = _audio_filters(s, dur)
+                if second_audio:
+                    graph += (f";[1:a]volume={s.stack_volume / 100:.2f}[a2];"
+                              f"[0:a][a2]amix=inputs=2:duration=first:dropout_transition=0:normalize=0"
+                              f"{',' + ','.join(af) if af else ''}[aout]")
+                else:
+                    graph += f";[0:a]{','.join(af) or 'anull'}[aout]"
         cmd += ["-filter_complex", graph, "-map", "[vout]"]
         encoder = pick_encoder(s.encoder)
         cmd += encoder_args(encoder, s.video_quality) + ["-pix_fmt", "yuv420p"]
@@ -189,6 +226,29 @@ def export_clip(src: Path, src_info: MediaInfo, dest: Path, clip: Clip, words: l
                     "-ar", "44100" if s.tiktok_ready else "48000"]
         cmd += ["-t", f"{dur:.3f}", "-movflags", "+faststart", str(dest.resolve())]
         run_with_progress(cmd, dur, progress, cwd=Path(tmp))
+
+
+def _edit_audio(edit, src: Path, clip: Clip, cmd: list[str], graph: str, n_inputs: int, second_index: int,
+                separate: bool, s: Settings, tmp: Path) -> tuple[str, list[str]]:
+    """The edit plan's sound (rendering/filtergraph.py) added to the command: the source's sound as its
+    own input when the picture was rendered separately, the music looping, and both loudness passes."""
+    from .rendering import filtergraph
+
+    if separate:
+        cmd += ["-ss", f"{clip.start:.3f}", "-i", str(src.resolve()), "-t", f"{clip.length:.3f}"]
+        source, n_inputs = f"{n_inputs}:a", n_inputs + 1
+    else:
+        source = "0:a"
+    music = None
+    if edit.audio.music is not None:
+        cmd += ["-stream_loop", "-1", "-i", str(Path(edit.audio.music).resolve())]
+        music, n_inputs = f"{n_inputs}:a", n_inputs + 1
+    second = f"{second_index}:a" if second_index >= 0 else None
+    edit.audio.stack_volume = s.stack_volume / 100 if second else 0.0
+    if edit.audio.master and edit.audio.measured is None:
+        edit.audio.measured = filtergraph.measure(cmd[4:], edit.audio, source, music, second, cwd=tmp)
+    audio, _ = filtergraph.chain(edit.audio, source, music, second)
+    return graph + ";" + audio, cmd
 
 
 def _fontsdir(names: list[str], tmp: str) -> str:

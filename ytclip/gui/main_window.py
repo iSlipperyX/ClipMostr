@@ -27,9 +27,10 @@ from ..organize import stamp
 from ..settings import APP_NAME, SCHEMA, Settings, all_presets, app_dir, save_user_preset, work_dir
 from ..polish import reapply_fixes
 from ..stackpool import preview_video
-from . import forms, theme
+from . import forms, icons, theme
 from .layout_tab import LayoutTab
 from .library import Library, reveal
+from .navigation import NavTabs
 from .player import Preview
 from .automation import Automation
 from .cleanup_dialog import CleanupDialog
@@ -54,10 +55,11 @@ STATUS_TEXT = {
 }
 REDETECT_FIELDS = {"clip_count", "min_len", "max_len", "min_gap", "quality_floor", "snap_to_pauses",
                    "pad_start", "pad_end", "keywords", "mode", "w_heatmap", "w_audio", "w_reactions",
-                   "w_scenes", "w_keywords"}
+                   "w_scenes", "w_keywords", "w_voice", "w_emotion"}
 CLIP_FIELDS = {f.name for f in fields(Clip)}  # a session saved by another version may differ
-RESCORE_FIELDS = {"keywords", "w_heatmap", "w_audio", "w_reactions", "w_scenes", "w_keywords"}
-RESEARCH_TAB = "🔥  Research"
+RESCORE_FIELDS = {"keywords", "w_heatmap", "w_audio", "w_reactions", "w_scenes", "w_keywords", "w_voice",
+                  "w_emotion"}
+RESEARCH_TAB = "Research"
 SHORTCUTS = [
     ("Space", "Play / pause"), ("← / →", "Seek 5 s (Shift: 1 s)"), ("J / L", "Previous / next clip"),
     ("P", "Play selected clip"), ("I / O", "Set clip start / end at playhead"), ("N", "New clip at playhead"),
@@ -305,18 +307,26 @@ class MainWindow(QMainWindow):
     # ================================================================== UI
     def _build(self) -> None:
         root = QWidget()
-        outer = QVBoxLayout(root)
-        outer.setContentsMargins(12, 10, 12, 8)
-        outer.setSpacing(8)
+        root.setObjectName("page")
+        shell = QHBoxLayout(root)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+        self.tabs = NavTabs()
+        shell.addWidget(self._build_sidebar(self.tabs.sidebar))
+        content = QWidget()
+        outer = QVBoxLayout(content)
+        outer.setContentsMargins(14, 10, 14, 8)
+        outer.setSpacing(10)
         outer.addLayout(self._build_header())
         self.banner = UpdateBanner(self)
         outer.addWidget(self.banner)
+        shell.addWidget(content, 1)
 
-        self.tabs = QTabWidget()
-        self.tabs.addTab(self._build_studio(), "🎬  Studio")
+        self.tabs.section("Create")
+        self.tabs.addTab(self._build_studio(), "Studio", "studio")
         self.library = Library(lambda: self.settings)
         self.library.reopen.connect(lambda src: (self.add_sources([src]), self.tabs.setCurrentIndex(0)))
-        self.tabs.addTab(self.library, "📚  Library")
+        self.tabs.addTab(self.library, "Library", "library")
         self.tabs.currentChanged.connect(lambda i: self.library.refresh() if i == 1 else None)
         self.research = Research(lambda: self.settings, self._setting_changed)
         self.research.send.connect(self._research_send)
@@ -325,7 +335,7 @@ class MainWindow(QMainWindow):
         self.research.log.connect(self._log)
         self.research.hits_changed.connect(self._research_hits)
         self.research.open_settings.connect(self._open_settings)
-        self.research_tab = self.tabs.addTab(self.research, RESEARCH_TAB)
+        self.research_tab = self.tabs.addTab(self.research, RESEARCH_TAB, "research")
         # Posting: the accounts, the queue and how it's doing. The TikTok work is done by automation's posting
         # worker in the background; these tabs show what it saved and ask it for things (posting_state.py).
         self.posting = PostingState(self)
@@ -337,25 +347,27 @@ class MainWindow(QMainWindow):
         self.niches.add_account.connect(self._add_account)
         self.niches.notice.connect(self._notice)
         self.niches.changed.connect(self._niches_changed)
-        self.tabs.addTab(self.niches, "🎯  Niches")
+        self.tabs.section("Automate")
+        self.tabs.addTab(self.niches, "Niches", "niches")
         self.automation = Automation(lambda: self.settings, change=self._setting_changed)
         self.automation.niches_edited.connect(lambda: (self.niches.reload(), self.research.settings_changed()))
         self.automation.notice.connect(self._notice)
         self.automation.open_settings.connect(self._open_settings)
         self.automation.clean_up.connect(self._clean_up)
         self.library.clean_up.connect(self._clean_up)
-        self.tabs.addTab(self.automation, "🤖  Automation")
+        self.tabs.addTab(self.automation, "Automation", "automation")
         self.accounts_page = AccountsPage(self.posting, lambda: self.settings)
         self.accounts_page.notice.connect(self._notice)
         self.accounts_page.open_niches.connect(lambda: self.tabs.setCurrentWidget(self.niches))
         self.posting.accounts_changed.connect(self._accounts_changed)
-        self.tabs.addTab(self.accounts_page, "👤  Accounts")
+        self.tabs.section("Publish")
+        self.tabs.addTab(self.accounts_page, "Accounts", "accounts")
         self.queue_page = QueuePage(self.posting)
         self.queue_page.notice.connect(self._notice)
         self.queue_page.open_niches.connect(lambda: self.tabs.setCurrentWidget(self.niches))
-        self.tabs.addTab(self.queue_page, "📤  Queue")
+        self.tabs.addTab(self.queue_page, "Queue", "queue")
         self.performance = PerformancePage(self.posting)
-        self.tabs.addTab(self.performance, "📈  Performance")
+        self.tabs.addTab(self.performance, "Performance", "performance")
         outer.addWidget(self.tabs, 1)
         outer.addWidget(self._build_footer())
         self.setCentralWidget(root)
@@ -427,22 +439,37 @@ class MainWindow(QMainWindow):
                      + (f" {again} {'was' if again == 1 else 'were'} queued before." if again else ""))
 
     def _research_hits(self, n: int) -> None:
-        self.tabs.setTabText(self.research_tab, f"{RESEARCH_TAB}  ({n} new)" if n else RESEARCH_TAB)
+        self.tabs.set_badge(self.research_tab, n)
+
+    def _build_sidebar(self, sidebar) -> QWidget:
+        """The left rail: the app's name, its sections (navigation.NavTabs) and the version."""
+        brand_row = QHBoxLayout()
+        brand_row.setSpacing(9)
+        logo = QLabel()
+        logo.setPixmap(theme.app_icon_pixmap(56).scaled(28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        brand_row.addWidget(logo)
+        brand_row.addWidget(_label(APP_NAME, "brand"))
+        brand_row.addStretch(1)
+        sidebar.top.addLayout(brand_row)
+        version = _label(f"Version {__version__}", "version")
+        sidebar.bottom.addWidget(version)
+        return sidebar
 
     def _build_header(self) -> QHBoxLayout:
         row = QHBoxLayout()
-        logo = QLabel()
-        logo.setPixmap(theme.app_icon_pixmap(34))
-        brand = _label(APP_NAME, "brand")
+        row.setSpacing(8)
         self.input = QLineEdit()
         self.input.setObjectName("bigInput")
         self.input.setPlaceholderText("Paste YouTube links, playlists or channels (several at once is fine) — "
                                       "or drop video files anywhere")
+        self.input.addAction(icons.icon("link", theme.MUTED, size=16), QLineEdit.LeadingPosition)
         self.input.returnPressed.connect(self._add_from_input)
-        add = QPushButton("＋  Add")
+        add = QPushButton(" Add")
+        add.setIcon(icons.icon("add", theme.ON_ACCENT, size=14))
         add.setObjectName("primary")
         add.clicked.connect(self._add_from_input)
-        open_files = QPushButton("📂  Open files")
+        open_files = QPushButton(" Open files")
+        open_files.setIcon(icons.icon("folder", size=16))
         open_files.clicked.connect(self._open_files)
 
         self.preset = QComboBox()
@@ -451,19 +478,19 @@ class MainWindow(QMainWindow):
         self._fill_presets()
         self.preset.activated.connect(self._preset_chosen)
 
-        settings_btn = QPushButton("⚙  Settings")
+        settings_btn = QPushButton(" Settings")
+        settings_btn.setIcon(icons.icon("settings", size=16))
         settings_btn.clicked.connect(lambda: self._open_settings())
-        help_btn = QPushButton("?")
+        help_btn = QPushButton()
+        help_btn.setIcon(icons.icon("help", size=17))
         help_btn.setObjectName("icon")
+        help_btn.setToolTip("Keyboard shortcuts and help")
         help_btn.clicked.connect(self._show_help)
 
-        row.addWidget(logo)
-        row.addWidget(brand)
-        row.addSpacing(12)
         row.addWidget(self.input, 1)
         row.addWidget(add)
         row.addWidget(open_files)
-        row.addSpacing(12)
+        row.addSpacing(14)
         row.addWidget(_label("Preset", muted=True))
         row.addWidget(self.preset)
         row.addWidget(settings_btn)
@@ -768,7 +795,7 @@ class MainWindow(QMainWindow):
         return page
 
     def _build_export_tab(self) -> QWidget:
-        fields = [f for f in SCHEMA if f.group in ("Export", "Captions")]
+        fields = [f for f in SCHEMA if f.group in ("Export", "Captions", "Editing")]
         form, self.export_editors = forms.build_form(fields, self.settings, self._setting_changed, compact=True)
         page = QWidget()
         lay = QVBoxLayout(page)
@@ -1644,9 +1671,11 @@ class MainWindow(QMainWindow):
     def _open_settings(self, tab: str = "") -> None:
         self.niches.commit()  # a niche name still being typed would be lost when the dialog's copy comes back
         dlg = SettingsDialog(self.settings, self, tab)
-        channel = self.settings.update_channel
+        channel, appearance = self.settings.update_channel, self.settings.appearance
         if dlg.exec():
             self._apply_settings(dlg.result_settings)
+            if self.settings.appearance != appearance:
+                self._notice("The new appearance shows the next time ClipMonster starts.")
             if dlg.run_setup:
                 QTimer.singleShot(0, self._open_setup)
             elif dlg.go_back:

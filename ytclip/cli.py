@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import time
 from pathlib import Path
@@ -16,7 +17,8 @@ from . import __version__, fresh, learn
 from .download import expand_sources
 from .engine import Engine, Project
 from .organize import stamp
-from .settings import ASPECTS, LAYOUT_PRESETS, PRESETS, Settings, all_layouts, all_presets, find_layout
+from .settings import (ASPECTS, LAYOUT_PRESETS, PRESETS, PRO_EDIT, Settings, all_layouts, all_presets,
+                       find_layout)
 from .qc import REJECTED as QC_REJECTED
 from .stackpool import pool_files
 
@@ -40,6 +42,7 @@ def build_parser() -> argparse.ArgumentParser:
            "Trending research: ytclip research --help\nFind videos for a request: ytclip find --help\n"
            "Automation: ytclip auto --help\n"
            "Quality check: ytclip qc --help\nWhat's working: ytclip results --help\n"
+           "Local AI (no key, offline): ytclip local-ai --help\n"
            "TikTok posting: ytclip posting --help\nClear out space: ytclip clean --help",
     formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -52,7 +55,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--min", dest="min_len", type=float, help="minimum clip length in seconds")
     p.add_argument("--max", dest="max_len", type=float, help="maximum clip length in seconds")
     p.add_argument("--mode", choices=["auto", "ai", "chapters"],
-                   help="auto: smart signals; ai: the AI (Claude or Gemini) picks from the transcript; chapters: one clip per chapter")
+                   help="auto: smart signals; ai: the AI (local, Claude or Gemini) picks from the transcript; "
+                        "chapters: one clip per chapter")
     p.add_argument("-f", "--format", dest="aspect", choices=[a for a, _ in ASPECTS], help="output framing")
     p.add_argument("--vertical", action="store_true", help="shortcut for --format vertical_blur")
     p.add_argument("--captions", action="store_true", help="burn in animated word-by-word captions")
@@ -69,8 +73,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--polish", action="store_true",
                    help="AI polish: hooks for the top banner, bottom lines for clips with no part 2, caption "
                         "fixes, speaker crops (needs a Claude or Gemini key)")
-    p.add_argument("--ai", choices=["claude", "gemini"],
-                   help="which AI to use for --mode ai and --polish this run (default: Settings → AI)")
+    p.add_argument("--ai", choices=["local", "claude", "gemini"],
+                   help="which AI to use for --mode ai and --polish this run (default: Settings → AI); local "
+                        "runs on this PC with no key (see: ytclip local-ai --help)")
+    p.add_argument("--pro", action="store_true",
+                   help="pro edit: follow the speaker, punch-ins, cut dead air and fillers, kinetic captions, "
+                        "-14 LUFS mastering, hook card and lower-third (Settings → Editing)")
+    p.add_argument("--creator-rewards", action="store_true",
+                   help="clips over a minute (62-88 s), the length TikTok's Creator Rewards pays for")
+    p.add_argument("--music", metavar="FOLDER", type=Path,
+                   help="licensed music to put under each clip, ducked under the voice (subfolders = moods)")
+    p.add_argument("--broll", metavar="FOLDER", type=Path,
+                   help="your own B-roll clips, cut in every 15-20 s where their file names match the words")
     p.add_argument("--bleep", action="store_true", help="mask strong swearing in captions (f*ck, sh*t)")
     p.add_argument("--qc", action="store_true", help="check each clip after export; failures move to _rejected")
     p.add_argument("--keywords", help="comma-separated words/phrases to boost")
@@ -182,6 +196,15 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
         "caption_censor": True if args.bleep else None,
         "qc_enabled": True if args.qc else None,
     }
+    if args.pro:
+        overrides |= PRO_EDIT
+    if args.creator_rewards:
+        overrides["creator_rewards"] = True
+    for flag, field in ((args.music, "music_folder"), (args.broll, "broll_folder")):
+        if flag is not None:
+            if not flag.is_dir():
+                raise SystemExit(f"No such folder: {flag}")
+            overrides[field] = str(flag.resolve())
     if args.top_text is not None:
         overrides |= {"banner_top": True, "banner_top_text": args.top_text}
     if args.bottom_text is not None:
@@ -1015,6 +1038,84 @@ def run_doctor(argv: list[str]) -> int:
     return 1 if any(c.level == doctor.BAD for c in checks) else 0
 
 
+def run_local_ai(argv: list[str]) -> int:
+    """`ytclip local-ai`: what the local AI would run on, download its model, and try it."""
+    from .intelligence import hardware, llama_engine, models
+
+    p = argparse.ArgumentParser(prog="ytclip local-ai",
+                                description="The AI that runs on this PC: free, private, no key. It finds clips "
+                                "from the transcript like Claude or Gemini do (Settings → AI → Local).")
+    p.add_argument("action", nargs="?", choices=("status", "download", "test"), default="status",
+                   help="status (default): this PC and the model it would use; download: fetch the model now; "
+                        "test: load it and ask it to pick a clip from a short sample transcript")
+    p.add_argument("--model", choices=[k for k, _ in models.CHOICES if k != "custom"],
+                   help="which model (default: Settings → AI → Local model)")
+    p.add_argument("--file", type=Path, help="use your own GGUF file instead")
+    p.add_argument("--cpu", action="store_true", help="don't use the graphics card")
+    args = p.parse_args(argv)
+    s = Settings.load()
+    if args.file:
+        s = s.copy(local_model="custom", local_model_path=str(args.file))
+    elif args.model:
+        s = s.copy(local_model=args.model)
+    if args.cpu:
+        s = s.copy(local_gpu=False)
+    hw = hardware.detect()
+    model, path = models.resolve(s, hw)
+    console.print(f"[bold]This PC:[/] {escape(hw.describe())}")
+    console.print(f"[bold]Runs with:[/] {escape(llama_engine.backend_name() or llama_engine.missing_backend())}")
+    name = model.label if model else (path.name or "no file chosen")
+    console.print(f"[bold]Model:[/] {escape(name)}  [dim]{escape(str(path))}[/]")
+    console.print(f"[bold]Status:[/] {escape(llama_engine.status(s))}")
+    if args.action == "status":
+        return 0
+    if args.action == "download" and model is None:
+        console.print("[yellow]A custom file isn't downloaded: choose it with --file.[/]")
+        return 2
+    if model is not None and not models.installed(path):
+        if not models.free_space_ok(model, path):
+            console.print(f"[red]Not enough free space for {model.size_gb:.1f} GB.[/]")
+            return 1
+        with Progress(TextColumn("[cyan]{task.description}"), BarColumn(), TextColumn("{task.percentage:>3.0f}%"),
+                      TimeElapsedColumn(), console=console, transient=True) as bar:
+            task = bar.add_task(f"Downloading {model.label.split(' (')[0]}", total=1.0)
+            try:
+                models.download(model, lambda m, f: bar.update(task, completed=f or 0.0))
+            except models.DownloadError as exc:
+                console.print(f"[red]{escape(str(exc))}[/]")
+                return 1
+        console.print("[green]✓ Model downloaded.[/]")
+    if args.action == "download":
+        return 0
+    from .intelligence import transcript_parser
+
+    sample = ("[0:00] So I quit my job in March. [0:04] Everyone told me it was the dumbest thing I'd ever do. "
+              "[0:09] And for six months they were right, I made nothing. [0:15] Then one video took off, "
+              "eleven million views in two days. [0:22] And here's the thing nobody tells you about that. "
+              "[0:26] The money from that one video was forty dollars. [0:31] Forty. [0:33] What paid was what "
+              "came after: the next fifty videos had an audience waiting. [0:41] Anyway, let's talk about the "
+              "setup I use now.")
+    started = time.monotonic()
+    try:
+        with console.status("Loading the model and asking it to pick a clip…"):
+            reply = llama_engine.ask_json(
+                s, "You find the most engaging self-contained moment in a transcript for a short video.",
+                f"Transcript:\n{sample}\n\nPick 1 clip.", transcript_parser.schema(1), max_tokens=1200,
+                log=lambda m: console.print(f"[dim]{escape(m)}[/]"))
+    except llama_engine.LocalAIError as exc:
+        console.print(f"[red]✗ {escape(str(exc))}[/]")
+        return 1
+    finally:
+        llama_engine.shutdown()
+    console.print(f"[green]✓ Answered in {time.monotonic() - started:.0f} s on {escape(reply.device or 'this PC')}"
+                  f" ({escape(reply.backend)}).[/]")
+    try:
+        console.print_json(json.dumps(json.loads(reply.text)))
+    except ValueError:
+        console.print(escape(reply.text.strip()[:1200]))
+    return 0
+
+
 def run_whisper_test(argv: list[str]) -> int:
     from . import speed, whisper_cpp
     from . import transcribe as whisper
@@ -1181,6 +1282,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_report(argv[1:])
     if argv[:1] == ["whisper-test"]:
         return run_whisper_test(argv[1:])
+    if argv[:1] == ["local-ai"]:
+        return run_local_ai(argv[1:])
     if argv[:1] == ["sign-in"]:
         return run_sign_in(argv[1:])
     if argv[:1] == ["posting"]:

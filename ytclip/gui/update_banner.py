@@ -35,8 +35,8 @@ class UpdateBanner(QFrame):
         self.task: Task | None = None
         self.ready = None  # the unpacked new version, when it downloaded by itself
         self.setObjectName("updateBanner")
-        self.setStyleSheet(f"QFrame#updateBanner {{ background: #1E1838; border: 1px solid {theme.ACCENT}; "
-                           f"border-radius: 9px; }}")
+        self.setStyleSheet(f"QFrame#updateBanner {{ background: {theme.soft(alpha=0.12)}; "
+                           f"border: 1px solid {theme.soft(alpha=0.45)}; border-radius: 10px; }}")
 
         self.text = QLabel()
         self.text.setTextFormat(Qt.RichText)

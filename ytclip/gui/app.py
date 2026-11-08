@@ -41,19 +41,6 @@ def _prepare_process() -> None:
             pass
 
 
-def _dark_title_bar(hwnd: int) -> None:
-    """Match the Windows title bar to the dark theme (Windows 10 20H1+ / 11)."""
-    if os.name != "nt":
-        return
-    try:
-        import ctypes
-
-        on = ctypes.c_int(1)
-        ctypes.windll.dwmapi.DwmSetWindowAttribute(ctypes.c_void_p(hwnd), 20, ctypes.byref(on), ctypes.sizeof(on))
-    except Exception:
-        pass
-
-
 def main() -> int:
     _prepare_process()
     if "--automation" in sys.argv[1:]:  # Start with Windows: the runner alone, no window
@@ -64,9 +51,8 @@ def main() -> int:
     from PySide6.QtCore import Qt
     from PySide6.QtWidgets import QApplication
 
-    from ..settings import APP_NAME
+    from ..settings import APP_NAME, Settings
     from . import qt_fonts, theme
-    from .main_window import MainWindow
 
     if os.name == "nt":
         try:  # own taskbar icon instead of python.exe's
@@ -81,7 +67,13 @@ def main() -> int:
     app.setApplicationName(APP_NAME)
     app.setOrganizationName(APP_NAME)
     app.setWindowIcon(theme.app_icon())
-    theme.apply(app)
+    try:
+        appearance = Settings.load().appearance
+    except Exception:
+        appearance = "dark"
+    theme.apply(app, appearance)  # before any window: widgets take the colours as they're built
+    from .main_window import MainWindow
+
     qt_fonts.register()  # bundled fonts, for the font picker and layout sketch
     old_copies = []
     if getattr(sys, "frozen", False):
@@ -107,7 +99,7 @@ def main() -> int:
     win = MainWindow()
     win.old_copies = old_copies
     win.show()
-    _dark_title_bar(int(win.winId()))
+    theme.title_bar(int(win.winId()))
     # Anything passed on the command line (e.g. files dropped onto the .exe) gets queued.
     if len(sys.argv) > 1:
         win.add_sources(sys.argv[1:])

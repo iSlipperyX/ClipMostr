@@ -226,6 +226,7 @@ def settings_for(job: Job, s: Settings, order: "orders.Order | None" = None,
         overrides["burn_captions"] = True
     if s.auto_bleep:
         overrides["caption_censor"] = True
+        overrides["bleep_audio"] = True
     if s.auto_delete_sources:
         overrides["keep_source"] = False
     overrides["qc_enabled"] = s.auto_qc

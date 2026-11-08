@@ -32,8 +32,10 @@ SCHEMA = {
                     "title": {"type": "string", "description": "Short, catchy clip title (max 8 words)"},
                     "reason": {"type": "string", "description": "One sentence on why this moment works"},
                     "score": {"type": "integer", "description": "Predicted appeal, 1-100"},
+                    "category": {"type": "string", "enum": ["Controversy", "Curiosity", "Story", "Humor", "Shock"],
+                                 "description": "What kind of moment it is"},
                 },
-                "required": ["start", "end", "title", "reason", "score"],
+                "required": ["start", "end", "title", "reason", "score", "category"],
                 "additionalProperties": False,
             },
         }
@@ -58,8 +60,10 @@ SYSTEM = (
 STREAM_TIMEOUT = 120.0
 
 # Settings → AI chooses which AI answers; each has its own key and models.
-PROVIDERS = (("claude", "Claude (Anthropic)"), ("gemini", "Gemini (Google)"))
-NAMES = {"claude": "Claude", "gemini": "Gemini"}
+PROVIDERS = (("claude", "Claude (Anthropic)"), ("gemini", "Gemini (Google)"),
+             ("local", "Local AI on this PC (free, private)"))
+NAMES = {"claude": "Claude", "gemini": "Gemini", "local": "Local AI"}
+CLOUD = ("claude", "gemini")  # the AIs that need a key; "local" runs on this PC (intelligence/llama_engine.py)
 ENV_KEYS = {"claude": ("ANTHROPIC_API_KEY",), "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY")}
 KEY_FIELDS = {"claude": "ai_api_key", "gemini": "gemini_api_key"}
 # task -> the setting holding each AI's model for it: "find" wants the best model, "polish" a quicker one
@@ -95,23 +99,51 @@ def name(s_or_provider) -> str:
 
 
 def key_for(s, provider: str = "") -> str:
-    """That AI's key from settings, else from its environment variable."""
+    """That AI's key from settings, else from its environment variable. The local AI has no key: it's
+    "local" when this copy of ClipMonster can run it, else ""."""
     provider = provider or chosen(s)
+    if provider == "local":
+        from .intelligence import llama_engine
+
+        return "local" if llama_engine.backend_name() else ""
     own = str(getattr(s, KEY_FIELDS[provider], "") or "").strip()
     return own or next((os.environ[v].strip() for v in ENV_KEYS[provider] if os.environ.get(v, "").strip()), "")
 
 
 def model_for(s, task: str = "find", provider: str = "") -> str:
-    return str(getattr(s, MODEL_FIELDS[task][provider or chosen(s)]))
+    provider = provider or chosen(s)
+    if provider == "local":
+        return local_model_name(s)
+    return str(getattr(s, MODEL_FIELDS[task][provider]))
+
+
+def local_model_name(s) -> str:
+    from .intelligence import hardware, models
+
+    model, path = models.resolve(s, hardware.detect())
+    return model.label.split(" (")[0] if model else (path.name or "your GGUF model")
+
+
+def local_ready(s) -> bool:
+    """The local AI can answer straight away: it's installed and its model is already downloaded (so
+    falling back to it never starts a surprise download of several GB)."""
+    from .intelligence import hardware, models
+
+    if not key_for(s, "local"):
+        return False
+    model, path = models.resolve(s, hardware.detect())
+    return models.installed(path) if model else path.is_file()
 
 
 def order(s) -> list[str]:
     """The AIs to ask, in turn: the chosen one when it has a key, then (with "If it fails, try the other
-    AI" on) the other one when it has a key."""
+    AI" on) the others that have a key. The local AI is a fallback only once its model is downloaded."""
     first = chosen(s)
     out = [first] if key_for(s, first) else []
     if getattr(s, "ai_fallback", True):
-        out += [p for p in NAMES if p != first and key_for(s, p)]
+        out += [p for p in CLOUD if p != first and key_for(s, p)]
+        if first != "local" and local_ready(s):
+            out.append("local")
     return out
 
 
@@ -122,12 +154,17 @@ def has_key(s) -> bool:
 
 def missing_key(s) -> str:
     """What to tell someone with no usable key."""
+    if chosen(s) == "local":
+        from .intelligence import llama_engine
+
+        return llama_engine.missing_backend()
     return f"No {name(s)} API key set. Add one in Settings → AI."
 
 
 def ask_json(s, task: str, system: str, content: str | list[dict], schema: dict, *, effort: str = "medium",
              max_tokens: int = 16000, log: Callable[[str], None] | None = None,
-             check: Callable[[], None] | None = None, what: str = "") -> Answer:
+             check: Callable[[], None] | None = None, what: str = "", only: list[str] | None = None,
+             progress: Callable[[str, "float | None"], None] | None = None) -> Answer:
     """Ask the AI Settings → AI chose (`s` is a Settings) for JSON matching `schema`.
 
     `task` is "find" or "polish" and picks the model setting (the best model, or the quicker one).
@@ -146,7 +183,9 @@ def ask_json(s, task: str, system: str, content: str | list[dict], schema: dict,
         if log and what:
             log(f"Asking {model} to {what}…")
         try:
-            if provider == "gemini":
+            if provider == "local":
+                text, used = _ask_local(s, system, content, schema, max_tokens, log, check, progress)
+            elif provider == "gemini":
                 text, used = _ask_gemini(key_for(s, provider), model, system, content, schema, effort, max_tokens,
                                          check)
             else:
@@ -218,6 +257,20 @@ def _ask_gemini(key: str, model: str, system: str, content, schema: dict, effort
     return reply.text, reply.model
 
 
+def _ask_local(s, system: str, content, schema: dict, max_tokens: int, log, check, progress) -> tuple[str, str]:
+    from .intelligence import llama_engine
+
+    try:
+        # A small model writes less padding: a third of the cloud's room is plenty, and it fits the context.
+        reply = llama_engine.ask_json(s, system, content, schema, max_tokens=min(max_tokens, 6000), log=log,
+                                      check=check, progress=progress)
+    except llama_engine.LocalCutOff as exc:
+        raise AICutOff(str(exc)) from exc
+    except llama_engine.LocalAIError as exc:
+        raise AIError(str(exc)) from exc
+    return reply.text, reply.model
+
+
 def _client(api_key: str, **kwargs):
     import anthropic
 
@@ -254,6 +307,12 @@ def check_key(s, provider: str = "") -> str:
     them up. Costs no tokens. Raises AIError."""
     provider = provider or chosen(s)
     key = key_for(s, provider)
+    if provider == "local":
+        from .intelligence import llama_engine
+
+        if not key:
+            raise AIError(llama_engine.missing_backend())
+        return f"Local AI: {llama_engine.status(s)}"
     if not key:
         raise AIError(f"No {name(provider)} API key set.")
     models = list(dict.fromkeys(model_for(s, task, provider) for task in MODEL_FIELDS))
@@ -306,6 +365,44 @@ def find_clips_ai(title: str, duration: float, sents: list[Cue], score: np.ndarr
     that actually answered."""
     if not sents:
         raise AIError("AI mode needs a transcript (captions or Whisper transcription).")
+    providers = order(s)
+    if not providers:
+        raise AIError(missing_key(s))
+    cloud = [p for p in providers if p != "local"]
+    if providers[0] == "local":
+        try:
+            return _find_local(title, duration, sents, score, count, min_len, max_len, instructions, s, log, check)
+        except AIError as exc:
+            if not cloud:
+                raise
+            if log:
+                log(f"Local AI didn't work: {exc} Trying {name(cloud[0])} instead.")
+    if not cloud:  # only the local AI is left
+        return _find_local(title, duration, sents, score, count, min_len, max_len, instructions, s, log, check)
+    try:
+        return _find_cloud(title, duration, sents, score, count, min_len, max_len, instructions, s, log, check, cloud)
+    except AIError as exc:
+        if "local" not in providers[1:]:
+            raise
+        if log:
+            log(f"{exc} Trying the local AI instead.")
+        return _find_local(title, duration, sents, score, count, min_len, max_len, instructions, s, log, check)
+
+
+def _find_local(title, duration, sents, score, count, min_len, max_len, instructions, s, log, check):
+    from .intelligence import llama_engine, transcript_parser
+
+    if log:
+        log(f"Asking the local AI ({local_model_name(s)}) to pick clips…")
+    try:
+        return transcript_parser.find_clips(title, duration, sents, score, count, min_len, max_len, instructions,
+                                            s, log, check)
+    except llama_engine.LocalAIError as exc:
+        raise AIError(str(exc)) from exc
+
+
+def _find_cloud(title, duration, sents, score, count, min_len, max_len, instructions, s, log, check,
+                only: list[str]) -> tuple[list[Clip], str]:
     prompt = (
         f"Video: {title}\nLength: {stamp(duration)} ({duration:.0f}s)\n\n"
         f"Pick up to {count} clips. Each clip must be between {min_len:.0f} and {max_len:.0f} seconds long "
@@ -316,7 +413,7 @@ def find_clips_ai(title: str, duration: float, sents: list[Cue], score: np.ndarr
     )
     try:
         answer = ask_json(s, "find", SYSTEM, prompt, SCHEMA, effort="medium", max_tokens=16000, log=log,
-                          check=check, what="pick clips")
+                          check=check, what="pick clips", only=only)
     except AICutOff as exc:
         raise AICutOff(f"{exc} Try asking for fewer clips.") from exc
     who = name(answer.provider)
@@ -343,8 +440,11 @@ def find_clips_ai(title: str, duration: float, sents: list[Cue], score: np.ndarr
             rating = float(item.get("score", 0))
         except (TypeError, ValueError):
             rating = 0.0
+        category = str(item.get("category") or "")
         clips.append(Clip(start, end, rating, str(item.get("title") or ""), origin="ai",
-                          reason=str(item.get("reason") or "")))
+                          reason=str(item.get("reason") or ""),
+                          category=category if category in ("Controversy", "Curiosity", "Story", "Humor", "Shock")
+                          else ""))
     if not clips:
         raise AIError(f"{who} suggested {len(items)} clip{'s' if len(items) != 1 else ''} but none fit inside "
                       "the video." if items
