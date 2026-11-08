@@ -85,6 +85,8 @@ class Settings:
     w_reactions: float = 0.20
     w_scenes: float = 0.10
     w_keywords: float = 0.30
+    w_voice: float = 0.25  # how animated the voice is (intelligence/viral_heuristics.py)
+    w_emotion: float = 0.20  # how strong and swinging the words' sentiment is
     # Transcription
     transcribe: str = "auto"  # auto | clips | always | never
     whisper_model: str = "base"
@@ -99,6 +101,11 @@ class Settings:
     ai_model: str = "claude-opus-5-5"
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.8-flash"
+    # Local AI (intelligence/llama_engine.py): a GGUF model on this PC, when "AI to use" is Local AI
+    local_model: str = "auto"  # auto | llama-3.2-3b | mistral-7b | custom (intelligence/models.py)
+    local_model_path: str = ""  # with custom: your own .gguf file
+    local_gpu: bool = True  # put the model on the graphics card when there's one with room
+    local_context: int = 0  # tokens the model reads at once; 0 = the model's own (16,384)
     gemini_polish_model: str = "gemini-3.8-flash"
     ai_instructions: str = (
         "Find self-contained moments that would work as standalone short-form clips: "
@@ -135,6 +142,37 @@ class Settings:
     caption_uppercase: bool = True
     title_overlay: bool = False
     caption_censor: bool = False
+    caption_style: str = "classic"  # classic | kinetic (rendering/ass_builder.py)
+    caption_keyword_colours: bool = True  # kinetic: money green, danger red, questions yellow
+    caption_money_colour: str = "#00FF66"
+    caption_danger_colour: str = "#FF3B30"
+    caption_question_colour: str = "#FFE600"
+    # Editing (rendering/plan.py): camera, cuts, sound and context, done in the export
+    track_speaker: bool = False  # follow the person talking (vision/face_tracker.py) instead of a fixed crop
+    camera_smoothing: float = 0.08  # how quickly the camera follows: the EMA's alpha per frame at 30 fps
+    camera_deadband: float = 0.04  # movements smaller than this share of the frame don't move the camera
+    punch_zoom: bool = False  # alternate 1.00x / punch_scale at each new sentence
+    punch_scale: float = 1.08
+    slow_zoom: bool = False  # slow push-in for stories and curiosity clips
+    slow_zoom_scale: float = 1.15
+    cut_silences: bool = False  # pauses longer than silence_longest shrink to silence_keep
+    silence_longest: float = 0.40
+    silence_keep: float = 0.12
+    cut_fillers: bool = False  # um, uh, and fillers set apart by pauses
+    filler_words: str = "um, uh, erm, hmm, you know, i mean, like, literally, basically"
+    bleep_audio: bool = False  # bleep strong swearing in the sound too
+    bleep_tone: str = "tone"  # tone (an 800 Hz beep) | mute
+    master_audio: bool = False  # 80 Hz high-pass, speech compressor, two-pass -14 LUFS / -1 dBTP
+    music_folder: str = ""  # your royalty-free or licensed music, in mood folders (audio/ducking.py)
+    music_level_db: int = -18
+    hook_intro: bool = False  # an editor's headline over the first moments (rendering/cards.py)
+    intro_seconds: float = 1.8
+    lower_third: bool = False  # a context tag: the topic, and the source credited
+    lower_third_text: str = "{topic}"
+    broll_folder: str = ""  # your own licensed B-roll clips (vision/broll_selector.py)
+    broll_every: float = 18.0
+    broll_seconds: float = 2.5
+    creator_rewards: bool = False  # clips 62-88 s (over a minute after cuts), for TikTok's Creator Rewards
     # Layout (banners and stacked video)
     banner_top: bool = False
     banner_top_text: str = "{title}"
@@ -213,6 +251,8 @@ class Settings:
     cleanup_auto: bool = True  # automation does it once a day
     cleanup_kinds: str = "partial, previews, rejected, posted, removed"
     cleanup_days: int = 3
+    # Look
+    appearance: str = "dark"  # dark | light | system (gui/theme.py)
     # 2 = text sizes are letter heights (1 = raw .ass sizes, which looked different in every font)
     text_units: int = 2
 
@@ -232,7 +272,8 @@ class Settings:
     @property
     def weights(self) -> dict[str, float]:
         return {"heatmap": self.w_heatmap, "audio": self.w_audio, "reactions": self.w_reactions,
-                "scenes": self.w_scenes, "keywords": self.w_keywords}
+                "scenes": self.w_scenes, "keywords": self.w_keywords, "voice": self.w_voice,
+                "emotion": self.w_emotion}
 
     @property
     def keyword_list(self) -> list[str]:
@@ -311,6 +352,12 @@ def migrate(data: dict) -> dict:
 
 # ---------------------------------------------------------------- presets
 
+# The pro editing (rendering/plan.py) that the TikTok presets switch on: the speaker followed, punch-ins and
+# push-ins, dead air and fillers cut, kinetic captions, mastered sound, a hook card and a credited context tag.
+PRO_EDIT = {"track_speaker": True, "punch_zoom": True, "slow_zoom": True, "cut_silences": True, "cut_fillers": True,
+            "caption_style": "kinetic", "caption_size": 62, "master_audio": True, "hook_intro": True,
+            "lower_third": True}
+
 # Presets leave clip length alone: it's yours (Min/Max clip length), so picking a look never makes
 # the clips shorter or longer than you asked.
 PRESETS: dict[str, dict] = {
@@ -321,6 +368,11 @@ PRESETS: dict[str, dict] = {
     "Shorts / TikTok / Reels": {
         "aspect": "vertical_blur", "clip_count": 6, "burn_captions": True,
         "caption_position": "lower", "normalize_audio": True, "title_overlay": False, "mode": "auto",
+        **PRO_EDIT,
+    },
+    "Creator Rewards (over 1 min)": {
+        "aspect": "vertical_blur", "clip_count": 4, "burn_captions": True, "normalize_audio": True,
+        "title_overlay": False, "mode": "auto", **PRO_EDIT, "creator_rewards": True,
     },
     "Vertical crop (talking head)": {
         "aspect": "vertical_crop", "clip_count": 6, "burn_captions": True,
@@ -372,7 +424,7 @@ def load_user_presets() -> dict[str, dict]:
 
 def save_user_preset(name: str, settings: Settings) -> None:
     presets = load_user_presets()
-    keys = {f.name for f in SCHEMA if f.group in ("Clip finding", "Export", "Captions", "Layout")} | {"mode"}
+    keys = {f.name for f in SCHEMA if f.group in ("Clip finding", "Export", "Captions", "Editing", "Layout")} | {"mode"}
     presets[name] = {k: v for k, v in asdict(settings).items() if k in keys | {"text_units"}}
     user_presets_path().write_text(json.dumps(presets, indent=2), encoding="utf-8")
 
@@ -488,7 +540,8 @@ class Field:
     placeholder: str = ""
 
 
-AI_PROVIDERS = (("claude", "Claude (Anthropic)"), ("gemini", "Gemini (Google)"))  # ai.PROVIDERS
+AI_PROVIDERS = (("claude", "Claude (Anthropic)"), ("gemini", "Gemini (Google)"),
+                ("local", "Local AI on this PC (free, private)"))  # ai.PROVIDERS
 CLAUDE_MODELS = (("claude-opus-5-5", "Claude Opus 5.5 (best)"), ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
                  ("claude-haiku-5-5", "Claude Haiku 5.5 (cheapest)"))
 GEMINI_MODELS = (("gemini-4-argon", "Gemini 4 Argon (best)"),  # gemini.MODELS
@@ -519,6 +572,12 @@ CLEANUP_KINDS = (
     ("removed", "Clips you took out of the posting queue"),
 )
 
+LOCAL_MODELS = (("auto", "Pick for this PC"), ("llama-3.2-3b", "Llama 3.2 3B Instruct (2 GB, quick, any PC)"),
+                ("mistral-7b", "Mistral 7B Instruct v0.3 (4.4 GB, better, 8 GB+ graphics)"),
+                ("custom", "My own GGUF file"))  # intelligence/models.CHOICES
+CAPTION_STYLES = (("classic", "Classic (word pop)"), ("kinetic", "Kinetic (pop, karaoke, keyword colours)"))
+APPEARANCES = (("dark", "Dark"), ("light", "Light"), ("system", "Match Windows"))
+
 UPDATE_CHANNELS = (("stable", "Stable"), ("beta", "Beta (test versions)"), ("dev", "Dev (every change)"))
 
 BANNER_MODES = (("bar", "Solid bar (video sits between)"), ("overlay", "Text over the video"))
@@ -527,6 +586,9 @@ LAYOUT_FITS = (("auto", "Auto (from Format)"), ("crop", "Crop to fill"), ("blur"
 
 SCHEMA: list[Field] = [
     Field("output_dir", "Output folder", "General", "path", help="Where finished clips are saved"),
+    Field("appearance", "Appearance", "General", "choice", choices=APPEARANCES,
+          help="Dark suits editing video; Light matches a light Windows theme. Takes effect when ClipMonster "
+               "starts again"),
     Field("cache_dir", "Download cache", "General", "path", help="Where full videos are kept. Empty = <output>/.downloads"),
     Field("folder_template", "Folder naming", "General", "str",
           help="Fields: {channel} {date} {title} {id}"),
@@ -584,6 +646,12 @@ SCHEMA: list[Field] = [
     Field("w_reactions", "Weight: laughter/applause", "Clip finding", "float", lo=0, hi=1, step=0.05),
     Field("w_scenes", "Weight: scene cuts", "Clip finding", "float", lo=0, hi=1, step=0.05),
     Field("w_keywords", "Weight: keywords", "Clip finding", "float", lo=0, hi=1, step=0.05),
+    Field("w_voice", "Weight: animated voice", "Clip finding", "float", lo=0, hi=1, step=0.05,
+          help="Where the speaker's voice gets lively: pitch swinging up and down with the energy. Works with "
+               "no AI and no key"),
+    Field("w_emotion", "Weight: emotional words", "Clip finding", "float", lo=0, hi=1, step=0.05,
+          help="Where the words turn strongly positive or negative, or swing from one to the other. Read from "
+               "the transcript on this PC, with no AI"),
 
     Field("transcribe", "Local transcription (Whisper)", "Transcription", "choice",
           choices=(("auto", "Only when YouTube has no captions"),
@@ -606,8 +674,9 @@ SCHEMA: list[Field] = [
     Field("whisper_language", "Language code (blank = detect)", "Transcription", "str"),
 
     Field("ai_provider", "AI to use", "AI", "choice", choices=AI_PROVIDERS,
-          help="Which AI picks clips, polishes them and follows special requests. Each needs its own API key"),
-    Field("ai_fallback", "If it fails, try the other AI", "AI", "bool",
+          help="Which AI picks clips, polishes them and follows special requests. Claude and Gemini need an API key "
+               "and are paid per use. Local AI runs a model on this PC: free and private, a little less sharp"),
+    Field("ai_fallback", "If it fails, try another AI", "AI", "bool",
           help="When the AI above can't answer (no key, a rejected key, a used-up quota, busy servers, or it "
                "declines), the other AI is asked instead, if it has a key. Off: that video uses smart signals "
                "or goes out unpolished"),
@@ -619,6 +688,16 @@ SCHEMA: list[Field] = [
           "aistudio.google.com/apikey", placeholder="AIza…"),
     Field("gemini_model", "Gemini model for finding clips", "AI", "choice", choices=GEMINI_MODELS),
     Field("gemini_polish_model", "Gemini model for polishing", "AI", "choice", choices=GEMINI_MODELS),
+    Field("local_model", "Local AI model", "AI", "choice", choices=LOCAL_MODELS,
+          help="Runs on this PC: free, private and offline once it's downloaded (from Hugging Face, once). 'Pick "
+               "for this PC' takes Mistral 7B when the graphics card has 8 GB or more, else Llama 3.2 3B, which "
+               "is also quick on a CPU"),
+    Field("local_model_path", "Local model file (with 'My own GGUF file')", "AI", "file",
+          help="Any instruction-tuned GGUF model, such as Qwen or Gemma"),
+    Field("local_gpu", "Local AI on the graphics card", "AI", "bool",
+          help="Much faster. Uses Vulkan, so AMD, NVIDIA and Intel cards all work. Falls back to the CPU by itself"),
+    Field("local_context", "Local AI memory (tokens, 0 = the model's own)", "AI", "int", lo=0, hi=131072,
+          step=1024, help="How much transcript it reads at once. Longer videos are read in parts either way"),
     Field("ai_instructions", "What makes a good clip?", "AI", "text"),
     Field("ai_polish", "Polish clips with AI", "AI", "bool",
           help="One extra AI call per video, with a frame from each clip: writes a hook for the top banner and "
@@ -673,6 +752,64 @@ SCHEMA: list[Field] = [
     Field("title_overlay", "Show clip title at top", "Captions", "bool"),
     Field("caption_censor", "Bleep strong swearing", "Captions", "bool",
           help="Writes f*ck, sh*t and the like in captions, which TikTok is less likely to hold back"),
+    Field("caption_style", "Caption style", "Captions", "choice", choices=CAPTION_STYLES,
+          help="Kinetic: one to three words at a time, centred in TikTok's safe zone, popping in, with the spoken "
+               "word lit up and money, danger and question words in their own colours"),
+    Field("caption_keyword_colours", "Kinetic: colour keywords", "Captions", "bool",
+          help="Money words green, danger and conflict red, questions and curiosity yellow"),
+    Field("caption_money_colour", "Money words", "Captions", "color"),
+    Field("caption_danger_colour", "Danger words", "Captions", "color"),
+    Field("caption_question_colour", "Question words", "Captions", "color"),
+
+    Field("track_speaker", "Follow the speaker", "Editing", "bool",
+          help="Finds the person talking (whose mouth moves while there are words) and keeps them framed, "
+               "gliding after them like a camera operator and cutting when someone else speaks. With a blurred "
+               "fill format, clips with a speaker are cropped to them; clips without one keep the fill"),
+    Field("camera_smoothing", "Camera speed (0.02 calm - 0.3 quick)", "Editing", "float", lo=0.01, hi=0.5,
+          step=0.01),
+    Field("camera_deadband", "Camera stays still within (share of frame)", "Editing", "float", lo=0.0, hi=0.2,
+          step=0.01, help="Small movements of the speaker don't move the camera, so it never wobbles"),
+    Field("punch_zoom", "Punch in on new sentences", "Editing", "bool",
+          help="Each new sentence switches between the normal shot and a slightly closer one, like a two-camera edit"),
+    Field("punch_scale", "Punch-in size", "Editing", "float", lo=1.02, hi=1.25, step=0.01),
+    Field("slow_zoom", "Slow push-in on stories", "Editing", "bool",
+          help="Stories and curiosity clips creep in over ten seconds, starting again at each change of topic"),
+    Field("slow_zoom_scale", "Push-in size", "Editing", "float", lo=1.03, hi=1.3, step=0.01),
+    Field("cut_silences", "Cut dead air", "Editing", "bool",
+          help="Pauses inside the clip shrink to a breath, using Whisper's word timings. The picture jump-cuts and "
+               "the sound joins without a click"),
+    Field("silence_longest", "Pauses longer than (s)", "Editing", "float", lo=0.2, hi=2.0, step=0.05),
+    Field("silence_keep", "...shrink to (s)", "Editing", "float", lo=0.04, hi=0.5, step=0.02),
+    Field("cut_fillers", "Cut filler words", "Editing", "bool",
+          help="'Um', 'uh' and the like always go. 'Like', 'you know' and 'literally' only when they stand apart "
+               "(set off by commas or pauses), never in 'I like it'"),
+    Field("filler_words", "Filler words", "Editing", "str"),
+    Field("bleep_audio", "Bleep swearing in the sound", "Editing", "bool",
+          help="The words masked in the captions (Captions → Bleep strong swearing) are bleeped in the sound too"),
+    Field("bleep_tone", "Bleep with", "Editing", "choice", choices=(("tone", "A beep"), ("mute", "Silence"))),
+    Field("master_audio", "Master the sound", "Editing", "bool",
+          help="Takes out rumble (80 Hz high-pass), brings quiet words forward (speech compressor) and sets the "
+               "loudness to TikTok's -14 LUFS with a -1 dB peak ceiling, measured in two passes"),
+    Field("music_folder", "Music folder", "Editing", "path",
+          help="Royalty-free or licensed tracks you have the right to use. Folders named Suspense, Upbeat, Chill "
+               "or Dark are matched to each clip's mood. The music ducks under the speech by itself"),
+    Field("music_level_db", "Music level (dB)", "Editing", "int", lo=-40, hi=-6),
+    Field("hook_intro", "Hook card at the start", "Editing", "bool",
+          help="The first moments dim behind a bold headline (the AI's hook, else the clip's title) that "
+               "punches in word by word while the clip plays"),
+    Field("intro_seconds", "Hook card length (s)", "Editing", "float", lo=0.8, hi=4.0, step=0.1),
+    Field("lower_third", "Context tag with source credit", "Editing", "bool",
+          help="A slim tag that slides in for a few seconds: the topic, and 'SOURCE · channel'"),
+    Field("lower_third_text", "Context tag text", "Editing", "str",
+          help="{topic} (the niche, else the clip's title), {title} or {channel}"),
+    Field("broll_folder", "B-roll folder", "Editing", "path",
+          help="Your own or licensed clips only. File and folder names are matched to what's being said "
+               "('money/counting cash.mp4' shows when money comes up)"),
+    Field("broll_every", "B-roll about every (s)", "Editing", "float", lo=8, hi=60, step=1),
+    Field("broll_seconds", "Each B-roll lasts (s)", "Editing", "float", lo=1, hi=6, step=0.5),
+    Field("creator_rewards", "Creator Rewards length (over 1 minute)", "Editing", "bool",
+          help="TikTok's Creator Rewards only pays for videos over one minute. Clips are found at 62 to 88 s, and "
+               "one that would come out under 61 s after its pauses are cut runs on to the next sentence's end"),
 
     Field("banner_top", "Top banner", "Layout", "bool", help="A bar of text above the video"),
     Field("banner_top_text", "Top text", "Layout", "str",

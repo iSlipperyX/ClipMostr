@@ -15,10 +15,11 @@ from PySide6.QtCore import QSignalBlocker, Qt, QTime, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
-                               QListWidgetItem, QMessageBox, QPlainTextEdit, QPushButton, QScrollArea, QSpinBox,
+                               QListWidgetItem, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
+                               QSpinBox,
                                QSplitter, QTableWidget, QTableWidgetItem, QTimeEdit, QVBoxLayout, QWidget)
 
-from ..posting import intake, jobs, live, profile, records, results, schedule
+from ..posting import intake, jobs, live, profile, records, results, schedule, tracker
 from ..posting.accounts import Account
 from ..posting.store import INTERRUPTED, VideoItem
 from . import theme
@@ -972,15 +973,18 @@ class PerformancePage(QWidget):
                            ("new_followers", "New followers today"), ("posted", "Posted this week")):
             box = QFrame(objectName="panel")
             bl = QVBoxLayout(box)
+            bl.setContentsMargins(14, 10, 14, 12)
+            bl.setSpacing(2)
             value = QLabel("—")
-            value.setStyleSheet("font-size: 18pt; font-weight: 700")
-            bl.addWidget(value)
+            value.setStyleSheet("font-size: 19pt; font-weight: 700")
             bl.addWidget(_muted(label))
+            bl.addWidget(value)
             self.tiles.addWidget(box)
             self.tile_labels[key] = value
         outer.addLayout(self.tiles)
         self.insights = _muted()
         outer.addWidget(self.insights)
+        outer.addWidget(self._rewards_panel())
         split = QSplitter()
         left = QWidget()
         ll = QVBoxLayout(left)
@@ -1002,6 +1006,62 @@ class PerformancePage(QWidget):
         split.setSizes([600, 400])
         outer.addWidget(split, 1)
 
+    def _rewards_panel(self) -> QFrame:
+        """Creator Rewards progress: followers and 30-day views against TikTok's goals."""
+        box = QFrame(objectName="panel")
+        self.rewards_box = box
+        lay = QVBoxLayout(box)
+        lay.setContentsMargins(14, 10, 14, 12)
+        lay.setSpacing(6)
+        top = QHBoxLayout()
+        top.addWidget(_h2("Creator Rewards progress"))
+        top.addStretch(1)
+        self.rewards_state = _muted()
+        self.rewards_state.setWordWrap(False)
+        top.addWidget(self.rewards_state)
+        lay.addLayout(top)
+        self.rewards_bars = {}
+        grid = QHBoxLayout()
+        grid.setSpacing(18)
+        for key in ("followers", "views"):
+            col = QVBoxLayout()
+            col.setSpacing(4)
+            label = QLabel()
+            bar = QProgressBar(textVisible=False, maximum=1000)
+            bar.setFixedHeight(8)
+            col.addWidget(label)
+            col.addWidget(bar)
+            grid.addLayout(col, 1)
+            self.rewards_bars[key] = (label, bar)
+        lay.addLayout(grid)
+        self.rewards_notes = _muted()
+        lay.addWidget(self.rewards_notes)
+        return box
+
+    def _show_rewards(self, a) -> None:
+        self.rewards_box.setVisible(a is not None)
+        if a is None:
+            for label, bar in self.rewards_bars.values():
+                label.setText("")
+                bar.setValue(0)
+            self.rewards_state.setText("")
+            self.rewards_notes.setText("")
+            return
+        store = self.state.store
+        p = tracker.progress(store.profile(a.id), store.videos(a.id), time.time())
+        for key, goal in (("followers", p.followers), ("views", p.views)):
+            label, bar = self.rewards_bars[key]
+            value = live.fmt(goal.value) if p.known else "—"
+            approx = "about " if key == "views" and p.views_estimated and p.known else ""
+            label.setText(f"<b>{goal.label}</b>&nbsp;&nbsp;{approx}{value} of {live.fmt(goal.target)}")
+            bar.setValue(int(goal.fraction * 1000) if p.known else 0)
+            bar.setProperty("done", goal.done and p.known)
+            bar.style().unpolish(bar)
+            bar.style().polish(bar)
+        self.rewards_state.setText("Eligible" if p.eligible else
+                                   (f"{p.qualifying} of {p.posts} recent posts over 1 min" if p.posts else ""))
+        self.rewards_notes.setText("\n".join(p.notes))
+
     def _fill_accounts(self) -> None:
         keep = self.which.currentData()
         with QSignalBlocker(self.which):
@@ -1020,6 +1080,7 @@ class PerformancePage(QWidget):
             self.feed.clear()
             self.top.setRowCount(0)
             self.insights.setText("Add an account in the Accounts tab to see how it's doing.")
+            self._show_rewards(None)
             return
         now = time.time()
         store = self.state.store
@@ -1032,6 +1093,7 @@ class PerformancePage(QWidget):
         self.tile_labels["likes"].setText(live.fmt(today["likes"]))
         self.tile_labels["new_followers"].setText(f"{today['followers']:+,}" if today["followers"] else "0")
         self.tile_labels["posted"].setText(str(week))
+        self._show_rewards(a)
         rows = [o for o in results.outcomes(store, now) if o.account == a.id]
         lines = results.insights(rows)
         self.insights.setText("  ".join(lines) if lines else

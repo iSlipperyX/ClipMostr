@@ -119,7 +119,8 @@ def _keys(s: Settings, online: bool) -> list[Check]:
         out.append(Check(f"{ai.name(first)} key", WARN, f"Not set, so {ai.name(use[0])} is used instead",
                          f"Add a {ai.name(first)} key in Settings → AI, or choose {ai.name(use[0])} there"))
     for provider in use:
-        label = f"{ai.name(provider)} key" + (" (if the other fails)" if provider != use[0] else "")
+        label = (ai.name(provider) if provider == "local" else f"{ai.name(provider)} key") + \
+            (" (if the other fails)" if provider != use[0] else "")
         if not online:
             out.append(Check(label, GOOD, "Set"))
             continue
@@ -269,7 +270,25 @@ def check(s: Settings, db=None, online: bool = False, now: float | None = None) 
     checks += _niches_and_requests(s, db)
     checks += _youtube_sign_in(s, db, now)
     checks += _whisper_speed(s)
+    checks += _pro_edit(s)
     return checks
+
+
+def _pro_edit(s: Settings) -> list[Check]:
+    """The pro edit's camera moves, cuts and B-roll need OpenCV; music and B-roll need their folders."""
+    from .rendering import plan
+    from . import vision
+
+    out: list[Check] = []
+    if plan.picture_changes(s) and not vision.available():
+        out.append(Check("Pro edit", WARN, "OpenCV isn't installed, so clips are made without camera moves, cuts "
+                         "or B-roll", "Update ClipMonster, or install it with: pip install opencv-python-headless"))
+    for field, label in (("music_folder", "Music folder"), ("broll_folder", "B-roll folder")):
+        folder = str(getattr(s, field, "") or "").strip()
+        if folder and not Path(folder).expanduser().is_dir():
+            out.append(Check(label, WARN, f"{folder} isn't there, so clips have no "
+                             f"{'music' if field == 'music_folder' else 'B-roll'}", "Pick it again in Settings → Editing"))
+    return out
 
 
 def _whisper_speed(s: Settings) -> list[Check]:

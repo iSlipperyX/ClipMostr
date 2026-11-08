@@ -23,7 +23,7 @@ from .export import frame as export_frame
 from .ffmpeg import Cancelled, MediaInfo, probe
 from .organize import clip_filename, video_dir, write_index
 from .scenes import detect_scenes
-from .settings import Settings
+from .settings import Settings, work_folder
 from .stackpool import StackPool, pool_files
 from .subtitles import (Cue, Word, censor, parse_vtt, parse_vtt_words, sentences, srt, text_between, to_dicts,
                         words_between)
@@ -145,23 +145,27 @@ class Engine:
         v = p.video
         assert v is not None
         cache = self.s.cache_path / f"{v.id}.analysis.npz"
-        db, fine, scene_cuts, scenes_done = None, None, [], False
+        db, fine, centroid, scene_cuts, scenes_done = None, None, None, [], False
         if cache.exists():
             try:
                 data = np.load(cache)
                 db, scene_cuts, scenes_done = data["db"], list(data["cuts"]), bool(data["scenes_done"])
                 fine = data["fine"] if "fine" in data.files else None  # caches before 2.4.0 have no fine loudness
+                centroid = data["centroid"] if "centroid" in data.files else None  # nor before 3.1.0 the voice
             except Exception:
                 db = None
-        if db is None or fine is None:
+        if db is None or fine is None or centroid is None:
             with timed(p, "audio"):
-                db, fine = loudness(v.path, v.duration, lambda f: self.progress("Measuring audio", f))
+                got: list = []
+                db, fine = loudness(v.path, v.duration, lambda f: self.progress("Measuring audio", f), centroid=got)
+                centroid = got[0] if got else np.zeros(0, np.float32)
         if self.s.detect_scenes and not scenes_done:
             with timed(p, "scenes"):
                 scene_cuts = self._scenes(v)
             scenes_done = True
         self.s.cache_path.mkdir(parents=True, exist_ok=True)
-        np.savez_compressed(cache, db=db, fine=fine, cuts=np.array(scene_cuts, dtype=float), scenes_done=scenes_done)
+        np.savez_compressed(cache, db=db, fine=fine, centroid=centroid, cuts=np.array(scene_cuts, dtype=float),
+                            scenes_done=scenes_done)
 
         with timed(p, "transcript"):
             cues, words, source = self._transcript(p)
@@ -171,7 +175,8 @@ class Engine:
                 self.log(f"Found {n} pauses in the speech to cut at (the captions have no punctuation).")
         p.words, p.transcript_source = words, source
         p.measurements = Measurements(duration=v.duration, db=db, heatmap=v.heatmap,
-                                      scene_cuts=scene_cuts if self.s.detect_scenes else [], cues=cues, fine=fine)
+                                      scene_cuts=scene_cuts if self.s.detect_scenes else [], cues=cues, fine=fine,
+                                      centroid=centroid)
 
     def _scenes(self, v: Video) -> list[float]:
         """Scene cuts, decoding the video on the graphics card unless Speed is Quiet (and on the
@@ -352,8 +357,13 @@ class Engine:
     def lengths(self, duration: float = 0.0) -> tuple[float, float]:
         """The shortest and longest a clip may be: Min/Max clip length, or the whole video when it's
         shorter, and never a longest under the shortest."""
-        shortest = min(self.s.min_len, duration) if duration else self.s.min_len
-        return shortest, max(self.s.max_len, self.s.min_len)
+        lo, hi = self.s.min_len, max(self.s.max_len, self.s.min_len)
+        if getattr(self.s, "creator_rewards", False):  # TikTok pays for videos over a minute only
+            from .compliance import duration_guard
+
+            lo, hi = duration_guard.lengths(lo, hi)
+        shortest = min(lo, duration) if duration else lo
+        return shortest, hi
 
     def hold_length(self, p: Project, sents: list[Cue] | None = None) -> int:
         """The last word on clip length: every clip is at least Min clip length (unless the video is
@@ -620,6 +630,7 @@ class Engine:
         files: list[str] = []
         details: list[dict] = []
         made: list[tuple[Settings, bool]] = []  # what each clip was made with, to make one again
+        self._broll_used: dict[str, int] = {}
         for i, clip in enumerate(clips, 1):
             name = clip_filename(i, clip, folder, self.s.file_template)
             label = f"Exporting clip {i}/{len(clips)}"
@@ -629,18 +640,30 @@ class Engine:
                 s = base.copy(stack_video=str(second))
                 extra["second_video"] = second.name
             next_part = layout.has_next_part(clip, clips, self.s)  # a part 2 the AI rated too low will be rejected
-            export_clip(v.path, media, folder / name, clip, p.words, s,
-                        lambda f, i=i: self.progress(label, (i - 1 + f) / len(clips)), next_part=next_part)
+            if getattr(s, "creator_rewards", False):
+                self._rewards_length(p, clip, clips)
+            edit = self._render(p, clip, s, folder / name, next_part,
+                                lambda f, i=i: self.progress(label, (i - 1 + f) / len(clips)), label)
             made.append((s, next_part))
+            length = edit["duration"] if edit else clip.length
+            if edit:
+                extra["edit"] = edit
             if self.s.tiktok_ready:
-                for warning in tiktok_warnings(folder / name, clip.length):
+                for warning in tiktok_warnings(folder / name, length):
                     self.log(f"TikTok: {warning}")
+            if getattr(s, "creator_rewards", False) and length < 61.0:
+                self.log(f"{name} is {length:.0f} s: under a minute, so it won't earn Creator Rewards (the video "
+                         "had no more to add).")
             if self.s.thumbnails:
                 thumbnail(v.path, thumbs / f"{i:02d}.jpg", clip.start + clip.length / 2)
             if self.s.write_srt and p.words:
-                text = srt(words_between(p.words, clip.start, clip.end), clip.start)
+                said = edit.pop("_words") if edit else None
+                text = srt(said, 0.0) if said is not None else srt(words_between(p.words, clip.start, clip.end),
+                                                                    clip.start)
                 Path(folder / name).with_suffix(".srt").write_text(
                     censor(text) if self.s.caption_censor else text, encoding="utf-8")
+            elif edit:
+                edit.pop("_words", None)
             files.append(name)
             details.append(extra)
 
@@ -672,7 +695,8 @@ class Engine:
         for i, (clip, name) in enumerate(zip(clips, files)):
             self.progress(f"Checking clip {i + 1}/{len(clips)}", i / len(clips))
             stats = qc.measure(folder / name)
-            v = qc.merge(qc.judge_file(stats, 0 if s.fast_copy else clip.length, None if s.fast_copy else (w, h),
+            expected = (details[i].get("edit") or {}).get("duration") or clip.length
+            v = qc.merge(qc.judge_file(stats, 0 if s.fast_copy else expected, None if s.fast_copy else (w, h),
                                        p.media.has_audio),
                          qc.judge_content(clip, p.words, s.qc_min_rating))
             if not v.ok:
@@ -700,10 +724,76 @@ class Engine:
         again = [i for i in kept if made[i][1] and made[i][0].banner_bottom
                  and not layout.has_next_part(clips[i], survivors) and bottom(i, True) != bottom(i, False)]
         for n, i in enumerate(again, 1):
-            export_clip(p.video.path, p.media, folder / files[i], clips[i], p.words, made[i][0],
-                        lambda f, n=n: self.progress("Making a clip again", (n - 1 + f) / len(again)),
-                        next_part=False)
+            done = self._render(p, clips[i], made[i][0], folder / files[i], False,
+                                lambda f, n=n: self.progress("Making a clip again", (n - 1 + f) / len(again)),
+                                "Making a clip again")
+            if done:
+                done.pop("_words", None)
             self.log(f"Made {files[i]} again without promising a part 2: its part 2 was rejected.")
+
+    def _render(self, p: Project, clip: Clip, s: Settings, dest: Path, next_part: bool,
+                progress: Callable[[float], None], label: str) -> dict | None:
+        """Export one clip, with the pro editing (rendering/plan.py) when any of it is on. Returns what the
+        edit did, for clips.json (with its words under "_words", for the .srt), or None for a plain export.
+        If the edit fails, the clip is made plain instead, so a video is never lost to it."""
+        from .rendering import plan as edit_plan
+
+        v, media = p.video, p.media
+        if not edit_plan.active(s):
+            export_clip(v.path, media, dest, clip, p.words, s, progress, next_part=next_part)
+            return None
+        from .niches import find as find_niche
+
+        niche = find_niche(self.s, (p.meta.get("automation") or {}).get("niche_id", ""))
+        topic = niche.name if niche else (clip.category or "")
+        m = p.measurements
+        try:
+            with work_folder("edit-") as work:
+                share = 0.55 if edit_plan.picture_changes(s) else 0.0  # rendering the picture, then the export
+
+                def step(msg: str, f: float | None) -> None:
+                    self.progress(label + (f" · {msg.lower()}" if msg else ""), None)
+                    if f is not None:
+                        progress(share * f)
+
+                edit = edit_plan.make(v.path, media, clip, p.words, s, Path(work),
+                                      scene_cuts=m.scene_cuts if m else [], channel=v.channel, topic=topic,
+                                      broll_used=self._broll_used, seed=f"{v.id}|{clip.start:.2f}", progress=step,
+                                      log=self.log)
+                export_clip(v.path, media, dest, clip, p.words, s, lambda f: progress(share + (1 - share) * f),
+                            next_part=next_part, edit=edit)
+        except Cancelled:
+            raise
+        except Exception as exc:
+            self.log(f"The editing failed for {dest.name} ({str(exc)[:300]}), so it's made without it.")
+            export_clip(v.path, media, dest, clip, p.words, s, progress, next_part=next_part)
+            return None
+        if edit.notes:
+            self.log(f"{dest.name}: {'; '.join(edit.notes)}.")
+        return {"duration": round(edit.duration, 2), "cut_seconds": edit.cut_seconds, "category": edit.category,
+                "tracked": edit.tracked, "music": edit.audio.music.name if edit.audio.music else "",
+                "broll": [b.path.name for b in edit.broll], "mastered": bool(edit.audio.master),
+                "measured_lufs": (edit.audio.measured or {}).get("input_i"), "_words": edit.words}
+
+    def _rewards_length(self, p: Project, clip: Clip, clips: list[Clip]) -> None:
+        """Creator Rewards: a clip that would come out a minute or less after its cuts runs on."""
+        from .compliance import duration_guard
+        from .rendering import plan as edit_plan
+
+        if clip.edited or p.video is None:
+            return
+        fps = min(p.media.fps or 30.0, 60.0) if p.media else 30.0
+        later = [c.start for c in clips if c is not clip and c.start >= clip.end - 0.01]
+        limit = min(later + [p.video.duration])
+
+        def finished(a: float, b: float) -> float:
+            probe_clip = Clip(a, b, 0.0)
+            return edit_plan.predicted_length(probe_clip, p.words, self.s, fps) if edit_plan.active(self.s) else b - a
+
+        before = clip.end
+        if duration_guard.stretch(clip, self._sentences(p), finished, limit) and clip.end != before:
+            self.log(f"Ran a clip on {clip.end - before:.1f} s to the end of a sentence, so it's over a minute "
+                     "for Creator Rewards.")
 
     @staticmethod
     def _remove_previous_export(folder: Path) -> None:

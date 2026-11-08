@@ -58,7 +58,7 @@ None of it is in OneDrive. A copy unzipped by hand (before 2.8.0) offers **Insta
 
 ### How clips are found
 
-Every second gets a score from up to five signals. You decide how much each one counts:
+Every second gets a score from up to seven signals. You decide how much each one counts:
 
 | Signal | What it captures |
 |---|---|
@@ -67,6 +67,8 @@ Every second gets a score from up to five signals. You decide how much each one 
 | **Laughter / applause** | `[Laughter]` and `[Applause]` tags in the captions |
 | **Scene cuts** | Bursts of fast editing, which usually mean action |
 | **Keywords** | Mentions of words or phrases you choose |
+| **Animated voice** | Pitch and loudness swinging about: someone getting worked up |
+| **Emotional words** | Strong feeling in the transcript, and sharp swings from calm to outraged |
 
 Clips grow outward from the peaks. When there's a transcript, their edges are aligned to whole sentences, so a clip never starts or ends mid-sentence; without one, they snap to natural pauses. Intros, credits and end screens count for less. **Trim dead air** (on by default) then pulls each clip in so it starts a quarter of a second before the first word and ends half a second after the last, instead of opening on silence. Clips you've edited by hand are never trimmed.
 
@@ -76,7 +78,30 @@ Clips grow outward from the peaks. When there's a transcript, their edges are al
 
 **Other clip finders** (pick one under *Find clips → Clip finder*):
 - **AI picks (Claude or Gemini):** the AI reads the transcript, one sentence per line with exact times, and picks self-contained moments with a strong hook and payoff, plus a title and the reason for each. Under *Settings → AI*, choose **Claude** (Anthropic API key, from [console.anthropic.com](https://console.anthropic.com/settings/keys)) or **Gemini** (Google's Gemini API key, free from [aistudio.google.com/apikey](https://aistudio.google.com/apikey)), add its key, then click **Test keys** to confirm it works (this uses no tokens). Each AI has its own models for finding and for polishing. With both keys and **If it fails, try the other AI** on (the default), a video the chosen AI can't do (a used-up quota, busy servers, a refusal) goes to the other one. The keys can also come from the `ANTHROPIC_API_KEY` and `GEMINI_API_KEY` (or `GOOGLE_API_KEY`) environment variables, and `--ai claude` or `--ai gemini` picks one for a single command-line run. Google may use what free Gemini keys send to improve its products; keys with billing turned on aren't used that way. When you click **Re-detect clips**, a failure shows a message and leaves your clips untouched. In batch runs, a failure falls back to the signals above, and the video is flagged with the reason. Clips you've edited by hand are kept when you re-detect.
+- **Local AI (on this PC):** the same job done by a language model running on your own PC: free, private, offline, no key. Choose **Local AI on this PC** under *Settings → AI*. ClipMonster looks at your graphics card and picks the model: **Mistral 7B** when the card has 8 GB or more, else **Llama 3.2 3B**, which is quick on any PC (or pick one, or your own `.gguf` file). It downloads once, 2 to 4.4 GB, to `%LOCALAPPDATA%\ClipMonster\models\llm`, and a stopped download carries on next time. It runs through llama.cpp, on the graphics card with Vulkan (AMD, NVIDIA and Intel), or on the CPU. Its answers are held to a strict JSON grammar, so they're always readable: start and end, the hook and how strong it is (1 to 10), the payoff and the kind of moment (Story, Curiosity, Humor, Shock, Controversy...). Long videos are read in overlapping parts. With a cloud AI chosen and *If it fails, try the other AI* on, the local AI also takes over when the cloud one fails, once its model is downloaded. `ytclip local-ai` shows what it would run on; `ytclip local-ai test` loads it and asks it to pick a clip.
 - **YouTube chapters:** one clip per chapter.
+
+With no AI at all, two more signals help the smart signals: **Animated voice** (how much the pitch and loudness swing, measured from the audio) and **Emotional words** (how strong, and how sharply changing, the transcript's sentiment is). They're sliders like the others.
+
+### Pro edit
+
+*Settings → Editing* turns a clip into an edit, not a cut-out. The **Shorts / TikTok / Reels** preset turns it all on (except music and B-roll, which need your own files):
+
+- **Follow the speaker:** faces are tracked (OpenCV's YuNet), the one whose mouth moves is the speaker, and a virtual camera follows them. It eases after them, ignores small movements, and cuts straight to the other person when the speaker changes, the way an editor would.
+- **Punch-ins and push-ins:** the shot alternates between wide and 8% closer at each new sentence, and stories and curiosity clips slowly push in (to 115% over 10 s), starting again at each change of topic.
+- **Cut dead air and filler words:** pauses over 0.4 s shrink to 0.12 s, and "um", "uh" and set-apart fillers ("it was, *like*, huge") go. Each join has a 5 ms fade, so there's no click. The captions follow the cut.
+- **Kinetic captions:** 1 to 3 words at a time in TikTok's safe zone, popping in (80% → 110% → 100%) with the spoken word highlighted. Money words go green, danger words red, questions yellow (colours are yours to change). With *Bleep swearing in the sound*, swearing gets an 800 Hz bleep (or silence) as well as the masked caption.
+- **Mastered sound:** an 80 Hz rumble filter, a gentle speech compressor and two-pass loudness to −14 LUFS with a −1 dB true-peak ceiling.
+- **Music under the voice:** a track from your *Music folder* (licensed music only), picked by the clip's mood when the folder has subfolders like `Suspense` or `Upbeat`, and ducked about 16 dB whenever someone speaks.
+- **Hook card:** the clip opens with its hook as a bold headline over the dimmed picture for 1.8 s, while the clip plays on under it.
+- **Context lower-third:** the topic and "SOURCE · channel" slide in at the bottom for a few seconds, crediting where it's from.
+- **B-roll:** every 15 to 20 seconds, a 2.5 s cutaway from your *B-roll folder*, chosen by matching its file and folder names to the words being said (`money/counting cash.mp4` shows when they talk about cash). Only your own footage is used.
+
+When the pro edit can't make a clip, the plain version is made instead and the log says why.
+
+### Creator Rewards
+
+TikTok's Creator Rewards Program pays for views on videos longer than one minute. **Creator Rewards length** (*Settings → Editing*, or the **Creator Rewards (over 1 min)** preset, or `--creator-rewards`) finds 62 to 88 second clips, and a clip that the dead-air cuts would bring under 61 seconds runs on to the end of a later sentence. The **Performance** tab shows each account's progress to the program's entry goals: 10,000 followers and 100,000 views in the last 30 days, with how long each should take at the recent pace and how many recent posts are over a minute. New accounts already start with a two-week warm-up (no posts for 3 days, then one a day, then two).
 
 **AI polish** (*Settings → AI → Polish clips with AI*, off by default) makes one more AI call per video (to Claude or Gemini, whichever Settings → AI uses), sending each clip's transcript and one small frame from it. It sends back:
 - a **hook** for each clip: a few honest, specific words that go in the top banner when it shows `{title}`, and into `clips.json` for your upload caption;
@@ -411,6 +436,8 @@ ytclip clean                                    # what Clean up would clear (--d
 ytclip --list-presets
 ```
 
+Pro edit: `--pro` turns on everything in *Settings → Editing* · `--creator-rewards` clips over a minute · `--music FOLDER` · `--broll FOLDER` · `--ai local` the local AI. `ytclip local-ai [status|download|test]` checks, downloads or tries the local AI.
+
 Main options: `-n` number of clips · `--min/--max` length in seconds · `--mode auto|ai|chapters` · `-f original|vertical_blur|vertical_crop|square` · `--captions` · `--polish` AI hooks and caption fixes · `--bleep` mask swearing · `--qc` check clips after export · `--stack VIDEO|FOLDER` · `--keywords` · `-q` max download resolution · `--encoder` · `--limit` videos per playlist · `-o` output folder · `--dry-run` analyse without exporting · `--cookies-from-browser clipmonster` to download with ClipMonster's own sign-in (`ytclip sign-in`), or `chrome`, `firefox`... for a browser's.
 
 ## Updates
@@ -461,7 +488,7 @@ pip install -e .[whisper,build]
 python build.py
 ```
 
-This produces `dist/ClipMonster/` and `dist/ClipMonster-windows.zip`, and `dist/ClipMonster-Setup.exe` when [Inno Setup 6](https://jrsoftware.org/isinfo.php) is installed (`winget install JRSoftware.InnoSetup`; `python build.py --installer` fails without it). To include Whisper for the graphics card, first install the Vulkan SDK and run `python packaging/build_whisper_cpp.py build/whisper-cpp --vulkan`; `build.py` then copies it in. The release workflow does both. During development, run the app with `python -m ytclip.gui.app` and the command line with `python -m ytclip`.
+This produces `dist/ClipMonster/` and `dist/ClipMonster-windows.zip`, and `dist/ClipMonster-Setup.exe` when [Inno Setup 6](https://jrsoftware.org/isinfo.php) is installed (`winget install JRSoftware.InnoSetup`; `python build.py --installer` fails without it). To include Whisper for the graphics card, first install the Vulkan SDK and run `python packaging/build_whisper_cpp.py build/whisper-cpp --vulkan`; `build.py` then copies it in. The local AI's `llama-server` is built the same way: `python packaging/build_llama_cpp.py build/llama-cpp --vulkan`. The release workflow does all of it. From source without that build, `pip install -e .[local]` installs llama-cpp-python, which the local AI uses instead. During development, run the app with `python -m ytclip.gui.app` and the command line with `python -m ytclip`.
 
 Run the tests with `pip install -e .[test]` and then `pytest`. They need no network or API key.
 
@@ -470,6 +497,10 @@ Run the tests with `pip install -e .[test]` and then `pytest`. They need no netw
 | `ytclip/engine.py` | Pipeline: open → measure (cached) → transcribe → find clips → export |
 | `ytclip/analyze.py` | Signals, scoring and clip picking |
 | `ytclip/ai.py` | AI clip finder, and the one place Claude and Gemini are called from (choosing the AI, falling back) |
+| `ytclip/intelligence/` | Local AI: hardware detection, the model catalogue and download, llama.cpp (`llama_engine.py`), the transcript parser; offline voice and sentiment signals |
+| `ytclip/vision/` | Face tracking, the virtual camera (follow, punch-ins, push-ins), B-roll choice, rendering the moved picture |
+| `ytclip/audio/`, `ytclip/rendering/` | Dead-air and filler cuts, ducking, mastering; the edit plan, the audio graph, kinetic caption tags, hook card and lower-third |
+| `ytclip/compliance/duration_guard.py`, `ytclip/posting/tracker.py` | Creator Rewards: clips over a minute, and progress to the program's goals |
 | `ytclip/gemini.py` | Google's Gemini API over plain HTTPS: streamed JSON answers, key checks |
 | `ytclip/polish.py` | AI polish: hooks, caption fixes, speaker crops, burned-in subtitle check |
 | `ytclip/qc.py` | Quality check: silence, black/frozen picture, length/size, mid-sentence edges, AI ratings |

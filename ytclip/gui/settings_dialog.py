@@ -1,4 +1,4 @@
-"""The full Settings dialog: one tab per settings group."""
+"""The full Settings dialog: one page per settings group, picked from a sidebar."""
 
 from __future__ import annotations
 
@@ -6,17 +6,18 @@ import os
 
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPushButton,
-                               QScrollArea, QTabWidget, QVBoxLayout)
+                               QScrollArea, QVBoxLayout, QWidget)
 
 from .. import niches, updater, youtube_login
 from ..settings import SCHEMA, Settings, app_dir
 from ..gemini import KEY_URL as GEMINI_KEY_URL
 from ..trending import KEY_HELP_URL
 from . import forms, theme
+from .navigation import NavTabs
 from .sign_in_dialog import SignInDialog
 
 ANTHROPIC_KEY_URL = "https://console.anthropic.com/settings/keys"
-GROUPS = ("General", "Download", "Clip finding", "Transcription", "Speed", "AI", "Export", "Captions", "Layout",
+GROUPS = ("General", "Download", "Clip finding", "Transcription", "Speed", "AI", "Export", "Captions", "Editing", "Layout",
           "Research", "Picking", "Automation", "Posting", "Updates")
 
 
@@ -24,7 +25,7 @@ class SettingsDialog(QDialog):
     def __init__(self, settings: Settings, parent=None, tab: str = ""):
         super().__init__(parent)
         self.setWindowTitle("Settings")
-        self.resize(640, 620)
+        self.resize(880, 640)
         self.result_settings = settings.copy()
         self._editors: dict[str, forms.Editor] = {}
         self.signed_in = False  # signed in to YouTube from here: the caller ends a sign-in pause
@@ -36,8 +37,22 @@ class SettingsDialog(QDialog):
         self.posting_settings = posting_config.Settings.load()
         self._posting_editors: dict[str, forms.Editor] = {}
 
-        layout = QVBoxLayout(self)
-        tabs = QTabWidget()
+        shell = QHBoxLayout(self)
+        shell.setContentsMargins(0, 0, 0, 0)
+        shell.setSpacing(0)
+        # Sections down the left, like System Settings; the page on the right under its own title.
+        tabs = NavTabs()
+        tabs.sidebar.setFixedWidth(196)
+        shell.addWidget(tabs.sidebar)
+        right = QWidget()
+        layout = QVBoxLayout(right)
+        layout.setContentsMargins(22, 16, 18, 14)
+        layout.setSpacing(10)
+        shell.addWidget(right, 1)
+        heading = QLabel()
+        heading.setObjectName("title")
+        layout.addWidget(heading)
+        tabs.currentChanged.connect(lambda i: heading.setText(tabs.tabText(i)))
         # With niches, each niche has its own channels and searches (Niches tab).
         per_niche = {"pick_channels", "pick_searches", "pick_finds"} if niches.load(settings) else set()
         for group in GROUPS:
@@ -60,9 +75,11 @@ class SettingsDialog(QDialog):
             page, editors = forms.build_form(fields, self.result_settings, self._changed)
             self._editors |= editors
             if group == "AI":
-                note = QLabel("The AI clip finder sends the video's transcript to the AI you choose (Claude or "
-                              "Gemini) and asks it to pick self-contained moments. AI polish sends it each clip's "
-                              "words and one frame, and gets back hooks, caption fixes and where the speaker is. "
+                note = QLabel("The AI clip finder gives the video's transcript to the AI you choose and asks it "
+                              "to pick self-contained moments. Local AI runs a model on this PC: free, private, "
+                              "no key (the model downloads once, 2 to 4.4 GB). Claude and Gemini run online and "
+                              "need a key; AI polish sends them each clip's words and one frame, and gets back "
+                              "hooks, caption fixes and where the speaker is. "
                               f"Get a Claude key at <a href='{ANTHROPIC_KEY_URL}' style='color:{theme.ACCENT_2}'>"
                               "console.anthropic.com</a> or a Gemini key at "
                               f"<a href='{GEMINI_KEY_URL}' style='color:{theme.ACCENT_2}'>aistudio.google.com"
@@ -190,6 +207,8 @@ class SettingsDialog(QDialog):
             tabs.addTab(scroll, group)
         if tab in GROUPS:
             tabs.setCurrentIndex(GROUPS.index(tab))
+        heading.setText(tabs.tabText(tabs.currentIndex()))
+        self.tabs = tabs
         layout.addWidget(tabs, 1)
 
         footer = QLabel(f"Settings are stored in {app_dir()}")

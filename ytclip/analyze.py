@@ -13,6 +13,8 @@ Signals, each normalised to 0-1 per second:
 * reactions - [Laughter] / [Applause] tags in captions.
 * scenes    - density of hard cuts (fast editing = action).
 * keywords  - mentions of user-supplied words or phrases.
+* voice     - how animated the voice is: pitch/brightness swings with energy (intelligence/viral_heuristics.py).
+* emotion   - how strong and how sharply swinging the transcript's sentiment is (no AI needed).
 """
 
 from __future__ import annotations
@@ -26,6 +28,7 @@ from typing import Callable
 import numpy as np
 
 from .ffmpeg import NO_WINDOW, ffmpeg_exe, tracked
+from .intelligence.viral_heuristics import emotion_signal, voice_signal
 from .subtitles import REACTION, Cue
 
 HOP = 0.5  # seconds per loudness frame
@@ -38,6 +41,8 @@ SIGNAL_LABELS = {
     "reactions": "Laughter / applause",
     "scenes": "Scene cuts",
     "keywords": "Keywords",
+    "voice": "Animated voice",
+    "emotion": "Emotional words",
 }
 
 
@@ -58,6 +63,7 @@ class Clip:
     hook: str = ""  # a short line written by the AI polish (polish.py) for the banner and the upload caption
     rating: int = 0  # the AI polish's 1-10 "does it stand alone?" (0 = not rated); qc.py rejects low ones
     rating_note: str = ""  # what holds it back, when rated low
+    category: str = ""  # the AI's viral category: Controversy | Curiosity | Story | Humor | Shock (editing uses it)
 
     @property
     def length(self) -> float:
@@ -72,6 +78,7 @@ class Measurements:
     scene_cuts: list[float] = field(default_factory=list)
     cues: list[Cue] = field(default_factory=list)
     fine: np.ndarray = field(default_factory=lambda: np.zeros(0))  # loudness (dBFS) per FINE seconds
+    centroid: np.ndarray = field(default_factory=lambda: np.zeros(0))  # spectral centroid (Hz) per HOP seconds
 
     @property
     def seconds(self) -> int:
@@ -108,9 +115,13 @@ def _minmax(x: np.ndarray) -> np.ndarray | None:
 
 
 def loudness(path: Path, duration: float = 0,
-             progress: Callable[[float], None] | None = None) -> tuple[np.ndarray, np.ndarray]:
+             progress: Callable[[float], None] | None = None,
+             centroid: list | None = None) -> tuple[np.ndarray, np.ndarray]:
     """RMS loudness in dBFS for every HOP-second frame, and for every FINE-second frame (the short
-    pauses between sentences and words, see cuts.py), in one pass through ffmpeg."""
+    pauses between sentences and words, see cuts.py), in one pass through ffmpeg. Pass a list as
+    `centroid` and it gets the spectral centroid of every HOP-second frame too (one array)."""
+    from .intelligence.viral_heuristics import spectral_centroid
+
     cmd = [ffmpeg_exe(), "-v", "error", "-i", str(path), "-vn", "-ac", "1",
            "-ar", str(SAMPLE_RATE), "-f", "s16le", "-"]
     frame_bytes = int(SAMPLE_RATE * HOP) * 2
@@ -130,10 +141,15 @@ def loudness(path: Path, duration: float = 0,
             chunks.append(20 * np.log10(rms / 32768))
             small = frames.reshape(-1, frame_bytes // 2 // per)
             fine.append((20 * np.log10(np.sqrt(np.mean(small**2, axis=1)) / 32768 + 1e-9)).astype(np.float32))
+            if centroid is not None:
+                centroid.append(spectral_centroid(frames, SAMPLE_RATE))
             leftover = buf[usable:]
             done += len(frames)
             if progress and duration:
                 progress(min(1.0, done * HOP / duration))
+    if centroid is not None:
+        parts = [c for c in centroid if isinstance(c, np.ndarray)]
+        centroid[:] = [np.concatenate(parts) if parts else np.zeros(0, np.float32)]
     return (np.concatenate(chunks) if chunks else np.zeros(0),
             np.concatenate(fine) if fine else np.zeros(0, np.float32))
 
@@ -218,6 +234,8 @@ def build_signals(m: Measurements, keywords: list[str]) -> dict[str, np.ndarray]
         "reactions": reaction_signal(m.cues, n),
         "scenes": scene_signal(m.scene_cuts, n),
         "keywords": keyword_signal(m.cues, n, keywords),
+        "voice": voice_signal(m.centroid, m.db, n, HOP),
+        "emotion": emotion_signal(m.cues, n),
     }
     return {k: v for k, v in raw.items() if v is not None}
 

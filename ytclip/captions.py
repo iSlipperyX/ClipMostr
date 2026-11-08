@@ -67,7 +67,16 @@ def caption_style(s: Settings, width: int, height: int, area: tuple[int, int, in
     scale = min(width, height) / 1080
     size = fonts.ass_size(s.caption_font, s.caption_size * scale)
     vertical = height > width
-    if area is None:
+    if kinetic(s) and vertical and area is None:
+        # TikTok's safe zone for captions: the block's bottom at y = 1200 of 1920, so a two-line group
+        # sits between about 700 and 1200, clear of the buttons and the caption text.
+        align, margin_v = 2, int(height * (1 - KINETIC_BOTTOM))
+        title_margin = int(height * 0.06)
+    elif kinetic(s) and area is not None:
+        top, bottom, mid = area
+        align, margin_v = 2, max(0, height - mid - int(size * 0.6))
+        title_margin = top + int((bottom - top) * 0.05)
+    elif area is None:
         align, margin_v = {
             "lower": (2, int(height * (0.22 if vertical else 0.08))),
             "middle": (5, 0),
@@ -100,6 +109,17 @@ class CaptionEvent:
 
 
 HOLD = 1.5  # seconds a caption may stay up after its last word, if nothing follows sooner
+KINETIC_BOTTOM = 1200 / 1920  # kinetic captions end this far down a vertical frame
+KINETIC_MAX_WORDS = 3
+
+
+def kinetic(s) -> bool:
+    return getattr(s, "caption_style", "classic") == "kinetic"
+
+
+def words_per_group(s) -> int:
+    n = max(1, int(s.caption_words))
+    return min(n, KINETIC_MAX_WORDS) if kinetic(s) else n
 
 
 def caption_events(words: list[Word], clip_start: float, clip_end: float, s: Settings) -> list[CaptionEvent]:
@@ -108,7 +128,7 @@ def caption_events(words: list[Word], clip_start: float, clip_end: float, s: Set
     duration = clip_end - clip_start
     out: list[CaptionEvent] = []
     clip_words = words_between(words, clip_start, clip_end)
-    groups = _groups(clip_words, max(1, s.caption_words))
+    groups = _groups(clip_words, words_per_group(s))
     for g, group in enumerate(groups):
         texts = [censor(w.text) if s.caption_censor else w.text for w in group]
         texts = [t.upper() if s.caption_uppercase else t for t in texts]
@@ -197,8 +217,17 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             pop = round(ACTIVE_SCALE * 100)
             out_lines, k = [], 0
             for ln in caption_lines(ev.words, s, st, width):
-                out_lines.append(" ".join(f"{{\\c{hl}\\fscx{pop}\\fscy{pop}}}{_escape(t)}{{\\r}}"
-                                          if k + j == ev.active else _escape(t) for j, t in enumerate(ln)))
+                if kinetic(s):
+                    from .rendering.ass_builder import kinetic_line
+
+                    active = ev.active - k if k <= ev.active < k + len(ln) else -1
+                    # The pop plays when the group appears; a still from inside the clip shows it settled.
+                    first = ev.active == 0 and ev.start >= offset
+                    out_lines.append(kinetic_line(ln, active, first, s, _ass_colour, _escape, s.caption_color,
+                                                  s.caption_highlight, pop))
+                else:
+                    out_lines.append(" ".join(f"{{\\c{hl}\\fscx{pop}\\fscy{pop}}}{_escape(t)}{{\\r}}"
+                                              if k + j == ev.active else _escape(t) for j, t in enumerate(ln)))
                 k += len(ln)
             times = f"{_ts(ev.start - offset)},{_ts(ev.end - offset)}"
             events.append(f"Dialogue: 0,{times},Cap,,0,0,0,,{BREAK.join(out_lines)}")

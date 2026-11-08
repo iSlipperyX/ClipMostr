@@ -95,6 +95,27 @@ jobs:
         continue-on-error: true
         run: python packaging/build_whisper_cpp.py build/whisper-cpp --vulkan
 
+      # The local AI's llama-server, for the graphics card through Vulkan (and the CPU when there's none).
+      # If this fails the app still ships, without the local AI (the cloud AIs still work).
+      - name: Cache the llama.cpp build
+        if: steps.version.outputs.kind != 'none'
+        id: llama-cache
+        uses: actions/cache@v4
+        with:
+          path: build/llama-cpp
+          key: llama-cpp-vulkan-${{ hashFiles('packaging/build_llama_cpp.py', 'packaging/install_vulkan_sdk.ps1') }}
+
+      - name: Vulkan SDK for llama.cpp
+        if: steps.version.outputs.kind != 'none' && steps.llama-cache.outputs.cache-hit != 'true' && steps.whisper-cache.outputs.cache-hit == 'true'
+        continue-on-error: true
+        shell: pwsh
+        run: ./packaging/install_vulkan_sdk.ps1
+
+      - name: Build llama.cpp for the graphics card
+        if: steps.version.outputs.kind != 'none' && steps.llama-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        run: python packaging/build_llama_cpp.py build/llama-cpp --vulkan
+
       - name: Build
         if: steps.version.outputs.kind != 'none'
         run: python build.py --installer --version "${{ steps.version.outputs.version }}"
