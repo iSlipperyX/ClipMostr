@@ -176,6 +176,7 @@ class Settings:
     creator_rewards: bool = False  # clips 62-88 s (over a minute after cuts), for TikTok's Creator Rewards
     # Video Creator (creator/): original videos made from a prompt, on this PC
     creator_ai: str = "local"  # who writes scripts: local (this PC's AI only) | any (Settings → AI's order)
+    creator_web: bool = True  # look the topic up online (news, Wikipedia) before the script is written
     creator_voice: str = "en_male_deep"  # creator/voice_engine.VOICES
     creator_tts: str = "auto"  # auto | kokoro | piper | windows | espeak
     creator_kokoro_model: str = "full"  # full (310 MB, best) | compact (88 MB)
@@ -878,6 +879,10 @@ SCHEMA: list[Field] = [
     Field("creator_ai", "Script writer", "Creator", "choice", choices=CREATOR_AI,
           help="The local AI writes scripts for free on this PC (Settings → AI picks its model). Or let the AI "
                "chosen in Settings → AI write them (a cloud AI costs a little per script)"),
+    Field("creator_web", "Look it up online first", "Creator", "bool",
+          help="Before the script is written, the topic is searched on Google News, Bing News and Wikipedia, and "
+               "the newest stories go to the AI with today's date. Without it, a local AI only knows what it "
+               "learnt in training, which can be a year or more out of date"),
     Field("creator_voice", "Voice", "Creator", "choice", choices=CREATOR_VOICES),
     Field("creator_tts", "Voice engine", "Creator", "choice", choices=CREATOR_TTS,
           help="Kokoro sounds most natural and downloads once (about 340 MB). Piper is lighter. Windows' own "

@@ -1371,6 +1371,8 @@ def run_create(argv: list[str]) -> int:
             writers = director.script_writers(s)
             console.print("[bold]Script writer:[/] " + (", ".join(writers) if writers else
                                                        f"[yellow]{escape(director.no_writer_text(s))}[/]"))
+            console.print("[bold]Look it up online first:[/] " + ("on (Google News, Bing News, Wikipedia)" if
+                                                                s.creator_web else "off"))
         return 0
     prompts = [args.prompt] if args.prompt.strip() else []
     if args.file:
