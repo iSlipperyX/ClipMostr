@@ -256,7 +256,7 @@ def test_tidy_removes_the_unpacked_update_and_old_downloads(tmp_path, monkeypatc
     (updater.updates_dir() / "update.log").write_text("keep", encoding="utf-8")
     assert updater.tidy(app) == 3
     assert not (tmp_path / ".cm-up").exists()
-    assert [p.name for p in updater.updates_dir().iterdir()] == ["update.log"]
+    assert sorted(p.name for p in updater.updates_dir().iterdir()) == [updater.LOCK_NAME, "update.log"]
     assert updater.tidy(app) == 0
 
 

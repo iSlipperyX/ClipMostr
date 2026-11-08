@@ -383,18 +383,146 @@ def _old_app_files(target: Path, names: set[str]) -> list[Path]:
     return found
 
 
+# ---------------------------------------------------------------- one unpacker at a time
+
+LOCK_NAME = "prepare.lock"
+LOCK_WAIT = 30 * 60  # seconds to wait for another ClipMonster process's download and unpack
+
+
+class PrepareLock:
+    """Only one process downloads and unpacks an update at a time. The window (its quiet download or
+    Update now), automation's own update and `ytclip update` all use the same updates folder; two at
+    once removed and recreated each other's "next" folder ("Cannot create a file when that file
+    already exists"). The lock is an OS file lock, so it's let go if the process holding it ends."""
+
+    def __init__(self, cancelled: Callable[[], bool] | None = None, wait: float = LOCK_WAIT,
+                 waiting: Callable[[], None] | None = None):
+        self.cancelled, self.wait, self.waiting = cancelled, wait, waiting
+        self.file = None
+
+    def _try(self) -> bool:
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                self.file.seek(0)
+                msvcrt.locking(self.file.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self.file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return True
+        except OSError:
+            return False
+
+    def acquire(self) -> "PrepareLock":
+        folder = updates_dir()
+        folder.mkdir(parents=True, exist_ok=True)
+        try:
+            self.file = open(folder / LOCK_NAME, "a+b")
+        except OSError as exc:
+            raise UpdateError(f"Couldn't use the updates folder {folder} ({exc.strerror or exc}).") from exc
+        end = time.monotonic() + self.wait
+        told = False
+        while not self._try():
+            if self.cancelled and self.cancelled():
+                self.release()
+                raise UpdateCancelled()
+            if time.monotonic() >= end:
+                self.release()
+                raise UpdateError("Another ClipMonster window or automation is still downloading this update. "
+                                  "Try again when it's finished.")
+            if not told and self.waiting:
+                self.waiting()
+                told = True
+            time.sleep(0.5)
+        return self
+
+    def release(self) -> None:
+        if self.file is None:
+            return
+        try:
+            if sys.platform == "win32":
+                import msvcrt
+
+                self.file.seek(0)
+                msvcrt.locking(self.file.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(self.file.fileno(), fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            self.file.close()
+        except OSError:
+            pass
+        self.file = None
+
+    def __enter__(self) -> "PrepareLock":
+        return self.acquire()
+
+    def __exit__(self, *exc) -> None:
+        self.release()
+
+
+def busy() -> bool:
+    """Whether another process is downloading or unpacking an update right now."""
+    lock = PrepareLock(wait=0)
+    try:
+        lock.acquire()
+    except (UpdateError, UpdateCancelled):
+        return True
+    lock.release()
+    return False
+
+
+def _remove_folder(folder: Path) -> None:
+    """Remove a folder; when something still holds a file in it (antivirus scanning the new exe, a
+    process started from it), move it aside for tidy() to remove later. Raises OSError if neither works."""
+    for attempt in range(4):
+        if not folder.exists():
+            return
+        shutil.rmtree(folder, ignore_errors=True)
+        if not folder.exists():
+            return
+        time.sleep(0.5 * (attempt + 1))
+    _move(folder, folder.with_name(f"{folder.name}-old-{int(time.time() * 1000)}"))
+
+
+def _move(src: Path, dest: Path) -> None:
+    """Rename a folder, trying again for a few seconds: on Windows, antivirus scanning the files just
+    unpacked briefly refuses it ("Access is denied")."""
+    for attempt in range(8):
+        try:
+            os.replace(src, dest)
+            return
+        except PermissionError:
+            if attempt == 7:
+                raise
+            time.sleep(0.5 * (attempt + 1))
+
+
+def _set_aside(folder: Path) -> bool:
+    name, base = folder.name, staging_dir().name
+    return name == base + "-new" or name.startswith((base + "-old-", base + "-new-old-"))
+
+
 def extract(zip_path: Path, target: Path, cancelled: Callable[[], bool] | None = None) -> Path:
-    """Unpack the update for the installed folder `target` in staging_dir(); returns the new app folder."""
+    """Unpack the update for the installed folder `target` in staging_dir(); returns the new app folder.
+    It's unpacked into a folder of its own first and moved into place when it's whole, so a half-unpacked
+    copy is never left where the install step looks."""
     staging = staging_dir()
     if not _writable(target):
         raise UpdateError(f"ClipMonster can't write to {target}. Install it again with {SETUP_NAME} from the "
                           "release page, which puts it in a folder you own.")
-    root = staging.resolve()
+    fresh = staging.with_name(f"{staging.name}-new")  # short: Windows' path length limit (one unpack at a time)
+    root = fresh.resolve()
     try:
         with zipfile.ZipFile(zip_path) as zf:
             members = zf.infolist()
             for member in members:
-                dest = (staging / member.filename).resolve()
+                dest = (fresh / member.filename).resolve()
                 if root not in dest.parents and dest != root:
                     raise UpdateError("The update archive contains unsafe paths. Not installing it.")
             # Check up front, so a too-deep install fails cleanly instead of halfway through.
@@ -413,29 +541,26 @@ def extract(zip_path: Path, target: Path, cancelled: Callable[[], bool] | None =
                                   f"location such as {Path.home() / 'ClipMonster'} and try again.")
             # unpacked, then copied in (the helper runs from the unpacked copy, so it stays until tidy())
             _need_space(target.parent, 2 * sum(m.file_size for m in members), "unpack the update")
-            shutil.rmtree(staging, ignore_errors=True)
-            staging.mkdir()
+            _remove_folder(fresh)  # left by an unpack that was cut short
+            fresh.mkdir(parents=True)
             for i, member in enumerate(members):
                 if cancelled and i % 50 == 0 and cancelled():
                     raise UpdateCancelled()
-                zf.extract(member, staging)
-    except UpdateError:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise
-    except UpdateCancelled:
-        shutil.rmtree(staging, ignore_errors=True)
+                zf.extract(member, fresh)
+        if not (fresh / APP_FOLDER / EXE_NAME).exists():
+            raise UpdateError("The update archive doesn't contain ClipMonster.exe.")
+        _remove_folder(staging)
+        _move(fresh, staging)
+    except (UpdateError, UpdateCancelled):
+        shutil.rmtree(fresh, ignore_errors=True)
         raise
     except zipfile.BadZipFile as exc:
-        shutil.rmtree(staging, ignore_errors=True)
+        shutil.rmtree(fresh, ignore_errors=True)
         raise UpdateError("The update archive is damaged.") from exc
     except OSError as exc:
-        shutil.rmtree(staging, ignore_errors=True)
-        raise UpdateError(f"Couldn't unpack the update in {staging} ({exc.strerror or exc}).") from exc
-    new_app = staging / APP_FOLDER
-    if not (new_app / EXE_NAME).exists():
-        shutil.rmtree(staging, ignore_errors=True)
-        raise UpdateError("The update archive doesn't contain ClipMonster.exe.")
-    return new_app
+        shutil.rmtree(fresh, ignore_errors=True)
+        raise UpdateError(f"Couldn't unpack the update in {fresh.parent} ({exc.strerror or exc}).") from exc
+    return staging / APP_FOLDER
 
 
 def prepare(rel: Release, target: Path, progress: Callable[[float], None] | None = None,
@@ -445,18 +570,19 @@ def prepare(rel: Release, target: Path, progress: Callable[[float], None] | None
     from .swap import is_complete
 
     staged = staging_dir() / APP_FOLDER
-    if load_state().get("staged") == rel.version and is_complete(staged):
-        if progress:
-            progress(1.0)
-        return staged
-    save_state(staged="")
-    zip_path = download(rel, progress, cancelled)
-    try:
-        new_app = extract(zip_path, target, cancelled)
-    finally:
-        zip_path.unlink(missing_ok=True)
-    save_state(staged=rel.version)
-    return new_app
+    with PrepareLock(cancelled):  # another process may be getting it: this waits, then reuses its copy
+        if load_state().get("staged") == rel.version and is_complete(staged):
+            if progress:
+                progress(1.0)
+            return staged
+        save_state(staged="")
+        zip_path = download(rel, progress, cancelled)
+        try:
+            new_app = extract(zip_path, target, cancelled)
+        finally:
+            zip_path.unlink(missing_ok=True)
+        save_state(staged=rel.version)
+        return new_app
 
 
 def previous_version() -> str:
@@ -483,15 +609,19 @@ def prepare_previous(target: Path) -> Path:
     size = sum(f.stat().st_size for f in source.rglob("*") if f.is_file())
     _need_space(updates_dir(), size, "go back to the previous version")
     staged = staging_dir() / APP_FOLDER
-    save_state(staged="")
-    shutil.rmtree(staging_dir(), ignore_errors=True)
-    try:
-        shutil.copytree(source, staged)
-    except OSError as exc:
-        shutil.rmtree(staging_dir(), ignore_errors=True)
-        raise UpdateError(f"Couldn't copy the previous version ({exc.strerror or exc}).") from exc
-    save_state(staged=version)
-    return staged
+    with PrepareLock():
+        save_state(staged="")
+        fresh = staging_dir().with_name(f"{staging_dir().name}-new")
+        try:
+            _remove_folder(fresh)
+            shutil.copytree(source, fresh / APP_FOLDER)
+            _remove_folder(staging_dir())
+            _move(fresh, staging_dir())
+        except OSError as exc:
+            shutil.rmtree(fresh, ignore_errors=True)
+            raise UpdateError(f"Couldn't copy the previous version ({exc.strerror or exc}).") from exc
+        save_state(staged=version)
+        return staged
 
 
 def other_instances(target: Path) -> list[str]:
@@ -606,8 +736,14 @@ def tidy(target: Path | None = None) -> int:
     each; before 2.4.1 they were kept forever), and keep the logs short. An update that's unpacked
     and waiting to be installed stays. Returns how many were removed. Never fails."""
     removed = 0
+    if busy():  # another ClipMonster process is downloading or unpacking one right now
+        return 0
     target = target or install_dir()
     folders = [target.parent / ".cm-up"] if target is not None else []  # where versions before 2.8.0 unpacked
+    try:
+        folders += [f for f in updates_dir().iterdir() if f.is_dir() and _set_aside(f)]
+    except OSError:
+        pass
     if not _staged_is_next():
         folders.append(staging_dir())
         if load_state().get("staged"):

@@ -103,8 +103,8 @@ def _zip(path, names):
 def test_path_length_check_allows_for_the_backup_folder(tmp_path, monkeypatch):
     target = tmp_path / "ClipMonster"
     target.mkdir()
-    # The deepest of the backup folder in the install folder and the unpacked copy counts
-    deepest = max(len(str(target / updater.BACKUP_NAME)), len(str(updater.staging_dir() / "ClipMonster")))
+    # The deepest of the backup folder in the install folder and the unpacked copy (next-new) counts
+    deepest = max(len(str(target / updater.BACKUP_NAME)), len(str(updater.staging_dir().with_name("next-new") / "ClipMonster")))
     room = updater.MAX_PATH - deepest - 1
     deep = "_internal/" + "d" * (room - len("_internal/") + 1)
     with pytest.raises(updater.UpdateError, match="path length"):
@@ -128,3 +128,132 @@ def test_path_length_check_counts_folders_and_the_old_files(tmp_path):
     old.write_bytes(b"")
     with pytest.raises(updater.UpdateError, match="path length"):
         updater.extract(_zip(tmp_path / "v.zip", ["ClipMonster/ClipMonster.exe", "ClipMonster/_internal/x"]), target)
+
+
+# ---------------------------------------------------------------- one unpacker at a time
+# The window's quiet download and automation's own update could unpack into the same folder at once,
+# removing and recreating each other's files: "Cannot create a file when that file already exists".
+
+HOLD = r"""
+import sys, time
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+from ytclip import updater
+with updater.PrepareLock():
+    Path(sys.argv[2]).write_text("locked")
+    if sys.argv[3] == "stage":  # the other process gets the update meanwhile
+        app = updater.staging_dir() / "ClipMonster"
+        (app / "_internal").mkdir(parents=True)
+        (app / "ClipMonster.exe").write_bytes(b"new")
+        (app / "ytclip.exe").write_bytes(b"new")
+        updater.save_state(staged="9.9.9")
+    time.sleep(float(sys.argv[4]))
+"""
+
+
+def _hold_lock(tmp_path, stage=False, seconds=1.5):
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    flag = tmp_path / "locked.flag"
+    script = tmp_path / "hold.py"
+    script.write_text(HOLD, encoding="utf-8")
+    root = str(Path(__file__).resolve().parents[1])
+    proc = subprocess.Popen([sys.executable, str(script), root, str(flag), "stage" if stage else "-", str(seconds)],
+                            env=dict(os.environ))
+    end = time.time() + 20
+    while not flag.exists() and time.time() < end:
+        time.sleep(0.05)
+    assert flag.exists(), "the helper process didn't take the lock"
+    return proc
+
+
+def _rel():
+    return updater.Release("9.9.9", "v9.9.9", "", "", "", "https://example.invalid/x.zip", 1, "", "", False)
+
+
+def test_prepare_waits_for_another_process_and_reuses_its_copy(tmp_path, monkeypatch):
+    target = tmp_path / "ClipMonster"
+    target.mkdir()
+    monkeypatch.setattr(updater, "download", lambda *a, **k: pytest.fail("downloaded it a second time"))
+    proc = _hold_lock(tmp_path, stage=True)
+    try:
+        assert updater.busy()
+        assert updater.tidy(target) == 0  # leaves the other process's work alone
+        started = time.monotonic()
+        new_app = updater.prepare(_rel(), target)
+        assert time.monotonic() - started > 0.3  # it waited its turn
+        assert (new_app / "ClipMonster.exe").read_bytes() == b"new"
+    finally:
+        proc.wait(20)
+    assert not updater.busy()
+
+
+def test_waiting_for_the_lock_can_be_cancelled(tmp_path):
+    proc = _hold_lock(tmp_path, seconds=5)
+    try:
+        calls = {"n": 0}
+
+        def cancelled():
+            calls["n"] += 1
+            return calls["n"] > 2
+
+        with pytest.raises(updater.UpdateCancelled):
+            updater.PrepareLock(cancelled).acquire()
+        with pytest.raises(updater.UpdateError, match="still downloading"):
+            updater.PrepareLock(wait=0.2).acquire()
+    finally:
+        proc.kill()
+        proc.wait(20)
+
+
+def test_unpacking_replaces_a_leftover_next_folder(tmp_path):
+    target = tmp_path / "ClipMonster"
+    target.mkdir()
+    leftover = updater.staging_dir() / "ClipMonster" / "_internal"
+    leftover.mkdir(parents=True)
+    (leftover / "old.dll").write_bytes(b"old")
+    new_app = updater.extract(_zip(tmp_path / "u.zip", ["ClipMonster/ClipMonster.exe", "ClipMonster/_internal/x"]),
+                              target)
+    assert new_app == updater.staging_dir() / "ClipMonster"
+    assert (new_app / "_internal" / "x").exists() and not (new_app / "_internal" / "old.dll").exists()
+    assert not updater.staging_dir().with_name("next-new").exists()
+
+
+def test_a_held_next_folder_is_moved_aside_and_tidied_later(tmp_path, monkeypatch):
+    target = tmp_path / "ClipMonster"
+    target.mkdir()
+    held = updater.staging_dir() / "ClipMonster"
+    held.mkdir(parents=True)
+    (held / "ytclip.exe").write_bytes(b"still running")
+    real = updater.shutil.rmtree
+
+    def stubborn(path, *a, **k):  # antivirus or a running helper keeps the folder from being removed
+        if os.path.abspath(path) == os.path.abspath(updater.staging_dir()):
+            return
+        real(path, *a, **k)
+
+    monkeypatch.setattr(updater.shutil, "rmtree", stubborn)
+    monkeypatch.setattr(updater.time, "sleep", lambda s: None)
+    new_app = updater.extract(_zip(tmp_path / "u.zip", ["ClipMonster/ClipMonster.exe"]), target)
+    assert (new_app / "ClipMonster.exe").exists()
+    aside = [p for p in updater.updates_dir().iterdir() if p.name.startswith("next-old-")]
+    assert len(aside) == 1 and (aside[0] / "ClipMonster" / "ytclip.exe").exists()
+    monkeypatch.setattr(updater.shutil, "rmtree", real)
+    updater.tidy(target)
+    assert not aside[0].exists()
+
+
+def test_a_damaged_archive_leaves_the_staged_copy_alone(tmp_path):
+    target = tmp_path / "ClipMonster"
+    target.mkdir()
+    updater.extract(_zip(tmp_path / "u.zip", ["ClipMonster/ClipMonster.exe"]), target)
+    bad = tmp_path / "bad.zip"
+    bad.write_bytes(b"not a zip")
+    with pytest.raises(updater.UpdateError, match="damaged"):
+        updater.extract(bad, target)
+    with pytest.raises(updater.UpdateError, match="doesn't contain"):
+        updater.extract(_zip(tmp_path / "v.zip", ["ClipMonster/readme.txt"]), target)
+    assert (updater.staging_dir() / "ClipMonster" / "ClipMonster.exe").exists()
+    assert not updater.staging_dir().with_name("next-new").exists()
