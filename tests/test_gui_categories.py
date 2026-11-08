@@ -514,3 +514,22 @@ def test_standing_requests_are_edited_and_move_with_the_first_and_last_category(
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
     tab.delete()
     assert host.settings.pick_finds == "MW4 with good comedy\nWarzone funny moments"
+
+
+def test_the_header_counts_categories_in_plain_english(app, tmp_path):
+    tab, *_ = _tab(app, tmp_path, categories=[{"id": "a", "name": "A", "account_id": "x"}])
+    assert "1 category ·" in tab.summary.text()
+    tab, *_ = _tab(app, tmp_path, categories=[{"id": "a", "name": "A"}, {"id": "b", "name": "B"}])
+    assert "2 categories ·" in tab.summary.text()  # not "categorys"
+    assert tab.list.item(0).text().splitlines()[1].startswith("⚠ needs an account")
+
+
+def test_the_list_names_the_account_even_before_its_name_is_stored(app, tmp_path):
+    from ytclip.posting.accounts import Accounts
+
+    accs = Accounts.load()
+    a = accs.add("")
+    a.username = "gamingclips"
+    accs.save()
+    tab, *_ = _tab(app, tmp_path, categories=[{"id": "g", "name": "Gaming", "account_id": a.id}])
+    assert tab.list.item(0).text().splitlines()[1].startswith("@gamingclips")

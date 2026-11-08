@@ -712,7 +712,7 @@ SCHEMA: list[Field] = [
     Field("local_context", "Local AI memory (tokens, 0 = sized to this PC)", "AI", "int", lo=0, hi=131072,
           step=1024, help="How much transcript it reads at once: up to 32,768 tokens (about an hour of talk) when "
                           "the graphics card has room. Longer videos are read in parts either way"),
-    Field("local_gpu_layers", "Local AI layers on the graphics card (-1 = as many as fit)", "AI", "int", lo=-1,
+    Field("local_gpu_layers", "Local AI layers on the card (-1 = all that fit)", "AI", "int", lo=-1,
           hi=256, help="Leave at -1: ClipMonster and llama.cpp measure the free graphics memory and fit as many "
                        "as they can. 0 runs it on the CPU only"),
     Field("ai_instructions", "What makes a good clip?", "AI", "text"),

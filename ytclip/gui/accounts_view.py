@@ -19,7 +19,7 @@ from typing import Callable
 
 from PySide6.QtCore import Qt, QTimer, Signal
 from PySide6.QtWidgets import (QCheckBox, QDialog, QFrame, QHBoxLayout, QLabel, QPlainTextEdit, QPushButton,
-                               QStackedWidget, QVBoxLayout, QWidget)
+                               QSizePolicy, QStackedWidget, QVBoxLayout, QWidget)
 
 from . import theme
 from .posting_state import PostingState
@@ -151,6 +151,7 @@ class AccountWizard(QDialog):
         for label in self.step_labels:
             label.setTextFormat(Qt.RichText)
             sl.addWidget(label)
+        self.steps_box.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)  # every step in full, never squeezed
         lay.addWidget(self.steps_box)
         self.hint = QLabel()
         self.hint.setWordWrap(True)
@@ -199,6 +200,7 @@ class AccountWizard(QDialog):
         self.cancel_btn.setText("Cancel")
         self._show_steps(0)
         self.pages.setCurrentIndex(1)
+        self.adjustSize()  # the steps page is taller than the first one
         self.timer.start()
         self._poll()
 
@@ -294,6 +296,7 @@ class AccountWizard(QDialog):
         self.warm.setChecked(bool(a and a.warm_up_start) or new)
         self._fill_categories()
         self.pages.setCurrentIndex(2)
+        self.adjustSize()
 
     def _fill_categories(self) -> None:
         while self.cats_box.count():

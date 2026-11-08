@@ -77,7 +77,8 @@ class SettingsDialog(QDialog):
             if group == "AI":
                 note = QLabel("The AI clip finder gives the video's transcript to the AI you choose and asks it "
                               "to pick self-contained moments. Local AI runs a model on this PC: free, private, "
-                              "no key (the model downloads once, 2 to 4.4 GB). Claude and Gemini run online and "
+                              "no key (the model that suits this PC downloads once, 2 to 20 GB; Test keys says "
+                              "how it would run here). Claude and Gemini run online and "
                               "need a key; AI polish sends them each clip's words and one frame, and gets back "
                               "hooks, caption fixes and where the speaker is. "
                               f"Get a Claude key at <a href='{ANTHROPIC_KEY_URL}' style='color:{theme.ACCENT_2}'>"
@@ -121,18 +122,19 @@ class SettingsDialog(QDialog):
                 why = whisper_cpp.unavailable()
                 rest = "" if why else whisper_cpp.rest_note()
                 self._gpu_state = QLabel("Graphics card: " + (f"not used: {why}" if why else
-                                                              f"{rest}; Whisper uses the CPU until then" if rest else
+                                                              f"{rest}. Whisper uses the CPU until then." if rest else
                                                               "ready (it's tried on the next video)"))
-                self._gpu_state.setWordWrap(True)
-                row = QHBoxLayout()
-                again = QPushButton("Try the graphics card again")
-                again.setToolTip("After a graphics driver update, say: Whisper tries the card on the next video")
-                again.setVisible(bool(why or rest) and whisper_cpp.binary() is not None)
-                again.clicked.connect(lambda: (whisper_cpp.forget_gpu_check(), again.hide(),
-                                               self._gpu_state.setText("Graphics card: tried again on the next video")))
-                row.addWidget(self._gpu_state, 1)
-                row.addWidget(again)
-                page.layout().addRow("", row)
+                self._gpu_state.setWordWrap(True)  # on a row of its own, so a long reason wraps in full
+                page.layout().addRow("", self._gpu_state)
+                if (why or rest) and whisper_cpp.binary() is not None:
+                    again = QPushButton("Try the graphics card again")
+                    again.setToolTip("After a graphics driver update, say: Whisper tries the card on the next video")
+                    again.clicked.connect(lambda: (whisper_cpp.forget_gpu_check(), again.hide(), self._gpu_state.setText(
+                        "Graphics card: tried again on the next video")))
+                    row = QHBoxLayout()
+                    row.addWidget(again)
+                    row.addStretch(1)
+                    page.layout().addRow("", row)
             if group == "General":
                 row = QHBoxLayout()
                 again = QPushButton("Set up again…")

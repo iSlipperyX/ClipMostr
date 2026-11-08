@@ -25,6 +25,25 @@ class Editor:
         self.widget, self.get, self.set = widget, get, set_
 
 
+class ChoiceBox(QComboBox):
+    """A choice box that asks for about 24 characters of room, so a long choice ("Qwen2.5 32B · Ultra ·
+    19.9 GB · 24 GB graphics card…") never pushes its page wider than the window, and opens its list wide
+    enough to show every choice in full."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+
+    def fit_choices(self) -> None:
+        self.setMinimumContentsLength(min(24, max((len(self.itemText(i)) for i in range(self.count())), default=8)))
+
+    def showPopup(self) -> None:
+        view = self.view()
+        longest = max((view.fontMetrics().horizontalAdvance(self.itemText(i)) for i in range(self.count())), default=0)
+        view.setMinimumWidth(longest + 48)  # the item's padding and a scroll bar
+        super().showPopup()
+
+
 def make_editor(f: Field, value: Any, on_change: OnChange) -> Editor:
     emit = lambda *_: on_change(f.name, editor.get())  # noqa: E731
 
@@ -78,9 +97,10 @@ def make_editor(f: Field, value: Any, on_change: OnChange) -> Editor:
         editor = Editor(w, w.value, lambda v: w.setValue(float(v)))
 
     elif f.kind == "choice":
-        w = QComboBox()
+        w = ChoiceBox()
         for data, text in f.choices:
             w.addItem(text, data)
+        w.fit_choices()
 
         def set_choice(v: Any) -> None:
             i = w.findData(v)

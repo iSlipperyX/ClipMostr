@@ -161,7 +161,7 @@ class Categories(QWidget):
             form.addRow(label)
             return label
 
-        section("The account")
+        section("The category")
         self.name = QLineEdit()
         self.name.setPlaceholderText("e.g. Gaming, Podcasts, Science")
         self.name.editingFinished.connect(self._rename)
@@ -175,6 +175,7 @@ class Categories(QWidget):
         self.account_note = QLabel()
         self.account_note.setWordWrap(True)
         self.account_note.setTextFormat(Qt.RichText)
+        self.account_note.setAlignment(Qt.AlignLeft | Qt.AlignTop)  # right under the account it's about
         form.addRow("", self.account_note)
         self.enabled = QCheckBox("Pick videos for this category")
         self.enabled.setToolTip("Off: nothing new is picked for it. Videos already waiting are still clipped")
@@ -365,6 +366,10 @@ class Categories(QWidget):
         except Exception:  # the runner has jobs.db busy; try again next time
             counts = {}
         total_today = 0
+        try:
+            handles = {a.id: a.handle for a in self._accounts()}
+        except Exception:  # noqa: BLE001 - the accounts file is being written: the stored names do
+            handles = {}
         for i, n in enumerate(self._categories):
             it = self.list.item(i)
             if it is None:
@@ -378,7 +383,8 @@ class Categories(QWidget):
                 sources.append(f"{len(n.search_list())} search{'es' if len(n.search_list()) != 1 else ''}")
             if n.keyword_list() or n.yt_category_ids():
                 sources.append("trending")
-            line2 = " · ".join([n.account or "⚠ needs an account"] + (sources or ["no sources yet"]))
+            who = "⚠ needs an account" if n.needs_account else (handles.get(n.account_id) or n.account or "its account")
+            line2 = " · ".join([who] + (sources or ["no sources yet"]))
             line3 = (f"Today {today}/{n.daily} · {c.get('waiting', 0)} waiting · {c.get('clips', 0)} clips this week"
                      if n.on else n.state.split(":")[0] + ": nothing is picked")
             it.setText(f"{n.name}\n{line2}\n{line3}")
@@ -386,7 +392,7 @@ class Categories(QWidget):
                                     theme.TEXT if n.on else theme.MUTED))
             it.setToolTip(str(self._folder_of(n)))
         on = [n for n in self._categories if n.enabled]
-        self.summary.setText(f"   {len(self._categories)} category{'s' if len(self._categories) != 1 else ''}"
+        self.summary.setText(f"   {len(self._categories)} {'category' if len(self._categories) == 1 else 'categories'}"
                              + (f" · {len(on)} on" if len(on) != len(self._categories) else "")
                              + f" · {total_today} picked today · up to {sum(n.daily for n in on)} a day")
 

@@ -131,3 +131,29 @@ def test_settings_dialog_keeps_the_longest_at_least_the_shortest(app):
     assert dlg._editors["max_len"].get() == 60
     dlg._editors["max_len"].widget.setValue(45)
     assert (dlg.result_settings.min_len, dlg.result_settings.max_len) == (45, 45)
+
+
+def test_long_choices_dont_push_a_settings_page_past_the_window(app):
+    """The local AI's model names ("Qwen2.5 32B · Ultra · 19.9 GB · 24 GB graphics card…") once pushed
+    Settings → AI 260 px past the window, cutting its text off: a choice box asks for at most about 24
+    characters, and its list opens wide enough to show every choice in full."""
+    from PySide6.QtWidgets import QComboBox, QScrollArea
+
+    from ytclip.gui.settings_dialog import SettingsDialog
+
+    dlg = SettingsDialog(Settings(), tab="AI")
+    box = dlg._editors["local_model"].widget
+    assert isinstance(box, QComboBox) and box.minimumContentsLength() <= 24
+    assert box.sizeAdjustPolicy() == QComboBox.AdjustToMinimumContentsLengthWithIcon
+    dlg.show()
+    box.showPopup()
+    longest = max(box.view().fontMetrics().horizontalAdvance(box.itemText(i)) for i in range(box.count()))
+    assert box.view().minimumWidth() >= longest
+    box.hidePopup()
+    for i in range(dlg.tabs.count()):
+        dlg.tabs.setCurrentIndex(i)
+        app.processEvents()
+        area = dlg.tabs.widget(i)
+        if isinstance(area, QScrollArea):  # a few pixels of give for other fonts; a page cut off shows
+            assert area.horizontalScrollBar().maximum() < 40, dlg.tabs.tabText(i)
+    dlg.close()

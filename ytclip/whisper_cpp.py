@@ -123,13 +123,16 @@ def resting(exe: Path | None = None, now: float | None = None) -> float:
 
 
 def rest_note(now: float | None = None) -> str:
-    """'resting until 14:32 after it failed (…)', or "" when the card isn't resting."""
+    """'resting until 14:32, after it failed while typing out the clips', or "" when the card isn't
+    resting."""
     exe = binary()
     until = resting(exe, now) if exe else 0.0
     if not until:
         return ""
-    failed = _remembered(exe).get("failed") or "it failed"
-    return f"resting until {time.strftime('%H:%M', time.localtime(until))} after {failed}"
+    failed = str(_remembered(exe).get("failed") or "it failed")
+    if failed.startswith("the graphics card "):
+        failed = "it " + failed[len("the graphics card "):]
+    return f"resting until {time.strftime('%H:%M', time.localtime(until))}, after {failed}"
 
 
 def _card_failed(exe: Path, problem: str) -> bool:
