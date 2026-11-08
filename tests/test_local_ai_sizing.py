@@ -213,6 +213,19 @@ def test_free_graphics_memory_comes_from_the_most_exact_source(fresh_memory, tmp
     assert none.vram_free_gb is None and none.ram_free_gb == 20.0
 
 
+def test_on_windows_free_graphics_memory_is_dxgis_budget(fresh_memory):
+    """The reading follows the PC that was detected, so this runs the same on any test machine."""
+    amd = Hardware("Windows", 16, 32, "amd", "AMD Radeon RX 9060 XT", 15.9, "DXGI")
+    fresh_memory.setattr(hardware, "dxgi_cards", lambda *a: [
+        Card("amd", "AMD Radeon RX 9060 XT", 15.9, 13.25, "DXGI", 0)])
+    fresh_memory.setattr(hardware, "linux_cards", lambda *a: [Card("amd", "AMD Radeon", 16.0, 1.0, "sysfs", 1)])
+    mem = hardware.memory_now(amd)
+    assert (mem.vram_free_gb, mem.source) == (13.25, "DXGI")  # /sys isn't read for a Windows PC
+    mem = hardware.memory_now(Hardware("Windows", 16, 32, "amd", "AMD Radeon RX 9060 XT", 15.9, "DXGI"),
+                              refresh=True)
+    assert mem.vram_free_gb == 13.25
+
+
 @pytest.mark.skipif(sys.platform in ("win32", "darwin"), reason="Linux's /proc/meminfo")
 def test_free_ram_is_what_linux_says_is_available(tmp_path):
     meminfo = tmp_path / "meminfo"

@@ -573,7 +573,7 @@ def memory_now(hw: Hardware | None = None, exe: Path | None = None, refresh: boo
         fresh: list[Card] = []
         if hw.gpu_vendor == "nvidia":
             fresh += nvml_cards() or nvidia_cards()
-        if sys.platform == "win32":
+        if hw.system == "Windows":
             fresh += dxgi_cards()
         elif hw.vram_source == "sysfs":
             fresh += linux_cards()
