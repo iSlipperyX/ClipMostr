@@ -320,7 +320,7 @@ class Automation(QWidget):
         job = self.db.working()
         if job is not None:
             status = job.status_bar
-            self.now.show_job(job.title or job.url, status, job.stage)
+            self.now.show_job(job.title or job.url, status, job.stage, making=job.is_creation)
             for r in range(self.table.rowCount()):
                 it = self.table.item(r, 0)
                 cell = self.table.item(r, STATUS_COLUMN)
@@ -591,13 +591,16 @@ class Automation(QWidget):
         jobs = self._selected_jobs() or [job]
         menu = QMenu(self)
         if job.folder:
-            menu.addAction("Show clips", lambda: self._open_folder(job))
-        if any(j.status in ("failed", "done") for j in jobs):
-            menu.addAction("Clip again" if all(j.status == "done" for j in jobs) else "Try again",
-                           lambda: self._each(jobs, self.db.retry))
+            menu.addAction("Show video" if job.is_creation else "Show clips", lambda: self._open_folder(job))
+        again = [j for j in jobs if j.status in ("failed", "done") and (not j.is_creation or j.request)]
+        if again:
+            word = "Make again" if all(j.is_creation for j in again) else "Clip again"
+            menu.addAction(word if all(j.status == "done" for j in again) else "Try again",
+                           lambda: self._each(again, self.db.retry))
         if job.error:
             menu.addAction("Copy error", lambda: QApplication.clipboard().setText(job.error))
-        menu.addAction("Open on YouTube", lambda: QDesktopServices.openUrl(QUrl(job.url)))
+        if not job.is_creation:
+            menu.addAction("Open on YouTube", lambda: QDesktopServices.openUrl(QUrl(job.url)))
         menu.addSeparator()
         menu.addAction("Remove from the list", lambda: self._each([j for j in jobs if j.status != "working"],
                                                                   self.db.remove))

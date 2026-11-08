@@ -17,7 +17,7 @@ from .navigation import NavTabs
 from .sign_in_dialog import SignInDialog
 
 ANTHROPIC_KEY_URL = "https://console.anthropic.com/settings/keys"
-GROUPS = ("General", "Download", "Clip finding", "Transcription", "Speed", "AI", "Export", "Captions", "Editing", "Layout",
+GROUPS = ("General", "Download", "Clip finding", "Transcription", "Speed", "AI", "Export", "Captions", "Editing", "Creator", "Layout",
           "Research", "Picking", "Automation", "Posting", "Updates")
 
 

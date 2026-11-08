@@ -1318,6 +1318,127 @@ def run_sign_in(argv: list[str], wait: float = 1800.0, poll: float = 2.0) -> int
     return 0
 
 
+def run_create(argv: list[str]) -> int:
+    """ytclip create: an original video from a prompt, made on this PC (creator/)."""
+    import json as _json
+
+    from .creator import director, orchestrator, visual_generator, voice_engine
+    from .ffmpeg import Cancelled
+
+    p = argparse.ArgumentParser(
+        prog="ytclip create", description="Make an original faceless video from a prompt, on this PC: the local AI "
+        "writes the script, a neural voice reads it, pictures are made and animated, music and sound effects are "
+        "mixed in, and kinetic captions burnt on. It goes to the category's Automation folder and its account's "
+        "posting queue, labelled AI-generated.",
+        epilog='Examples:  ytclip create "Dark psychology secrets" --category Psychology --voice deep_male '
+               '--creator-rewards\n           ytclip create --file prompts.txt --category DailyFacts --schedule',
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("prompt", nargs="?", default="", help="what the video is about")
+    p.add_argument("--file", type=Path, help="one prompt per line (# starts a comment): a video each")
+    p.add_argument("--script", type=Path, help="your own narration instead of the AI's (a blank line starts a scene)")
+    p.add_argument("--storyboard", type=Path, help="make a storyboard.json as it is (from --storyboard-only, edited)")
+    p.add_argument("--title", default="", help="the video's title (default: the AI's)")
+    p.add_argument("--category", default="", help="category name or id: its folder and its TikTok account")
+    p.add_argument("--voice", default="", help="voice (--list-voices), e.g. deep_male, documentary, female")
+    p.add_argument("--duration", type=float, default=0, help="seconds to aim for (default: Settings → Creator)")
+    p.add_argument("--visuals", choices=visual_generator.BACKENDS, default="",
+                   help="where pictures come from (default: Settings → Creator)")
+    p.add_argument("--style", choices=["", *director.STYLES], default="", help="the look (default: from the category)")
+    rewards = p.add_mutually_exclusive_group()
+    rewards.add_argument("--creator-rewards", dest="rewards", action="store_true", default=None,
+                         help="keep it 62-85 s, over the minute Creator Rewards needs")
+    rewards.add_argument("--no-creator-rewards", dest="rewards", action="store_false")
+    p.add_argument("--schedule", action="store_true", help="queue it for automation to make instead of making it now")
+    p.add_argument("--no-post", action="store_true", help="save it in Output/Created instead of the posting queue")
+    p.add_argument("--storyboard-only", action="store_true", help="only write the script and storyboard (JSON)")
+    p.add_argument("--list-voices", action="store_true", help="the voices, and which engines work here")
+    p.add_argument("--check", action="store_true", help="what's ready on this PC: AI, voices, pictures")
+    args = p.parse_args(argv)
+    s = Settings.load()
+    if args.list_voices or args.check:
+        engines = voice_engine.available(s)
+        console.print("[bold]Voices[/] (--voice):")
+        for v in voice_engine.VOICES.values():
+            console.print(f"  {v.key:<18} {escape(v.label)} [dim]· {escape(v.blurb)}[/]")
+        console.print("[bold]Voice engines:[/] " + ", ".join(
+            f"{voice_engine.ENGINE_NAMES[k]} [green]ready[/]" if not why else
+            f"{voice_engine.ENGINE_NAMES[k]} [dim]({escape(why)})[/]" for k, why in engines.items()))
+        if args.check:
+            pics = visual_generator.available(s)
+            console.print("[bold]Pictures:[/] " + ", ".join(
+                f"{visual_generator.BACKEND_NAMES[k]} [green]ready[/]" if not why else
+                f"{visual_generator.BACKEND_NAMES[k]} [dim]({escape(why)})[/]" for k, why in pics.items()))
+            writers = director.script_writers(s)
+            console.print("[bold]Script writer:[/] " + (", ".join(writers) if writers else
+                                                       f"[yellow]{escape(director.no_writer_text(s))}[/]"))
+        return 0
+    prompts = [args.prompt] if args.prompt.strip() else []
+    if args.file:
+        prompts += [ln.strip() for ln in args.file.read_text(encoding="utf-8").splitlines()
+                    if ln.strip() and not ln.lstrip().startswith("#")]
+    script = args.script.read_text(encoding="utf-8") if args.script else ""
+    board = _json.loads(args.storyboard.read_text(encoding="utf-8")) if args.storyboard else None
+    if not prompts and not script and board is None:
+        p.print_help()
+        return 2
+    category = orchestrator.find_category(s, args.category) if args.category else None
+    if args.category and category is None:
+        console.print(f"[yellow]⚠ There's no category called {escape(args.category)}.[/] The video goes to an "
+                      f"Automation folder of that name; posting queues it only if you have a single account.")
+    base = dict(title=args.title, category=category.id if category else args.category, voice=args.voice,
+                seconds=args.duration, visuals=args.visuals, style=args.style, rewards=args.rewards,
+                post=not args.no_post)
+    requests = ([orchestrator.CreateRequest(prompt=x, **base) for x in prompts] if not (script or board) else
+                [orchestrator.CreateRequest(prompt=prompts[0] if prompts else "", script=script, storyboard=board, **base)])
+    if args.schedule:
+        from .jobs import JobDB
+
+        db = JobDB()
+        try:
+            for req in requests:
+                orchestrator.queue(db, req, category.id if category else "")
+        finally:
+            db.close()
+        console.print(f"[green]✓ {len(requests)} video{'s' if len(requests) != 1 else ''} queued.[/] Automation makes "
+                      "them in turn (start it in the Automation tab or with [bold]ytclip auto run[/]).")
+        return 0
+    log = lambda m: console.print(f"[dim]{escape(m)}[/]")  # noqa: E731
+    last = {"m": ""}
+
+    def progress(msg: str, frac) -> None:
+        head = msg.split(":")[0]
+        if head != last["m"]:
+            last["m"] = head
+            console.print(f"[cyan]…[/] {escape(head)}")
+
+    failed = 0
+    for i, req in enumerate(requests, 1):
+        if len(requests) > 1:
+            console.rule(f"[bold]Video {i}/{len(requests)}: {escape(req.label())}")
+        maker = orchestrator.VideoCreatorOrchestrator(s, log=log, progress=progress)
+        try:
+            if args.storyboard_only:
+                sb = maker.storyboard(req)
+                console.print(sb.dumps(), markup=False, highlight=False)
+                continue
+            result = maker.create(req)
+        except KeyboardInterrupt:
+            console.print("[red]Interrupted.[/]")
+            return 130
+        except Cancelled:
+            return 130
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            console.print(f"[red]✗ {escape(str(exc))}[/]")
+            continue
+        c = result.checks
+        console.print(f"[green]✓ {escape(result.storyboard.title)}[/] · {result.duration:.0f} s · {c.get('lufs')} LUFS · "
+                      f"{c.get('size_mb')} MB\n  {escape(str(result.video))}")
+        for w in result.warnings:
+            console.print(f"  [yellow]⚠ {escape(w)}[/]")
+    return 1 if failed else 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["--apply-update"]:  # the updater's install step, run from the unpacked new version
@@ -1338,6 +1459,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_categories(argv[1:])
     if argv[:1] == ["request"]:
         return run_request(argv[1:])
+    if argv[:1] == ["create"]:
+        return run_create(argv[1:])
     if argv[:1] == ["report"]:
         return run_report(argv[1:])
     if argv[:1] == ["whisper-test"]:

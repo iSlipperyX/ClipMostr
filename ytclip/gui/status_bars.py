@@ -113,8 +113,10 @@ class NowPanel(QFrame):
         self.detail.setProperty("muted", True)
         lay.addWidget(self.detail)
 
-    def show_job(self, title: str, status: Status | None, stage: str = "") -> None:
-        self.title.setText(f"✂ Clipping <span style='color:{theme.TEXT}'>{_esc(title)}</span>")
+    def show_job(self, title: str, status: Status | None, stage: str = "", making: bool = False) -> None:
+        """`making`: a Video Creator job (made from a prompt), not a video being clipped."""
+        verb = "✨ Making" if making else "✂ Clipping"
+        self.title.setText(f"{verb} <span style='color:{theme.TEXT}'>{_esc(title)}</span>")
         self.title.setToolTip(title)
         if status is None:  # started by an older runner, or just starting
             self.right.setText("")

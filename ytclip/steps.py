@@ -16,16 +16,22 @@ from typing import Callable
 # (key, label), in the order a video goes through them
 STEPS: tuple[tuple[str, str], ...] = (
     ("download", "Download"), ("analyse", "Analyse"), ("transcript", "Transcribe"), ("find", "Find clips"),
-    ("polish", "AI polish"), ("export", "Export"), ("check", "Quality check"),
+    ("polish", "AI polish"),
+    # the Video Creator's own steps (creator/orchestrator.py)
+    ("script", "Write script"), ("voice", "Record voice"), ("visuals", "Make pictures"), ("render", "Render"),
+    ("export", "Export"), ("check", "Quality check"),
 )
+CREATOR_PLAN = ["script", "voice", "visuals", "render", "check"]
 LABELS = dict(STEPS)
 ORDER = {key: i for i, (key, _) in enumerate(STEPS)}
 # Seconds each step takes on a typical 20-minute video, until a real one has been timed.
 DEFAULT_SECONDS = {"download": 60.0, "analyse": 25.0, "transcript": 120.0, "find": 20.0, "polish": 30.0,
-                   "export": 150.0, "check": 15.0}
+                   "export": 150.0, "check": 15.0,
+                   "script": 60.0, "voice": 45.0, "visuals": 90.0, "render": 120.0}
 # engine.TIMED keys -> steps (audio and scene cuts are both "Analyse")
 TIMED_STEPS = {"download": "download", "audio": "analyse", "scenes": "analyse", "transcript": "transcript",
-               "find": "find", "polish": "polish", "export": "export", "check": "check"}
+               "find": "find", "polish": "polish", "export": "export", "check": "check",
+               "script": "script", "voice": "voice", "visuals": "visuals", "render": "render"}
 
 # The start of each progress message the engine (and download/transcribe) sends, and its step.
 MESSAGES: tuple[tuple[str, str], ...] = (
@@ -38,6 +44,9 @@ MESSAGES: tuple[tuple[str, str], ...] = (
     ("AI is polishing", "polish"),
     ("Exporting clip", "export"), ("Making a clip again", "export"), ("Rendering", "export"),
     ("Checking clip", "check"),
+    ("Writing the script", "script"), ("Recording the voice", "voice"), ("Lining up the words", "voice"),
+    ("Making pictures", "visuals"), ("Animating scene", "render"), ("Mixing the sound", "render"),
+    ("Putting the video together", "render"), ("Checking the video", "check"),
 )
 
 MIN_ELAPSED = 8.0  # seconds before a time-left estimate is shown

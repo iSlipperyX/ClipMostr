@@ -150,7 +150,16 @@ def _up(p: QPainter) -> None:
     p.drawPath(c)
 
 
+def _creator(p: QPainter) -> None:  # a magic wand with sparkles
+    p.drawLine(QPointF(4, 20), QPointF(14.5, 9.5))
+    p.drawLine(QPointF(13, 8), QPointF(16, 11))
+    for cx, cy, r in ((17.5, 4.5, 2.4), (20.5, 12, 1.6), (9.5, 4, 1.4)):
+        p.drawLine(QPointF(cx - r, cy), QPointF(cx + r, cy))
+        p.drawLine(QPointF(cx, cy - r), QPointF(cx, cy + r))
+
+
 ICONS = {
+    "creator": _creator,
     "studio": _studio, "library": _library, "research": _research, "categories": _categories,
     "automation": _automation, "accounts": _accounts, "queue": _queue, "performance": _performance,
     "settings": _settings, "help": _help, "add": _add, "folder": _folder, "link": _link, "check": _check,

@@ -19,11 +19,33 @@ datas = (
     + [(os.path.join(ROOT, "ytclip", "fonts"), os.path.join("ytclip", "fonts"))]  # bundled caption/banner fonts
 )
 binaries = collect_dynamic_libs("ctranslate2")
+
+
+def optional(package, data=True, libs=False):
+    """The Video Creator's voice packages, when this build has them (pip install -e .[creator,piper])."""
+    global datas, binaries
+    try:
+        __import__(package)
+    except Exception:
+        return []
+    if data:
+        datas += collect_data_files(package)
+    if libs:
+        binaries += collect_dynamic_libs(package)
+    return collect_submodules(package)
+
+
+creator_imports = (
+    optional("kokoro_onnx") + optional("espeakng_loader", libs=True) + optional("phonemizer")
+    + optional("language_tags") + optional("segments") + optional("csvw")
+    + optional("onnxruntime", data=False, libs=True) + optional("soundfile", libs=True)
+    + optional("_soundfile_data", libs=True) + optional("piper", libs=True)
+)
 hiddenimports = (
     collect_submodules("yt_dlp_ejs")
     + collect_submodules("ytclip.intelligence") + collect_submodules("ytclip.vision")
     + collect_submodules("ytclip.audio") + collect_submodules("ytclip.rendering")
-    + collect_submodules("ytclip.compliance")
+    + collect_submodules("ytclip.compliance") + collect_submodules("ytclip.creator") + creator_imports
     + ["cv2", "faster_whisper", "ctranslate2", "anthropic", "playwright.sync_api", "PySide6.QtNetwork",
        "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets"]
 )

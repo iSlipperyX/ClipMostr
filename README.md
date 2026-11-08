@@ -349,6 +349,30 @@ Posting keeps track of how your posted clips do: every half hour it writes `%APP
 
 `ytclip results` prints the same, with every channel's numbers (`--json` for scripts). Results older than 90 days are ignored.
 
+## Video Creator
+
+The **Creator** tab (and `ytclip create`) makes an original, faceless video from an idea, all on your PC: the local AI writes the script, a neural voice reads it, a picture is made for every scene and slowly moved, music and sound effects are mixed in, and big word-by-word captions are burnt on. The video goes to its category's Automation folder and its TikTok account's posting queue like any clip, labelled **AI-generated**.
+
+1. **Write it for me** with a prompt ("3 stoic habits that will change your life"), or **Use my script** to paste your own narration (the first sentence is the hook; a blank line starts a new scene).
+2. Pick the **category** (its folder and account), the **voice** (▶ plays a sample), the **length** and the **look**. *Over a minute* keeps it 62–85 seconds, so it counts for Creator Rewards.
+3. **Write storyboard** shows the script scene by scene: what's said, the picture, the camera move and the sound. Double-click anything to change it.
+4. **Make video** renders it (about 3–5 minutes for a 65-second video), or **Add to automation queue** lets automation make it in turn with the clips.
+
+How each part works:
+
+- **Script.** The AI writes a storyboard in a fixed JSON shape: a hook of at most 10 words (under 3.5 seconds), then 130–155 words a minute of narration, scene by scene. It's asked again when it misses the word count or the hook runs long. It never promises a part 2, never states made-up statistics as fact and never puts real people or text in the pictures. *Settings → Creator → Script writer* chooses the local AI (free) or the AI in *Settings → AI*. Each new script is compared with the last 400 you made, and one that repeats an earlier one's wording is written again.
+- **Voice.** [Kokoro-82M](https://github.com/thewh1teagle/kokoro-onnx) (natural, downloads about 340 MB once), else Piper, else Windows' own voices, else eSpeak NG. Eight narrators: Deep Male Narrator, Energetic Storyteller, Documentary, Warm Female, Bright Female, Hushed, British Male and Calm Male. When a voice runs long or short for the target, it's read again a little faster or slower, and the pace it actually reads at is learnt for the next script. Whisper then lines every caption word up with the voice.
+- **Pictures.** ComfyUI if it's running on this PC (any checkpoint; SDXL-Turbo and FLUX.1-schnell get their own settings, or use your own workflow JSON with `{{prompt}}`, `{{negative}}`, `{{seed}}`, `{{width}}`, `{{height}}`), else SDXL-Turbo or FLUX.1-schnell from Python (`pip install -e .[diffusion]` with the PyTorch build for your graphics card), else clips and pictures from your B-roll folder matched by name, else built-in moody textures in the look's colours. Each scene falls back on its own, so one failed picture never stops the video. The local AI's model is unloaded first to give the picture model the graphics memory.
+- **Motion.** Every picture gets a camera move: push in (zoom 1 → 1.15), pull out, pans in six directions or a push to one side, with a hint of roll, drawn at sub-pixel precision so nothing shimmers. Scenes change just before their first word, with 0.3-second dissolves, dips to black, slides or zooms.
+- **Sound.** The voice is compressed and set to −14 LUFS; the music sits under it and ducks while it speaks; whooshes, risers, bass drops and hits land on the cuts and the cues the script asks for; a limiter keeps peaks under −1 dBTP. Music comes from your music folder (sorted by mood folders like `dark` or `epic`, if you have them), else a calm bed is composed for the mood. Sound effects are built in; put your own WAVs in a folder (*Settings → Creator → Sound effects folder*), named or foldered by cue (`whoosh`, `riser`, `impact`...) and they're used instead. Only use music and sounds you have the rights to.
+- **Checks.** 1080×1920, sound present, the loudness, the length (over 61 seconds for Creator Rewards), the size for the TikTok app, and the originality check. The folder gets `clips.json` (what posting reads, with the caption and hashtags), `storyboard.json` (to make it again: `ytclip create --storyboard`), a `README.md` with how it was made, the scene pictures and a thumbnail.
+
+```
+pip install -e .[creator]          # Kokoro voice (the release build includes it)
+pip install -e .[piper]            # Piper voices
+pip install -e .[diffusion]        # SDXL-Turbo / FLUX.1-schnell from Python (install PyTorch for your card first)
+```
+
 ## Posting to TikTok
 
 Posting runs inside automation's background process, so it keeps going with the window closed and starts with Windows. For every clip that passed the quality check, it:
@@ -441,6 +465,10 @@ ytclip results                                  # what's working, from your post
 ytclip posting                                  # TikTok accounts, what's waiting, what was posted
 ytclip categories                                   # your categories and how each is doing
 ytclip clean                                    # what Clean up would clear (--delete clears it)
+ytclip create "Dark psychology secrets" --category Psychology --voice deep_male --creator-rewards
+ytclip create --file prompts.txt --category DailyFacts --schedule   # a video per line, made by automation
+ytclip create --script story.txt --storyboard-only                  # check the storyboard first (JSON)
+ytclip create --check                           # what's ready here: script writer, voices, pictures
 ytclip --list-presets
 ```
 
@@ -523,6 +551,7 @@ Run the tests with `pip install -e .[test]` and then `pytest`. They need no netw
 | `ytclip/policy.py` | Picking rules, each category's share, and the log of picks |
 | `ytclip/categories.py` | Categories: each TikTok account's sources, look and folder, and which category a video goes in |
 | `ytclip/cleanup.py` | Clean up: what nothing needs any more, and clearing it; the work folder's startup sweep |
+| `ytclip/creator/` | Video Creator: the storyboard (`director.py`), voices (`voice_engine.py`), pictures (`visual_generator.py`), camera moves (`motion.py`), sound effects and music (`sfx_library.py`, `soundbed.py`), rendering and the mix (`compositor.py`), the whole run (`orchestrator.py`) |
 | `ytclip/posting/service.py` | The posting worker, a thread of automation's background process: intake, posting, readings, records |
 | `ytclip/posting/intake.py`, `store.py`, `jobs.py`, `schedule.py` | New clips into the posting queue for their account; the library; what posts when |
 | `ytclip/posting/accounts.py`, `actions.py` | TikTok accounts; the window's requests to the worker (log in, post now, test posting) |
