@@ -55,17 +55,25 @@ def colours(s) -> dict[str, str]:
             "question": getattr(s, "caption_question_colour", "") or DEFAULT_COLOURS["question"]}
 
 
+def bare(word: str) -> str:
+    """A caption word as a plain lower-case key ("Okay?" -> "okay"), for matching emphasis words."""
+    return _BARE.sub("", word.lower()).strip("'")
+
+
 def kinetic_line(words: list[str], active: int, first: bool, s, ass_colour, escape, base: str, highlight: str,
-                 pop: int) -> str:
+                 pop: int, emphasis: frozenset[str] | set[str] = frozenset(), emphasis_colour: str = "") -> str:
     """One caption event's text: every word with its own colour and scale tags.
 
-    `first`: the group has just appeared, so every word pops in. Otherwise only the spoken word pops."""
+    `first`: the group has just appeared, so every word pops in. Otherwise only the spoken word pops.
+    `emphasis`: words (bare(), lower case) a script marked to stand out: drawn in `emphasis_colour`."""
     kinds = colours(s) if getattr(s, "caption_keyword_colours", True) else {}
     out: list[str] = []
     for j, text in enumerate(words):
         kind = keyword_kind(text) if kinds else ""
         is_active = j == active
         colour = kinds.get(kind) if kind else None
+        if emphasis and bare(text) in emphasis:
+            colour = emphasis_colour or kinds.get("question") or DEFAULT_COLOURS["question"]
         if is_active:
             colour = colour or highlight
         tag = f"\\1c{ass_colour(colour or base)}"

@@ -56,7 +56,8 @@ def post(item: VideoItem, s: Settings, account: Account, log: Callable[[str], No
     privacy = item.privacy or s.default_privacy
     with TikTokBrowser(s, account.browser_dir(), log, cancelled=cancelled) as b:
         b.upload(path, caption, privacy, s.allow_comments, s.allow_duet, s.allow_stitch,
-                 s.ai_generated_label, progress=progress, expected_user=account.username)
+                 s.ai_generated_label or getattr(item, "ai_generated", False), progress=progress,
+                 expected_user=account.username)
     return {"via": "browser"}
 
 

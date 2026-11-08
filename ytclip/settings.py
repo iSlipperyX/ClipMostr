@@ -174,6 +174,35 @@ class Settings:
     broll_every: float = 18.0
     broll_seconds: float = 2.5
     creator_rewards: bool = False  # clips 62-88 s (over a minute after cuts), for TikTok's Creator Rewards
+    # Video Creator (creator/): original videos made from a prompt, on this PC
+    creator_ai: str = "local"  # who writes scripts: local (this PC's AI only) | any (Settings → AI's order)
+    creator_voice: str = "en_male_deep"  # creator/voice_engine.VOICES
+    creator_tts: str = "auto"  # auto | kokoro | piper | windows | espeak
+    creator_kokoro_model: str = "full"  # full (310 MB, best) | compact (88 MB)
+    creator_word_timing: str = "whisper"  # whisper (listen to the voice) | sound (from its pauses and syllables)
+    creator_duration: int = 65  # seconds of video it aims for
+    creator_rewards_length: bool = True  # keep videos 62-85 s, over the minute Creator Rewards needs
+    creator_style: str = ""  # creator/director.STYLES key; "" = from the category
+    creator_visuals: str = "auto"  # auto | comfyui | sdxl_turbo | flux_schnell | local_broll | texture
+    creator_image_model: str = "sdxl_turbo"  # the diffusers model auto tries: sdxl_turbo | flux_schnell
+    creator_comfy_url: str = "http://127.0.0.1:8188"
+    creator_comfy_checkpoint: str = ""  # "" = the fastest one ComfyUI has (turbo/schnell/lightning first)
+    creator_comfy_workflow: str = ""  # your own API-format workflow JSON, with {{prompt}} etc. placeholders
+    creator_cpu_pictures: bool = False  # let diffusers draw on the CPU (minutes a picture)
+    creator_motion: float = 1.0  # camera movement strength (creator/motion.py)
+    creator_transition: str = "mixed"  # mixed | fade | dissolve | fadeblack
+    creator_music: str = "auto"  # auto (your music folder, else composed) | folder | composed | off
+    creator_music_db: int = -20
+    creator_sfx: bool = True
+    creator_sfx_folder: str = ""  # your own sound effects, named for their cue (whoosh, riser...)
+    creator_sfx_db: int = 0  # all effects up or down
+    creator_auto_whoosh: bool = True  # a whoosh on scene changes that have no other effect
+    creator_caption_font: str = "Montserrat Black"
+    creator_caption_size: int = 84
+    creator_uppercase: bool = True
+    creator_hook_card: bool = True  # the hook in big letters over the first seconds
+    creator_film_look: bool = True  # vignette and fine grain
+    creator_downloads: bool = True  # download voice and picture models when they're first needed
     # Layout (banners and stacked video)
     banner_top: bool = False
     banner_top_text: str = "{title}"
@@ -586,6 +615,24 @@ LOCAL_MODELS = (('auto', 'Pick for this PC'),
                 ('mistral-7b', "Mistral 7B v0.3 · 4.4 GB · ClipMonster 3.1's model"),
                 ('custom', 'My own GGUF file'))  # intelligence/models.CHOICES (a test keeps them the same)
 CAPTION_STYLES = (("classic", "Classic (word pop)"), ("kinetic", "Kinetic (pop, karaoke, keyword colours)"))
+# The Video Creator's choices (a test keeps them the same as creator/'s own lists)
+CREATOR_AI = (("local", "The local AI on this PC (free)"), ("any", "The AI chosen in Settings → AI"))
+CREATOR_VOICES = (("en_male_deep", "Deep Male Narrator"), ("en_storyteller", "Energetic Storyteller"),
+                  ("en_documentary", "Calm Documentary"), ("en_female_warm", "Warm Female Narrator"),
+                  ("en_female_bright", "Bright Female"), ("en_hushed", "Hushed Storyteller"),
+                  ("en_british_male", "British Male"), ("en_male_calm", "Calm Male"))
+CREATOR_TTS = (("auto", "Best available"), ("kokoro", "Kokoro-82M (natural)"), ("piper", "Piper (light)"),
+               ("windows", "Windows voices"), ("espeak", "eSpeak NG (robotic)"))
+CREATOR_STYLES = (("", "Pick from the category"), ("cinematic", "Cinematic dark"), ("documentary", "Documentary"),
+                  ("history", "Old-world painting"), ("horror", "Horror"), ("bright", "Bright and bold"),
+                  ("dreamy", "Calm and dreamy"))
+CREATOR_VISUALS = (("auto", "Best available"), ("comfyui", "ComfyUI on this PC"), ("sdxl_turbo", "SDXL-Turbo (Python)"),
+                   ("flux_schnell", "FLUX.1-schnell (Python)"), ("local_broll", "My B-roll folder"),
+                   ("texture", "Built-in moving textures"))
+CREATOR_TRANSITIONS = (("mixed", "Varied (dissolves, dips, slides)"), ("fade", "Cross-dissolve"),
+                       ("fadeblack", "Dip to black"), ("dissolve", "Grainy dissolve"))
+CREATOR_MUSIC = (("auto", "My music folder, else composed"), ("folder", "My music folder only"),
+                 ("composed", "Composed on this PC"), ("off", "No music"))
 APPEARANCES = (("dark", "Dark"), ("light", "Light"), ("system", "Match Windows"))
 
 UPDATE_CHANNELS = (("stable", "Stable"), ("beta", "Beta (test versions)"), ("dev", "Dev (every change)"))
@@ -827,6 +874,60 @@ SCHEMA: list[Field] = [
     Field("creator_rewards", "Creator Rewards length (over 1 minute)", "Editing", "bool",
           help="TikTok's Creator Rewards only pays for videos over one minute. Clips are found at 62 to 88 s, and "
                "one that would come out under 61 s after its pauses are cut runs on to the next sentence's end"),
+
+    Field("creator_ai", "Script writer", "Creator", "choice", choices=CREATOR_AI,
+          help="The local AI writes scripts for free on this PC (Settings → AI picks its model). Or let the AI "
+               "chosen in Settings → AI write them (a cloud AI costs a little per script)"),
+    Field("creator_voice", "Voice", "Creator", "choice", choices=CREATOR_VOICES),
+    Field("creator_tts", "Voice engine", "Creator", "choice", choices=CREATOR_TTS,
+          help="Kokoro sounds most natural and downloads once (about 340 MB). Piper is lighter. Windows' own "
+               "voices need nothing at all"),
+    Field("creator_kokoro_model", "Kokoro model", "Creator", "choice",
+          choices=(("full", "Full (310 MB, best)"), ("compact", "Compact (88 MB)"))),
+    Field("creator_word_timing", "Caption timing", "Creator", "choice",
+          choices=(("whisper", "Whisper listens to the voice (most exact)"), ("sound", "From the voice's pauses"))),
+    Field("creator_duration", "Video length (s)", "Creator", "int", lo=20, hi=180,
+          help="What the script is written for. The voice's speed is nudged to land on it"),
+    Field("creator_rewards_length", "Keep it over a minute (Creator Rewards)", "Creator", "bool",
+          help="TikTok's Creator Rewards only pays for videos over one minute: videos are kept between 62 and 85 s"),
+    Field("creator_style", "Look", "Creator", "choice", choices=CREATOR_STYLES,
+          help="The pictures' style, the textures' colours and the music's mood"),
+    Field("creator_visuals", "Pictures from", "Creator", "choice", choices=CREATOR_VISUALS,
+          help="Auto uses ComfyUI when it's running, then Stable Diffusion in Python (source installs), then your "
+               "B-roll, then built-in moving textures. A scene that fails in one moves on to the next"),
+    Field("creator_image_model", "Stable Diffusion model (Python)", "Creator", "choice",
+          choices=(("sdxl_turbo", "SDXL-Turbo (fast, 8 GB+ card)"),
+                   ("flux_schnell", "FLUX.1-schnell (best, 16 GB+ card)"))),
+    Field("creator_comfy_url", "ComfyUI address", "Creator", "str"),
+    Field("creator_comfy_checkpoint", "ComfyUI checkpoint", "Creator", "str",
+          help="Empty = the fastest one ComfyUI has (a turbo, schnell or lightning model first)",
+          placeholder="sd_xl_turbo_1.0_fp16.safetensors"),
+    Field("creator_comfy_workflow", "ComfyUI workflow (API format)", "Creator", "file",
+          help="Optional. Your own workflow saved with 'Export (API)'; {{prompt}}, {{negative}}, {{seed}}, "
+               "{{width}} and {{height}} in it are filled in for each scene"),
+    Field("creator_cpu_pictures", "Let Stable Diffusion use the CPU", "Creator", "bool",
+          help="Without a graphics card it can use: minutes per picture"),
+    Field("creator_motion", "Camera movement", "Creator", "float", lo=0.0, hi=2.0, step=0.1,
+          help="0 = still pictures, 1 = gentle push-ins and pans, 2 = twice as much"),
+    Field("creator_transition", "Scene changes", "Creator", "choice", choices=CREATOR_TRANSITIONS),
+    Field("creator_music", "Music", "Creator", "choice", choices=CREATOR_MUSIC,
+          help="Your music folder (Settings → Editing) first, sorted into mood folders; without one, a calm bed "
+               "is composed for the mood on this PC"),
+    Field("creator_music_db", "Music level (dB)", "Creator", "int", lo=-40, hi=-6),
+    Field("creator_sfx", "Sound effects", "Creator", "bool",
+          help="Whooshes, risers, bass drops and hits on the script's cues, made on this PC"),
+    Field("creator_sfx_folder", "Sound effects folder", "Creator", "path",
+          help="Optional: your own licensed effects. Files or folders named whoosh, riser, bass drop, boom, impact, "
+               "glass, vinyl, shimmer, tick or heartbeat are used for that cue"),
+    Field("creator_sfx_db", "Sound effects level (dB)", "Creator", "int", lo=-20, hi=10),
+    Field("creator_auto_whoosh", "Whoosh on scene changes", "Creator", "bool"),
+    Field("creator_caption_font", "Caption font", "Creator", "font"),
+    Field("creator_caption_size", "Caption size", "Creator", "int", lo=40, hi=120),
+    Field("creator_uppercase", "Captions in capitals", "Creator", "bool"),
+    Field("creator_hook_card", "Hook in big letters at the start", "Creator", "bool"),
+    Field("creator_film_look", "Film look (vignette, fine grain)", "Creator", "bool"),
+    Field("creator_downloads", "Download voice and picture models when needed", "Creator", "bool",
+          help="Into %LOCALAPPDATA%\\ClipMonster\\models, once. Off: put them there yourself"),
 
     Field("banner_top", "Top banner", "Layout", "bool", help="A bar of text above the video"),
     Field("banner_top_text", "Top text", "Layout", "str",

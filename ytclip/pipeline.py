@@ -433,7 +433,11 @@ class Runner:
         scan_wait = next_scan - now if research.youtube_key(s) else IDLE
         job = self.db.next_due(now, paused)
         if job:
-            wait, why = self.wait_reason(s, now, downloaded=self.prefetched(job))
+            if job.is_creation:  # made on this PC: no download to space out, nothing YouTube can pause
+                wait = hours_wait(now, s.auto_start_hour, s.auto_end_hour)
+                why = f"Outside working hours ({s.auto_start_hour}:00–{s.auto_end_hour}:00)" if wait else ""
+            else:
+                wait, why = self.wait_reason(s, now, downloaded=self.prefetched(job))
             if wait >= UPDATE_GAP and self._self_update and (self.prefetch is None or not self.prefetch.busy):
                 self.self_update(s)  # a long wait (working hours, a sign-in pause) is a good time
             if wait:
@@ -919,7 +923,78 @@ class Runner:
                                stage="Waiting", category_id=category_id), self.now())
 
     # ------------------------------------------------------------ one video
+    def add_creation(self, request, category_id: str = "") -> str:
+        """Queue a video for the Video Creator to make (creator/orchestrator.CreateRequest). Returns the job id."""
+        from .creator.orchestrator import queue
+
+        return queue(self.db, request, category_id, self.now())
+
+    def process_creation(self, job: Job, s: Settings) -> None:
+        """Make a queued video (a GENERATIVE_CREATOR job) with the Video Creator."""
+        from .creator.orchestrator import CreateRequest, CreatorError, VideoCreatorOrchestrator
+
+        try:
+            req = CreateRequest.from_json(job.request)
+        except (ValueError, TypeError) as exc:
+            self.db.update(job.id, self.now(), status="failed", error=f"Its request couldn't be read ({exc})",
+                           stage="Can't be made", progress="")
+            return
+        if job.category_id and not req.category:
+            req.category = job.category_id
+        now = self.now()
+        self.db.update(job.id, now, status="working", stage="Starting", recipe="Video Creator", error="")
+        self.state(f"Making a video: {job.title}")
+        self.log(f"Making a video: {job.title}")
+        try:
+            timings = json.loads(self.db.meta("creator_timings") or "{}")
+        except ValueError:
+            timings = {}
+        tracker = steps.Tracker(list(steps.CREATOR_PLAN), steps.weights_from_timings(timings))
+        last = {"t": 0.0, "msg": ""}
+
+        def progress(msg: str, frac: float | None) -> None:
+            t = self.now()
+            status = tracker.update(msg, frac)
+            if msg != last["msg"] or t - last["t"] >= 2:
+                last.update(t=t, msg=msg)
+                self.db.update(job.id, t, stage=msg + (f" {frac:.0%}" if frac is not None else ""),
+                               progress=json.dumps(status.to_json()))
+            self.beat()
+
+        def cancelled() -> bool:
+            t = self.now()
+            if t - self._last_flag_check < 2:
+                return False
+            self._last_flag_check = t
+            return self.stop_requested()
+
+        maker = VideoCreatorOrchestrator(s, log=self.log, progress=progress, cancelled=cancelled, register=False)
+        try:
+            result = maker.create(req)
+        except Cancelled:
+            self.db.update(job.id, self.now(), status="queued", stage="Stopped; will start again", progress="")
+            self.log(f"Stopped while making {job.title}; it'll start again next time.")
+            raise Stopped()
+        except CreatorError as exc:  # the script, the voice or the check: trying again won't change it
+            self.db.update(job.id, self.now(), status="failed", attempts=job.attempts + 1, error=str(exc),
+                           stage="Couldn't be made", progress="")
+            self.log(f"✗ {job.title}: {exc}")
+            self.db.set_meta("last_error", str(exc))
+            return
+        except Exception as exc:  # noqa: BLE001 - ffmpeg or a model hiccup: the usual retries
+            self.failed(job, str(exc) or exc.__class__.__name__, s)
+            return
+        if getattr(s, "creator_ai", "local") != "local" and not req.script and not req.storyboard:
+            self.db.note("ai", self.now())  # a cloud AI wrote it: counts towards the daily AI limit
+        self.db.update(job.id, self.now(), status="done", stage="Done", folder=str(result.folder), progress="",
+                       clips=1, title=result.storyboard.title)
+        self.db.set_meta("creator_timings", json.dumps(result.timings))
+        self.log(f"✓ Made {result.storyboard.title} ({result.duration:.0f} s) → {result.folder}")
+
     def process(self, job: Job, s: Settings) -> None:
+        if job.is_creation:
+            self.process_creation(job, s)
+            return
         now = self.now()
         if job.category_id and categories.find(s, job.category_id) is None:
             s = self.load()  # the settings we were given may be older than the category

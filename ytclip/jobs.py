@@ -11,11 +11,20 @@ import sqlite3
 import threading
 import time
 from dataclasses import asdict, dataclass, field, fields
+from enum import Enum
 from pathlib import Path
 
 from .settings import app_dir
 
 STATUSES = ("queued", "working", "done", "failed")
+
+
+class JobType(str, Enum):
+    """What a job makes: clips cut from a YouTube video, or an original video the Video Creator makes
+    from a prompt (creator/orchestrator.py)."""
+
+    CLIP = "clip"
+    GENERATIVE_CREATOR = "creator"
 SIGN_IN_WAIT = "Waiting: YouTube asked this PC to sign in"  # the stage of a video waiting out a sign-in pause
 
 
@@ -45,6 +54,12 @@ class Job:
     category_id: str = ""  # id of the category it was picked for (categories.py), "" for none
     order: str = ""  # id of the clip request it's for (orders.py), "" for none
     progress: str = ""  # while it's worked on: its steps.Status as JSON, for the Automation tab's status bars
+    kind: str = JobType.CLIP.value  # JobType: "clip" (a YouTube video to clip) | "creator" (a video to make)
+    request: str = ""  # a creator job's request as JSON (creator/orchestrator.CreateRequest)
+
+    @property
+    def is_creation(self) -> bool:
+        return self.kind == JobType.GENERATIVE_CREATOR.value
 
     @property
     def status_bar(self):

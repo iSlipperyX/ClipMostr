@@ -122,7 +122,7 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Install
-        run: pip install -e ".[ai,whisper,build]"
+        run: pip install -e ".[ai,whisper,build,creator,piper]"
       - name: Install Inno Setup
         shell: pwsh
         run: |

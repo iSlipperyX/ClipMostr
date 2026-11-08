@@ -26,6 +26,13 @@ whisper = ["faster-whisper>=1.0"]
 # The local AI runs llama.cpp's llama-server (bundled with the app; packaging/build_llama_cpp.py). From
 # source without that build, the Python binding works too:
 local = ["llama-cpp-python>=0.3"]
+# The Video Creator (ytclip create, the Creator tab). Kokoro-82M is its main voice; it falls back to Piper,
+# then Windows' own voices or eSpeak NG, so none of these is required.
+creator = ["kokoro-onnx>=0.4", "soundfile>=0.12"]
+piper = ["piper-tts>=1.2"]
+# AI pictures from Python (SDXL-Turbo / FLUX.1-schnell). Several GB; install the torch build for your graphics
+# card first (pytorch.org). Without it, ComfyUI (if you run it), your B-roll folder or built-in textures are used.
+diffusion = ["torch>=2.3", "diffusers>=0.30", "transformers>=4.44", "accelerate>=0.33", "safetensors>=0.4"]
 build = ["pyinstaller>=6.10"]
 test = ["pytest>=8.2"]
 
@@ -40,7 +47,8 @@ testpaths = ["tests"]
 
 [tool.setuptools]
 packages = ["ytclip", "ytclip.gui", "ytclip.posting", "ytclip.posting.tiktok", "ytclip.intelligence",
-            "ytclip.vision", "ytclip.audio", "ytclip.rendering", "ytclip.compliance"]
+            "ytclip.vision", "ytclip.audio", "ytclip.rendering", "ytclip.compliance",
+            "ytclip.creator"]
 package-data = { ytclip = ["fonts/*.ttf", "fonts/licenses/*.txt"] }
 
 [tool.setuptools.dynamic]

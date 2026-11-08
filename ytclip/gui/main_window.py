@@ -37,6 +37,7 @@ from .cleanup_dialog import CleanupDialog
 from .categories_tab import Categories
 from .posting_pages import AccountsPage, PerformancePage, QueuePage
 from .posting_state import PostingState
+from .creator_view import CreatorView
 from .research import Research
 from .settings_dialog import SettingsDialog
 from .status_bars import LabeledBar
@@ -336,6 +337,13 @@ class MainWindow(QMainWindow):
         self.research.hits_changed.connect(self._research_hits)
         self.research.open_settings.connect(self._open_settings)
         self.research_tab = self.tabs.addTab(self.research, RESEARCH_TAB, "research")
+        # The Creator: an original narrated video from a prompt or a script, made on this PC (ytclip/creator).
+        self.creator = CreatorView(lambda: self.settings, self._setting_changed)
+        self.creator.notice.connect(self._notice)
+        self.creator.open_settings.connect(self._open_settings)
+        self.tabs.addTab(self.creator, "Creator", "creator")
+        self.tabs.currentChanged.connect(
+            lambda _i: self.creator.reload() if self.tabs.currentWidget() is self.creator else None)
         # Posting: the accounts, the queue and how it's doing. The TikTok work is done by automation's posting
         # worker in the background; these tabs show what it saved and ask it for things (posting_state.py).
         self.posting = PostingState(self)
@@ -464,6 +472,7 @@ class MainWindow(QMainWindow):
         """A category was added, edited or removed: everything that shows categories follows."""
         self.research.settings_changed()
         self.automation.categories_changed()
+        self.creator.reload()
         if self.tabs.currentWidget() is self.library:  # otherwise it refreshes when it's opened
             self.library.refresh()
 

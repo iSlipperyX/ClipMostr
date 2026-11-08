@@ -59,6 +59,11 @@ def read_folder_index(folder: Path) -> dict[str, dict]:
             # Kept with the posting entry for its record, since the clips.json row goes when the clip is deleted
             "facts": _facts(data, clip),
             "rejected": qc.get("ok") is False or file.replace("\\", "/").startswith(f"{REJECTED_DIR}/"),
+            # ClipMonster 3.3: made by the Video Creator, so it's labelled AI-generated when posted, and comes
+            # with its own caption and hashtags
+            "ai_generated": bool(clip.get("ai_generated") or (data.get("creator") or {}).get("ai_generated")),
+            "caption": str(clip.get("caption") or ""),
+            "hashtags": " ".join(f"#{str(h).lstrip('#')}" for h in clip.get("hashtags") or [] if str(h).strip("# ")),
         }
     return out
 

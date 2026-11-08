@@ -179,8 +179,9 @@ def title_block(title: str, s: Settings, st: CaptionStyle, width: int) -> textla
 
 def build_ass(words: list[Word], clip_start: float, clip_end: float, width: int, height: int,
               s: Settings, title: str = "", area: tuple[int, int, int] | None = None, side: int = 0,
-              offset: float = 0.0) -> str:
-    """The captions .ass file. `offset` shifts every time earlier, for rendering a still from inside the clip."""
+              offset: float = 0.0, emphasis: set[str] | None = None, emphasis_colour: str = "") -> str:
+    """The captions .ass file. `offset` shifts every time earlier, for rendering a still from inside the clip.
+    `emphasis`: words to draw in `emphasis_colour` with kinetic captions (the Video Creator's script marks them)."""
     st = caption_style(s, width, height, area, side)
     lr = st.margin_lr
     # Encoding -1 lets libass work out each line's text direction, so Arabic or Hebrew words read
@@ -224,7 +225,8 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     # The pop plays when the group appears; a still from inside the clip shows it settled.
                     first = ev.active == 0 and ev.start >= offset
                     out_lines.append(kinetic_line(ln, active, first, s, _ass_colour, _escape, s.caption_color,
-                                                  s.caption_highlight, pop))
+                                                  s.caption_highlight, pop, frozenset(emphasis or ()),
+                                                  emphasis_colour))
                 else:
                     out_lines.append(" ".join(f"{{\\c{hl}\\fscx{pop}\\fscy{pop}}}{_escape(t)}{{\\r}}"
                                               if k + j == ev.active else _escape(t) for j, t in enumerate(ln)))

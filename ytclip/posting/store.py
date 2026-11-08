@@ -51,6 +51,7 @@ class VideoItem:
     for_account: str = ""  # the account id the category posts to ("" = none)
     # ClipMonster's facts about the clip for its record: the source video, where in it, how it was made
     facts: dict = field(default_factory=dict)
+    ai_generated: bool = False  # made by the Video Creator: TikTok's "AI-generated content" label goes on
     # Part series: one moment cut into parts, each but the last saying "follow for part 2".
     # `series` is unique across the library: ClipMonster's id is only unique within one clips folder, and
     # the same video can be clipped into several folders (one per category, or a later run), so it's keyed on it.
@@ -410,6 +411,11 @@ class Store:
                     item.category_id = meta.get("category_id", "")
                     item.for_account = meta.get("account_id", "")
                     item.facts = dict(meta.get("facts") or {})
+                    item.ai_generated = bool(meta.get("ai_generated"))
+                    if meta.get("caption"):
+                        item.caption = meta["caption"]
+                    if meta.get("hashtags"):
+                        item.hashtags = meta["hashtags"]
                     if meta.get("series"):
                         item.series = f"{f.parent.resolve()}#{meta['series']}"
                         item.part, item.parts = meta.get("part"), meta.get("parts")

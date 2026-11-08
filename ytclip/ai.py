@@ -171,8 +171,11 @@ def ask_json(s, task: str, system: str, content: str | list[dict], schema: dict,
     `content` is text, or Anthropic-style blocks (text, and base64 JPEG images), which work for both AIs.
     `what` finishes the log line "Asking <model> to …". `check` is called while the answer streams in
     and may raise to cancel; that exception passes straight through. If the chosen AI fails and the
-    other one has a key (and ai_fallback is on), the other one is asked. Raises AIError."""
-    providers = order(s)
+    other one has a key (and ai_fallback is on), the other one is asked. `only` limits it to those AIs.
+    Raises AIError."""
+    providers = [p for p in order(s) if only is None or p in only]
+    if only is not None and "local" in only and "local" not in providers and key_for(s, "local"):
+        providers.append("local")  # asked for by name: its model may download (order() only falls back to it once it's here)
     if not providers:
         raise AIError(missing_key(s))
     failures: list[tuple[str, AIError]] = []
