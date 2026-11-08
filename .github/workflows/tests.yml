@@ -63,7 +63,8 @@ jobs:
         run: pytest -q tests/test_whisper_cpp_real.py
 
   # The local AI for real: a CPU build of llama-server loading a tiny random model and answering through
-  # ClipMonster's wrapper (intelligence/llama_engine.py), held to the clip-finding JSON schema.
+  # ClipMonster's wrapper (intelligence/llama_engine.py), held to the clip-finding JSON schema, plus a check
+  # of every catalogue model's header (its shape and size) straight from Hugging Face.
   llama-cpp:
     runs-on: ubuntu-latest
     steps:
@@ -85,6 +86,7 @@ jobs:
         env:
           CLIPMONSTER_LLAMA_SERVER: build/llama-cpp/llama-server
           CLIPMONSTER_TEST_GGUF: build/tiny.gguf
+          CLIPMONSTER_CHECK_MODEL_URLS: "1"
         run: pytest -q tests/test_local_ai_real.py
 
   # The release workflow's Vulkan build of whisper.cpp, so a broken one shows up before a release.

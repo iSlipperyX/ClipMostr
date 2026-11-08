@@ -1082,23 +1082,50 @@ def run_local_ai(argv: list[str]) -> int:
         s = s.copy(local_gpu=False)
     hw = hardware.detect()
     model, path = models.resolve(s, hw)
+    exe = llama_engine.server_binary()
     console.print(f"[bold]This PC:[/] {escape(hw.describe())}")
+    mem = hardware.memory_now(hw, exe if hw.has_gpu else None)
+    if hw.has_gpu:
+        free = (f"{mem.vram_free_gb:.1f} GB free now (from {mem.source})" if mem.vram_free_gb is not None
+                else "free memory not reported")
+        console.print(f"[bold]Graphics memory:[/] {hw.vram_gb:.1f} GB on {escape(hw.gpu_name)} (from "
+                      f"{escape(hw.vram_source)}), {escape(free)}")
+        for card in hw.cards:
+            console.print(f"  [dim]{escape(card.source)}: {escape(card.name)}, {card.total_gb:.1f} GB"
+                          + (f", {card.free_gb:.1f} GB free" if card.free_gb is not None else "") + "[/]")
+    console.print(f"[bold]RAM free now:[/] {mem.ram_free_gb:.1f} of {mem.ram_total_gb:.0f} GB")
     console.print(f"[bold]Runs with:[/] {escape(llama_engine.backend_name() or llama_engine.missing_backend())}")
     name = model.label if model else (path.name or "no file chosen")
     console.print(f"[bold]Model:[/] {escape(name)}  [dim]{escape(str(path))}[/]")
     console.print(f"[bold]Status:[/] {escape(llama_engine.status(s))}")
     if args.action == "status":
+        from rich.table import Table
+
+        table = Table(title="The models, on this PC", title_justify="left", header_style="bold")
+        for col in ("Model", "Tier", "Download", "Here", "On this PC", "Licence"):
+            table.add_column(col)
+        for m in models.MODELS.values():
+            fit = models.runs_on_card(m, hw, mem.ram_free_gb)
+            here = "downloaded" if models.installed(models.folder() / m.file) else ""
+            pick = " (picked for this PC)" if m.key == models.choose(hw).key else ""
+            table.add_row(m.short + pick, models.TIERS[m.tier][0], f"{m.size_gb:.1f} GB", here,
+                          fit.describe("the card") if fit.fits else "too big for this PC's free memory", m.licence)
+        console.print(table)
         return 0
     if args.action == "download" and model is None:
         console.print("[yellow]A custom file isn't downloaded: choose it with --file.[/]")
         return 2
+    better = models.better_choice(s, hw) if args.action == "download" else None
+    if better is not None:  # "Pick for this PC" is on a model downloaded earlier: fetch the one that suits it
+        model, path = better, models.folder() / better.file
+        console.print(f"[bold]Downloading the model that suits this PC best:[/] {escape(better.label)}")
     if model is not None and not models.installed(path):
         if not models.free_space_ok(model, path):
             console.print(f"[red]Not enough free space for {model.size_gb:.1f} GB.[/]")
             return 1
         with Progress(TextColumn("[cyan]{task.description}"), BarColumn(), TextColumn("{task.percentage:>3.0f}%"),
                       TimeElapsedColumn(), console=console, transient=True) as bar:
-            task = bar.add_task(f"Downloading {model.label.split(' (')[0]}", total=1.0)
+            task = bar.add_task(f"Downloading {model.name}", total=1.0)
             try:
                 models.download(model, lambda m, f: bar.update(task, completed=f or 0.0))
             except models.DownloadError as exc:
@@ -1109,19 +1136,24 @@ def run_local_ai(argv: list[str]) -> int:
         return 0
     from .intelligence import transcript_parser
 
-    sample = ("[0:00] So I quit my job in March. [0:04] Everyone told me it was the dumbest thing I'd ever do. "
-              "[0:09] And for six months they were right, I made nothing. [0:15] Then one video took off, "
-              "eleven million views in two days. [0:22] And here's the thing nobody tells you about that. "
-              "[0:26] The money from that one video was forty dollars. [0:31] Forty. [0:33] What paid was what "
-              "came after: the next fifty videos had an audience waiting. [0:41] Anyway, let's talk about the "
-              "setup I use now.")
+    sample = "\n".join((
+        "[0.0-4.0] So I quit my job in March.",
+        "[4.0-9.0] Everyone told me it was the dumbest thing I'd ever do.",
+        "[9.0-15.0] And for six months they were right, I made nothing.",
+        "[15.0-22.0] Then one video took off, eleven million views in two days.",
+        "[22.0-26.0] And here's the thing nobody tells you about that.",
+        "[26.0-31.0] The money from that one video was forty dollars.",
+        "[31.0-33.0] Forty.",
+        "[33.0-41.0] What paid was what came after: the next fifty videos had an audience waiting.",
+        "[41.0-45.0] Anyway, let's talk about the setup I use now."))
     started = time.monotonic()
     try:
         with console.status("Loading the model and asking it to pick a clip…"):
             reply = llama_engine.ask_json(
                 s, "You find the most engaging self-contained moment in a transcript for a short video.",
-                f"Transcript:\n{sample}\n\nPick 1 clip.", transcript_parser.schema(1), max_tokens=1200,
-                log=lambda m: console.print(f"[dim]{escape(m)}[/]"))
+                f"Transcript:\n{sample}\n\nPick 1 clip, 15 to 60 seconds long.", transcript_parser.schema(1, 15, 60),
+                max_tokens=1200, log=lambda m: console.print(f"[dim]{escape(m)}[/]"),
+                prompt_schema=transcript_parser.schema(1, 15, 60, strict=False))
     except llama_engine.LocalAIError as exc:
         console.print(f"[red]✗ {escape(str(exc))}[/]")
         return 1

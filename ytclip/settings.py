@@ -102,10 +102,11 @@ class Settings:
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.8-flash"
     # Local AI (intelligence/llama_engine.py): a GGUF model on this PC, when "AI to use" is Local AI
-    local_model: str = "auto"  # auto | llama-3.2-3b | mistral-7b | custom (intelligence/models.py)
+    local_model: str = "auto"  # auto | a key of intelligence/models.MODELS | custom
     local_model_path: str = ""  # with custom: your own .gguf file
     local_gpu: bool = True  # put the model on the graphics card when there's one with room
-    local_context: int = 0  # tokens the model reads at once; 0 = the model's own (16,384)
+    local_context: int = 0  # tokens the model reads at once; 0 = sized to the model and this PC (up to 32,768)
+    local_gpu_layers: int = -1  # layers on the graphics card; -1 = as many as fit (intelligence/planner.py)
     gemini_polish_model: str = "gemini-3.8-flash"
     ai_instructions: str = (
         "Find self-contained moments that would work as standalone short-form clips: "
@@ -576,9 +577,14 @@ CLEANUP_KINDS = (
     ("removed", "Clips you took out of the posting queue"),
 )
 
-LOCAL_MODELS = (("auto", "Pick for this PC"), ("llama-3.2-3b", "Llama 3.2 3B Instruct (2 GB, quick, any PC)"),
-                ("mistral-7b", "Mistral 7B Instruct v0.3 (4.4 GB, better, 8 GB+ graphics)"),
-                ("custom", "My own GGUF file"))  # intelligence/models.CHOICES
+LOCAL_MODELS = (('auto', 'Pick for this PC'),
+                ('llama-3.2-3b', 'Llama 3.2 3B · Compact · 2.0 GB · any PC, quick on the CPU too'),
+                ('qwen2.5-7b', 'Qwen2.5 7B · Standard · 4.7 GB · 8 GB+ graphics card'),
+                ('mistral-nemo-12b', 'Mistral Nemo 12B · High-capacity · 7.5 GB · 12 GB+ graphics card'),
+                ('qwen2.5-32b', 'Qwen2.5 32B · Ultra · 19.9 GB · 24 GB graphics card, or 16 GB + 32 GB RAM'),
+                ('command-r-32b', 'Command R 32B · Ultra · 19.8 GB · non-commercial licence'),
+                ('mistral-7b', "Mistral 7B v0.3 · 4.4 GB · ClipMonster 3.1's model"),
+                ('custom', 'My own GGUF file'))  # intelligence/models.CHOICES (a test keeps them the same)
 CAPTION_STYLES = (("classic", "Classic (word pop)"), ("kinetic", "Kinetic (pop, karaoke, keyword colours)"))
 APPEARANCES = (("dark", "Dark"), ("light", "Light"), ("system", "Match Windows"))
 
@@ -694,14 +700,21 @@ SCHEMA: list[Field] = [
     Field("gemini_polish_model", "Gemini model for polishing", "AI", "choice", choices=GEMINI_MODELS),
     Field("local_model", "Local AI model", "AI", "choice", choices=LOCAL_MODELS,
           help="Runs on this PC: free, private and offline once it's downloaded (from Hugging Face, once). 'Pick "
-               "for this PC' takes Mistral 7B when the graphics card has 8 GB or more, else Llama 3.2 3B, which "
-               "is also quick on a CPU"),
+               "for this PC' takes the biggest model that fits entirely on the graphics card: Qwen2.5 7B for 8 GB, "
+               "Mistral Nemo 12B for 12-16 GB, Qwen2.5 32B for 24 GB, else Llama 3.2 3B, which is also quick on "
+               "a CPU. A bigger model than that splits between the card and RAM: better picks, but slower"),
     Field("local_model_path", "Local model file (with 'My own GGUF file')", "AI", "file",
-          help="Any instruction-tuned GGUF model, such as Qwen or Gemma"),
+          help="Any instruction-tuned GGUF model, such as Qwen or Gemma. Its own header says how big it is, so "
+               "it's sized to the graphics card like the others"),
     Field("local_gpu", "Local AI on the graphics card", "AI", "bool",
-          help="Much faster. Uses Vulkan, so AMD, NVIDIA and Intel cards all work. Falls back to the CPU by itself"),
-    Field("local_context", "Local AI memory (tokens, 0 = the model's own)", "AI", "int", lo=0, hi=131072,
-          step=1024, help="How much transcript it reads at once. Longer videos are read in parts either way"),
+          help="Much faster. Uses Vulkan, so AMD, NVIDIA and Intel cards all work. If the card runs out of memory "
+               "or its driver fails, it carries on on the CPU by itself"),
+    Field("local_context", "Local AI memory (tokens, 0 = sized to this PC)", "AI", "int", lo=0, hi=131072,
+          step=1024, help="How much transcript it reads at once: up to 32,768 tokens (about an hour of talk) when "
+                          "the graphics card has room. Longer videos are read in parts either way"),
+    Field("local_gpu_layers", "Local AI layers on the graphics card (-1 = as many as fit)", "AI", "int", lo=-1,
+          hi=256, help="Leave at -1: ClipMonster and llama.cpp measure the free graphics memory and fit as many "
+                       "as they can. 0 runs it on the CPU only"),
     Field("ai_instructions", "What makes a good clip?", "AI", "text"),
     Field("ai_polish", "Polish clips with AI", "AI", "bool",
           help="One extra AI call per video, with a frame from each clip: writes a hook for the top banner and "

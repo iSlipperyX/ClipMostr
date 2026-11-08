@@ -745,7 +745,7 @@ class Engine:
         from .categories import find as find_category
 
         category = find_category(self.s, (p.meta.get("automation") or {}).get("category_id", ""))
-        topic = category.name if category else (clip.category or "")
+        topic = category.name if category else (getattr(clip, "topic", "") or clip.category or "")
         m = p.measurements
         try:
             with work_folder("edit-") as work:

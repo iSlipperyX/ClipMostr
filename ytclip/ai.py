@@ -121,7 +121,7 @@ def local_model_name(s) -> str:
     from .intelligence import hardware, models
 
     model, path = models.resolve(s, hardware.detect())
-    return model.label.split(" (")[0] if model else (path.name or "your GGUF model")
+    return model.name if model else (path.name or "your GGUF model")
 
 
 def local_ready(s) -> bool:
@@ -262,8 +262,8 @@ def _ask_local(s, system: str, content, schema: dict, max_tokens: int, log, chec
 
     try:
         # A small model writes less padding: a third of the cloud's room is plenty, and it fits the context.
-        reply = llama_engine.ask_json(s, system, content, schema, max_tokens=min(max_tokens, 6000), log=log,
-                                      check=check, progress=progress)
+        reply = llama_engine.ask_json(s, system, content, schema, max_tokens=min(max_tokens, 6000),
+                                      min_tokens=min(max_tokens, 1500), log=log, check=check, progress=progress)
     except llama_engine.LocalCutOff as exc:
         raise AICutOff(str(exc)) from exc
     except llama_engine.LocalAIError as exc:

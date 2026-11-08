@@ -88,6 +88,7 @@ def write_index(folder: Path, video: Video, clips: list[Clip], files: list[str],
             "reason": c.reason,
             "watch": watch_link(video, c.start),
             **({"hook": c.hook} if c.hook else {}),
+            **{k: getattr(c, k) for k in ("trigger", "pacing", "topic") if getattr(c, k, "")},
             **({"rating": c.rating, **({"rating_note": c.rating_note} if c.rating_note else {})} if c.rating else {}),
             **((details or [])[i - 1] if i <= len(details or []) else {}),
         }
