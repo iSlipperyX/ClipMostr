@@ -320,3 +320,92 @@ def test_a_pro_edited_clip_renders(tmp_path):
     assert out.duration == pytest.approx(edit.duration, abs=0.15)
     assert _audio_seconds(dest) == pytest.approx(edit.duration, abs=0.15)  # the sound runs to the end too
     assert _loudness(dest) == pytest.approx(-14.0, abs=1.0)
+
+
+def _brightness_per_frame(path: Path) -> np.ndarray:
+    raw = subprocess.run([ffmpeg_exe(), "-v", "error", "-i", str(path), "-vf", "scale=16:16,format=gray", "-f",
+                          "rawvideo", "-"], capture_output=True, check=True).stdout
+    return np.frombuffer(raw, np.uint8).reshape(-1, 256).mean(axis=1)
+
+
+def _loudness_per_frame(path: Path, fps: float) -> np.ndarray:
+    raw = subprocess.run([ffmpeg_exe(), "-v", "error", "-i", str(path), "-map", "0:a", "-ac", "1", "-ar", "48000",
+                          "-f", "f32le", "-"], capture_output=True, check=True).stdout
+    pcm = np.frombuffer(raw, np.float32)
+    n = int(48000 / fps)
+    return np.sqrt((pcm[:len(pcm) // n * n].reshape(-1, n) ** 2).mean(axis=1))
+
+
+def test_cuts_keep_picture_sound_and_captions_in_step(tmp_path):
+    """A source whose picture is white exactly while a word is spoken (a tone) and black between: after the
+    pauses and the filler are cut, every frame must still be white just when it's loud, and each caption
+    word must sit where its sound and picture landed."""
+    pytest.importorskip("cv2")
+    from ytclip.export import build_ass, export_clip
+    from ytclip.rendering import plan as edit_plan
+
+    words = [Word(0.5, 0.9, "One"), Word(1.0, 1.4, "two,"), Word(3.0, 3.4, "three"), Word(3.5, 3.9, "um"),
+             Word(4.03, 4.43, "four"), Word(6.27, 6.67, "five"), Word(6.8, 7.2, "six"), Word(8.9, 9.3, "seven.")]
+    spoken = "+".join(f"between(t,{w.start},{w.end})" for w in words)
+    src = tmp_path / "sync.mp4"
+    subprocess.run([ffmpeg_exe(), "-v", "error", "-y", "-f", "lavfi", "-i",
+                    f"color=black:size=320x240:rate=30:duration=10,"
+                    f"drawbox=x=0:y=0:w=iw:h=ih:color=white:t=fill:enable='{spoken}'",
+                    "-f", "lavfi", "-i", f"aevalsrc='0.4*sin(2*PI*440*t)*({spoken})':s=48000:d=10",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-g", "15", "-c:a", "aac",
+                    "-b:a", "192k", "-shortest", str(src)], check=True)
+    media = probe(src)
+    s = Settings(aspect="vertical_crop", cut_silences=True, cut_fillers=True, burn_captions=False,
+                 title_overlay=False, track_speaker=False, punch_zoom=False, slow_zoom=False, master_audio=False,
+                 normalize_audio=False, fades=False, hook_intro=False, lower_third=False, bleep_audio=False,
+                 encoder="libx264", broll_folder="", music_folder="")
+    clip = Clip(0.0, 10.0, 50, "In step")
+    edit = edit_plan.make(src, media, clip, words, s, tmp_path)
+    assert len(edit.spans) >= 4 and edit.duration < 10.0 - 4.0  # three long pauses and the "um" came out
+    assert [w.text for w in edit.words] == ["One", "two,", "three", "four", "five", "six", "seven."]
+    dest = tmp_path / "out.mp4"
+    export_clip(src, media, dest, clip, words, s, edit=edit)
+    bright = _brightness_per_frame(dest) > 128
+    loud = _loudness_per_frame(dest, edit.fps) > 0.05
+    n = min(len(bright), len(loud))
+    assert n >= int(edit.duration * edit.fps) - 2
+    # A frame half in a word can go either way, so each of the words' edges may disagree by one frame.
+    assert int(np.sum(bright[:n] != loud[:n])) <= 2 * len(edit.words)
+    # The captions follow the cut timeline: the words' own times say which frames are white and loud.
+    centres = (np.arange(n) + 0.5) / edit.fps
+    said = np.array([any(w.start <= t < w.end for w in edit.words) for t in centres])
+    assert int(np.sum(said != bright[:n])) <= 2 * len(edit.words)
+    assert int(np.sum(said != loud[:n])) <= 2 * len(edit.words)
+    for w in edit.words:
+        mid = int((w.start + w.end) / 2 * edit.fps)
+        assert bright[mid] and loud[mid], (w, mid)
+    ass = build_ass(edit.words, 0.0, edit.duration, 1080, 1920, s.copy(burn_captions=True))
+    assert ass.count("Dialogue: 0,") >= len(edit.words)
+
+
+@pytest.mark.parametrize("folder", ["Justyn's PC [test], 50% off; final", "a=b (copy) {x} #1 & more"])
+def test_captions_and_banners_burn_in_from_a_folder_with_any_name(tmp_path, monkeypatch, folder):
+    """ffmpeg's filter options treat : ' [ ] , ; = and \\ as syntax, so a path like C:\\Users\\Justyn's PC\\...
+    inside subtitles= would need each of them escaped, the drive letter's colon too. export.py names
+    each subtitles file relative to ffmpeg's working folder instead, so no folder name can break it."""
+    from ytclip.export import export_clip
+
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / folder))  # the work folder the export renders in
+    src = tmp_path / "src.mp4"
+    subprocess.run([ffmpeg_exe(), "-v", "error", "-y", "-f", "lavfi", "-i", "color=gray:size=640x360:rate=30:duration=3",
+                    "-f", "lavfi", "-i", "sine=frequency=220:duration=3:sample_rate=48000", "-c:v", "libx264",
+                    "-preset", "ultrafast", "-pix_fmt", "yuv420p", "-c:a", "aac", "-shortest", str(src)], check=True)
+    media = probe(src)
+    words = words_from("Every folder name works now", start=0.2, step=0.5)
+    clip = Clip(0.0, 3.0, 50, "Any folder")
+    s = Settings(aspect="vertical_crop", burn_captions=True, title_overlay=True, banner_top=True,
+                 banner_top_text="Part 1", encoder="libx264")
+    still, plain = tmp_path / "still.png", tmp_path / "plain.png"
+    export_clip(src, media, still, clip, words, s, still_at=1.0)
+    export_clip(src, media, plain, clip, words, s.copy(burn_captions=False, title_overlay=False, banner_top=False),
+                still_at=1.0)
+    drawn = _brightness_per_frame(still) - _brightness_per_frame(plain)
+    assert np.abs(drawn).max() > 3  # the captions, title and banner were drawn
+    dest = tmp_path / "clip.mp4"
+    export_clip(src, media, dest, clip, words, s)
+    assert probe(dest).duration == pytest.approx(3.0, abs=0.15)

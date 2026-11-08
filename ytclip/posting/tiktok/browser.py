@@ -21,6 +21,7 @@ from typing import Callable
 
 from ..config import Settings, cache_dir
 from ..store import Profile, TikTokVideo
+from . import upload_wait
 
 UPLOAD_URL = "https://www.tiktok.com/tiktokstudio/upload?from=upload&lang=en"
 LOGIN_URL = "https://www.tiktok.com/login"
@@ -632,31 +633,68 @@ class TikTokBrowser:
             self._set_switch("AI-generated content", True)
 
         step("Waiting for TikTok to finish processing…")
-        post = None
-        end = time.time() + 900
-        while time.time() < end:
-            self._check()
-            self._wait_for_captcha()
-            err = self.page.locator("text=/upload failed|couldn.t upload|unsupported file|file is too large/i")
-            if err.count() and err.first.is_visible():
-                raise BrowserError("TikTok rejected the file: " + (err.first.inner_text() or "upload failed").strip())
-            btn = self._post_button()
-            if btn.count():
-                b = btn.first
-                disabled = (b.get_attribute("disabled") is not None or b.get_attribute("aria-disabled") == "true"
-                            or b.get_attribute("data-disabled") == "true")
-                if not disabled and b.is_enabled():
-                    post = b
-                    break
-            self._sleep(1.5)
-        if not post:
-            raise BrowserError("TikTok didn't finish processing the video within 15 minutes.")
+        post = self._wait_until_postable(video, step)
 
         self._dismiss_popups()
         step("Posting…")
         post.scroll_into_view_if_needed()
         post.click()
         self._finish_post()
+
+    def _wait_until_postable(self, video: Path, step: Callable[[str], None]):
+        """Wait for the Post button, following the page's upload progress (upload_wait.py): a big file on a
+        slow connection gets as long as it keeps moving, a stuck upload stops after a few minutes, and a big
+        file's Post is only clicked once the upload is known to be done."""
+        try:
+            size = video.stat().st_size
+        except OSError:
+            size = 0
+        watch = upload_wait.UploadWatch(size, time.time(), stall_seconds=upload_wait.STALL_SECONDS)
+        if watch.big:
+            step(f"Sending {size / upload_wait.MB:.0f} MB to TikTok; a big file takes a while…")
+        while True:
+            now = time.time()
+            if watch.expired(now):
+                self.screenshot("upload-timeout")
+                raise BrowserError(f"TikTok didn't finish taking the video within {upload_wait.limit_for(size) / 60:.0f} "
+                                   "minutes.")
+            if watch.stalled(now):
+                self.screenshot("upload-stalled")
+                raise BrowserError(f"The upload to TikTok stopped at {watch.progress:.0f}% and hasn't moved for "
+                                   f"{watch.stall_seconds / 60:.0f} minutes. Check the internet connection, then "
+                                   "post it again.")
+            self._check()
+            self._wait_for_captcha()
+            err = self.page.locator("text=/upload failed|couldn.t upload|unsupported file|file is too large/i")
+            if err.count() and err.first.is_visible():
+                raise BrowserError("TikTok rejected the file: " + (err.first.inner_text() or "upload failed").strip())
+            btn = self._post_button()
+            enabled = False
+            if btn.count():
+                b = btn.first
+                disabled = (b.get_attribute("disabled") is not None or b.get_attribute("aria-disabled") == "true"
+                            or b.get_attribute("data-disabled") == "true")
+                enabled = not disabled and b.is_enabled()
+            state = self._upload_state()
+            watch.seen(now, state.get("pct"), bool(state.get("done")), enabled)
+            reached = watch.report()
+            if reached is not None and watch.big:
+                step(f"Uploading to TikTok: {reached}%…")
+            if watch.ready():
+                return btn.first
+            self._sleep(watch.delay)
+
+    def _upload_state(self) -> dict:
+        """The upload's progress as the page shows it: {"pct": 0-100 or None, "done": bool}."""
+        try:
+            got = self.page.evaluate(upload_wait.READ_PROGRESS)
+        except Exception:  # noqa: BLE001 - the page navigated or closed mid-read: no reading this time
+            return {}
+        if not isinstance(got, dict):
+            return {}
+        pct = got.get("pct")
+        return {"pct": float(pct) if isinstance(pct, (int, float)) and 0 <= pct <= 100 else None,
+                "done": bool(got.get("done"))}
 
     def _open_upload_page(self) -> None:
         self.page.goto(UPLOAD_URL, wait_until="domcontentloaded")

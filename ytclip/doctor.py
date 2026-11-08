@@ -311,6 +311,10 @@ def _whisper_speed(s: Settings) -> list[Check]:
     if why:
         return [Check("Whisper on the graphics card", WARN, f"Full power uses the CPU for Whisper: {why}",
                       "Settings → Speed → Try the graphics card again (after a driver update)")]
+    rest = whisper_cpp.rest_note()
+    if rest:
+        return [Check("Whisper on the graphics card", WARN, f"The graphics card is {rest}, so Whisper uses the CPU "
+                      "until then", "Nothing to do: it's tried again by itself (details in automation.log)")]
     return [Check("Whisper on the graphics card", GOOD, "Full power types out speech on the graphics card")]
 
 

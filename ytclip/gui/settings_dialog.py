@@ -119,13 +119,15 @@ class SettingsDialog(QDialog):
                 note.setProperty("muted", True)
                 page.layout().insertRow(0, note)
                 why = whisper_cpp.unavailable()
-                self._gpu_state = QLabel("Graphics card: " + ("ready (it's tried on the next video)" if not why
-                                                              else f"not used: {why}"))
+                rest = "" if why else whisper_cpp.rest_note()
+                self._gpu_state = QLabel("Graphics card: " + (f"not used: {why}" if why else
+                                                              f"{rest}; Whisper uses the CPU until then" if rest else
+                                                              "ready (it's tried on the next video)"))
                 self._gpu_state.setWordWrap(True)
                 row = QHBoxLayout()
                 again = QPushButton("Try the graphics card again")
                 again.setToolTip("After a graphics driver update, say: Whisper tries the card on the next video")
-                again.setVisible(bool(why) and whisper_cpp.binary() is not None)
+                again.setVisible(bool(why or rest) and whisper_cpp.binary() is not None)
                 again.clicked.connect(lambda: (whisper_cpp.forget_gpu_check(), again.hide(),
                                                self._gpu_state.setText("Graphics card: tried again on the next video")))
                 row.addWidget(self._gpu_state, 1)
