@@ -1011,8 +1011,12 @@ class PerformancePage(QWidget):
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
         ll.addWidget(_h2("Top videos (30 days)"))
-        self.top = QTableWidget(0, 4)
-        self.top.setHorizontalHeaderLabels(("Video", "Views", "Likes", "Posted"))
+        self.top = QTableWidget(0, 5)
+        self.top.setHorizontalHeaderLabels(("Video", "Views", "vs usual", "Likes", "Posted"))
+        self.top.horizontalHeaderItem(2).setToolTip(
+            "Views against this account's usual: the median of its videos from the last 30 days. ⚑ marks an "
+            "outlier, far above the rest (3 times the usual or more, and clear of how much the others vary): "
+            "worth another clip like it")
         QueuePage._table(self.top, stretch=0)
         self.top.itemDoubleClicked.connect(self._open_top)
         ll.addWidget(self.top, 1)
@@ -1120,14 +1124,24 @@ class PerformancePage(QWidget):
         self.insights.setText("  ".join(lines) if lines else
                               ("Stats read " + live.ago(now - p.fetched_at) + " ago." if p.fetched_at else
                                "No stats yet: they're read every few minutes once the account is logged in."))
-        vids = sorted((v for v in store.videos(a.id).values() if not v.create_time or now - v.create_time < 30 * 86400),
-                      key=lambda v: v.views, reverse=True)[:50]
+        recent = [v for v in store.videos(a.id).values() if not v.create_time or now - v.create_time < 30 * 86400]
+        vids = sorted(recent, key=lambda v: v.views, reverse=True)[:50]
+        usual, standouts = outlier_views(recent, now)
         self.top.setRowCount(len(vids))
         for r, v in enumerate(vids):
-            for c, text in enumerate((live.video_name(v), live.fmt(v.views), live.fmt(v.likes),
+            ratio = v.views / usual if usual else 0.0
+            vs = (("⚑ " if v.id in standouts else "") + f"×{ratio:.1f}") if usual else "–"
+            for c, text in enumerate((live.video_name(v), live.fmt(v.views), vs, live.fmt(v.likes),
                                       schedule.fmt_when(v.create_time, now) if v.create_time else "")):
                 cell = QTableWidgetItem(text)
                 cell.setData(Qt.UserRole, v.url)
+                if c == 2:
+                    cell.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    if v.id in standouts:
+                        cell.setForeground(QColor(theme.GOOD))
+                        cell.setToolTip(f"An outlier: {ratio:.1f} times this account's usual {live.fmt(usual)} views")
+                    elif usual:
+                        cell.setToolTip(f"{ratio:.1f} times this account's usual {live.fmt(usual)} views")
                 self.top.setItem(r, c, cell)
         self.feed.clear()
         for e in reversed(events[-200:]):
@@ -1140,4 +1154,17 @@ class PerformancePage(QWidget):
 
     def _open_top(self, cell) -> None:
         _open(cell.data(Qt.UserRole) or "")
+
+
+def outlier_views(videos, now: float) -> tuple[float, set[str]]:
+    """(the account's usual views: the median of these videos, the ids of the outliers). Only videos a day old
+    or more are compared: a newer one hasn't had its first day of views yet."""
+    from statistics import median
+
+    from ..analytics import outliers
+
+    settled = {v.id: v.views for v in videos if v.create_time and now - v.create_time >= 86400}
+    if len(settled) < 4:
+        return (median(settled.values()) if settled else 0.0), set()
+    return median(settled.values()), set(outliers(settled))
 

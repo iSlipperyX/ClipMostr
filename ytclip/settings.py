@@ -208,6 +208,8 @@ class Settings:
     research_alert: int = 75
     research_category_charts: bool = True  # also check the trending chart of each YouTube category your categories use
     research_hide_used: bool = True  # Research hides videos already picked, queued, clipped or sent
+    research_view: str = "matrix"  # Research shows: "matrix" (cards per cluster), "table" or "arbitrage"
+    research_hidden_columns: str = ""  # Research table columns hidden from its header menu, comma separated
     # Picking rules (policy.py): which researched videos may be clipped without asking
     pick_from: str = "watchlist"
     pick_languages: str = "en"  # only pick videos in these spoken languages (when YouTube knows it); "" = any

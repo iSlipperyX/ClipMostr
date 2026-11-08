@@ -308,7 +308,8 @@ def deep_from_info(info: dict) -> DeepInfo:
 
 # ---------------------------------------------------------------- history
 
-SNAPSHOTS = 16  # view counts kept per video
+SNAPSHOTS = 40  # view counts kept per video, thinned to cover the last day and a half (thin_snapshots)
+SNAPSHOT_SPAN = 36 * 3600
 FORGET_AFTER = 7 * 86400  # drop videos not seen on any chart for a week
 DEEP_FRESH = 6 * 3600  # re-check the heatmap after this long
 DEEP_RETRY = 3600  # a check that failed is tried again after this long, not on every scan
@@ -321,6 +322,17 @@ def _locked(fn):
         with self.lock:
             return fn(self, *args, **kwargs)
     return wrapper
+
+
+def thin_snapshots(snaps: list, now: float, keep: int = SNAPSHOTS) -> None:
+    """Keep at most `keep` view counts for a video without losing how far back they reach, so momentum
+    always has its day-long baseline (analytics.py) whatever the check interval: ones older than
+    SNAPSHOT_SPAN go (but the newest of those, the baseline's far end), then, one at a time, the one whose
+    neighbours are closest together, which leaves recent checks close together and older ones spread out."""
+    while len(snaps) > 2 and now - snaps[1][0] > SNAPSHOT_SPAN:
+        del snaps[0]
+    while len(snaps) > max(2, keep):
+        del snaps[min(range(1, len(snaps) - 1), key=lambda i: snaps[i + 1][0] - snaps[i - 1][0])]
 
 
 class History:
@@ -362,7 +374,7 @@ class History:
         v.sent = bool(rec.get("sent"))
         if not snaps or now - snaps[-1][0] >= 60:
             snaps.append([now, v.views])
-            del snaps[:-SNAPSHOTS]
+            thin_snapshots(snaps, now)
         rec["last_seen"] = now
         rec["title"] = v.title
 
