@@ -2,9 +2,9 @@
 
 After automation exports a video's clips (and every few minutes, in case the worker stopped in
 between), the clips listed in the Automation folder's clips.json files that the quality check passed
-come into the posting library, keeping the hook, the niche, the part series and where they came from.
-Each goes to the queue of the account its niche posts to (Niche.account_id). With one account,
-everything goes there. A clip whose niche has no account stays in the library, and the Queue tab
+come into the posting library, keeping the hook, the category, the part series and where they came from.
+Each goes to the queue of the account its category posts to (Category.account_id). With one account,
+everything goes there. A clip whose category has no account stays in the library, and the Queue tab
 says so.
 """
 
@@ -34,20 +34,20 @@ def take(store: Store, accounts: Accounts | list[Account], main, now: float | No
 
 
 def account_for(accounts: Accounts | list[Account], item: VideoItem, main=None) -> Account | None:
-    """The account a clip posts to: the one its niche names (at the time it was made, or now), else the
+    """The account a clip posts to: the one its category names (at the time it was made, or now), else the
     only account there is."""
     accounts = list(accounts)
     by_id = {a.id: a for a in accounts}
     if item.for_account in by_id:
         return by_id[item.for_account]
-    if main is not None and item.niche_id:
-        from .. import niches
+    if main is not None and item.category_id:
+        from .. import categories
 
-        niche = niches.find(main, item.niche_id)
-        if niche is not None and niche.account_id in by_id:
-            return by_id[niche.account_id]
-        if niche is not None and niche.account and not niche.account_id:  # a niche from before 3.0: "@name"
-            name = niche.account.strip().lstrip("@").lower()
+        category = categories.find(main, item.category_id)
+        if category is not None and category.account_id in by_id:
+            return by_id[category.account_id]
+        if category is not None and category.account and not category.account_id:  # a category from before 3.0: "@name"
+            name = category.account.strip().lstrip("@").lower()
             match = next((a for a in accounts if a.username and a.username.lower() == name), None)
             if match is not None:
                 return match
@@ -95,7 +95,7 @@ def assign(store: Store, accounts: Accounts | list[Account], items: list[VideoIt
 
 
 def unassigned(store: Store) -> list[VideoItem]:
-    """Automation's clips still waiting for an account (their niche has none): the Queue tab says so."""
+    """Automation's clips still waiting for an account (their category has none): the Queue tab says so."""
     with store.lock:
         return [i for i in store.items.values()
                 if i.imported_by == "auto" and i.status == "new" and not i.account and i.exists()]

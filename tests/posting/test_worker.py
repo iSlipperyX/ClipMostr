@@ -21,16 +21,16 @@ DAY = 86400.0
 class Main:
     """The bits of ClipMonster's Settings posting reads."""
 
-    def __init__(self, root: Path, niches=()):
+    def __init__(self, root: Path, categories=()):
         self.auto_output_path = root
-        self.niches = [dict(n) for n in niches]
+        self.categories = [dict(n) for n in categories]
 
 
-def niche(nid="n1", name="Pod", account_id="", account=""):
+def category(nid="n1", name="Pod", account_id="", account=""):
     return {"id": nid, "name": name, "account_id": account_id, "account": account}
 
 
-def setup(tmp_path, n_accounts=1, niches=(), automation=None, name="Pod/Talk [abc]"):
+def setup(tmp_path, n_accounts=1, categories=(), automation=None, name="Pod/Talk [abc]"):
     accs = Accounts.load()
     made = [accs.add("" if i == 0 else f"Acc {i}") for i in range(n_accounts)]
     for i, a in enumerate(made):
@@ -38,14 +38,14 @@ def setup(tmp_path, n_accounts=1, niches=(), automation=None, name="Pod/Talk [ab
     accs.save()
     root = tmp_path / "Automation"
     clipmonster_folder(tmp_path, name=name, automation=automation)
-    return accs, made, Main(root, niches), root
+    return accs, made, Main(root, categories), root
 
 
 # --- intake ---------------------------------------------------------------------------------
 
 
 def test_one_account_takes_every_finished_clip_with_its_facts(tmp_path):
-    accs, (a,), main, root = setup(tmp_path, automation={"niche": "Pod", "niche_id": "n1", "how": "trending",
+    accs, (a,), main, root = setup(tmp_path, automation={"category": "Pod", "category_id": "n1", "how": "trending",
                                                           "recipe": "Podcast"})
     store = Store(tmp_path / "lib.json")
     items, got = intake.take(store, accs, main)
@@ -58,55 +58,55 @@ def test_one_account_takes_every_finished_clip_with_its_facts(tmp_path):
     assert intake.take(store, accs, main) == ([], {})  # nothing twice
 
 
-def test_each_niche_posts_to_its_own_account(tmp_path):
-    accs, (a, b), _, root = setup(tmp_path, 2, automation={"niche": "Games", "niche_id": "g",
+def test_each_category_posts_to_its_own_account(tmp_path):
+    accs, (a, b), _, root = setup(tmp_path, 2, automation={"category": "Games", "category_id": "g",
                                                              "account_id": "", "account": ""})
-    main = Main(root, [niche("g", "Games", account_id=b.id)])
+    main = Main(root, [category("g", "Games", account_id=b.id)])
     store = Store(tmp_path / "lib.json")
     items, got = intake.take(store, accs, main)
     assert got == {b.id: 2} and all(i.account == b.id for i in items)
 
 
-def test_the_account_saved_with_the_clip_wins_over_the_niche_now(tmp_path):
-    accs, (a, b), _, root = setup(tmp_path, 2, automation={"niche_id": "g", "account_id": "x"})
-    # account_id "x" no longer exists: falls back to the niche's account
-    main = Main(root, [niche("g", "Games", account_id=a.id)])
+def test_the_account_saved_with_the_clip_wins_over_the_category_now(tmp_path):
+    accs, (a, b), _, root = setup(tmp_path, 2, automation={"category_id": "g", "account_id": "x"})
+    # account_id "x" no longer exists: falls back to the category's account
+    main = Main(root, [category("g", "Games", account_id=a.id)])
     store = Store(tmp_path / "lib.json")
     assert intake.take(store, accs, main)[1] == {a.id: 2}
 
 
-def test_a_niche_from_before_3_0_matches_by_username(tmp_path):
-    accs, (a, b), _, root = setup(tmp_path, 2, automation={"niche_id": "g"})
-    main = Main(root, [niche("g", "Games", account="@USER1")])
+def test_a_category_from_before_3_0_matches_by_username(tmp_path):
+    accs, (a, b), _, root = setup(tmp_path, 2, automation={"category_id": "g"})
+    main = Main(root, [category("g", "Games", account="@USER1")])
     store = Store(tmp_path / "lib.json")
     assert intake.take(store, accs, main)[1] == {b.id: 2}
 
 
-def test_clips_wait_when_their_niche_has_no_account(tmp_path):
-    accs, (a, b), _, root = setup(tmp_path, 2, automation={"niche_id": "g"})
-    main = Main(root, [niche("g", "Games")])
+def test_clips_wait_when_their_category_has_no_account(tmp_path):
+    accs, (a, b), _, root = setup(tmp_path, 2, automation={"category_id": "g"})
+    main = Main(root, [category("g", "Games")])
     store = Store(tmp_path / "lib.json")
     items, got = intake.take(store, accs, main)
     assert got == {} and len(intake.unassigned(store)) == 2
-    from ytclip import niches
+    from ytclip import categories
 
-    s = type("S", (), {"niches": [niche("g", "Games", account_id=b.id)]})()
-    assert niches.find(s, "g").account_id == b.id
+    s = type("S", (), {"categories": [category("g", "Games", account_id=b.id)]})()
+    assert categories.find(s, "g").account_id == b.id
 
 
-def test_niches_follow_their_accounts(tmp_path):
-    from ytclip import niches
+def test_categories_follow_their_accounts(tmp_path):
+    from ytclip import categories
 
     accs, (a, b), _, _ = setup(tmp_path, 2)
     s = type("S", (), {})()
-    s.niches = [niche("g", "Games", account="@user1"), niche("p", "Pod", account_id=a.id),
-                niche("x", "Gone", account_id="deleted", account="@old")]
-    assert niches.link_accounts(s, accs)
-    by = {n.id: n for n in niches.load(s)}
+    s.categories = [category("g", "Games", account="@user1"), category("p", "Pod", account_id=a.id),
+                category("x", "Gone", account_id="deleted", account="@old")]
+    assert categories.link_accounts(s, accs)
+    by = {n.id: n for n in categories.load(s)}
     assert by["g"].account_id == b.id and by["g"].account == "@user1"
     assert by["p"].account == "@user0"
     assert by["x"].account_id == "" and by["x"].account == "@old"
-    assert not niches.link_accounts(s, accs)
+    assert not categories.link_accounts(s, accs)
 
 
 def test_parts_of_a_series_queue_together_in_order(tmp_path):
@@ -176,7 +176,7 @@ def test_the_video_folder_goes_once_its_last_clip_is_cleared(tmp_path):
     s = Settings(records_folder=str(tmp_path / "Records"))
     r = records.finish(store, accs, s, [root], now=now)
     assert r.cleaned == 2 and not folder.exists()
-    assert folder.parent.exists() and root.exists()  # the niche folder ("Pod") and Automation stay
+    assert folder.parent.exists() and root.exists()  # the category folder ("Pod") and Automation stay
 
 
 def test_a_post_never_seen_on_the_profile_keeps_its_files(tmp_path):
@@ -368,3 +368,119 @@ def test_a_window_without_the_background_worker_only_does_what_it_is_asked(tmp_p
     svc.start()
     svc.tick()
     assert fake.posted == [] and not svc.store.items  # no intake, no posting
+
+
+# ---------------------------------------------------------------- the sign-in check (3.2)
+
+
+def _signed_in(tmp_path, clock):
+    accs, (a,), main, root = setup(tmp_path)
+    a.username, a.logged_in = "user0", True
+    accs.save()
+    svc, fake = worker(tmp_path, clock, accs, main)
+    svc.read_fn = lambda *a_, **k: (_ for _ in ()).throw(AssertionError("no stats reading in these tests"))
+    for acc in svc.accounts:
+        acc.live = False
+    toasts = []
+    svc.notify_fn = lambda handle, aid: toasts.append((handle, aid)) or True
+    return svc, svc.accounts.get(a.id), toasts
+
+
+def test_each_signed_in_account_is_checked_every_six_hours(tmp_path, clock):
+    from ytclip.posting.service import SESSION_EVERY
+
+    svc, a, toasts = _signed_in(tmp_path, clock)
+    seen = []
+    svc.session_fn = lambda s, acc, log, cancelled: seen.append(acc.id) or (True, "Studio opened signed in.")
+    assert svc.session_due().id == a.id
+    assert svc.session_check() and seen == [a.id]
+    assert (a.session_check, a.logged_in) == ("ok", True) and a.session_checked_at == clock[0]
+    assert svc.session_due() is None and not svc.session_check()
+    clock[0] += SESSION_EVERY - 60
+    assert svc.session_due() is None
+    clock[0] += 120
+    assert svc.session_due().id == a.id and toasts == []
+
+
+def test_a_sign_in_that_ran_out_says_so_with_a_button_to_sign_in_again(tmp_path, clock):
+    svc, a, toasts = _signed_in(tmp_path, clock)
+    svc.session_fn = lambda s, acc, log, cancelled: (False, "TikTok Studio sent it to the login page.")
+    assert svc.session_check()
+    assert not a.logged_in and a.session_check == "expired" and "login page" in a.session_detail
+    assert toasts == [("@user0", a.id)]
+    feed = live.EventLog(a.id, tmp_path / "live")
+    feed.load()
+    e = feed.events[-1]
+    assert e.kind == "login_needed" and e.alert and e.toasted and "needs signing in again" in e.text
+    assert svc.session_due() is None  # not signed in: nothing to check until it is again
+
+
+def test_a_check_that_cant_tell_tries_again_in_an_hour_and_changes_nothing(tmp_path, clock):
+    from ytclip.posting.service import SESSION_RETRY
+
+    svc, a, toasts = _signed_in(tmp_path, clock)
+    svc.session_fn = lambda s, acc, log, cancelled: (None, "TikTok Studio didn't load: offline")
+    assert svc.session_check()
+    assert a.logged_in and a.session_check == "unknown" and toasts == []
+    assert svc.session_due() is None
+    clock[0] += SESSION_RETRY + 1
+    assert svc.session_due().id == a.id
+
+
+def test_a_browser_that_wont_start_counts_as_cant_tell(tmp_path, clock):
+    svc, a, toasts = _signed_in(tmp_path, clock)
+
+    def broken(*_a):
+        raise RuntimeError("This account's TikTok browser window is already open.")
+
+    svc.session_fn = broken
+    assert svc.session_check() and a.logged_in and a.session_check == "unknown" and "already open" in a.session_detail
+
+
+def test_the_check_waits_for_a_post_that_is_due(tmp_path, clock):
+    svc, a, toasts = _signed_in(tmp_path, clock)
+    a.first_post_time, a.last_post_time, a.warm_up_start = "00:00", "23:59", 0.0
+    svc.intake()
+    jobs.replan(svc.store, svc.accounts, svc.s, clock[0])
+    clock[0] = jobs.next_post(svc.store, a.id).planned_at
+    svc.session_fn = lambda *_a: (_ for _ in ()).throw(AssertionError("posting comes first"))
+    assert not svc.session_check()
+
+
+def test_making_a_new_account_opens_tiktoks_sign_up_page_and_warms_it_up(tmp_path, clock, monkeypatch):
+    from ytclip.posting import service as service_mod
+    from ytclip.posting.tiktok import browser as browser_mod
+    from ytclip.posting.tiktok import login as login_mod
+
+    accs, (a,), main, root = setup(tmp_path)
+    svc, fake = worker(tmp_path, clock, accs, main)
+    opened = []
+    monkeypatch.setattr(login_mod, "login_window", lambda s, d, log, cancelled, finish, url: opened.append(url) or True)
+
+    class Browser:
+        def __init__(self, *a_, **k):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def logged_in(self):
+            return True
+
+        def whoami(self):
+            return "brandnew"
+
+    monkeypatch.setattr(browser_mod, "TikTokBrowser", Browser)
+    svc.refresh_fn = lambda *a_, **k: None
+    acc = svc.accounts.get(a.id)
+    acc.warm_up_start = 0.0
+    out = service_mod._login(svc, acc, lambda m: None, lambda: False, lambda: False, mode="create")
+    assert opened == [login_mod.SIGNUP_URL] and "@brandnew" in out
+    assert acc.logged_in and acc.onboarded == "create" and acc.warm_up_start and acc.session_check == "ok"
+    opened.clear()
+    acc.warm_up_start = 0.0
+    service_mod._login(svc, acc, lambda m: None, lambda: False, lambda: False)
+    assert opened == [login_mod.LOGIN_URL] and acc.warm_up_start == 0.0 and acc.onboarded == "create"

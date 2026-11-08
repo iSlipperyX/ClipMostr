@@ -61,7 +61,7 @@ class Outcome:
     score: float | None = None  # ClipMonster's clip score
     posted_at: float = 0.0
     account: str = ""
-    niche: str = ""  # id of the ClipMonster niche the clip was made for (see for_settings)
+    category_id: str = ""  # id of the ClipMonster category the clip was made for (see for_settings)
 
     @classmethod
     def from_json(cls, d: dict) -> "Outcome | None":
@@ -78,7 +78,7 @@ class Outcome:
                    rating=int(rating) if isinstance(rating, (int, float)) else None,
                    score=float(score) if isinstance(score, (int, float)) else None,
                    posted_at=float(d.get("posted_at") or 0), account=str(d.get("account") or ""),
-                   niche=str(d.get("niche") or ""))
+                   category_id=str(d.get("category_id") or d.get("niche") or ""))
 
 
 @dataclass
@@ -156,10 +156,10 @@ class Lessons:
     # --------------------------------------------------------------- for the AI polish
 
     def hook_examples(self, count: int = 3,
-                      niche: str = "") -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
-        """(hooks that worked, hooks that flopped) as (hook, lift), best and worst first. For a niche,
+                      category_id: str = "") -> tuple[list[tuple[str, float]], list[tuple[str, float]]]:
+        """(hooks that worked, hooks that flopped) as (hook, lift), best and worst first. For a category,
         its own posts once there are enough of them (what works differs between accounts), else all."""
-        hooked = self._hooked(niche)
+        hooked = self._hooked(category_id)
         if len(hooked) < MIN_EXAMPLES:
             return [], []
         ranked = sorted(hooked, key=lambda o: o.lift, reverse=True)
@@ -167,17 +167,17 @@ class Lessons:
         bad = [(o.hook, o.lift) for o in reversed(ranked) if o.lift <= 0.6][:count]
         return good, bad
 
-    def _hooked(self, niche: str = "") -> list[Outcome]:
+    def _hooked(self, category_id: str = "") -> list[Outcome]:
         hooked = [o for o in self.outcomes if o.hook]
-        own = [o for o in hooked if niche and o.niche == niche]
+        own = [o for o in hooked if category_id and o.category_id == category_id]
         return own if len(own) >= MIN_EXAMPLES else hooked
 
-    def prompt_text(self, niche: str = "") -> str:
+    def prompt_text(self, category_id: str = "") -> str:
         """A paragraph for the polish prompt, or "" when there isn't enough to go on."""
-        good, bad = self.hook_examples(niche=niche)
+        good, bad = self.hook_examples(category_id=category_id)
         if not good and not bad:
             return ""
-        if niche and any(o.niche != niche for o in self._hooked(niche)):  # too few of its own yet
+        if category_id and any(o.category_id != category_id for o in self._hooked(category_id)):  # too few of its own yet
             lines = ["How earlier hooks did on your TikTok accounts (views compared with each account's usual):"]
         else:
             lines = ["How earlier hooks did on this TikTok account (views compared with the account's usual):"]
@@ -235,15 +235,15 @@ class Lessons:
 
 def for_settings(s) -> Lessons | None:
     """The lessons to use with these settings: None when learning from results is off. A post
-    without its niche (from before posting carried it) gets it from picks.json (the niche each video
+    without its category (from before posting carried it) gets it from picks.json (the category each video
     was picked for)."""
     if not getattr(s, "learn_from_results", False):
         return None
     lessons = Lessons.load()
-    if any(not o.niche for o in lessons.outcomes):
-        from .policy import PickLog, picks_path
+    if any(not o.category_id for o in lessons.outcomes):
+        from .policy import PickLog, pick_category, picks_path
 
-        picked = {p["id"]: str(p.get("niche") or "") for p in PickLog(picks_path()).picks}
+        picked = {p["id"]: pick_category(p) for p in PickLog(picks_path()).picks}
         for o in lessons.outcomes:
-            o.niche = o.niche or picked.get(o.video_id, "")
+            o.category_id = o.category_id or picked.get(o.video_id, "")
     return lessons

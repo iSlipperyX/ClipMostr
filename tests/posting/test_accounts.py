@@ -50,11 +50,11 @@ def test_a_fresh_install_has_no_accounts_until_one_is_added():
 
 def test_accounts_round_trip():
     accs, a, b = two_accounts()
-    b.username, b.niche = "second_one", "gaming"
+    b.username, b.audience = "second_one", "gaming"
     accs.save()
     again = Accounts.load()
     assert again.ids() == [a.id, b.id]
-    assert again.get(b.id).username == "second_one" and again.get(b.id).niche == "gaming"
+    assert again.get(b.id).username == "second_one" and again.get(b.id).audience == "gaming"
     assert again.find_username("@SECOND_ONE").id == b.id
     assert again.find_username("second_one", exclude=b.id) is None
     assert (app_dir() / "accounts.json").is_file()
@@ -116,10 +116,10 @@ def test_an_account_removed_in_the_window_stays_removed():
 
 def test_apply_lays_account_values_over_app_settings():
     s = Settings(posts_per_day=3, default_hashtags="#fyp", caption_template="{caption} | {hashtags}")
-    a = Account(posts_per_day=7, default_hashtags="#gaming", default_privacy="private", niche="speedruns",
+    a = Account(posts_per_day=7, default_hashtags="#gaming", default_privacy="private", audience="speedruns",
                 autopilot=True, logged_in=True)
     t = a.apply(s)
-    assert (t.posts_per_day, t.default_hashtags, t.default_privacy, t.ai_niche) == (7, "#gaming", "private", "speedruns")
+    assert (t.posts_per_day, t.default_hashtags, t.default_privacy, t.ai_audience) == (7, "#gaming", "private", "speedruns")
     assert t.autopilot and t.browser_logged_in
     assert t.caption_template == "{caption} | {hashtags}"  # app-wide settings are kept
     assert s.posts_per_day == 3  # the original isn't changed

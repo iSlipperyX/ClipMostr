@@ -10,7 +10,7 @@ pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)  # no Qt or no di
 from PySide6.QtCore import Qt  # noqa: E402
 from PySide6.QtWidgets import QMessageBox  # noqa: E402
 
-from ytclip import cleanup, niches  # noqa: E402
+from ytclip import cleanup, categories  # noqa: E402
 from ytclip.jobs import Job, JobDB  # noqa: E402
 from ytclip.settings import Settings  # noqa: E402
 
@@ -30,32 +30,58 @@ class Host:
         self.settings = self.settings.apply({name: value})
 
 
+@pytest.fixture(autouse=True)
+def new_category_answers(monkeypatch):
+    """"New category" asks for a name and an account first: here it takes the name it suggests and the
+    first account (made if there's none), as pressing Create straight away would."""
+    from ytclip.gui import categories_tab
+    from ytclip.posting.accounts import Accounts
+
+    def exec_(dlg):
+        if dlg.account.findData("") >= 0 and not any(dlg.account.itemData(i) not in ("", None, dlg.account.itemData(
+                dlg.account.count() - 1)) for i in range(dlg.account.count())):
+            accs = Accounts.load()
+            a = accs.add("")
+            a.username = "first"
+            accs.save()
+            dlg._fill("")
+        first = next(i for i in range(dlg.account.count())
+                     if dlg.account.itemData(i) not in ("", None, categories_tab.Categories.ADD_ACCOUNT))
+        dlg.account.setCurrentIndex(first)
+        dlg._check()
+        assert dlg.buttons.button(dlg.buttons.StandardButton.Ok).isEnabled()
+        return 1
+
+    monkeypatch.setattr(categories_tab.NewCategoryDialog, "exec", exec_)
+
+
 def _tab(app, tmp_path, **overrides):
-    from ytclip.gui.niches import Niches
+    from ytclip.gui.categories_tab import Categories
 
     host = Host(**overrides)
     db = JobDB(tmp_path / "jobs.db")
-    tab = Niches(host.get, host.change, db)
+    tab = Categories(host.get, host.change, db)
     notices = []
     tab.notice.connect(notices.append)
     return tab, host, db, notices
 
 
-def test_first_niche_takes_the_channel_list_along(app, tmp_path):
+def test_first_category_takes_the_channel_list_along(app, tmp_path):
     tab, host, _, notices = _tab(app, tmp_path, pick_channels="@Pod # ok", pick_searches="cats")
     assert tab.split.isHidden() and not tab.empty.isHidden()
-    assert "move into the first niche" in tab.empty_text.text()
+    assert "move into the first category" in tab.empty_text.text()
     tab.add()
-    [n] = niches.load(host.settings)
-    assert n.name == "My first niche" and n.channels == "@Pod # ok" and n.searches == "cats"
+    [n] = categories.load(host.settings)
+    assert n.name == "My first category" and n.channels == "@Pod # ok" and n.searches == "cats"
     assert host.settings.pick_channels == "" and host.settings.pick_searches == ""
     assert "channel list" in notices[0]
-    assert not tab.split.isHidden() and tab.name.text() == "My first niche"
+    assert not tab.split.isHidden() and tab.name.text() == "My first category"
+    assert n.account_id and n.account == "@first" and n.on  # made with its account
     tab.add()
-    assert [x.name for x in niches.load(host.settings)] == ["My first niche", "New niche"]
+    assert [x.name for x in categories.load(host.settings)] == ["My first category", "New category"]
 
 
-def test_editing_a_niche_saves_it(app, tmp_path):
+def test_editing_a_category_saves_it(app, tmp_path):
     tab, host, _, _ = _tab(app, tmp_path)
     tab.add()
     tab.name.setText("Gaming")
@@ -74,17 +100,17 @@ def test_editing_a_niche_saves_it(app, tmp_path):
     tab.channels.setPlainText("@GameChan")
     tab.searches.setPlainText("minecraft highlights")
     tab.keywords.setText("fortnite")
-    gaming = next(i for i in range(tab.categories.count()) if tab.categories.item(i).data(Qt.UserRole) == "20")
-    tab.categories.item(gaming).setCheckState(Qt.Checked)
+    gaming = next(i for i in range(tab.yt_categories.count()) if tab.yt_categories.item(i).data(Qt.UserRole) == "20")
+    tab.yt_categories.item(gaming).setCheckState(Qt.Checked)
     tab.preset.setCurrentIndex(tab.preset.findData("Gaming / action"))
     tab.preset.activated.emit(tab.preset.currentIndex())
     tab.view.setCurrentIndex(tab.view.findData("Gameplay below"))
     tab.view.activated.emit(tab.view.currentIndex())
     tab.instructions.setPlainText("clutch plays")
     tab.enabled.setChecked(False)
-    [n] = niches.load(host.settings)
+    [n] = categories.load(host.settings)
     assert n.account_id == acc.id
-    assert (n.name, n.account, n.daily, n.channels, n.searches, n.keywords, n.categories) == (
+    assert (n.name, n.account, n.daily, n.channels, n.searches, n.keywords, n.yt_categories) == (
         "Gaming", "@gameclips", 4, "@GameChan", "minecraft highlights", "fortnite", "20")
     assert (n.preset, n.view, n.instructions, n.enabled) == ("Gaming / action", "Gameplay below", "clutch plays",
                                                              False)
@@ -93,52 +119,102 @@ def test_editing_a_niche_saves_it(app, tmp_path):
 
 def test_text_still_being_typed_is_saved_before_settings_are_copied(app, tmp_path):
     """Opening Settings with Ctrl+, (or closing the app) mustn't lose a name or folder mid-edit."""
-    tab, host, _, _ = _tab(app, tmp_path, niches=[{"id": "a", "name": "Gaming"}])
+    tab, host, _, _ = _tab(app, tmp_path, categories=[{"id": "a", "name": "Gaming", "account_id": "acc1"}])
     tab.name.setText("Games")  # typed, but the box hasn't been left yet
     tab.stack_folder.setText("D:/gameplay")
     tab.commit()
-    [n] = niches.load(host.settings)
+    [n] = categories.load(host.settings)
     assert (n.name, n.stack_folder) == ("Games", "D:/gameplay")
 
 
-def test_add_an_account_from_the_niche(app, tmp_path):
-    tab, *_ = _tab(app, tmp_path, niches=[{"id": "a", "name": "Gaming"}])
+def test_add_an_account_from_the_category(app, tmp_path):
+    from ytclip.posting.accounts import Accounts
+
+    tab, host, _, _ = _tab(app, tmp_path, categories=[{"id": "a", "name": "Gaming"}])
+    assert tab.account.itemText(0).startswith("No accounts yet") and tab.account.currentData() == ""
     asked = []
-    tab.add_account.connect(lambda: asked.append(1))
-    assert tab.account.itemText(0).startswith("No account yet")
+
+    def wizard(parent, category_id):  # the account wizard adds and signs in an account
+        asked.append(category_id)
+        accs = Accounts.load()
+        a = accs.add("")
+        a.username, a.logged_in = "newone", True
+        accs.save()
+        return a.id
+
+    tab.onboard = wizard
     i = tab.account.findData(tab.ADD_ACCOUNT)
     tab.account.setCurrentIndex(i)
     tab.account.activated.emit(i)
-    assert asked == [1] and tab.account.currentIndex() == 0
+    [n] = categories.load(host.settings)
+    assert asked == ["a"] and n.account == "@newone" and n.on and tab.account.currentData() == n.account_id
+
+
+def test_a_category_without_an_account_is_held_and_says_so(app, tmp_path):
+    from ytclip.posting.accounts import Accounts
+
+    accs = Accounts.load()
+    a = accs.add("")
+    a.username = "gameclips"
+    accs.save()
+    tab, host, _, _ = _tab(app, tmp_path, categories=[{"id": "a", "name": "Gaming", "channels": "@G"}])
+    assert tab.account.itemText(0) == "⚠ Pick an account" and tab.account.currentData() == ""
+    assert "needs an account" in tab.list.item(0).text() and "Needs an account" in tab.list.item(0).text()
+    assert "need" in tab.warnings.text() and "Pick one" in tab.warnings.text()
+    assert categories.active(host.settings) == [] and categories.paused_ids(host.settings) == {"a"}
+    i = tab.account.findData(a.id)
+    tab.account.setCurrentIndex(i)
+    tab.account.activated.emit(i)
+    [n] = categories.active(host.settings)
+    assert n.account == "@gameclips" and "need" not in tab.warnings.text()
+
+
+def test_a_new_category_needs_a_name_and_an_account(app, tmp_path):
+    from ytclip.gui.categories_tab import NewCategoryDialog
+    from ytclip.posting.accounts import Accounts
+
+    dlg = NewCategoryDialog("New category", lambda: list(Accounts.load()), [], lambda _cid: "")
+    ok = dlg.buttons.button(dlg.buttons.StandardButton.Ok)
+    assert not ok.isEnabled() and "account" in dlg.problem.text()
+    accs = Accounts.load()
+    a = accs.add("")
+    a.username = "one"
+    accs.save()
+    dlg._fill("")
+    dlg.account.setCurrentIndex(dlg.account.findData(a.id))
+    dlg._check()
+    assert ok.isEnabled() and dlg.account_id() == a.id
+    dlg.name_edit.setText("  ")
+    assert not ok.isEnabled() and "name" in dlg.problem.text()
 
 
 def test_names_must_be_there_and_be_different(app, tmp_path):
-    tab, host, _, notices = _tab(app, tmp_path, niches=[{"id": "a", "name": "Gaming"}, {"id": "b", "name": "Pods"}])
+    tab, host, _, notices = _tab(app, tmp_path, categories=[{"id": "a", "name": "Gaming", "account_id": "acc1"}, {"id": "b", "name": "Pods", "account_id": "acc1"}])
     tab.list.setCurrentRow(1)
     tab.name.setText("gaming")
     tab.name.editingFinished.emit()
-    assert tab.name.text() == "Pods" and "already a niche called gaming" in notices[-1]
+    assert tab.name.text() == "Pods" and "already a category called gaming" in notices[-1]
     tab.name.setText("   ")
     tab.name.editingFinished.emit()
-    assert tab.name.text() == "Pods" and [n.name for n in niches.load(host.settings)] == ["Gaming", "Pods"]
+    assert tab.name.text() == "Pods" and [n.name for n in categories.load(host.settings)] == ["Gaming", "Pods"]
 
 
 def test_renaming_keeps_the_id_and_says_where_old_clips_are(app, tmp_path):
-    tab, host, _, notices = _tab(app, tmp_path, niches=[{"id": "a", "name": "Gaming"}],
+    tab, host, _, notices = _tab(app, tmp_path, categories=[{"id": "a", "name": "Gaming", "account_id": "acc1"}],
                                  auto_output_dir=str(tmp_path / "auto"))
     (tmp_path / "auto" / "Gaming").mkdir(parents=True)
     (tmp_path / "auto" / "Gaming" / "clip.mp4").write_bytes(b"x")
     tab.name.setText("Games")
     tab.name.editingFinished.emit()
-    assert niches.find(host.settings, "a").name == "Games"
+    assert categories.find(host.settings, "a").name == "Games"
     assert "clips already made stay in" in notices[-1]
 
 
 def test_warnings_point_out_problems(app, tmp_path):
-    tab, host, _, _ = _tab(app, tmp_path, pick_daily=2, niches=[
-        {"id": "a", "name": "Gaming", "daily": 3, "channels": "@Same\nnot a channel!", "searches": "cats"},
-        {"id": "b", "name": "Pods", "daily": 2, "channels": "@same", "searches": "Cats"},
-        {"id": "c", "name": "Empty"}])
+    tab, host, _, _ = _tab(app, tmp_path, pick_daily=2, categories=[
+        {"id": "a", "name": "Gaming", "account_id": "acc1", "daily": 3, "channels": "@Same\nnot a channel!", "searches": "cats"},
+        {"id": "b", "name": "Pods", "account_id": "acc1", "daily": 2, "channels": "@same", "searches": "Cats"},
+        {"id": "c", "name": "Empty", "account_id": "acc1"}])
     text = tab.warnings.text()
     assert "add up to 7 videos a day, but at most 2" in text and "raise:7" in text
     assert "No YouTube" not in text and "YouTube Data API key" in text
@@ -151,115 +227,115 @@ def test_warnings_point_out_problems(app, tmp_path):
 
 
 def test_the_list_shows_how_today_is_going(app, tmp_path):
-    tab, host, db, _ = _tab(app, tmp_path, niches=[{"id": "a", "name": "Gaming", "daily": 3, "channels": "@G"}])
-    db.add(Job("q", "u", niche="a", status="queued"), time.time())
-    db.add(Job("d", "u", niche="a", status="done", clips=6), time.time())
+    tab, host, db, _ = _tab(app, tmp_path, categories=[{"id": "a", "name": "Gaming", "account_id": "acc1", "daily": 3, "channels": "@G"}])
+    db.add(Job("q", "u", category_id="a", status="queued"), time.time())
+    db.add(Job("d", "u", category_id="a", status="done", clips=6), time.time())
     tab._refresh_stats()
     assert "Today 0/3 · 1 waiting · 6 clips this week" in tab.list.item(0).text()
-    assert "1 niche · 0 picked today · up to 3 a day" in tab.summary.text()
+    assert "1 category · 0 picked today · up to 3 a day" in tab.summary.text()
 
 
 def test_deleting_takes_its_waiting_videos_out_of_the_queue(app, tmp_path, monkeypatch):
-    tab, host, db, _ = _tab(app, tmp_path, niches=[{"id": "a", "name": "Gaming", "channels": "@G"},
-                                                   {"id": "b", "name": "Pods", "channels": "@P", "searches": "talk"}])
-    db.add(Job("q", "u", niche="a", status="queued"), NOW)
-    db.add(Job("w", "u", niche="a", status="working"), NOW)
+    tab, host, db, _ = _tab(app, tmp_path, categories=[{"id": "a", "name": "Gaming", "account_id": "acc1", "channels": "@G"},
+                                                   {"id": "b", "name": "Pods", "account_id": "acc1", "channels": "@P", "searches": "talk"}])
+    db.add(Job("q", "u", category_id="a", status="queued"), NOW)
+    db.add(Job("w", "u", category_id="a", status="working"), NOW)
     asked = []
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: (asked.append(a[2]), QMessageBox.Yes)[1])
     tab.delete()
     assert "Its 1 video waiting to be clipped comes out of the queue" in asked[0]
     assert db.get("q") is None and db.get("w") is not None
-    assert [n.name for n in niches.load(host.settings)] == ["Pods"] and tab.name.text() == "Pods"
+    assert [n.name for n in categories.load(host.settings)] == ["Pods"] and tab.name.text() == "Pods"
     tab.delete()  # the last one: its sources go back to the channel list
-    assert "It's your last niche" in asked[1]
-    assert niches.load(host.settings) == [] and host.settings.pick_channels == "@P"
+    assert "It's your last category" in asked[1]
+    assert categories.load(host.settings) == [] and host.settings.pick_channels == "@P"
     assert host.settings.pick_searches == "talk" and not tab.empty.isHidden()
 
 
-def test_saying_no_keeps_the_niche(app, tmp_path, monkeypatch):
-    tab, host, _, _ = _tab(app, tmp_path, niches=[{"id": "a", "name": "Gaming"}])
+def test_saying_no_keeps_the_category(app, tmp_path, monkeypatch):
+    tab, host, _, _ = _tab(app, tmp_path, categories=[{"id": "a", "name": "Gaming", "account_id": "acc1"}])
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.No)
     tab.delete()
-    assert len(niches.load(host.settings)) == 1
+    assert len(categories.load(host.settings)) == 1
 
 
 # ---------------------------------------------------------------- other tabs
 
 
-def test_research_shows_and_filters_by_niche(app):
-    from ytclip.gui.research import NICHE_COLUMN, Research
+def test_research_shows_and_filters_by_category(app):
+    from ytclip.gui.research import CATEGORY_COLUMN, Research
     from ytclip.research import ScanResult
     from ytclip.trending import video_from_api
 
     host = Host(youtube_api_key="k", pick_from="any", pick_min_score=0,
-                niches=[{"id": "g", "name": "Gaming", "keywords": "gaming"}])
+                categories=[{"id": "g", "name": "Gaming", "account_id": "acc1", "keywords": "gaming"}])
     tab = Research(host.get, host.change)
     videos = [video_from_api(api_item(f"v{i}", title=t, channel=f"C{i}")) for i, t in
               enumerate(["Big gaming moment", "Calm news"])]
     tab._show_result(ScanResult(videos, NOW, ["US"]))
-    assert not tab.table.isColumnHidden(NICHE_COLUMN)
-    names = {tab._video_at(r).id: tab.table.item(r, NICHE_COLUMN).text() for r in range(2)}
+    assert not tab.table.isColumnHidden(CATEGORY_COLUMN)
+    names = {tab._video_at(r).id: tab.table.item(r, CATEGORY_COLUMN).text() for r in range(2)}
     assert names == {"v0": "Gaming", "v1": "–"}
-    assert tab.decisions["v1"].rule == "niche"
-    tab.niche_filter.setCurrentIndex(tab.niche_filter.findData("g"))
+    assert tab.decisions["v1"].rule == "unsorted"
+    tab.category_filter.setCurrentIndex(tab.category_filter.findData("g"))
     tab._apply_filter()
     assert [tab._video_at(r).id for r in range(2) if not tab.table.isRowHidden(r)] == ["v0"]
-    host.settings = host.settings.apply({"niches": []})
+    host.settings = host.settings.apply({"categories": []})
     tab.settings_changed()
-    assert tab.table.isColumnHidden(NICHE_COLUMN) and tab.niche_filter.isHidden()
+    assert tab.table.isColumnHidden(CATEGORY_COLUMN) and tab.category_filter.isHidden()
 
 
-def test_automation_queues_a_link_for_a_niche(app, tmp_path):
+def test_automation_queues_a_link_for_a_category(app, tmp_path):
     from ytclip.gui.automation import COLUMNS, Automation
 
-    host = Host(niches=[{"id": "g", "name": "Gaming"}])
+    host = Host(categories=[{"id": "g", "name": "Gaming", "account_id": "acc1"}])
     db = JobDB(tmp_path / "jobs.db")
     tab = Automation(host.get, db, launch=lambda: None)
-    assert [tab.niche.itemText(i) for i in range(tab.niche.count())] == ["Gaming", "No niche"]
+    assert [tab.category_id.itemText(i) for i in range(tab.category_id.count())] == ["Gaming", "No category"]
     tab.link.setText("https://youtu.be/abcdefghijk")
     tab.add_link()
-    assert db.get("abcdefghijk").niche == "g"
+    assert db.get("abcdefghijk").category_id == "g"
     tab.refresh()
-    assert tab.table.item(0, COLUMNS.index("Niche")).text() == "Gaming"
-    host.settings = host.settings.apply({"niches": []})
-    tab.niches_changed()
+    assert tab.table.item(0, COLUMNS.index("Category")).text() == "Gaming"
+    host.settings = host.settings.apply({"categories": []})
+    tab.categories_changed()
     tab.refresh()
-    assert tab.table.item(0, COLUMNS.index("Niche")).text() == "(deleted niche)"
+    assert tab.table.item(0, COLUMNS.index("Category")).text() == "(deleted category)"
 
 
-def test_library_filters_by_niche(app, tmp_path):
+def test_library_filters_by_category(app, tmp_path):
     from ytclip.gui.library import Library
 
     out = tmp_path / "out"
-    for name, auto in (("a", {"niche_id": "g", "niche": "Gaming", "account": "@gameclips"}), ("b", None),
-                       ("c", {"permission": "x"}), ("d", {"niche_id": "old", "niche": "Cooking"})):
+    for name, auto in (("a", {"category_id": "g", "category": "Gaming", "account": "@gameclips"}), ("b", None),
+                       ("c", {"permission": "x"}), ("d", {"category_id": "old", "category": "Cooking"})):
         folder = out / name
         folder.mkdir(parents=True)
         meta = {"video": {"title": name.upper(), "channel": "Chan"}, "clips": [{"rank": 1, "file": "01.mp4"}]}
         if auto:
             meta["automation"] = auto
         (folder / "clips.json").write_text(json.dumps(meta), encoding="utf-8")
-    host = Host(output_dir=str(out), niches=[{"id": "g", "name": "Gaming"}])
+    host = Host(output_dir=str(out), categories=[{"id": "g", "name": "Gaming", "account_id": "acc1"}])
     lib = Library(host.get)
     lib.refresh()
     lines = [lib.videos.item(i).text() for i in range(lib.videos.count())]
     assert len(lines) == 4 and "A\nChan · Gaming (@gameclips) · 1 clips" in lines
-    assert "D\nChan · Cooking · 1 clips" in lines  # a deleted niche: the name it had
-    lib.niche.setCurrentIndex(lib.niche.findData("g"))
+    assert "D\nChan · Cooking · 1 clips" in lines  # a deleted category: the name it had
+    lib.category_id.setCurrentIndex(lib.category_id.findData("g"))
     lib._fill()
     assert lib.videos.count() == 1 and lib.videos.item(0).text().startswith("A\n")
-    lib.niche.setCurrentIndex(lib.niche.findData("studio"))
+    lib.category_id.setCurrentIndex(lib.category_id.findData("studio"))
     lib._fill()
     assert lib.videos.count() == 1 and lib.videos.item(0).text().startswith("B\n")
 
 
-def test_settings_dialog_hides_the_global_lists_with_niches(app):
+def test_settings_dialog_hides_the_global_lists_with_categories(app):
     from ytclip.gui.settings_dialog import SettingsDialog
 
-    with_niches = SettingsDialog(Settings().apply({"niches": [{"id": "g", "name": "Gaming"}]}))
-    assert "pick_channels" not in with_niches._editors and "pick_searches" not in with_niches._editors
-    with_niches._reset()
-    assert niches.load(with_niches.result_settings)[0].name == "Gaming"  # a reset keeps your niches
+    with_categories = SettingsDialog(Settings().apply({"categories": [{"id": "g", "name": "Gaming", "account_id": "acc1"}]}))
+    assert "pick_channels" not in with_categories._editors and "pick_searches" not in with_categories._editors
+    with_categories._reset()
+    assert categories.load(with_categories.result_settings)[0].name == "Gaming"  # a reset keeps your categories
     assert "pick_channels" in SettingsDialog(Settings())._editors
 
 
@@ -427,14 +503,14 @@ def test_quitting_while_the_cleanup_window_still_looks_doesnt_crash(tmp_path):
     assert done.returncode == 0, done.stderr
 
 
-def test_standing_requests_are_edited_and_move_with_the_first_and_last_niche(app, tmp_path, monkeypatch):
+def test_standing_requests_are_edited_and_move_with_the_first_and_last_category(app, tmp_path, monkeypatch):
     from PySide6.QtWidgets import QMessageBox
 
     tab, host, _, _ = _tab(app, tmp_path, pick_finds="MW4 with good comedy")
     tab.add()
-    assert host.settings.pick_finds == "" and tab._niche().finds == "MW4 with good comedy"
+    assert host.settings.pick_finds == "" and tab._category().finds == "MW4 with good comedy"
     tab.finds.setPlainText("MW4 with good comedy\nWarzone funny moments")
-    assert host.settings.niches[0]["finds"].endswith("Warzone funny moments")
+    assert host.settings.categories[0]["finds"].endswith("Warzone funny moments")
     monkeypatch.setattr(QMessageBox, "question", lambda *a, **k: QMessageBox.Yes)
     tab.delete()
     assert host.settings.pick_finds == "MW4 with good comedy\nWarzone funny moments"

@@ -42,7 +42,7 @@ class Job:
     rejected: int = 0  # moved to _rejected by the quality check
     recipe: str = ""
     pruned: int = 0  # cache files removed
-    niche: str = ""  # id of the niche it was picked for (niches.py), "" for none
+    category_id: str = ""  # id of the category it was picked for (categories.py), "" for none
     order: str = ""  # id of the clip request it's for (orders.py), "" for none
     progress: str = ""  # while it's worked on: its steps.Status as JSON, for the Automation tab's status bars
 
@@ -89,12 +89,31 @@ class JobDB:
         cols = ", ".join(f'"{name}" {kind}{" PRIMARY KEY" if name == "id" else ""}' for name, kind in _COLUMNS.items())
         self.con.execute(f"CREATE TABLE IF NOT EXISTS jobs ({cols})")
         have = {r["name"] for r in self.con.execute("PRAGMA table_info(jobs)")}
+        have = self._rename_niche_column(have)
         for name, kind in _COLUMNS.items():  # columns added by later versions
             if name not in have:
                 self.con.execute(f'ALTER TABLE jobs ADD COLUMN "{name}" {kind}')
         self.con.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)")
         self.con.execute("CREATE TABLE IF NOT EXISTS events (time REAL, kind TEXT)")
         self.con.execute("CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, created REAL, data TEXT)")
+
+    def _rename_niche_column(self, have: set[str]) -> set[str]:
+        """3.2 renamed niches to categories: the jobs table's "niche" column becomes "category_id"
+        (not "category", which has always held the video's YouTube category). The app and the
+        automation worker can both open the file at once, so whichever gets there first renames it and
+        the other finds it done. Returns the table's columns afterwards."""
+        if "niche" not in have:
+            return have
+        try:
+            if "category_id" in have:
+                # Both (3.1 opened the file after 3.2 and added its column back): keep what each holds.
+                self.con.execute("UPDATE jobs SET category_id = niche "
+                                 "WHERE COALESCE(category_id, '') = '' AND COALESCE(niche, '') != ''")
+            else:
+                self.con.execute('ALTER TABLE jobs RENAME COLUMN "niche" TO "category_id"')
+        except sqlite3.OperationalError:
+            pass  # the other process renamed it a moment ago, or the database is busy: read it again
+        return {r["name"] for r in self.con.execute("PRAGMA table_info(jobs)")}
 
     def close(self) -> None:
         self.con.close()
@@ -138,22 +157,22 @@ class JobDB:
             rows = self.con.execute("SELECT id FROM jobs").fetchall()
         return {r["id"].split("~", 1)[0] for r in rows}
 
-    def next_due(self, now: float, skip_niches: set[str] | frozenset = frozenset()) -> Job | None:
-        """The oldest waiting job that's due, leaving out the niches in `skip_niches` (paused).
+    def next_due(self, now: float, skip_categories: set[str] | frozenset = frozenset()) -> Job | None:
+        """The oldest waiting job that's due, leaving out the categories in `skip_categories` (paused).
         A clip request's videos go first: you asked for those."""
-        skip = sorted(skip_niches)
+        skip = sorted(skip_categories)
         marks = ", ".join("?" * len(skip))
-        where = f" AND COALESCE(niche, '') NOT IN ({marks})" if skip else ""
+        where = f" AND COALESCE(category_id, '') NOT IN ({marks})" if skip else ""
         with self._lock:
             row = self.con.execute(f"SELECT * FROM jobs WHERE status = 'queued' AND next_try <= ?{where} "
                                    "ORDER BY COALESCE(\"order\", '') = '', created LIMIT 1",
                                    (now, *skip)).fetchone()
         return Job.from_row(row) if row else None
 
-    def next_try(self, skip_niches: set[str] | frozenset = frozenset()) -> float | None:
-        """When the soonest waiting job becomes due, leaving out the niches in `skip_niches` (paused)."""
-        skip = sorted(skip_niches)
-        where = f" AND COALESCE(niche, '') NOT IN ({', '.join('?' * len(skip))})" if skip else ""
+    def next_try(self, skip_categories: set[str] | frozenset = frozenset()) -> float | None:
+        """When the soonest waiting job becomes due, leaving out the categories in `skip_categories` (paused)."""
+        skip = sorted(skip_categories)
+        where = f" AND COALESCE(category_id, '') NOT IN ({', '.join('?' * len(skip))})" if skip else ""
         with self._lock:
             row = self.con.execute(f"SELECT MIN(next_try) AS t FROM jobs WHERE status = 'queued'{where}",
                                    skip).fetchone()
@@ -187,21 +206,21 @@ class JobDB:
                                     "WHERE status = 'queued' AND stage = ? AND next_try > ?",
                                     (now, SIGN_IN_WAIT, now)).rowcount
 
-    def drop_waiting(self, niche: str) -> int:
-        """Take a niche's waiting videos out of the queue (the niche was deleted)."""
+    def drop_waiting(self, category_id: str) -> int:
+        """Take a category's waiting videos out of the queue (the category was deleted)."""
         with self._lock:
-            return self.con.execute("DELETE FROM jobs WHERE niche = ? AND status = 'queued'", (niche,)).rowcount
+            return self.con.execute("DELETE FROM jobs WHERE category_id = ? AND status = 'queued'", (category_id,)).rowcount
 
-    def niche_counts(self, since: float) -> dict[str, dict[str, int]]:
-        """Per niche id: videos waiting or working, done since `since`, and clips ready from those."""
+    def category_counts(self, since: float) -> dict[str, dict[str, int]]:
+        """Per category id: videos waiting or working, done since `since`, and clips ready from those."""
         with self._lock:
             rows = self.con.execute(
-                "SELECT COALESCE(niche, '') AS niche, "
+                "SELECT COALESCE(category_id, '') AS category_id, "
                 "SUM(status IN ('queued', 'working')) AS waiting, "
                 "SUM(status = 'done' AND updated >= ?) AS done, "
                 "SUM(CASE WHEN status = 'done' AND updated >= ? THEN clips ELSE 0 END) AS clips "
-                "FROM jobs GROUP BY COALESCE(niche, '')", (since, since)).fetchall()
-        return {r["niche"]: {"waiting": r["waiting"] or 0, "done": r["done"] or 0, "clips": r["clips"] or 0}
+                "FROM jobs GROUP BY COALESCE(category_id, '')", (since, since)).fetchall()
+        return {r["category_id"]: {"waiting": r["waiting"] or 0, "done": r["done"] or 0, "clips": r["clips"] or 0}
                 for r in rows}
 
     def counts(self) -> dict[str, int]:

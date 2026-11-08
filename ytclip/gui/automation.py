@@ -1,7 +1,7 @@
 """Automation tab: watch and steer the unattended runner (pipeline.py) through jobs.db.
 
 The runner is its own process, so it keeps going when this window closes. This tab starts it,
-stops or pauses it, queues links by hand, and shows the queue, each niche, clip requests and the
+stops or pauses it, queues links by hand, and shows the queue, each category, clip requests and the
 runner's log.
 """
 
@@ -19,7 +19,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QHeaderView, QLabel, QLineEdit, QMenu, QPlainTextEdit, QPushButton, QSplitter,
                                QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget)
 
-from .. import learn, niches, pipeline, youtube_login
+from .. import learn, categories, pipeline, youtube_login
 from ..clipability import age_text
 from ..jobs import Job, JobDB
 from ..research import youtube_key
@@ -27,7 +27,7 @@ from ..settings import Settings
 from . import theme
 from .library import reveal
 from .overnight import OvernightPanel
-from .requests_panel import NichePanel, RequestDialog, RequestPanel
+from .requests_panel import CategoryPanel, RequestDialog, RequestPanel
 from .sign_in_dialog import SignInDialog
 from .status_bars import BAR_ROLE, NowPanel, ProgressDelegate
 
@@ -35,8 +35,8 @@ REPORT_EVERY = 30.0  # seconds between refreshes of the Overnight page while it'
 NOW_EVERY = 1000  # ms between updates of the status bars while automation runs
 ACTIVITY_STALE = 120.0  # an activity this old was left behind by a runner that stopped
 
-COLUMNS = ("Video", "Channel", "Niche", "Status", "Clips", "Updated", "Why it was picked")
-NICHE_COLUMN = COLUMNS.index("Niche")
+COLUMNS = ("Video", "Channel", "Category", "Status", "Clips", "Updated", "Why it was picked")
+CATEGORY_COLUMN = COLUMNS.index("Category")
 STATUS_COLUMN = COLUMNS.index("Status")
 STATUS_COLOURS = {"working": theme.ACCENT_2, "queued": theme.TEXT, "done": theme.GOOD, "failed": theme.BAD}
 STATUS_WORDS = {"working": "Working", "queued": "Waiting", "done": "Done", "failed": "Failed"}
@@ -48,7 +48,7 @@ class Automation(QWidget):
     notice = Signal(str)
     open_settings = Signal(str)
     clean_up = Signal()  # open the Clean up window
-    niches_edited = Signal()  # a niche was paused or resumed here
+    categories_edited = Signal()  # a category was paused or resumed here
 
     def __init__(self, settings: Callable[[], Settings], db: JobDB | None = None,
                  launch: Callable[[], None] = pipeline.launch_background,
@@ -63,12 +63,12 @@ class Automation(QWidget):
         self._log_size = -1
         self._windows_checked = False
         self._lessons_sig: tuple | None = None
-        self._niche_names: dict[str, str] = {}
+        self._category_names: dict[str, str] = {}
         self._sign_in_checked = -SIGN_IN_CHECK
         self._signed_in = False
         self._alive = False
         self._build()
-        self.niches_changed()
+        self.categories_changed()
         self.refresh()
         self.timer = QTimer(self, interval=3000)
         self.timer.timeout.connect(self.refresh)
@@ -119,8 +119,8 @@ class Automation(QWidget):
         self.link = QLineEdit()
         self.link.setPlaceholderText("Paste a YouTube link to queue it yourself")
         self.link.returnPressed.connect(self.add_link)
-        self.niche = QComboBox()
-        self.niche.setToolTip("The niche a video you queue is for: its style, and its folder")
+        self.category_id = QComboBox()
+        self.category_id.setToolTip("The category a video you queue is for: its style, and its folder")
         add = QPushButton("Queue")
         add.clicked.connect(self.add_link)
         self.with_windows = QCheckBox("Start with Windows")
@@ -139,7 +139,7 @@ class Automation(QWidget):
                          "would go first")
         clean.clicked.connect(self.clean_up.emit)
         row.addWidget(self.link, 1)
-        row.addWidget(self.niche)
+        row.addWidget(self.category_id)
         row.addWidget(add)
         row.addSpacing(10)
         row.addWidget(self.with_windows)
@@ -202,16 +202,16 @@ class Automation(QWidget):
                                 "Learn from how my clips do). Details: ytclip results")
         uv.addWidget(self.learned)
 
-        self.niche_panel = NichePanel(self._settings, self._niche_change, self.db)
-        self.niche_panel.notice.connect(self.notice.emit)
-        self.niche_panel.request.connect(self.new_request)
+        self.category_panel = CategoryPanel(self._settings, self._category_change, self.db)
+        self.category_panel.notice.connect(self.notice.emit)
+        self.category_panel.request.connect(self.new_request)
         self.request_panel = RequestPanel(self._settings, self.db)
         self.request_panel.notice.connect(self.notice.emit)
         self.request_panel.new.connect(lambda: self.new_request(""))
         self.pages = QTabWidget()
         self.pages.setDocumentMode(True)
         self.pages.addTab(queue, "Queue")
-        self.pages.addTab(self.niche_panel, "Niches")
+        self.pages.addTab(self.category_panel, "Categories")
         self.pages.addTab(self.request_panel, "Requests")
         self.overnight = OvernightPanel(self._settings, self.db)
         self.pages.addTab(self.overnight, "Overnight report")
@@ -236,22 +236,22 @@ class Automation(QWidget):
         layout.addWidget(hint)
 
     # ================================================================== state
-    def niches_changed(self) -> None:
-        """Niches were added, renamed or removed: the queue's Niche column and the niche picker follow."""
-        all_niches = niches.load(self._settings())
-        self._niche_names = {n.id: n.name for n in all_niches}
-        keep = self.niche.currentData()
-        self.niche.blockSignals(True)
-        self.niche.clear()
-        for n in all_niches:
-            self.niche.addItem(n.name, n.id)
-        self.niche.addItem("No niche", "")
-        self.niche.setCurrentIndex(max(0, self.niche.findData(keep)) if keep is not None else 0)
-        self.niche.blockSignals(False)
-        self.niche.setVisible(bool(all_niches))
+    def categories_changed(self) -> None:
+        """Categories were added, renamed or removed: the queue's Category column and the category picker follow."""
+        all_categories = categories.load(self._settings())
+        self._category_names = {n.id: n.name for n in all_categories}
+        keep = self.category_id.currentData()
+        self.category_id.blockSignals(True)
+        self.category_id.clear()
+        for n in all_categories:
+            self.category_id.addItem(n.name, n.id)
+        self.category_id.addItem("No category", "")
+        self.category_id.setCurrentIndex(max(0, self.category_id.findData(keep)) if keep is not None else 0)
+        self.category_id.blockSignals(False)
+        self.category_id.setVisible(bool(all_categories))
         self._sig = None  # redraw the table with the new names
-        self.niche_panel._sig = self.request_panel._sig = None
-        self.niche_panel.refresh()
+        self.category_panel._sig = self.request_panel._sig = None
+        self.category_panel.refresh()
         self.request_panel.refresh()
 
     def running(self) -> bool:
@@ -295,7 +295,7 @@ class Automation(QWidget):
         self._fill_table()
         self._show_now()
         self._show_posting()
-        self.niche_panel.refresh()
+        self.category_panel.refresh()
         self.request_panel.refresh()
         self._refresh_report()
         self._tail_log()
@@ -371,7 +371,7 @@ class Automation(QWidget):
 
     def _fill_table(self) -> None:
         jobs = self.db.jobs()
-        sig = [(j.id, j.status, j.stage, j.updated, j.clips, j.rejected, j.niche, j.progress) for j in jobs]
+        sig = [(j.id, j.status, j.stage, j.updated, j.clips, j.rejected, j.category_id, j.progress) for j in jobs]
         counts = self.db.counts()
         self.counts.setText(f"{counts['queued']} waiting · {counts['working']} working · {counts['done']} done · "
                             f"{counts['failed']} failed")
@@ -384,11 +384,11 @@ class Automation(QWidget):
         for r, j in enumerate(jobs):
             status = self._status_text(j)
             tip = j.error if j.error and j.status != "done" else ""
-            niche = self._niche_names.get(j.niche, "(deleted niche)" if j.niche else "")
+            category = self._category_names.get(j.category_id, "(deleted category)" if j.category_id else "")
             cells = [
                 _item(j.title or j.url, j.url),
                 _item(j.channel),
-                _item(niche),
+                _item(category),
                 _item(status, "\n".join(x for x in (status, tip, j.recipe and f"Style: {j.recipe}") if x)),
                 _item(f"{j.clips} ✓ {j.rejected} ✗" if j.rejected else str(j.clips) if j.clips else "",
                       f"{j.clips} ready to post, {j.rejected} rejected by the quality check (in the _rejected "
@@ -405,7 +405,7 @@ class Automation(QWidget):
                 self.table.setItem(r, c, cell)
             if j.id in keep:
                 self.table.selectRow(r)
-        self.table.setColumnHidden(NICHE_COLUMN, not self._niche_names and not any(j.niche for j in jobs))
+        self.table.setColumnHidden(CATEGORY_COLUMN, not self._category_names and not any(j.category_id for j in jobs))
         has = bool(jobs)
         self.table.setVisible(has)
         self.empty.setVisible(not has)
@@ -511,10 +511,10 @@ class Automation(QWidget):
         if not text:
             return
         added = 0
-        niche = self.niche.currentData() if not self.niche.isHidden() else ""
+        category = self.category_id.currentData() if not self.category_id.isHidden() else ""
         for url in text.split():
             try:
-                added += pipeline.Runner(self.db).add_manual(url, niche=niche or "")
+                added += pipeline.Runner(self.db).add_manual(url, category_id=category or "")
             except ValueError as exc:
                 self.notice.emit(f"<span style='color:{theme.WARN}'>⚠ {_esc(str(exc))}</span>")
                 return
@@ -547,13 +547,13 @@ class Automation(QWidget):
             self._report_at = time.time()
             self.overnight.refresh(force=force)
 
-    def _niche_change(self, name: str, value) -> None:
+    def _category_change(self, name: str, value) -> None:
         if self._change is not None:
             self._change(name, value)
-            self.niches_edited.emit()
+            self.categories_edited.emit()
 
-    def new_request(self, niche_id: str = "") -> None:
-        dlg = RequestDialog(self._settings(), niche_id or "", self)
+    def new_request(self, category_id: str = "") -> None:
+        dlg = RequestDialog(self._settings(), category_id or "", self)
         if dlg.exec() != QDialog.DialogCode.Accepted or dlg.order is None:
             return
         order = pipeline.Runner(self.db, load=self._settings, log=pipeline.file_logger()).place(dlg.order)

@@ -43,7 +43,7 @@ def test_jobs_show_in_the_table(app, tmp_path):
     r = rows["Done video"]
     assert tab.table.item(r, col["Status"]).text() == "Done" and tab.table.item(r, col["Clips"]).text() == "4"
     assert tab.table.item(r, col["Why it was picked"]).text() == "On your channel list"
-    assert tab.table.isColumnHidden(col["Niche"])  # no niches, so no Niche column
+    assert tab.table.isColumnHidden(col["Category"])  # no categories, so no Category column
     broken = tab.table.item(rows["Broken"], col["Status"])
     assert broken.text() == "Failed: Gave up" and "ffmpeg died" in broken.toolTip()
     assert tab.counts.text() == "1 waiting · 0 working · 1 done · 1 failed"

@@ -54,7 +54,7 @@ def analyze_item(store: Store, item_id: str, s: Settings) -> VideoItem:
 
 def ai_item(store: Store, item_id: str, s: Settings, log: Log | None = None,
             account: Account | None = None) -> VideoItem:
-    """The AI rates the video and writes a caption, for `account`'s niche when one is given."""
+    """The AI rates the video and writes a caption, for `account`'s audience when one is given."""
     from .ai import rate
 
     item = store.get(item_id)
@@ -124,7 +124,7 @@ def ai_hashtags(store: Store, item_id: str, s: Settings, account: Account | None
     if only_if_empty and item.hashtags.strip():
         return item
     a = account
-    tags = suggest_hashtags(a.apply(s) if a else s, item, niche=a.niche if a else s.ai_niche,
+    tags = suggest_hashtags(a.apply(s) if a else s, item, audience=a.audience if a else s.ai_audience,
                             always=a.default_hashtags if a else s.default_hashtags,
                             proven=proven_tags(store, a.id) if a else None, context=clip_context(item))
     if not tags:

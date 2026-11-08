@@ -14,10 +14,10 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import clipability, niches
+from . import clipability, categories
 from .download import is_blocked
 from .policy import language_codes
-from .niches import Niche
+from .categories import Category
 from .settings import Settings, app_dir
 from .sources import ChannelRef, Gathered, gather
 from .trending import (CATEGORIES, ChartUnavailable, DeepInfo, History, ResearchError, TrendingVideo, deep_check,
@@ -46,26 +46,26 @@ class ScanOptions:
     language: str = ""  # Creative Commons searches favour this spoken language (the first of Picking's)
     deep_workers: int = 4  # most-replayed checks at once
     deep_pause: float = 0.0  # seconds between them (automation spaces them out)
-    niches: list[Niche] = field(default_factory=list)  # every niche (switched off too), to sort the videos into
-    # Charts of the categories your niches use, besides the all-categories chart: trending videos
-    # for each niche that the overall chart, crowded with music and sports, never shows.
-    niche_charts: list[str] = field(default_factory=list)
+    categories: list[Category] = field(default_factory=list)  # every category (switched off too), to sort the videos into
+    # Charts of the YouTube categories your categories use, besides the all-categories chart: trending videos
+    # for each category that the overall chart, crowded with music and sports, never shows.
+    category_charts: list[str] = field(default_factory=list)
 
     @classmethod
     def from_settings(cls, s: Settings) -> "ScanOptions":
-        channels, searches, bad = niches.scan_sources(s)
+        channels, searches, bad = categories.scan_sources(s)
         return cls(api_key=youtube_key(s), regions=parse_regions(s.research_regions) or ["US"],
                    category=s.research_category, per_region=s.research_per_region,
                    min_minutes=s.research_min_minutes, deep_count=s.research_deep_count,
                    cookies=s.cookies_browser or None, channels=channels,
                    searches=searches, unreadable=bad,
-                   language=next(iter(language_codes(s.pick_languages)), ""), niches=niches.load(s),
-                   niche_charts=niche_charts(s) if s.research_niche_charts else [])
+                   language=next(iter(language_codes(s.pick_languages)), ""), categories=categories.load(s),
+                   category_charts=category_charts(s) if s.research_category_charts else [])
 
     @property
     def charts(self) -> list[str]:
-        """Every chart checked in each region: the chosen category, then the niches' own."""
-        extra = [] if self.category else [c for c in self.niche_charts if c]
+        """Every chart checked in each region: the chosen YouTube category, then your categories' own."""
+        extra = [] if self.category else [c for c in self.category_charts if c]
         return [self.category] + extra
 
     @property
@@ -75,16 +75,16 @@ class ScanOptions:
         return len(self.regions) * (math.ceil(self.per_region / 50) + len(self.charts) - 1)
 
 
-MAX_NICHE_CHARTS = 4  # category charts checked for niches, each 1 quota unit per region
+MAX_CATEGORY_CHARTS = 4  # YouTube category charts checked for your categories, each 1 quota unit per region
 
 
-def niche_charts(s: Settings) -> list[str]:
-    """The categories switched-on niches use, most used first (at most MAX_NICHE_CHARTS)."""
+def category_charts(s: Settings) -> list[str]:
+    """The YouTube categories switched-on categories use, most used first (at most MAX_CATEGORY_CHARTS)."""
     count: dict[str, int] = {}
-    for n in niches.active(s):
-        for c in sorted(n.category_ids()):
+    for n in categories.active(s):
+        for c in sorted(n.yt_category_ids()):
             count[c] = count.get(c, 0) + 1
-    return sorted(count, key=lambda c: (-count[c], int(c) if c.isdigit() else 0))[:MAX_NICHE_CHARTS]
+    return sorted(count, key=lambda c: (-count[c], int(c) if c.isdigit() else 0))[:MAX_CATEGORY_CHARTS]
 
 
 @dataclass
@@ -187,7 +187,7 @@ def scan(opts: ScanOptions, history: History, log: Log | None = None, progress: 
                                            or v.live == "live")]
     if merged and len(videos) < len(merged):
         log(f"Skipped {len(merged) - len(videos)} video(s) shorter than {opts.min_minutes:g} min or not yet live.")
-    niches.assign(videos, opts.niches, history)
+    categories.assign(videos, opts.categories, history)
     first = not history.videos
     for v in videos:
         history.record(v, now)

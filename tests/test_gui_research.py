@@ -316,7 +316,7 @@ def test_find_needs_words_and_a_key(app):
     assert tab.job is None and not tab.key_panel.isHidden()
 
 
-def test_queue_in_automation_sends_each_videos_niche(app):
+def test_queue_in_automation_sends_each_videos_category(app):
     tab, _ = _make(app, youtube_api_key="k")
     tab._show_result(_result())
     got = []

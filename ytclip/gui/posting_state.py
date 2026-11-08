@@ -29,6 +29,7 @@ class PostingState(QObject):
     request_done = Signal(object)  # an actions.Request this window asked for has finished
     request_log = Signal(object)  # a request this window asked for wrote a new line
     alert = Signal(str, str)  # (title, text) worth a notification: posted, failed, logged out, a hit
+    sign_in_needed = Signal(str)  # an account's TikTok sign-in ran out (its id): the window offers to redo it
     message = Signal(str)  # a line for the window's log
 
     def __init__(self, parent=None, worker_alive=None, start_timer: bool = True):
@@ -188,7 +189,9 @@ class PostingState(QObject):
                 continue
             self._seen_events[a.id] = max(e.at for e in new)
             for e in new[-3:]:  # never a flood after a long time away
-                if e.alert:
+                if e.kind == "login_needed":
+                    self.sign_in_needed.emit(a.id)
+                if e.alert and not e.toasted:  # a Windows notification already said it
                     self.alert.emit(a.handle, e.text)
 
 

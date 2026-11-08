@@ -149,6 +149,27 @@ class TikTokBrowser:
     def logout(self) -> None:
         self.ctx.clear_cookies()
 
+    def session_ok(self, settle: float = 6.0) -> tuple[bool | None, str]:
+        """Load TikTok Studio's upload page with the saved sign-in: (True, …) when it stays there,
+        (False, …) when TikTok sends it to log in or the sign-in cookie has gone, (None, why) when the
+        page couldn't be reached at all."""
+        if not self.logged_in():
+            return False, "The TikTok sign-in cookie is gone from this account's browser profile."
+        try:
+            self.page.goto(UPLOAD_URL, wait_until="domcontentloaded", timeout=45_000)
+        except Exception as exc:  # noqa: BLE001 - offline, DNS, a timeout: can't tell
+            return None, f"TikTok Studio didn't load: {str(exc).splitlines()[0][:160]}"
+        end = time.time() + settle  # TikTok redirects a stale session a moment after the page starts
+        while time.time() < end:
+            self._check()
+            url = self.page.url.lower()
+            if "/login" in url or "/signup" in url:
+                return False, "TikTok Studio sent it to the login page."
+            self.page.wait_for_timeout(500)
+        if not self.logged_in():
+            return False, "TikTok cleared the sign-in cookie when Studio opened."
+        return True, "TikTok Studio's upload page opened signed in."
+
     def require_login(self) -> None:
         # No logging in from here: TikTok refuses logins in this automated window ("Too many attempts").
         # Account → Log in opens a plain browser window for it instead (login.py).

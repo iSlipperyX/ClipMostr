@@ -5,7 +5,7 @@
 2. Keys: the AI (Claude or Gemini) and the YouTube Data API.
 3. YouTube sign-in, in ClipMonster's own Firefox profile.
 4. TikTok accounts: add each one and log in once.
-5. The first niche: what it clips, and the account it posts to.
+5. The first category: what it clips, and the account it posts to.
 6. The posting schedule.
 7. Start: with Windows, and now.
 
@@ -22,7 +22,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDoubleSpinBox, QF
                                QLineEdit, QListWidget, QPlainTextEdit, QPushButton, QSpinBox, QStackedWidget,
                                QTimeEdit, QVBoxLayout, QWidget)
 
-from .. import niches, youtube_login
+from .. import categories, youtube_login
 from ..settings import Settings
 from . import theme
 from .posting_state import PostingState
@@ -34,7 +34,7 @@ ANTHROPIC_KEY_URL = "https://console.anthropic.com/settings/keys"
 GEMINI_KEY_URL = "https://aistudio.google.com/apikey"
 YOUTUBE_KEY_URL = "https://console.cloud.google.com/apis/library/youtube.googleapis.com"
 
-STEPS = ("Tools", "Keys", "YouTube sign-in", "TikTok accounts", "First niche", "Posting schedule", "Start")
+STEPS = ("Tools", "Keys", "YouTube sign-in", "TikTok accounts", "First category", "Posting schedule", "Start")
 
 
 def _link(url: str, text: str) -> str:
@@ -86,7 +86,7 @@ class SetupWizard(QDialog):
         lay.addWidget(self.crumbs)
         self.pages = QStackedWidget()
         lay.addWidget(self.pages, 1)
-        for build in (self._tools, self._keys, self._youtube, self._accounts, self._niche, self._schedule,
+        for build in (self._tools, self._keys, self._youtube, self._accounts, self._category, self._schedule,
                       self._start):
             page = QWidget()
             pl = QVBoxLayout(page)
@@ -135,7 +135,7 @@ class SetupWizard(QDialog):
             self._check_tools()
         elif STEPS[i] == "YouTube sign-in":
             self._show_sign_in()
-        elif STEPS[i] in ("TikTok accounts", "First niche"):
+        elif STEPS[i] in ("TikTok accounts", "First category"):
             self._fill_accounts()
 
     def _leave(self, i: int) -> None:
@@ -146,8 +146,8 @@ class SetupWizard(QDialog):
                               ("youtube_api_key", self.youtube_key)):
                 if box.text().strip() != getattr(self.s, name):
                     self._set(name, box.text().strip())
-        elif step == "First niche":
-            self._save_niche()
+        elif step == "First category":
+            self._save_category()
         elif step == "Posting schedule":
             self._save_schedule()
 
@@ -270,18 +270,19 @@ class SetupWizard(QDialog):
 
     def _accounts(self, pl) -> None:
         pl.addWidget(_text("<p style='font-size:12pt'><b>TikTok accounts</b></p>"
-                           "<p>Add each TikTok account clips should post to, and log in to it once in the window "
-                           "that opens (the QR code from the TikTok app is quickest). Each account keeps its own "
-                           "login on this PC. One account per niche works best.</p>"))
+                           "<p>Add each TikTok account clips should post to: link one you have, or make a new one "
+                           "on TikTok's own sign-up page. You sign in once in the window that opens (the QR code "
+                           "from the TikTok app is quickest); each account keeps its own sign-in on this PC. "
+                           "Every category posts to one of them.</p>"))
         self.account_list = QListWidget()
         self.account_list.setMaximumHeight(160)
         pl.addWidget(self.account_list)
         row = QHBoxLayout()
-        add = QPushButton("+ Add an account and log in")
+        add = QPushButton("+ Add an account")
         add.setObjectName("primary")
         add.clicked.connect(self._add_account)
         row.addWidget(add)
-        self.relogin = QPushButton("Log in again")
+        self.relogin = QPushButton("Sign in again")
         self.relogin.clicked.connect(self._login_selected)
         row.addWidget(self.relogin)
         row.addStretch(1)
@@ -294,20 +295,27 @@ class SetupWizard(QDialog):
         for a in self.posting.accounts:
             shown = a.label + (f"  ·  @{a.username}" if a.username and a.name.strip() else "")
             self.account_list.addItem(f"{'✓' if a.logged_in else '○'}  {shown}"
-                                      + ("" if a.logged_in else "  (not logged in yet)"))
+                                      + ("" if a.logged_in else "  (not signed in yet)"))
         self.relogin.setEnabled(len(self.posting.accounts) > 0)
-        if hasattr(self, "niche_account"):
-            keep = self.niche_account.currentData()
-            self.niche_account.clear()
-            self.niche_account.addItem("No account yet: clips wait", "")
+        if hasattr(self, "category_account"):
+            keep = self.category_account.currentData()
+            self.category_account.clear()
+            self.category_account.addItem("⚠ No account yet: nothing is picked for it until it has one", "")
             for a in self.posting.accounts:
-                self.niche_account.addItem(a.label, a.id)
-            i = self.niche_account.findData(keep) if keep else (1 if len(self.posting.accounts) else 0)
-            self.niche_account.setCurrentIndex(max(0, i))
+                self.category_account.addItem(a.label, a.id)
+            i = self.category_account.findData(keep) if keep else (1 if len(self.posting.accounts) else 0)
+            self.category_account.setCurrentIndex(max(0, i))
 
     def _add_account(self) -> None:
-        a = self.posting.add_account()
-        self._login(a.id)
+        self._wizard()
+
+    def _wizard(self, account_id: str = "") -> None:
+        from .accounts_view import AccountWizard
+
+        # Categories come on the next page, so this one only adds the account (and its warm-up)
+        AccountWizard(self.posting, account_id=account_id, parent=self).exec()
+        self.posting.poll()
+        self._fill_accounts()
 
     def _login_selected(self) -> None:
         i = self.account_list.currentRow()
@@ -318,44 +326,35 @@ class SetupWizard(QDialog):
             self._login(accounts[-1].id)
 
     def _login(self, account_id: str) -> None:
-        from .posting_pages import RequestDialog
+        self._wizard(account_id)
 
-        a = self.posting.accounts.get(account_id)
-        rid = self.posting.ask("login", account=account_id)
-        dlg = RequestDialog(self.posting, rid, f"Log in · {a.label if a else ''}",
-                            "A browser window opens on TikTok's login page. Log in there; it closes by itself once "
-                            "you're in (or press “I'm logged in”).", login=True, parent=self)
-        dlg.exec()
-        self.posting.poll()
-        self._fill_accounts()
+    # --- 5. first category -----------------------------------------------------------------------------------
 
-    # --- 5. first niche -----------------------------------------------------------------------------------
-
-    def _niche(self, pl) -> None:
-        pl.addWidget(_text("<p style='font-size:12pt'><b>Your first niche</b></p>"
-                           "<p>A niche is one account's topic: where its videos come from and how its clips look. "
+    def _category(self, pl) -> None:
+        pl.addWidget(_text("<p style='font-size:12pt'><b>Your first category</b></p>"
+                           "<p>A category is one account's topic: where its videos come from and how its clips look. "
                            "Channels you list should be ones that welcome clipping (a clipping programme, say); "
                            "a standing request is plain words, like “Warzone clutch plays”, that ClipMonster "
-                           "searches for every few hours. More niches, sources and styles are in the Niches "
+                           "searches for every few hours. More categories, sources and styles are in the Categories "
                            "tab.</p>"))
         form = QFormLayout()
-        existing = niches.load(self.s)
+        existing = categories.load(self.s)
         n = existing[0] if existing else None
-        self.niche_name = QLineEdit(n.name if n else "", placeholderText="e.g. Gaming, Podcasts")
-        form.addRow("Name", self.niche_name)
-        self.niche_account = QComboBox()
-        form.addRow("Posts to", self.niche_account)
-        self.niche_channels = QPlainTextEdit(n.channels if n else "")
-        self.niche_channels.setPlaceholderText("@somepodcast  # clipping programme, credit in caption")
-        self.niche_channels.setFixedHeight(64)
-        form.addRow("Channels", self.niche_channels)
-        self.niche_finds = QPlainTextEdit(n.finds if n else "")
-        self.niche_finds.setPlaceholderText("Warzone clutch plays\nfunny podcast moments")
-        self.niche_finds.setFixedHeight(64)
-        form.addRow("Standing requests", self.niche_finds)
-        self.niche_daily = QSpinBox(minimum=1, maximum=niches.MAX_DAILY, value=n.daily if n else 2)
-        self.niche_daily.setSuffix(" videos a day")
-        form.addRow("Videos to clip", self.niche_daily)
+        self.category_name = QLineEdit(n.name if n else "", placeholderText="e.g. Gaming, Podcasts")
+        form.addRow("Name", self.category_name)
+        self.category_account = QComboBox()
+        form.addRow("Posts to", self.category_account)
+        self.category_channels = QPlainTextEdit(n.channels if n else "")
+        self.category_channels.setPlaceholderText("@somepodcast  # clipping programme, credit in caption")
+        self.category_channels.setFixedHeight(64)
+        form.addRow("Channels", self.category_channels)
+        self.category_finds = QPlainTextEdit(n.finds if n else "")
+        self.category_finds.setPlaceholderText("Warzone clutch plays\nfunny podcast moments")
+        self.category_finds.setFixedHeight(64)
+        form.addRow("Standing requests", self.category_finds)
+        self.category_daily = QSpinBox(minimum=1, maximum=categories.MAX_DAILY, value=n.daily if n else 2)
+        self.category_daily.setSuffix(" videos a day")
+        form.addRow("Videos to clip", self.category_daily)
         lens = QHBoxLayout()
         self.min_len = QDoubleSpinBox(minimum=5, maximum=600, value=(n.min_len if n and n.min_len else 62), suffix=" s")
         self.max_len = QDoubleSpinBox(minimum=5, maximum=600, value=(n.max_len if n and n.max_len else 90), suffix=" s")
@@ -371,21 +370,21 @@ class SetupWizard(QDialog):
         form.addRow("", hint)
         pl.addLayout(form)
 
-    def _save_niche(self) -> None:
-        name = " ".join(self.niche_name.text().split())
+    def _save_category(self) -> None:
+        name = " ".join(self.category_name.text().split())
         if not name:
             return
-        aid = self.niche_account.currentData() or ""
+        aid = self.category_account.currentData() or ""
         a = self.posting.accounts.get(aid)
-        found = niches.load(self.s)
-        base = found[0] if found else niches.Niche(id=niches.new_id(), name=name)
+        found = categories.load(self.s)
+        base = found[0] if found else categories.Category(id=categories.new_id(), name=name)
         from dataclasses import replace
 
         lo, hi = sorted((self.min_len.value(), self.max_len.value()))
         new = replace(base, name=name, account_id=aid, account=a.handle if a else "",
-                      channels=self.niche_channels.toPlainText().strip(), finds=self.niche_finds.toPlainText().strip(),
-                      daily=self.niche_daily.value(), min_len=lo, max_len=hi)
-        self._set("niches", niches.to_settings([new] + found[1:]))
+                      channels=self.category_channels.toPlainText().strip(), finds=self.category_finds.toPlainText().strip(),
+                      daily=self.category_daily.value(), min_len=lo, max_len=hi)
+        self._set("categories", categories.to_settings([new] + found[1:]))
 
     # --- 6. schedule -------------------------------------------------------------------------------------
 
@@ -435,7 +434,7 @@ class SetupWizard(QDialog):
     def _start(self, pl) -> None:
         pl.addWidget(_text("<p style='font-size:12pt'><b>Ready</b></p>"
                            "<p>Automation runs in the background, with the window closed too: it finds videos, "
-                           "clips them, posts each niche's clips to its account on the schedule, reads how they "
+                           "clips them, posts each category's clips to its account on the schedule, reads how they "
                            "do, writes a record of each post to Documents\\ClipMonster\\Posted videos and deletes "
                            "the clip once TikTok shows it. The Queue and Performance tabs show what it's doing; "
                            "updates install themselves.</p>"))
@@ -459,6 +458,6 @@ class SetupWizard(QDialog):
 
     def reject(self) -> None:  # Finish later: what was filled in so far is kept
         i = self.pages.currentIndex()
-        if STEPS[i] in ("Keys", "First niche", "Posting schedule"):
+        if STEPS[i] in ("Keys", "First category", "Posting schedule"):
             self._leave(i)
         super().reject()

@@ -22,7 +22,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable
 
-from . import fresh, learn, lookup, niches, orders, research, steps, youtube_login
+from . import fresh, learn, lookup, categories, orders, research, steps, youtube_login
 from .download import Video, download, is_blocked
 from .engine import Cancelled, Engine, Project, timing_text
 from .jobs import SIGN_IN_WAIT, Job, JobDB
@@ -43,10 +43,12 @@ FIND_MATCH = 60.0  # a standing request's video must match at least this well (0
 FIND_SINCE = "month"  # standing requests look for videos posted in the last month: new ones each run
 RULE_WORDS = {"score": "clip-ability under your minimum", "age": "older than your limit",
               "length": "outside your video length", "daily_cap": "today's limit is reached",
-              "niche_cap": "the niche's videos a day are reached", "channel_cap": "the channel's weekly limit",
+              "category_cap": "the category's videos a day are reached",
+              "niche_cap": "the category's videos a day are reached", "channel_cap": "the channel's weekly limit",
               "channel": "a blocked channel", "category": "a blocked category", "word": "a blocked word",
               "language": "another language", "source": "your picking rules allow Creative Commons only",
-              "live": "live or not out yet", "niche": "its niche is off or paused"}
+              "live": "live or not out yet", "unsorted": "its category is off or paused",
+              "niche": "its category is off or paused"}
 HEARTBEAT_STALE = 180  # a runner silent for this long is gone
 PULSE = 5.0  # seconds between heartbeats, whatever the runner is busy with
 IDLE = 300  # longest sleep between checks
@@ -153,22 +155,22 @@ def has_ai_key(s: Settings) -> bool:
 def settings_for(job: Job, s: Settings, order: "orders.Order | None" = None,
                  clips: int = 0) -> tuple[Settings, str]:
     """The settings a job is clipped with, and a label saying what gave them: a recipe matching
-    the video's channel or category comes first, then the style of its niche, then a catch-all
-    recipe (*), then Automation's. A niche's clips go to its own folder inside the Automation folder.
+    the video's channel or category comes first, then the style of its category, then a catch-all
+    recipe (*), then Automation's. A category's clips go to its own folder inside the Automation folder.
 
-    The niche's own clip count and length go on top of the style, and a clip request's (`order`,
+    The category's own clip count and length go on top of the style, and a clip request's (`order`,
     asking this video for `clips` clips) on top of those, into the request's own folder. Special
-    requests (the niche's and the request's) go to the AI, and with an AI key they make the AI
+    requests (the category's and the request's) go to the AI, and with an AI key they make the AI
     pick the clips, since only it can follow them.
 
-    Clip length is never the style's: it's Min/Max clip length from Settings, unless the niche or the
+    Clip length is never the style's: it's Min/Max clip length from Settings, unless the category or the
     request asks for its own, so a preset made for 15-second clips can't undercut what you set."""
     recipes, _ = parse_recipes(s.auto_recipes)
-    niche = niches.find(s, job.niche)
+    category = categories.find(s, job.category_id)
     matching = [r for r in recipes if r.matches(job)]
-    rule = next((r for r in matching if not (niche and r.catch_all)), None)
-    fallback = next((r for r in matching if r.catch_all), None) if niche else None
-    layers = [x for x in (rule, niche, fallback) if x]  # strongest first; each has .preset and .view
+    rule = next((r for r in matching if not (category and r.catch_all)), None)
+    fallback = next((r for r in matching if r.catch_all), None) if category else None
+    layers = [x for x in (rule, category, fallback) if x]  # strongest first; each has .preset and .view
     preset_from = next((x for x in layers if x.preset), None)
     view_from = next((x for x in layers if x.view), None)
     preset = preset_from.preset if preset_from else s.auto_preset
@@ -181,16 +183,16 @@ def settings_for(job: Job, s: Settings, order: "orders.Order | None" = None,
         name = find_layout(view)
         if name:
             out = out.apply(all_layouts()[name])
-    folder = s.auto_output_path / niche.folder if niche else s.auto_output_path
+    folder = s.auto_output_path / category.folder if category else s.auto_output_path
     if order is not None:
         folder = folder / "Requests" / order.folder
     overrides = {"output_dir": str(folder), "cache_dir": str(s.cache_path),
                  "min_len": s.min_len, "max_len": max(s.max_len, s.min_len)}
-    if niche:
-        own_len = niche.clip_overrides()
+    if category:
+        own_len = category.clip_overrides()
         overrides |= own_len
         lo, hi = overrides["min_len"], overrides["max_len"]
-        if lo > hi:  # the niche's shortest passes Settings' longest (or the other way): the niche's wins
+        if lo > hi:  # the category's shortest passes Settings' longest (or the other way): the category's wins
             if "max_len" in own_len and "min_len" not in own_len:
                 overrides["min_len"] = hi
             else:
@@ -198,7 +200,7 @@ def settings_for(job: Job, s: Settings, order: "orders.Order | None" = None,
     if order is not None:
         overrides |= {"min_len": order.min_len, "max_len": order.max_len,
                       "clip_count": max(1, clips or order.remaining or order.count)}
-    # The niche's second videos, unless a channel or category recipe's own preset or view brings its own.
+    # The category's second videos, unless a channel or category recipe's own preset or view brings its own.
     own = ""
     if rule is not None:
         mine = (presets.get(preset) if preset_from is rule else None,
@@ -208,18 +210,18 @@ def settings_for(job: Job, s: Settings, order: "orders.Order | None" = None,
                 own = str(values["stack_folder"] or "").strip()
     if own:
         overrides["stack_folder"] = own
-    elif niche and niche.stack_folder.strip():
-        overrides["stack_folder"] = niche.stack_folder.strip()
+    elif category and category.stack_folder.strip():
+        overrides["stack_folder"] = category.stack_folder.strip()
     told = out.ai_instructions.strip()
-    if niche and niche.instructions.strip():
-        told = (f"{told}\nThese clips are for a TikTok account about {niche.name}: "
-                f"{niche.instructions.strip()}").strip()
+    if category and category.instructions.strip():
+        told = (f"{told}\nThese clips are for a TikTok account about {category.name}: "
+                f"{category.instructions.strip()}").strip()
     special = orders.instructions(order) if order is not None else ""
     if special:
         told = f"{told}\n{special}".strip()
     if told != out.ai_instructions.strip():
         overrides["ai_instructions"] = told
-    wants_ai = bool((niche and niche.instructions.strip()) or special)
+    wants_ai = bool((category and category.instructions.strip()) or special)
     if wants_ai and out.mode != "ai" and has_ai_key(s):
         overrides["mode"] = "ai"
     if s.auto_captions:
@@ -233,7 +235,7 @@ def settings_for(job: Job, s: Settings, order: "orders.Order | None" = None,
     overrides["ai_polish"] = s.auto_polish and has_ai_key(s)
     out = out.apply(overrides)
     label = " · ".join(x for x in (preset or "My settings", view) if x)
-    why = [f"niche: {niche.name}"] if niche else []
+    why = [f"category: {category.name}"] if category else []
     if order is not None:
         why.append(f"request: {order.count} clips of {order.length_text()}")
     if overrides.get("mode") == "ai":
@@ -414,7 +416,7 @@ class Runner:
             next_scan = now
         if research.youtube_key(s) and now >= next_scan:
             self.research(s)
-            s = self.load()  # a scan takes minutes: niches made meanwhile count (see research)
+            s = self.load()  # a scan takes minutes: categories made meanwhile count (see research)
             now = self.now()
             next_scan = now + max(10, s.research_interval) * 60
         elif not research.youtube_key(s) and not self.db.meta("warned_key"):
@@ -426,7 +428,7 @@ class Runner:
 
         self.lift_pause_for_sign_in(s, now)
         self.check_orders()
-        paused = niches.paused_ids(s)
+        paused = categories.paused_ids(s)
         # Without a key there's no check to wait for (and "Find videos now" can't happen).
         scan_wait = next_scan - now if research.youtube_key(s) else IDLE
         job = self.db.next_due(now, paused)
@@ -451,8 +453,8 @@ class Runner:
         blocked = self.blocked(now)
         if blocked and upcoming:  # the videos waiting are waiting for the sign-in pause: say so
             self.state(self.wait_reason(s, now)[1])
-        elif self.db.next_due(now) is not None:  # only paused niches' videos are waiting
-            self.state("Waiting: the niches with videos waiting are paused")
+        elif self.db.next_due(now) is not None:  # only paused categories' videos are waiting
+            self.state("Waiting: the categories with videos waiting are paused")
         else:
             self.state(self.idle_text(s, next_scan, upcoming))
         return max(1.0, min(scan_wait, (upcoming - now) if upcoming else IDLE, IDLE))
@@ -517,7 +519,7 @@ class Runner:
         if not s.auto_prefetch or (self.prefetch is not None and self.prefetch.busy):
             return
         now = self.now()
-        nxt = self.db.next_due(now, niches.paused_ids(s))  # `current` is working, so it's not this
+        nxt = self.db.next_due(now, categories.paused_ids(s))  # `current` is working, so it's not this
         if nxt is None or nxt.id == current.id or self.prefetched(nxt):
             return
         order = self.db.get_order(nxt.order) if nxt.order else None
@@ -642,13 +644,13 @@ class Runner:
         self.state("Checking what to clip")
         forced = self.db.meta("scan_now")
         self.db.set_meta("scan_now", "")
-        only = forced if forced not in ("", "1") else ""  # "Find videos now" for one niche
-        if not only:  # a one-niche check doesn't put off the next check of the others
+        only = forced if forced not in ("", "1") else ""  # "Find videos now" for one category
+        if not only:  # a one-category check doesn't put off the next check of the others
             self.db.set_meta("last_scan", now)
-        if only and niches.find(s, only):
-            s = s.copy(niches=[d for d in s.niches if isinstance(d, dict) and niches.Niche.from_json(d)
-                               and niches.Niche.from_json(d).id == only])
-            self.log(f"Finding videos now for {niches.name_of(s, only)}.")
+        if only and categories.find(s, only):
+            s = s.copy(categories=[d for d in s.categories if isinstance(d, dict) and categories.Category.from_json(d)
+                               and categories.Category.from_json(d).id == only])
+            self.log(f"Finding videos now for {categories.name_of(s, only)}.")
         history = self._history()
         recent = history.last_scan.get("time", 0)
         reused = False
@@ -681,8 +683,8 @@ class Runner:
             self.db.set_meta("last_error", f"Research: {exc}")
             return 0
         picks = self._picks()
-        s = self.load()  # a scan takes minutes: niches and rules may have changed since it started
-        niches.assign_from_settings(result.videos, s, history)
+        s = self.load()  # a scan takes minutes: categories and rules may have changed since it started
+        categories.assign_from_settings(result.videos, s, history)
         videos = list(result.videos)
         found = self.standing(s, history, forced == "1", only)
         if found:  # standing requests' videos join the scan's, under the same rules and limits
@@ -691,23 +693,23 @@ class Runner:
                 old = seen.get(v.id)
                 if old is None:
                     videos.append(v)
-                else:  # on the charts too: it counts as found for the request, for the request's niche
+                else:  # on the charts too: it counts as found for the request, for the request's category
                     old.origins = sorted(set(old.origins) | {"request"})
-                    old.niche, old.match, old.match_why = v.niche, v.match, v.match_why
+                    old.category_id, old.match, old.match_why = v.category_id, v.match, v.match_why
         used = fresh.used_ids(self.db)  # queued or clipped before (picks and sends are checked by the rules)
         for v in videos:
             v.used = v.id in used
         policy = Policy.from_settings(s)
-        wanted = self.videos_wanted(s)  # clip requests that pick: niche id -> [(request, videos it needs)]
+        wanted = self.videos_wanted(s)  # clip requests that pick: category id -> [(request, videos it needs)]
         for nid, asks in wanted.items():  # what requests need comes on top of the daily limits
             # (and so do their own picks in the last day, which the limits already count)
             extra = sum(n + self.picked_for(o, now) for o, n in asks)
             policy.daily += extra
-            for k in ([nid] if nid else list(policy.niche_daily)):  # no niche: any niche's video will do
-                if k in policy.niche_daily:
-                    policy.niche_daily[k] += extra
-            if not nid and policy.use_niches:  # and so will a video that fits no niche
-                policy.niche_daily[""] = policy.niche_daily.get("", 0) + extra
+            for k in ([nid] if nid else list(policy.category_daily)):  # no category: any category's video will do
+                if k in policy.category_daily:
+                    policy.category_daily[k] += extra
+            if not nid and policy.use_categories:  # and so will a video that fits no category
+                policy.category_daily[""] = policy.category_daily.get("", 0) + extra
         decisions = decide(videos, policy, picks, now=now, notes=result.notes,
                            lessons=learn.for_settings(s))
         added = 0
@@ -729,19 +731,19 @@ class Runner:
                 continue
             v = d.video
             order = ""
-            for key in dict.fromkeys((v.niche, "")):  # its niche's requests first, then ones for no niche
+            for key in dict.fromkeys((v.category_id, "")):  # its category's requests first, then ones for no category
                 for i, (o, n) in enumerate(wanted.get(key, [])):
                     if n > 0 and not order:
                         order = o.id
                         wanted[key][i] = (o, n - 1)
             job = Job(id=v.id, url=v.url, title=v.title, channel=v.channel, channel_id=v.channel_id,
                       category=v.category, permission=d.reason, origins=list(v.origins), how="auto",
-                      stage="Waiting", niche=v.niche, order=order)
+                      stage="Waiting", category_id=v.category_id, order=order)
             if not self.db.add(job, now):  # queued before after all: it mustn't use up one of today's picks
                 continue
             added += 1
-            niche = niches.name_of(s, v.niche)
-            self.log(f"Picked{' for ' + niche if niche else ''}{' (for a request)' if order else ''}: "
+            category = categories.name_of(s, v.category_id)
+            self.log(f"Picked{' for ' + category if category else ''}{' (for a request)' if order else ''}: "
                      f"{v.title} ({v.channel}, clip-ability {v.score:.0f}). {d.reason}"
                      + (f" {d.learned}" if d.learned else ""))
             picks.record(d, "auto", now)
@@ -754,10 +756,10 @@ class Runner:
     # ------------------------------------------------------------ standing requests (lookup.py)
     def standing(self, s: Settings, history: History, everything: bool = False, only: str = "") -> list:
         """Run the standing requests that are due (every Settings → Picking hours; all of them for
-        Find videos now, or one niche's) and return their good matches, each in its niche. Each run
+        Find videos now, or one category's) and return their good matches, each in its category. Each run
         of a request costs about 200 YouTube quota units, and two AI calls when there's a key and
         today's AI calls allow."""
-        asks = niches.standing_requests(s)
+        asks = categories.standing_requests(s)
         key = research.youtube_key(s)
         if not asks or not key:
             return []
@@ -803,12 +805,12 @@ class Runner:
                     self.db.note("ai", self.now())
                 good = [v for v in r.videos if v.match >= FIND_MATCH]
                 for v in good:
-                    v.niche = nid
+                    v.category_id = nid
                     v.sent = bool((history.videos.get(v.id) or {}).get("sent"))
                 out += good
-                niche = niches.name_of(s, nid)
+                category = categories.name_of(s, nid)
                 new = sum(1 for v in good if v.new)
-                self.log(f"Standing request “{text}”{' for ' + niche if niche else ''}: {len(good)} good "
+                self.log(f"Standing request “{text}”{' for ' + category if category else ''}: {len(good)} good "
                          f"match{'es' if len(good) != 1 else ''} ({new} new) of {len(r.videos) + r.weak} found"
                          + (f", {r.skipped} already used left out" if r.skipped else "")
                          + f" (searched {', '.join(repr(q) for q in r.plan.queries)}, "
@@ -822,12 +824,12 @@ class Runner:
         return out
 
     # ------------------------------------------------------------ clip requests (orders.py)
-    def per_video(self, s: Settings, niche_id: str) -> int:
-        """Clips one picked video gives a request: the niche's clips per video, else the style's count."""
-        n = niches.find(s, niche_id)
+    def per_video(self, s: Settings, category_id: str) -> int:
+        """Clips one picked video gives a request: the category's clips per video, else the style's count."""
+        n = categories.find(s, category_id)
         if n and n.clips_per_video:
             return n.clips_per_video
-        job = Job(id="", url="", niche=niche_id)
+        job = Job(id="", url="", category_id=category_id)
         return max(1, settings_for(job, s)[0].clip_count)
 
     def picked_for(self, order: orders.Order, now: float) -> int:
@@ -841,16 +843,16 @@ class Runner:
                 self.order_progress(o.id)
 
     def videos_wanted(self, s: Settings) -> dict[str, list[tuple[orders.Order, int]]]:
-        """Open requests that pick their videos, by niche id, with how many more videos each needs."""
+        """Open requests that pick their videos, by category id, with how many more videos each needs."""
         out: dict[str, list[tuple[orders.Order, int]]] = {}
-        on = {n.id for n in niches.active(s)}
+        on = {n.id for n in categories.active(s)}
         for o in reversed(self.db.orders(open_only=True)):  # oldest request first
-            if not o.picks or (o.niche and o.niche not in on):
+            if not o.picks or (o.category_id and o.category_id not in on):
                 continue
             waiting = sum(1 for j in self.db.order_jobs(o.id) if j.status in ("queued", "working"))
-            need = orders.videos_needed(o, self.per_video(s, o.niche), waiting)
+            need = orders.videos_needed(o, self.per_video(s, o.category_id), waiting)
             if need:
-                out.setdefault(o.niche, []).append((o, need))
+                out.setdefault(o.category_id, []).append((o, need))
         return out
 
     def place(self, order: orders.Order) -> orders.Order:
@@ -860,16 +862,16 @@ class Runner:
         for url in order.links:
             vid = _video_id(url)
             job = Job(id=vid, url=url, title=url, permission="Added by you (request)", how="manual",
-                      stage="Waiting", niche=order.niche, order=order.id)
+                      stage="Waiting", category_id=order.category_id, order=order.id)
             if not self.db.add(job, now):  # clipped before (or waiting): the request gets its own copy
                 job.id = orders.job_id(vid, order.id)
                 self.db.add(job, now)
         if order.picks:
-            request_scan(self.db, order.niche)
+            request_scan(self.db, order.category_id)
             message = "Waiting for automation to pick videos"
         else:
             message = f"{len(order.links)} video{'s' if len(order.links) != 1 else ''} waiting"
-        self.log(f"New request: {order.title(niches.name_of(self.load(), order.niche))}"
+        self.log(f"New request: {order.title(categories.name_of(self.load(), order.category_id))}"
                  + (f". Special requests: {order.notes}" if order.notes else ""))
         return self.db.update_order(order.id, now, message=message) or order
 
@@ -907,28 +909,28 @@ class Runner:
             self.log(f"Request {'done' if status == 'done' else 'finished short'}: {message}.")
         return self.db.update_order(order_id, self.now(), made=made, status=status, message=message)
 
-    def add_manual(self, url: str, title: str = "", niche: str = "") -> bool:
+    def add_manual(self, url: str, title: str = "", category_id: str = "") -> bool:
         from .download import is_url
 
         if not is_url(url):
             raise ValueError("Give a video link (https://…).")
         vid = _video_id(url)
         return self.db.add(Job(id=vid, url=url, title=title or url, permission="Added by you", how="manual",
-                               stage="Waiting", niche=niche), self.now())
+                               stage="Waiting", category_id=category_id), self.now())
 
     # ------------------------------------------------------------ one video
     def process(self, job: Job, s: Settings) -> None:
         now = self.now()
-        if job.niche and niches.find(s, job.niche) is None:
-            s = self.load()  # the settings we were given may be older than the niche
-            if niches.find(s, job.niche) is None:
-                if niches.load(s):  # deleted while it waited (or mid-scan)
+        if job.category_id and categories.find(s, job.category_id) is None:
+            s = self.load()  # the settings we were given may be older than the category
+            if categories.find(s, job.category_id) is None:
+                if categories.load(s):  # deleted while it waited (or mid-scan)
                     self.db.remove(job.id)
-                    self.log(f"Took {job.title or job.url} out of the queue: its niche was deleted.")
-                else:  # no niches at all: settings.json may not have been readable, so don't lose the video
-                    self.db.update(job.id, now, status="failed", error="Its niche isn't in your settings",
-                                   stage="Its niche is missing")
-                    self.log(f"✗ {job.title or job.url}: its niche isn't in your settings. Retry it once it's back.")
+                    self.log(f"Took {job.title or job.url} out of the queue: its category was deleted.")
+                else:  # no categories at all: settings.json may not have been readable, so don't lose the video
+                    self.db.update(job.id, now, status="failed", error="Its category isn't in your settings",
+                                   stage="Its category is missing")
+                    self.log(f"✗ {job.title or job.url}: its category isn't in your settings. Retry it once it's back.")
                 return
         order = self.db.get_order(job.order) if job.order else None
         clips = 0
@@ -939,7 +941,7 @@ class Runner:
                          f"{'gone' if order is None else orders.STATUS_WORDS[order.status].lower()}.")
                 return
             left = sum(1 for j in self.db.order_jobs(order.id) if j.status in ("queued", "working"))
-            clips = orders.clips_for_video(order, self.per_video(s, job.niche), left)
+            clips = orders.clips_for_video(order, self.per_video(s, job.category_id), left)
         settings, label = settings_for(job, s, order, clips)
         used = self.db.count("ai", now - DAY)
         if settings.mode == "ai" and used >= s.auto_ai_daily:
@@ -997,10 +999,10 @@ class Runner:
         p.video = early
         p.meta = {"automation": {"permission": job.permission, "origins": job.origins, "how": job.how,
                                  "recipe": label, "picked_at": job.created}}
-        niche = niches.find(s, job.niche)
-        if niche:  # for the Library, and for posting to know which account the clips are for
-            p.meta["automation"] |= {"niche": niche.name, "niche_id": niche.id, "account": niche.account,
-                                     "account_id": niche.account_id}
+        category = categories.find(s, job.category_id)
+        if category:  # for the Library, and for posting to know which account the clips are for
+            p.meta["automation"] |= {"category": category.name, "category_id": category.id, "account": category.account,
+                                     "account_id": category.account_id}
         if order is not None:
             p.meta["automation"]["request"] = {"id": order.id, "count": order.count, "min_len": order.min_len,
                                                "max_len": order.max_len, "notes": order.notes}
@@ -1164,7 +1166,7 @@ class Runner:
                     wait = self.tick()
                 except Stopped:
                     break
-                if once and (wait > 1.0 or not self.db.next_due(self.now(), niches.paused_ids(self.load()))):
+                if once and (wait > 1.0 or not self.db.next_due(self.now(), categories.paused_ids(self.load()))):
                     break
                 waited = 0.0
                 while waited < wait:
@@ -1357,15 +1359,15 @@ class Watchdog:
 
 # What stopped videos from being picked, in the words the status line uses.
 _RULE_WORDS = {
-    "done": "already picked", "niche": "fit no niche", "length": "too long or short", "score": "low clip-ability",
+    "done": "already picked", "unsorted": "fit no category", "niche": "fit no category", "length": "too long or short", "score": "low clip-ability",
     "age": "too old", "word": "blocked words", "category": "blocked category", "channel": "blocked channel",
     "language": "other languages", "live": "live or not out yet", "source": "not from your sources",
-    "channel_cap": "channel's weekly limit", "niche_cap": "niche's daily limit", "daily_cap": "daily limit",
+    "channel_cap": "channel's weekly limit", "category_cap": "category's daily limit", "niche_cap": "category's daily limit", "daily_cap": "daily limit",
 }
 
 
 def why_none(decisions) -> str:
-    """'21 videos: 12 already picked, 4 too long or short, 3 fit no niche' for a check that picked nothing."""
+    """'21 videos: 12 already picked, 4 too long or short, 3 fit no category' for a check that picked nothing."""
     if not decisions:
         return "no videos found"
     counts: dict[str, int] = {}
@@ -1431,11 +1433,11 @@ def run_headless() -> int:
     return Runner(log=file_logger(), priority=speed.set_priority, self_update=True, posting=True).run()
 
 
-def request_scan(db: JobDB, niche_id: str = "") -> None:
-    """Ask automation to check for videos now: for one niche, or all ("1"). Two different asks
+def request_scan(db: JobDB, category_id: str = "") -> None:
+    """Ask automation to check for videos now: for one category, or all ("1"). Two different asks
     before the check happens make it a check of all of them."""
     asked = db.meta("scan_now")
-    db.set_meta("scan_now", niche_id if niche_id and asked in ("", niche_id) else "1")
+    db.set_meta("scan_now", category_id if category_id and asked in ("", category_id) else "1")
     db.set_meta("nudge", "1")  # a running automation looks now, not after its wait
 
 

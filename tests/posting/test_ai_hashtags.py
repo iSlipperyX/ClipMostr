@@ -47,7 +47,7 @@ def main_key(key="sk-ant-x"):
 
 def account():
     a = Accounts.load().add("")
-    a.niche, a.default_hashtags = "Rainbow Six streamer clips", "#fyp #gaming"
+    a.audience, a.default_hashtags = "Rainbow Six streamer clips", "#fyp #gaming"
     return a
 
 

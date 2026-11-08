@@ -442,21 +442,21 @@ class Engine:
     def polish(self, p: Project) -> None:
         """Hooks, caption fixes, speaker crops and a burned-in subtitle check from one AI call.
         Never fails the video: on any error the clips go out as they are (reason in p.polish_error)."""
-        from . import learn, niches, polish
+        from . import learn, categories, polish
 
         p.polished, p.polish_error, p.captions_off = False, "", False
         clips = [c for c in p.clips if c.enabled]
         if not clips or p.video is None:
             return
         self.progress("AI is polishing the clips", None)
-        niche = niches.find(self.s, (p.meta.get("automation") or {}).get("niche_id", ""))
+        category = categories.find(self.s, (p.meta.get("automation") or {}).get("category_id", ""))
         lessons = learn.for_settings(self.s)
-        guide = lessons.prompt_text(niche.id if niche else "") if lessons else ""
+        guide = lessons.prompt_text(category.id if category else "") if lessons else ""
         if guide:
             self.log("The AI sees which of your earlier hooks worked.")
-        if niche:  # hooks that suit the account these clips are for
-            about = f"These clips are for a TikTok account about {niche.name}."
-            guide = "\n\n".join(x for x in (about + (f" {niche.instructions.strip()}" if niche.instructions.strip()
+        if category:  # hooks that suit the account these clips are for
+            about = f"These clips are for a TikTok account about {category.name}."
+            guide = "\n\n".join(x for x in (about + (f" {category.instructions.strip()}" if category.instructions.strip()
                                                        else ""), guide) if x)
         notes = str(((p.meta.get("automation") or {}).get("request") or {}).get("notes") or "").strip()
         if notes:  # a clip request's special requests shape the hooks and bottom lines too
@@ -742,10 +742,10 @@ class Engine:
         if not edit_plan.active(s):
             export_clip(v.path, media, dest, clip, p.words, s, progress, next_part=next_part)
             return None
-        from .niches import find as find_niche
+        from .categories import find as find_category
 
-        niche = find_niche(self.s, (p.meta.get("automation") or {}).get("niche_id", ""))
-        topic = niche.name if niche else (clip.category or "")
+        category = find_category(self.s, (p.meta.get("automation") or {}).get("category_id", ""))
+        topic = category.name if category else (clip.category or "")
         m = p.measurements
         try:
             with work_folder("edit-") as work:

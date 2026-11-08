@@ -38,7 +38,7 @@ def _research(p: QPainter) -> None:  # magnifier with a spark
     p.drawLine(QPointF(7, 9.5), QPointF(12, 9.5))
 
 
-def _niches(p: QPainter) -> None:  # target
+def _categories(p: QPainter) -> None:  # target
     p.drawEllipse(QRectF(3, 3, 18, 18))
     p.drawEllipse(QRectF(7.5, 7.5, 9, 9))
     p.drawPoint(QPointF(12, 12))
@@ -151,7 +151,7 @@ def _up(p: QPainter) -> None:
 
 
 ICONS = {
-    "studio": _studio, "library": _library, "research": _research, "niches": _niches,
+    "studio": _studio, "library": _library, "research": _research, "categories": _categories,
     "automation": _automation, "accounts": _accounts, "queue": _queue, "performance": _performance,
     "settings": _settings, "help": _help, "add": _add, "folder": _folder, "link": _link, "check": _check,
     "down": _down, "up": _up,

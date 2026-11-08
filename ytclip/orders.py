@@ -1,14 +1,14 @@
-"""Clip requests: "make 10 clips of 30 to 45 seconds for this niche", filled by automation.
+"""Clip requests: "make 10 clips of 30 to 45 seconds for this category", filled by automation.
 
-A request says how many clips, how long, which niche (or none), and where they come from: links
-you give it, or videos automation picks for the niche. It can carry special requests in plain
+A request says how many clips, how long, which category (or none), and where they come from: links
+you give it, or videos automation picks for the category. It can carry special requests in plain
 words ("only the funniest reactions"), which go to the AI that picks the moments and to the AI
 that writes hooks and bottom text.
 
 Requests live in jobs.db next to the queue. Each video a request needs is a queued job that
 carries the request's id, and the runner clips it with the request's count, length and special
 requests. Clips that pass the quality check count towards the request; when it has them all it's
-done. Its clips go to <niche folder>/Requests/<request>/, so a video clipped again for a request
+done. Its clips go to <category folder>/Requests/<request>/, so a video clipped again for a request
 never replaces the clips it made before.
 """
 
@@ -36,8 +36,8 @@ class Order:
     count: int = 5  # clips wanted, after the quality check
     min_len: float = 20.0
     max_len: float = 60.0
-    niche: str = ""  # niche id, "" for none
-    links: list[str] = field(default_factory=list)  # [] = automation picks videos for the niche
+    category_id: str = ""  # category id, "" for none
+    links: list[str] = field(default_factory=list)  # [] = automation picks videos for the category
     notes: str = ""  # special requests, told to the AI
     status: str = "open"
     made: int = 0  # clips ready so far
@@ -50,7 +50,10 @@ class Order:
         if not isinstance(d, dict):
             return None
         known = {f.name for f in fields(cls)}
+        if "category_id" not in d and "niche" in d:  # saved before 3.2, when categories were called niches
+            d = {**d, "category_id": d["niche"]}
         o = cls(**{k: v for k, v in d.items() if k in known})
+        o.category_id = str(o.category_id or "")
         try:
             o.count = max(1, min(MAX_COUNT, int(o.count)))
             o.min_len = max(MIN_LEN, min(MAX_LEN, float(o.min_len)))
@@ -82,14 +85,14 @@ class Order:
     def length_text(self) -> str:
         return f"{self.min_len:g}–{self.max_len:g} s"
 
-    def title(self, niche_name: str = "") -> str:
-        where = f" for {niche_name}" if niche_name else ""
+    def title(self, category_name: str = "") -> str:
+        where = f" for {category_name}" if category_name else ""
         source = f" from {len(self.links)} link{'s' if len(self.links) != 1 else ''}" if self.links else ""
         return f"{self.count} clips of {self.length_text()}{where}{source}"
 
     @property
     def folder(self) -> str:
-        """Its folder inside the niche's (or the Automation) folder's Requests folder."""
+        """Its folder inside the category's (or the Automation) folder's Requests folder."""
         stamp = time.strftime("%Y-%m-%d %H%M", time.localtime(self.created or time.time()))
         return safe_name(f"{stamp} {self.count} clips {self.min_len:g}-{self.max_len:g}s", 60)
 
@@ -121,7 +124,7 @@ def parse_length(text: str) -> tuple[float, float]:
     return lo, hi
 
 
-def make(count: int, min_len: float, max_len: float, niche: str = "", links: list[str] | None = None,
+def make(count: int, min_len: float, max_len: float, category_id: str = "", links: list[str] | None = None,
          notes: str = "", now: float | None = None) -> Order:
     """A new request, checked. ValueError says what's wrong in words."""
     try:
@@ -139,7 +142,7 @@ def make(count: int, min_len: float, max_len: float, niche: str = "", links: lis
     seen: set[str] = set()
     unique = [x for x in links if not (video_id(x) in seen or seen.add(video_id(x)))]
     now = now or time.time()
-    return Order(id=new_id(), count=count, min_len=float(min_len), max_len=float(max_len), niche=niche,
+    return Order(id=new_id(), count=count, min_len=float(min_len), max_len=float(max_len), category_id=category_id,
                  links=unique, notes=" ".join(notes.split()) if "\n" not in notes else notes.strip(),
                  created=now, updated=now)
 

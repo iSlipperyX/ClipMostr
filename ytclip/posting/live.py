@@ -76,7 +76,7 @@ class Event:
     """One line of the Live page's activity feed."""
 
     at: float
-    kind: str  # start | moved | more | followers | new | seen | hot | milestone | away | error
+    kind: str  # start | moved | more | followers | new | seen | hot | milestone | away | error | login_needed
     text: str
     video_id: str = ""
     views: int = 0  # what changed (for "today" totals); counted only from readings after `since`
@@ -86,6 +86,7 @@ class Event:
     followers: int = 0
     since: float = 0.0  # when the reading this was compared with was taken
     alert: bool = False  # worth a tray notification
+    toasted: bool = False  # already shown as a Windows notification by the background process
 
     @classmethod
     def from_json(cls, d: dict) -> "Event | None":

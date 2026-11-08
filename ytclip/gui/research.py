@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComb
                                QPushButton, QScrollArea, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
                                QVBoxLayout, QWidget)
 
-from .. import clipability, fresh, learn, lookup, niches, steps
+from .. import clipability, fresh, learn, lookup, categories, steps
 from ..clipability import FIT, PART_LABELS, WEIGHTS, age_text, compact, verdict
 from ..organize import stamp
 from ..policy import Decision, PickLog, Policy, decide, language_codes, picks_path
@@ -23,11 +23,11 @@ from ..trending import CATEGORIES, KEY_HELP_URL, REGIONS, History, TrendingVideo
 from . import theme
 from .status_bars import LabeledBar
 
-COLUMNS = ("Score", "Video", "Channel", "Found in", "Views", "Views / h", "Engagement", "Length", "Posted", "Niche",
+COLUMNS = ("Score", "Video", "Channel", "Found in", "Views", "Views / h", "Engagement", "Length", "Posted", "Category",
            "Pick", "Seen", "Match")
 PICK_COLUMN = COLUMNS.index("Pick")
 SEEN_COLUMN = COLUMNS.index("Seen")
-NICHE_COLUMN = COLUMNS.index("Niche")
+CATEGORY_COLUMN = COLUMNS.index("Category")
 MATCH_COLUMN = COLUMNS.index("Match")  # only for a request's results
 ORIGIN_LABELS = {"watchlist": "Your list", "cc": "CC search", "request": "Your request"}
 SINCE_CHOICES = (("any", "Any time"), ("year", "This year"), ("month", "This month"), ("week", "This week"))
@@ -103,7 +103,7 @@ class _Bar(QWidget):
 
 class Research(QWidget):
     send = Signal(list)  # video URLs for the Studio
-    queue = Signal(list)  # (url, title, niche) for Automation's queue
+    queue = Signal(list)  # (url, title, category) for Automation's queue
     notice = Signal(str)  # a line for the main status bar
     log = Signal(str)
     hits_changed = Signal(int)  # new high scorers the user hasn't looked at yet
@@ -120,7 +120,7 @@ class Research(QWidget):
         self.mode = "trending"  # what the table shows: "trending" or "find" (a request's results)
         self.videos: list[TrendingVideo] = []
         self._used: set[str] = set()  # videos already picked, queued, clipped or sent (fresh.used_ids)
-        self._niche_names: dict[str, str] = {}
+        self._category_names: dict[str, str] = {}
         self.decisions: dict[str, Decision] = {}
         self.job: _Job | None = None
         self.side_job: _Job | None = None
@@ -262,9 +262,9 @@ class Research(QWidget):
         self.new_only.setToolTip(f"Only videos first seen in the last {NEW_HOURS} hours (for a request: the ones it "
                                  "hadn't shown before)")
         self.new_only.toggled.connect(self._apply_filter)
-        self.niche_filter = QComboBox()
-        self.niche_filter.setToolTip("Show the videos that fit one niche")
-        self.niche_filter.activated.connect(lambda _i: self._apply_filter())
+        self.category_filter = QComboBox()
+        self.category_filter.setToolTip("Show the videos that fit one category")
+        self.category_filter.activated.connect(lambda _i: self._apply_filter())
         self.picks_only = QCheckBox("Picks only")
         self.picks_only.setToolTip("Show only the videos your picking rules would clip")
         self.picks_only.toggled.connect(self._apply_filter)
@@ -281,7 +281,7 @@ class Research(QWidget):
         filters.addWidget(self.interval)
         filters.addStretch(1)
         filters.addWidget(self.search, 1)
-        filters.addWidget(self.niche_filter)
+        filters.addWidget(self.category_filter)
         filters.addWidget(self.hide_used)
         filters.addWidget(self.new_only)
         filters.addWidget(self.picks_only)
@@ -331,7 +331,7 @@ class Research(QWidget):
         self.send_btn = QPushButton("➜  Send selected to Studio")
         self.send_btn.clicked.connect(self._send_selected)
         self.queue_btn = QPushButton("⏵  Queue in Automation")
-        self.queue_btn.setToolTip("Automation clips these next, in their niche's style, with your clip length")
+        self.queue_btn.setToolTip("Automation clips these next, in their category's style, with your clip length")
         self.queue_btn.clicked.connect(lambda: self._queue(self._selected_videos()))
         self.send_picks_btn = QPushButton()
         self.send_picks_btn.setToolTip("Send every video your picking rules picked to the Studio. They count "
@@ -483,25 +483,25 @@ class Research(QWidget):
             w.blockSignals(False)
         regions = parse_regions(s.research_regions)
         self.regions_btn.setText(", ".join(regions) if regions else "Choose…")
-        self._fill_niche_filter(s)
+        self._fill_category_filter(s)
         self.key_panel.setVisible(not youtube_key(s))
         self._update_summary()
         self._apply_filter()
 
-    def _fill_niche_filter(self, s: Settings) -> None:
-        all_niches = niches.load(s)
-        self._niche_names = {n.id: n.name for n in all_niches}
-        keep = self.niche_filter.currentData()
-        self.niche_filter.blockSignals(True)
-        self.niche_filter.clear()
-        self.niche_filter.addItem("All niches", None)
-        for n in all_niches:
-            self.niche_filter.addItem(n.name, n.id)
-        self.niche_filter.addItem("Fits no niche", "")
-        self.niche_filter.setCurrentIndex(max(0, self.niche_filter.findData(keep)))
-        self.niche_filter.blockSignals(False)
-        self.niche_filter.setVisible(bool(all_niches))
-        self.table.setColumnHidden(NICHE_COLUMN, not all_niches)
+    def _fill_category_filter(self, s: Settings) -> None:
+        all_categories = categories.load(s)
+        self._category_names = {n.id: n.name for n in all_categories}
+        keep = self.category_filter.currentData()
+        self.category_filter.blockSignals(True)
+        self.category_filter.clear()
+        self.category_filter.addItem("All categories", None)
+        for n in all_categories:
+            self.category_filter.addItem(n.name, n.id)
+        self.category_filter.addItem("Fits no category", "")
+        self.category_filter.setCurrentIndex(max(0, self.category_filter.findData(keep)))
+        self.category_filter.blockSignals(False)
+        self.category_filter.setVisible(bool(all_categories))
+        self.table.setColumnHidden(CATEGORY_COLUMN, not all_categories)
 
     def settings_changed(self) -> None:
         self.sync_from_settings()
@@ -860,7 +860,7 @@ class Research(QWidget):
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(self.videos))
         s = self._settings()
-        niches.assign_from_settings(self.videos, s, self.history)
+        categories.assign_from_settings(self.videos, s, self.history)
         self._mark_used()
         self.decisions = {d.video.id: d for d in decide(self.videos, Policy.from_settings(s), self.picks,
                                                         notes=notes, lessons=learn.for_settings(s))}
@@ -956,21 +956,21 @@ class Research(QWidget):
                  "Likes and comments per view" if rate is not None else "This channel hides its like count"),
             item(stamp(v.duration) if v.live == "none" else v.live.upper(), v.duration),
             item(age_text(v.age_hours()), -v.published),
-            self._niche_item(v),
+            self._category_item(v),
             self._pick_item(v),
             self._seen_item(v),
             self._match_item(v),
         ]
         for c, cell in enumerate(cells):
-            if 4 <= c < NICHE_COLUMN:
+            if 4 <= c < CATEGORY_COLUMN:
                 cell.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.table.setItem(r, c, cell)
 
-    def _niche_item(self, v: TrendingVideo) -> QTableWidgetItem:
-        name = self._niche_names.get(v.niche, "")
+    def _category_item(self, v: TrendingVideo) -> QTableWidgetItem:
+        name = self._category_names.get(v.category_id, "")
         it = _SortItem(name or "–")
-        it.setData(SORT_ROLE, name.lower() or "~")  # videos without a niche sort last
-        it.setToolTip(f"Fits the {name} niche" if name else "Fits none of your niches")
+        it.setData(SORT_ROLE, name.lower() or "~")  # videos without a category sort last
+        it.setToolTip(f"Fits the {name} category" if name else "Fits none of your categories")
         if not name:
             it.setForeground(QColor(theme.MUTED))
         return it
@@ -1005,7 +1005,7 @@ class Research(QWidget):
         """Run the picking rules over the current results (after a scan or a rules change)."""
         s = self._settings()
         notes = self.result.notes if self.result else {}
-        niches.assign_from_settings(self.videos, s, self.history)  # a niche may have changed
+        categories.assign_from_settings(self.videos, s, self.history)  # a category may have changed
         self._mark_used()  # the automation runner may have picked or clipped videos since
         self.decisions = {d.video.id: d for d in decide(self.videos, Policy.from_settings(s), self.picks,
                                                         notes=notes, lessons=learn.for_settings(s))}
@@ -1013,7 +1013,7 @@ class Research(QWidget):
         for r in range(self.table.rowCount()):
             v = self._video_at(r)
             if v:
-                self.table.setItem(r, NICHE_COLUMN, self._niche_item(v))
+                self.table.setItem(r, CATEGORY_COLUMN, self._category_item(v))
                 self.table.setItem(r, PICK_COLUMN, self._pick_item(v))
                 self.table.setItem(r, SEEN_COLUMN, self._seen_item(v))
         self.table.setSortingEnabled(True)
@@ -1029,7 +1029,7 @@ class Research(QWidget):
         hide_used = self.hide_used.isChecked()
         only_new = self.new_only.isChecked()
         only_picks = self.picks_only.isChecked()
-        niche = self.niche_filter.currentData() if not self.niche_filter.isHidden() else None
+        category = self.category_filter.currentData() if not self.category_filter.isHidden() else None
         shown = used = 0
         now = time.time()
         for r in range(self.table.rowCount()):
@@ -1039,7 +1039,7 @@ class Research(QWidget):
             used += is_used
             hidden = v is None or (hide_used and is_used) or (only_picks and not (d and d.picked)) or bool(
                 text and text not in v.title.lower() and text not in v.channel.lower()) or (
-                niche is not None and v.niche != niche) or (only_new and not self.is_new(v, now))
+                category is not None and v.category_id != category) or (only_new and not self.is_new(v, now))
             self.table.setRowHidden(r, hidden)
             shown += not hidden
         total = len(self.videos)
@@ -1108,8 +1108,8 @@ class Research(QWidget):
         if v.match >= 0:
             where += (f"<br><span style='color:{score_colour(v.match)}'><b>Match {v.match:.0f}</b></span>"
                       f" · {_esc(v.match_why)}")
-        if self._niche_names.get(v.niche):
-            where += f" · fits the <b>{_esc(self._niche_names[v.niche])}</b> niche"
+        if self._category_names.get(v.category_id):
+            where += f" · fits the <b>{_esc(self._category_names[v.category_id])}</b> category"
         length = stamp(v.duration) if v.live == "none" else v.live
         self.d_meta.setText(f"{_esc(v.channel)} · {compact(v.views)} views · {length} · posted {age_text(v.age_hours())} ago"
                             f"<br>{where}")
@@ -1243,9 +1243,9 @@ class Research(QWidget):
         self.refresh_picks()
 
     def _queue(self, videos: list[TrendingVideo]) -> None:
-        """To Automation's queue, each in the niche it fits (or none)."""
+        """To Automation's queue, each in the category it fits (or none)."""
         if videos:
-            self.queue.emit([(v.url, v.title, v.niche) for v in videos])
+            self.queue.emit([(v.url, v.title, v.category_id) for v in videos])
 
     def _send_selected(self) -> None:
         self._send(self._selected_videos())

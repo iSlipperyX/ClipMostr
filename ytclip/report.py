@@ -3,7 +3,7 @@
 Built from jobs.db (the queue, its clip requests and the events the runner notes) and the
 clips.json of each video it finished, so it needs no log reading and works with the app closed:
 
-* clips made per niche, and per clip request;
+* clips made per category, and per clip request;
 * clips the quality check rejected, and the reasons most often given;
 * videos that failed, with their errors;
 * pauses: YouTube asking the PC to sign in, the disk running low, stuck work the watchdog stopped;
@@ -20,7 +20,7 @@ from collections import Counter
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
-from . import niches
+from . import categories
 from .cleanup import size_text
 from .jobs import JobDB
 from .orders import STATUS_WORDS
@@ -30,7 +30,7 @@ HOUR = 3600.0
 
 
 @dataclass
-class NicheLine:
+class CategoryLine:
     name: str
     account: str = ""
     videos: int = 0
@@ -56,7 +56,7 @@ class Report:
     rejected: int = 0
     failed: list[tuple[str, str]] = field(default_factory=list)  # (video, error)
     waiting: int = 0
-    niches: list[NicheLine] = field(default_factory=list)
+    categories: list[CategoryLine] = field(default_factory=list)
     requests: list[RequestLine] = field(default_factory=list)
     reasons: list[tuple[str, int]] = field(default_factory=list)  # quality check problems, commonest first
     blocks: int = 0  # times YouTube asked the PC to sign in
@@ -86,7 +86,7 @@ class Report:
     def lines(self) -> list[str]:
         """The report in plain lines, most useful first."""
         out = [self.headline()]
-        for n in self.niches:
+        for n in self.categories:
             if n.videos or n.clips:
                 out.append(f"{n.name}{f' ({n.account})' if n.account else ''}: {n.clips} clips from {n.videos} "
                            f"video{'s' if n.videos != 1 else ''}" + (f", {n.rejected} rejected" if n.rejected else ""))
@@ -152,16 +152,16 @@ def build(db: JobDB, s: Settings, hours: float = 12.0, now: float | None = None)
     now = time.time() if now is None else now
     since = now - hours * HOUR
     r = Report(since=since, until=now, state=db.meta("state"))
-    all_niches = niches.load(s)
-    by_niche = {n.id: NicheLine(n.name, n.account) for n in all_niches}
-    other = NicheLine("No niche")
+    all_categories = categories.load(s)
+    by_category = {n.id: CategoryLine(n.name, n.account) for n in all_categories}
+    other = CategoryLine("No category")
     reasons: Counter = Counter()
     for j in db.jobs_since(since):
         if j.status == "done":
             r.videos += 1
             r.clips += j.clips
             r.rejected += j.rejected
-            line = by_niche.get(j.niche, other)
+            line = by_category.get(j.category_id, other)
             line.videos += 1
             line.clips += j.clips
             line.rejected += j.rejected
@@ -169,14 +169,14 @@ def build(db: JobDB, s: Settings, hours: float = 12.0, now: float | None = None)
                 reasons.update(_reasons(j.folder))
         elif j.status == "failed":
             r.failed.append((j.title or j.url, _short(j.error)))
-    r.niches = [x for x in by_niche.values() if x.videos] + ([other] if other.videos and all_niches else [])
+    r.categories = [x for x in by_category.values() if x.videos] + ([other] if other.videos and all_categories else [])
     r.reasons = reasons.most_common()
     counts = db.counts()
     r.waiting = counts.get("queued", 0) + counts.get("working", 0)
-    names = {n.id: n.name for n in all_niches}
+    names = {n.id: n.name for n in all_categories}
     for o in db.orders():
         if o.updated >= since or o.is_open:
-            r.requests.append(RequestLine(o.title(names.get(o.niche, "")), o.made, o.count, o.status, o.message))
+            r.requests.append(RequestLine(o.title(names.get(o.category_id, "")), o.made, o.count, o.status, o.message))
     for _, kind in db.events_since(since):
         if kind == "blocked":
             r.blocks += 1

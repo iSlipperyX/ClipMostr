@@ -4,7 +4,7 @@ import pytest
 from conftest import NOW
 from test_pipeline import GAMING, Clock, FakeEngine, _runner, _scan_result, _settings, fresh_engine  # noqa: F401
 
-from ytclip import niches, orders
+from ytclip import categories, orders
 from ytclip.jobs import Job, JobDB
 from ytclip.pipeline import settings_for
 
@@ -27,7 +27,7 @@ def test_unreadable_lengths_say_how_to_write_them(text):
 
 
 def test_a_request_is_checked_and_its_links_tidied():
-    o = orders.make(10, 30, 45, niche="game01", links=[" https://youtu.be/AAAAAAAAAAA ",
+    o = orders.make(10, 30, 45, category_id="game01", links=[" https://youtu.be/AAAAAAAAAAA ",
                                                        "https://www.youtube.com/watch?v=AAAAAAAAAAA", ""],
                     notes="  only   the funniest  bits ", now=NOW)
     assert o.links == ["https://youtu.be/AAAAAAAAAAA"]  # the same video twice is one link
@@ -76,7 +76,7 @@ def test_a_jobs_db_from_before_requests_gains_the_column(tmp_path):
     path = tmp_path / "jobs.db"
     con = sqlite3.connect(path)
     con.execute("CREATE TABLE jobs (id TEXT PRIMARY KEY, url TEXT, status TEXT, created REAL, next_try REAL, "
-                "niche TEXT)")
+                "category TEXT)")
     con.execute("INSERT INTO jobs VALUES ('old', 'u', 'queued', 1, 0, '')")
     con.commit()
     con.close()
@@ -87,57 +87,57 @@ def test_a_jobs_db_from_before_requests_gains_the_column(tmp_path):
     assert [j.id for j in db.order_jobs("r1")] == ["new"]
 
 
-def test_paused_niches_videos_wait(tmp_path):
+def test_paused_categories_videos_wait(tmp_path):
     db = JobDB(tmp_path / "jobs.db")
-    db.add(Job("a", "u", niche="game01"), NOW - 10)
-    db.add(Job("b", "u", niche="pod"), NOW)
+    db.add(Job("a", "u", category_id="game01"), NOW - 10)
+    db.add(Job("b", "u", category_id="pod"), NOW)
     assert db.next_due(NOW).id == "a"
     assert db.next_due(NOW, {"game01"}).id == "b"
     assert db.next_due(NOW, {"game01", "pod"}) is None
 
 
-# ---------------------------------------------------------------- niches
+# ---------------------------------------------------------------- categories
 
 
-def test_a_niche_can_set_its_own_count_and_length(tmp_path):
-    s = _settings(niches=[GAMING | {"clips_per_video": 3, "min_len": 25, "max_len": 40}],
+def test_a_category_can_set_its_own_count_and_length(tmp_path):
+    s = _settings(categories=[GAMING | {"clips_per_video": 3, "min_len": 25, "max_len": 40}],
                   auto_output_dir=str(tmp_path / "out"))
-    game, _ = settings_for(Job("a", "u", niche="game01"), s)
+    game, _ = settings_for(Job("a", "u", category_id="game01"), s)
     assert (game.clip_count, game.min_len, game.max_len) == (3, 25, 40)
-    n = niches.Niche.from_json(GAMING | {"clips_per_video": "x", "min_len": 50, "max_len": 30})
+    n = categories.Category.from_json(GAMING | {"clips_per_video": "x", "min_len": 50, "max_len": 30})
     assert n.clips_per_video == 0 and (n.min_len, n.max_len) == (30, 50)
 
 
-def test_a_niches_one_length_never_passes_the_styles_other(tmp_path):
-    s = _settings(niches=[GAMING | {"min_len": 80}], auto_output_dir=str(tmp_path / "out"), max_len=60)
-    game, _ = settings_for(Job("a", "u", niche="game01"), s)
-    assert (game.min_len, game.max_len) == (80, 80)  # the niche's shortest wins over the style's longest
-    s = _settings(niches=[GAMING | {"max_len": 15}], auto_output_dir=str(tmp_path / "out"), min_len=20)
-    game, _ = settings_for(Job("a", "u", niche="game01"), s)
+def test_a_categories_one_length_never_passes_the_styles_other(tmp_path):
+    s = _settings(categories=[GAMING | {"min_len": 80}], auto_output_dir=str(tmp_path / "out"), max_len=60)
+    game, _ = settings_for(Job("a", "u", category_id="game01"), s)
+    assert (game.min_len, game.max_len) == (80, 80)  # the category's shortest wins over the style's longest
+    s = _settings(categories=[GAMING | {"max_len": 15}], auto_output_dir=str(tmp_path / "out"), min_len=20)
+    game, _ = settings_for(Job("a", "u", category_id="game01"), s)
     assert (game.min_len, game.max_len) == (15, 15)
 
 
-def test_a_paused_niche_picks_nothing_and_holds_its_queue(tmp_path):
+def test_a_paused_category_picks_nothing_and_holds_its_queue(tmp_path):
     history = __import__("ytclip.trending", fromlist=["History"]).History(None)
     history.sources["channels"]["@c0"] = {"id": "UCC0"}
-    s = _settings(niches=[GAMING | {"paused": True}])
-    assert niches.active(s) == [] and niches.paused_ids(s) == {"game01"}
+    s = _settings(categories=[GAMING | {"paused": True}])
+    assert categories.active(s) == [] and categories.paused_ids(s) == {"game01"}
     r = _runner(tmp_path, s, scan=lambda *a, **k: _scan_result("a"), history=history)
     assert r.research(s) == 0
-    r.db.add(Job("q", "https://www.youtube.com/watch?v=q", niche="game01"), NOW)
+    r.db.add(Job("q", "https://www.youtube.com/watch?v=q", category_id="game01"), NOW)
     r.db.set_meta("last_scan", NOW)
     r.tick()
     assert r.db.get("q").status == "queued" and "paused" in r.db.meta("state")
 
 
 def test_special_requests_make_the_ai_pick_when_there_is_a_key(tmp_path, monkeypatch):
-    s = _settings(niches=[GAMING], ai_api_key="sk-test")
-    game, label = settings_for(Job("a", "u", niche="game01"), s)
+    s = _settings(categories=[GAMING], ai_api_key="sk-test")
+    game, label = settings_for(Job("a", "u", category_id="game01"), s)
     assert game.mode == "ai" and "AI picks, for the special requests" in label
-    no_notes, _ = settings_for(Job("a", "u", niche="game01"), _settings(niches=[GAMING | {"instructions": ""}],
+    no_notes, _ = settings_for(Job("a", "u", category_id="game01"), _settings(categories=[GAMING | {"instructions": ""}],
                                                                        ai_api_key="sk-test"))
     assert no_notes.mode != "ai"
-    no_key, _ = settings_for(Job("a", "u", niche="game01"), _settings(niches=[GAMING]))
+    no_key, _ = settings_for(Job("a", "u", category_id="game01"), _settings(categories=[GAMING]))
     assert no_key.mode != "ai"
 
 
@@ -218,15 +218,15 @@ def test_a_request_that_picks_gets_videos_beyond_the_daily_limit(tmp_path):
     assert r.videos_wanted(s) == {}
 
 
-def test_find_videos_now_for_one_niche_checks_only_its_sources(tmp_path):
+def test_find_videos_now_for_one_category_checks_only_its_sources(tmp_path):
     seen = {}
 
     def scan(opts, history, log, **kw):
         seen["searches"] = list(opts.searches)
         return _scan_result("a")
 
-    pod = {"id": "pod01", "name": "Podcasts", "searches": "podcast clips"}
-    s = _settings(niches=[GAMING | {"searches": "gaming clips"}, pod])
+    pod = {"id": "pod01", "name": "Podcasts", "account_id": "acc1", "searches": "podcast clips"}
+    s = _settings(categories=[GAMING | {"searches": "gaming clips"}, pod])
     r = _runner(tmp_path, s, scan=scan)
     r.db.set_meta("scan_now", "pod01")
     r.db.set_meta("last_scan", NOW)  # not due by the clock
@@ -238,10 +238,10 @@ def test_find_videos_now_for_one_niche_checks_only_its_sources(tmp_path):
 # ---------------------------------------------------------------- found in review (2.4.0)
 
 
-def test_once_ends_when_only_a_paused_niches_videos_wait(tmp_path):
+def test_once_ends_when_only_a_paused_categories_videos_wait(tmp_path):
     r = _runner(tmp_path, _settings(youtube_api_key="", disk_min_free_gb=0,
-                                    niches=[{"id": "g", "name": "G", "searches": "x", "paused": True}]))
-    r.db.add(Job("aaaaaaaaaaa", "https://youtu.be/aaaaaaaaaaa", niche="g"), 0)
+                                    categories=[{"id": "g", "name": "G", "account_id": "acc1", "searches": "x", "paused": True}]))
+    r.db.add(Job("aaaaaaaaaaa", "https://youtu.be/aaaaaaaaaaa", category_id="g"), 0)
     ticks = []
     real = r.tick
     r.tick = lambda: ticks.append(1) or (real() if len(ticks) < 20 else pytest.fail("never ended"))
@@ -269,8 +269,8 @@ def test_a_requests_own_picks_dont_use_up_its_daily_room(tmp_path):
     assert len(r.db.order_jobs(o.id)) == 3
 
 
-def test_a_request_for_no_niche_takes_videos_when_niches_exist(tmp_path):
-    s = _settings(pick_daily=1, clip_count=4, niches=[GAMING])
+def test_a_request_for_no_category_takes_videos_when_categories_exist(tmp_path):
+    s = _settings(pick_daily=1, clip_count=4, categories=[GAMING])
     r = _runner(tmp_path, s, scan=lambda *a, **k: _scan_result("a", "b", "c", "d"))
     o = r.place(orders.make(8, 20, 40))
     assert r.research(s) == 2 and len(r.db.order_jobs(o.id)) == 2
@@ -292,7 +292,7 @@ def test_a_cancel_isnt_undone_by_the_runners_count(tmp_path):
     assert db.update_order(o.id, status="open", made=2).status == "cancelled"
 
 
-def test_find_now_for_two_niches_checks_them_all(tmp_path):
+def test_find_now_for_two_categories_checks_them_all(tmp_path):
     from ytclip import pipeline
 
     db = JobDB(tmp_path / "jobs.db")

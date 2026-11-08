@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPushButton,
                                QScrollArea, QVBoxLayout, QWidget)
 
-from .. import niches, updater, youtube_login
+from .. import categories, updater, youtube_login
 from ..settings import SCHEMA, Settings, app_dir
 from ..gemini import KEY_URL as GEMINI_KEY_URL
 from ..trending import KEY_HELP_URL
@@ -53,8 +53,8 @@ class SettingsDialog(QDialog):
         heading.setObjectName("title")
         layout.addWidget(heading)
         tabs.currentChanged.connect(lambda i: heading.setText(tabs.tabText(i)))
-        # With niches, each niche has its own channels and searches (Niches tab).
-        per_niche = {"pick_channels", "pick_searches", "pick_finds"} if niches.load(settings) else set()
+        # With categories, each category has its own channels and searches (Categories tab).
+        per_category = {"pick_channels", "pick_searches", "pick_finds"} if categories.load(settings) else set()
         for group in GROUPS:
             if group == "Posting":
                 page, self._posting_editors = forms.build_form(posting_config.SCHEMA, self.posting_settings,
@@ -71,7 +71,7 @@ class SettingsDialog(QDialog):
                 scroll.setWidget(page)
                 tabs.addTab(scroll, group)
                 continue
-            fields = [f for f in SCHEMA if f.group == group and f.name not in per_niche]
+            fields = [f for f in SCHEMA if f.group == group and f.name not in per_category]
             page, editors = forms.build_form(fields, self.result_settings, self._changed)
             self._editors |= editors
             if group == "AI":
@@ -134,7 +134,7 @@ class SettingsDialog(QDialog):
             if group == "General":
                 row = QHBoxLayout()
                 again = QPushButton("Set up again…")
-                again.setToolTip("The first-run setup: tools, keys, YouTube sign-in, TikTok accounts, a niche, the "
+                again.setToolTip("The first-run setup: tools, keys, YouTube sign-in, TikTok accounts, a category, the "
                                  "posting schedule. What you've set up already is filled in")
                 again.clicked.connect(self._run_setup)
                 row.addWidget(again)
@@ -182,8 +182,8 @@ class SettingsDialog(QDialog):
                               "accounts struck, so by default only channels on your list (creators who say clips "
                               "are welcome) and Creative Commons videos are picked. The Research tab's Pick column "
                               "shows what the rules would pick, and why the rest were skipped."
-                              + (" You have niches, so each one's channels and Creative Commons searches are set "
-                                 "in the Niches tab; these rules apply to all of them." if per_niche else ""))
+                              + (" You have categories, so each one's channels and Creative Commons searches are set "
+                                 "in the Categories tab; these rules apply to all of them." if per_category else ""))
                 note.setWordWrap(True)
                 note.setProperty("muted", True)
                 page.layout().insertRow(0, note)
@@ -286,8 +286,8 @@ class SettingsDialog(QDialog):
         self.accept()
 
     def _reset(self) -> None:
-        # Niches are your content, edited in their own tab, not a setting to reset.
-        self.result_settings = Settings(niches=self.result_settings.niches,
+        # Categories are your content, edited in their own tab, not a setting to reset.
+        self.result_settings = Settings(categories=self.result_settings.categories,
                                         setup_done=self.result_settings.setup_done)
         forms.refresh(self._editors, self.result_settings)
         self.posting_settings = type(self.posting_settings)()

@@ -351,17 +351,37 @@ def build_find_parser() -> argparse.ArgumentParser:
     p.add_argument("--min-minutes", type=float, help="skip videos shorter than this (default: your settings)")
     p.add_argument("--no-ai", action="store_true", help="match by the request's words, without Claude")
     p.add_argument("--queue", type=int, metavar="N", help="add the best N to Automation's queue")
-    p.add_argument("--niche", help="the niche (name or id) videos added with --queue are for")
+    add_category_option(p, help="the category (name or id) videos added with --queue are for")
     p.add_argument("--json", action="store_true", help="print results as JSON")
     p.add_argument("--api-key", help="YouTube Data API key (otherwise from settings or YOUTUBE_API_KEY)")
     return p
+
+
+def _renamed_warning(old: str, new: str) -> None:
+    print(f"Note: {old} is now {new} (3.2 renamed niches to categories). {old} still works for now.",
+          file=sys.stderr)
+
+
+class _NicheAlias(argparse.Action):
+    """--niche, from before 3.2: the same as --category, with a note to use the new name."""
+
+    def __call__(self, parser, namespace, values, option_string=None):
+        _renamed_warning("--niche", "--category")
+        setattr(namespace, self.dest, values)
+
+
+def add_category_option(p: argparse.ArgumentParser, **kw) -> None:
+    """--category NAME, and the old --niche NAME as a hidden alias of it."""
+    p.add_argument("--category", dest="category", **kw)
+    p.add_argument("--niche", dest="category", action=_NicheAlias, help=argparse.SUPPRESS,
+                   **{k: v for k, v in kw.items() if k == "metavar"})
 
 
 def run_find(argv: list[str]) -> int:
     import contextlib
     import json
 
-    from . import lookup, niches
+    from . import lookup, categories
     from .policy import language_codes
     from .research import youtube_key
     from .trending import ResearchError
@@ -373,12 +393,12 @@ def run_find(argv: list[str]) -> int:
         console.print("[red]Needs a YouTube Data API key:[/] --api-key, the YOUTUBE_API_KEY variable, or "
                       "Settings → Research in the app.")
         return 2
-    niche = None
-    if args.niche:
-        niche = niches.find(s, args.niche) or next((n for n in niches.load(s)
-                                                    if n.name.lower() == args.niche.strip().lower()), None)
-        if niche is None:
-            console.print(f"[red]No niche called {escape(args.niche)}.[/]")
+    category = None
+    if args.category:
+        category = categories.find(s, args.category) or next((n for n in categories.load(s)
+                                                    if n.name.lower() == args.category.strip().lower()), None)
+        if category is None:
+            console.print(f"[red]No category called {escape(args.category)}.[/]")
             return 2
     request = " ".join(args.request)
     log = (lambda m: None) if args.json else (lambda m: console.print(f"[dim]{escape(m)}[/]"))  # noqa: E731
@@ -426,12 +446,12 @@ def run_find(argv: list[str]) -> int:
         db = JobDB()
         try:
             runner = Runner(db)
-            added = sum(runner.add_manual(v.url, v.title, niche.id if niche else "")
+            added = sum(runner.add_manual(v.url, v.title, category.id if category else "")
                         for v in result.videos[:args.queue])
         finally:
             db.close()
         if not args.json:
-            console.print(f"Queued {added} in Automation" + (f" for {escape(niche.name)}" if niche else "") + ".")
+            console.print(f"Queued {added} in Automation" + (f" for {escape(category.name)}" if category else "") + ".")
     return 0
 
 
@@ -509,7 +529,7 @@ def run_research(argv: list[str]) -> int:
             if args.json:
                 keep = ("id", "url", "title", "channel", "score", "parts", "reasons", "moments", "regions",
                         "views", "velocity", "recent", "duration", "published", "category", "new", "origins",
-                        "license", "niche")
+                        "license", "category_id")
                 rows = []
                 for v in top:
                     row = {k: (v.url if k == "url" else getattr(v, k)) for k in keep}
@@ -577,7 +597,7 @@ def build_auto_parser() -> argparse.ArgumentParser:
     p.add_argument("--once", action="store_true", help="do what's due now, then exit (for scheduled runs)")
     p.add_argument("--status", action="store_true", help="show the queue and what automation is doing")
     p.add_argument("--add", nargs="+", metavar="URL", help="queue videos yourself")
-    p.add_argument("--niche", metavar="NAME", default="", help="with --add: the niche they're for")
+    add_category_option(p, metavar="NAME", default="", help="with --add: the category they're for")
     p.add_argument("--retry", nargs="+", metavar="ID", help="try failed videos again (ids from --status)")
     p.add_argument("--remove", nargs="+", metavar="ID", help="take videos out of the queue")
     p.add_argument("--pause", action="store_true", help="pause a running automation")
@@ -615,9 +635,9 @@ def _auto_status(db) -> None:
     if not jobs:
         console.print("Nothing queued yet.")
         return
-    from . import niches
+    from . import categories
 
-    names = {n.id: n.name for n in niches.load(Settings.load())}
+    names = {n.id: n.name for n in categories.load(Settings.load())}
     table = Table(show_edge=False, header_style="bold")
     for col in ("Id", "Video", "Status", "Clips", "Updated", "Why it was picked"):
         table.add_column(col, overflow="fold" if col in ("Video", "Status", "Why it was picked") else "ellipsis")
@@ -628,7 +648,7 @@ def _auto_status(db) -> None:
             status += f": {escape(j.stage)}"
         if j.error and j.status != "done":
             status += f"\n[dim]{escape(j.error[:200])}[/]"
-        where = escape(j.channel) + (f" · {escape(names[j.niche])}" if j.niche in names else "")
+        where = escape(j.channel) + (f" · {escape(names[j.category_id])}" if j.category_id in names else "")
         table.add_row(j.id, f"{escape(j.title or j.url)}\n[dim]{where}[/]", status,
                       f"{j.clips} (+{j.rejected} rejected)" if j.rejected else str(j.clips or ""),
                       age_text((now - j.updated) / 3600) + " ago", escape(j.permission))
@@ -684,21 +704,21 @@ def run_auto(argv: list[str]) -> int:
         console.print("Done.")
         return 0
     if args.add:
-        from . import niches
+        from . import categories
 
-        niche = ""
-        if args.niche:
-            mine = niches.load(Settings.load())
-            found = next((n for n in mine if n.name.lower() == " ".join(args.niche.split()).lower()), None)
+        category = ""
+        if args.category:
+            mine = categories.load(Settings.load())
+            found = next((n for n in mine if n.name.lower() == " ".join(args.category.split()).lower()), None)
             if not found:
                 names = ", ".join(n.name for n in mine) or "none yet"
-                console.print(f"[red]No niche called {escape(args.niche)} (yours: {escape(names)}).[/]")
+                console.print(f"[red]No category called {escape(args.category)} (yours: {escape(names)}).[/]")
                 return 2
-            niche = found.id
+            category = found.id
         runner = pipeline.Runner(db)
         for url in args.add:
             try:
-                added = runner.add_manual(url, niche=niche)
+                added = runner.add_manual(url, category_id=category)
             except ValueError as exc:
                 console.print(f"[red]{escape(url)}: {escape(str(exc))}[/]")
                 return 2
@@ -838,31 +858,31 @@ def run_clean(argv: list[str]) -> int:
     return 1 if result.failed else 0
 
 
-def run_niches(argv: list[str]) -> int:
-    from . import niches
+def run_categories(argv: list[str]) -> int:
+    from . import categories
     from .jobs import JobDB
     from .policy import PickLog, picks_path
 
-    p = argparse.ArgumentParser(prog="ytclip niches", description="Your niches (one TikTok account's topic each, "
-                                "set up in the app's Niches tab) and how each is doing.")
+    p = argparse.ArgumentParser(prog="ytclip categories", description="Your categories (one TikTok account's topic each, "
+                                "set up in the app's Categories tab) and how each is doing.")
     p.add_argument("--json", action="store_true", help="print them as JSON")
     args = p.parse_args(argv)
     s = Settings.load()
-    all_niches = niches.load(s)
+    all_categories = categories.load(s)
     now = time.time()
     picks = PickLog(picks_path())
     db = JobDB()
     try:
-        counts = db.niche_counts(now - 7 * 86400)
+        counts = db.category_counts(now - 7 * 86400)
     finally:
         db.close()
     rows = []
-    for n in all_niches:
+    for n in all_categories:
         refs, _ = n.channel_refs()
         c = counts.get(n.id, {})
         rows.append({"id": n.id, "name": n.name, "account": n.account, "on": n.enabled, "per_day": n.daily,
                      "channels": len(refs), "searches": len(n.search_list()),
-                     "picked_today": picks.count_since(now - 86400, niche=n.id), "waiting": c.get("waiting", 0),
+                     "picked_today": picks.count_since(now - 86400, category_id=n.id), "waiting": c.get("waiting", 0),
                      "clips_this_week": c.get("clips", 0), "folder": str(s.auto_output_path / n.folder)})
     if args.json:
         import json
@@ -870,12 +890,12 @@ def run_niches(argv: list[str]) -> int:
         print(json.dumps(rows, indent=1, ensure_ascii=False))
         return 0
     if not rows:
-        console.print("No niches yet. Add them in ClipMonster's Niches tab: each one is a TikTok account's topic, "
+        console.print("No categories yet. Add them in ClipMonster's Categories tab: each one is a TikTok account's topic, "
                       "with its own channels, searches, look and folder.")
         return 0
     table = Table(show_edge=False, header_style="bold")
-    for col in ("Niche", "Account", "Per day", "Sources", "Today", "Waiting", "Clips (7 days)"):
-        table.add_column(col, justify="left" if col in ("Niche", "Account") else "right")
+    for col in ("Category", "Account", "Per day", "Sources", "Today", "Waiting", "Clips (7 days)"):
+        table.add_column(col, justify="left" if col in ("Category", "Account") else "right")
     for r in rows:
         table.add_row(escape(r["name"]) + ("" if r["on"] else " [dim](off)[/]"), escape(r["account"]),
                       str(r["per_day"]), f"{r['channels']} ch · {r['searches']} cc", str(r["picked_today"]),
@@ -883,41 +903,41 @@ def run_niches(argv: list[str]) -> int:
     console.print(table)
     total = sum(r["per_day"] for r in rows if r["on"])
     if total > s.pick_daily:
-        console.print(f"[yellow]Your niches add up to {total} videos a day, but at most {s.pick_daily} are picked a "
+        console.print(f"[yellow]Your categories add up to {total} videos a day, but at most {s.pick_daily} are picked a "
                       "day in all (Settings → Picking → Videos picked per day).[/]")
     return 0
 
 
-def _niche_by_name(name: str):
-    """(niche id, error message) for a niche name typed on the command line."""
-    from . import niches
+def _category_by_name(name: str):
+    """(category id, error message) for a category name typed on the command line."""
+    from . import categories
 
     if not name:
         return "", ""
-    mine = niches.load(Settings.load())
+    mine = categories.load(Settings.load())
     found = next((n for n in mine if n.name.lower() == " ".join(name.split()).lower()), None)
     if found:
         return found.id, ""
-    return "", f"No niche called {name} (yours: {', '.join(n.name for n in mine) or 'none yet'})."
+    return "", f"No category called {name} (yours: {', '.join(n.name for n in mine) or 'none yet'})."
 
 
 def run_request(argv: list[str]) -> int:
-    from . import niches, orders, pipeline
+    from . import categories, orders, pipeline
     from .jobs import Job, JobDB
     from .research import youtube_key
 
     p = argparse.ArgumentParser(
         prog="ytclip request",
-        description="Ask automation for clips: how many, how long, for which niche, from your links or from videos "
+        description="Ask automation for clips: how many, how long, for which category, from your links or from videos "
                     "it picks, with special requests for the AI. Automation fills it and shows its progress.",
-        epilog='Example: ytclip request 10 --length 30-45 --niche Gaming --notes "only clutch plays, no swearing '
+        epilog='Example: ytclip request 10 --length 30-45 --category Gaming --notes "only clutch plays, no swearing '
                'in the hook"')
     p.add_argument("count", nargs="?", type=int, help="how many clips you want")
-    p.add_argument("--length", default="", metavar="SECONDS", help="clip length, e.g. 30-45 (default: the niche's "
+    p.add_argument("--length", default="", metavar="SECONDS", help="clip length, e.g. 30-45 (default: the category's "
                    "or Automation's style)")
-    p.add_argument("--niche", default="", metavar="NAME", help="the niche they're for")
+    add_category_option(p, default="", metavar="NAME", help="the category they're for")
     p.add_argument("--link", nargs="+", action="extend", default=[], metavar="URL", help="videos to clip (default: automation picks "
-                   "videos for the niche)")
+                   "videos for the category)")
     p.add_argument("--notes", default="", metavar="TEXT", help="special requests for the AI, in plain words")
     p.add_argument("--list", action="store_true", help="show your requests and how far along they are")
     p.add_argument("--cancel", nargs="+", metavar="ID", help="cancel requests (ids from --list)")
@@ -934,22 +954,22 @@ def run_request(argv: list[str]) -> int:
                                                              if n else "."))
             return 0
         if args.list or args.count is None:
-            names = {n.id: n.name for n in niches.load(Settings.load())}
+            names = {n.id: n.name for n in categories.load(Settings.load())}
             mine = db.orders()
             if not mine:
-                console.print("No requests yet. Example: ytclip request 10 --length 30-45 --niche Gaming")
+                console.print("No requests yet. Example: ytclip request 10 --length 30-45 --category Gaming")
                 return 0
             table = Table(show_edge=False, header_style="bold")
             for col in ("Id", "Request", "Status", "Ready", "Special requests"):
                 table.add_column(col, overflow="fold")
             colours = {"open": "cyan", "done": "green", "short": "yellow", "cancelled": "dim"}
             for o in mine:
-                table.add_row(o.id, escape(o.title(names.get(o.niche, ""))),
+                table.add_row(o.id, escape(o.title(names.get(o.category_id, ""))),
                               f"[{colours[o.status]}]{orders.STATUS_WORDS[o.status]}[/]\n[dim]{escape(o.message)}[/]",
                               f"{o.made}/{o.count}", escape(o.notes))
             console.print(table)
             return 0
-        niche, err = _niche_by_name(args.niche)
+        category, err = _category_by_name(args.category)
         if err:
             console.print(f"[red]{escape(err)}[/]")
             return 2
@@ -957,16 +977,16 @@ def run_request(argv: list[str]) -> int:
         try:
             if args.length:
                 lo, hi = orders.parse_length(args.length)
-            else:  # the niche's length, else Automation's style
-                job = Job(id="", url="", niche=niche)
+            else:  # the category's length, else Automation's style
+                job = Job(id="", url="", category_id=category)
                 style = pipeline.settings_for(job, s)[0]
                 lo, hi = style.min_len, style.max_len
-            order = orders.make(args.count, lo, hi, niche=niche, links=args.link, notes=args.notes)
+            order = orders.make(args.count, lo, hi, category_id=category, links=args.link, notes=args.notes)
         except ValueError as exc:
             console.print(f"[red]{escape(str(exc))}[/]")
             return 2
         order = pipeline.Runner(db, log=pipeline.file_logger()).place(order)
-        console.print(f"Request {order.id}: {escape(order.title(niches.name_of(s, niche)))}. {escape(order.message)}.")
+        console.print(f"Request {order.id}: {escape(order.title(categories.name_of(s, category)))}. {escape(order.message)}.")
         if order.notes and not pipeline.has_ai_key(s):
             console.print("[yellow]Special requests need a Claude or Gemini key (Settings → AI): without one the clips are "
                           "picked by smart signals.[/]")
@@ -985,7 +1005,7 @@ def run_report(argv: list[str]) -> int:
     from .jobs import JobDB
 
     p = argparse.ArgumentParser(prog="ytclip report", description="What automation did while you were away: "
-                                "clips per niche and request, rejected clips and why, failures, pauses.")
+                                "clips per category and request, rejected clips and why, failures, pauses.")
     p.add_argument("--hours", type=float, default=12.0, help="how far back to look (default 12)")
     p.add_argument("--json", action="store_true", help="print it as JSON")
     args = p.parse_args(argv)
@@ -1013,7 +1033,7 @@ def run_doctor(argv: list[str]) -> int:
     from .jobs import JobDB
 
     p = argparse.ArgumentParser(prog="ytclip doctor", description="Check that everything automation needs is in "
-                                "place: ffmpeg, the downloader, keys, folders, free space, TikTok posting, niches.")
+                                "place: ffmpeg, the downloader, keys, folders, free space, TikTok posting, categories.")
     p.add_argument("--offline", action="store_true", help="don't test the keys online")
     p.add_argument("--json", action="store_true", help="print the checks as JSON")
     args = p.parse_args(argv)
@@ -1272,10 +1292,18 @@ def main(argv: list[str] | None = None) -> int:
         from .swap import main as apply_update
 
         return apply_update(argv[1:])
+    try:  # files from older versions (3.2: niches became categories)
+        from .categories import migrate_disk
+
+        migrate_disk()
+    except Exception:
+        pass
     if argv[:1] == ["clean"]:
         return run_clean(argv[1:])
-    if argv[:1] == ["niches"]:
-        return run_niches(argv[1:])
+    if argv[:1] in (["categories"], ["niches"]):
+        if argv[:1] == ["niches"]:
+            _renamed_warning("ytclip niches", "ytclip categories")
+        return run_categories(argv[1:])
     if argv[:1] == ["request"]:
         return run_request(argv[1:])
     if argv[:1] == ["report"]:

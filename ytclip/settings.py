@@ -206,14 +206,14 @@ class Settings:
     research_auto: bool = True
     research_interval: int = 30
     research_alert: int = 75
-    research_niche_charts: bool = True  # also check the trending chart of each category your niches use
+    research_category_charts: bool = True  # also check the trending chart of each YouTube category your categories use
     research_hide_used: bool = True  # Research hides videos already picked, queued, clipped or sent
     # Picking rules (policy.py): which researched videos may be clipped without asking
     pick_from: str = "watchlist"
     pick_languages: str = "en"  # only pick videos in these spoken languages (when YouTube knows it); "" = any
     pick_channels: str = ""
     pick_searches: str = ""
-    pick_finds: str = ""  # standing requests without niches, one per line (niches have their own)
+    pick_finds: str = ""  # standing requests without categories, one per line (categories have their own)
     pick_find_hours: int = 6  # how often automation runs each standing request
     pick_min_score: int = 65
     pick_min_minutes: float = 8.0
@@ -226,8 +226,8 @@ class Settings:
     pick_block_categories: str = "10, 1"  # Music, Film & Animation: reposts are usually claimed
     pick_block_words: str = "music video, lyric video, lyrics, official audio, trailer, full movie, full album"
     learn_from_results: bool = True  # learn.py: how posted clips did ranks channels and guides AI hooks
-    # Niches (niches.py): one TikTok account's topic each, edited in the Niches tab. Empty = no niches
-    niches: list = field(default_factory=list)
+    # Categories (categories.py): one TikTok account's topic each, edited in the Categories tab. Empty = no categories
+    categories: list = field(default_factory=list)
     # Automation (pipeline.py): the unattended runner
     auto_output_dir: str = ""  # "" = <output_dir>/Automation
     auto_preset: str = "Shorts / TikTok / Reels"
@@ -313,7 +313,9 @@ class Settings:
             # itself every day: nothing ClipMonster is done with is left taking up space.
             data = data | {"update_channel": "beta" if data.get("include_prereleases") else "stable",
                            "cleanup_auto": True}
-        return cls().apply(migrate(data))
+        from .categories import migrate_settings  # niches before 3.2
+
+        return cls().apply(migrate(migrate_settings(data)))
 
     def save(self, path: Path | None = None) -> None:
         """Write settings.json whole or not at all: automation reads it while you type in the app."""
@@ -801,7 +803,7 @@ SCHEMA: list[Field] = [
     Field("lower_third", "Context tag with source credit", "Editing", "bool",
           help="A slim tag that slides in for a few seconds: the topic, and 'SOURCE · channel'"),
     Field("lower_third_text", "Context tag text", "Editing", "str",
-          help="{topic} (the niche, else the clip's title), {title} or {channel}"),
+          help="{topic} (the category, else the clip's title), {title} or {channel}"),
     Field("broll_folder", "B-roll folder", "Editing", "path",
           help="Your own or licensed clips only. File and folder names are matched to what's being said "
                "('money/counting cash.mp4' shows when money comes up)"),
@@ -868,9 +870,9 @@ SCHEMA: list[Field] = [
     Field("research_interval", "Check every (minutes)", "Research", "int", lo=10, hi=720, step=5),
     Field("research_alert", "Highlight new videos scoring at least", "Research", "int", lo=0, hi=100,
           help="New arrivals above this score are counted on the Research tab"),
-    Field("research_niche_charts", "Also check my niches' category charts", "Research", "bool",
-          help="With All categories, each region's chart for the categories your niches use (up to 4) is checked "
-               "too, 1 unit each: more videos for each niche than the main chart shows"),
+    Field("research_category_charts", "Also check my categories' YouTube charts", "Research", "bool",
+          help="With All categories, each region's chart for the YouTube categories your categories use (up to 4) is checked "
+               "too, 1 unit each: more videos for each category than the main chart shows"),
 
     Field("pick_from", "Pick videos from", "Picking", "choice", choices=PICK_FROM,
           help="Creators on your channel list, or Creative Commons videos, have said clips are fine. "
@@ -888,7 +890,7 @@ SCHEMA: list[Field] = [
           help="Videos you want, one request per line, in your own words, e.g. 'Call of Duty MW4 with good "
                "comedy'. Automation searches YouTube for each one every few hours and picks the best new "
                "matches, within your limits (they count as permission to clip, like adding a link yourself). "
-               "Each run of a request costs about 200 quota units. With niches, each niche has its own",
+               "Each run of a request costs about 200 quota units. With categories, each category has its own",
           placeholder="Call of Duty MW4 with good comedy\nMinecraft hardcore funny moments"),
     Field("pick_find_hours", "Run standing requests every (hours)", "Picking", "int", lo=1, hi=72),
     Field("pick_languages", "Only pick videos in", "Picking", "str",

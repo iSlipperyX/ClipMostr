@@ -303,17 +303,17 @@ def test_stats_come_from_the_accounts_own_browser(fake):
     assert fake.opened[0]["profile_dir"] == a.browser_dir()
 
 
-def test_results_for_clipmonster_carry_the_niche(tmp_path):
+def test_results_for_clipmonster_carry_the_category(tmp_path):
     st = Store(tmp_path / "lib.json")
     now = time.time()
     for n in range(4):
         v = TikTokVideo(id=f"t{n}", create_time=now - 5 * 86400, views=100 * (n + 1))
         st.update_tiktok_videos("A", [v])
     it = VideoItem(path="C:/x.mp4", status="posted", account="A", posted_at=now - 5 * 86400, tiktok_id="t3",
-                   source_channel="Pod", niche_id="n-gaming")
+                   source_channel="Pod", category_id="n-gaming")
     st.items[it.id] = it
     rows = results.outcomes(st, now)
-    assert rows and rows[0].niche == "n-gaming"
+    assert rows and rows[0].category_id == "n-gaming"
 
 
 # --- found in review ------------------------------------------------------------------------

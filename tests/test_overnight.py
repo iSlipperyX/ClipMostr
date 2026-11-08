@@ -25,10 +25,10 @@ def _folder(tmp_path, name, problems):
 
 def test_the_report_adds_up_the_night(tmp_path):
     db = JobDB(tmp_path / "jobs.db")
-    s = _settings(niches=[{"id": "g", "name": "Gaming", "account": "@g"}, {"id": "p", "name": "Pods"}])
-    db.add(Job("a", "u", title="A", niche="g", status="done", clips=4, rejected=2,
+    s = _settings(categories=[{"id": "g", "name": "Gaming", "account_id": "acc1", "account": "@g"}, {"id": "p", "name": "Pods", "account_id": "acc1"}])
+    db.add(Job("a", "u", title="A", category_id="g", status="done", clips=4, rejected=2,
                folder=_folder(tmp_path, "a", ["AI rated it 3/10: dull", "AI rated it 2/10"])), NOW - 3600)
-    db.add(Job("b", "u", title="B", niche="g", status="done", clips=3,
+    db.add(Job("b", "u", title="B", category_id="g", status="done", clips=3,
                folder=_folder(tmp_path, "b", [])), NOW - 7200)
     db.add(Job("c", "u", title="C", status="done", clips=2, rejected=1,
                folder=_folder(tmp_path, "c", ["Came out 3s long instead of 30s"])), NOW - 100)
@@ -37,13 +37,13 @@ def test_the_report_adds_up_the_night(tmp_path):
     db.add(Job("w", "u", title="Waiting"), NOW)
     for kind in ("blocked", "disk_low", "watchdog", "watchdog", f"freed:{3 * GB}", "freed:junk"):
         db.note(kind, NOW - 600)
-    o = orders.make(5, 30, 45, niche="g", now=NOW - 5000)
+    o = orders.make(5, 30, 45, category_id="g", now=NOW - 5000)
     o.made, o.updated = 2, NOW - 100
     db.add_order(o)
     r = report.build(db, s, hours=12, now=NOW)
     assert (r.videos, r.clips, r.rejected) == (3, 9, 3)
     assert r.failed == [("Broken one", "ffmpeg failed: bad data")]
-    assert [(n.name, n.videos, n.clips, n.rejected) for n in r.niches] == [("Gaming", 2, 7, 2), ("No niche", 1, 2, 1)]
+    assert [(n.name, n.videos, n.clips, n.rejected) for n in r.categories] == [("Gaming", 2, 7, 2), ("No category", 1, 2, 1)]
     assert r.reasons == [("the AI rated it low", 2), ("wrong length or size", 1)]
     assert (r.blocks, r.disk_pauses, r.watchdog, r.freed) == (1, 1, 2, 3 * GB)
     assert r.waiting == 1 and r.requests[0].made == 2
@@ -71,7 +71,7 @@ def _levels(checks):
 def test_the_health_check_finds_what_automation_needs(tmp_path, monkeypatch):
     out = tmp_path / "out"
     s = _settings(youtube_api_key="", auto_output_dir=str(out), cache_dir=str(tmp_path / "cache"),
-                  niches=[{"id": "g", "name": "Gaming"}, {"id": "p", "name": "Pods", "searches": "x", "paused": True}],
+                  categories=[{"id": "g", "name": "Gaming", "account_id": "acc1"}, {"id": "p", "name": "Pods", "account_id": "acc1", "searches": "x", "paused": True}],
                   auto_polish=True)
     db = JobDB(tmp_path / "jobs.db")
     db.add_order(orders.make(4, 20, 40))
@@ -80,7 +80,7 @@ def test_the_health_check_finds_what_automation_needs(tmp_path, monkeypatch):
     assert got["ffmpeg"] == doctor.GOOD
     assert got["YouTube Data API key"] == doctor.WARN and got["Claude key"] == doctor.WARN
     assert got["Automation folder"] == doctor.GOOD and not out.exists()  # checking makes no folders
-    assert got["Niche Gaming"] == doctor.WARN and got["Paused niches"] == doctor.WARN
+    assert got["Category Gaming"] == doctor.WARN and got["Paused categories"] == doctor.WARN
     assert got["Clip requests"] == doctor.BAD and got["YouTube sign-in"] == doctor.WARN
     assert got["TikTok posting"] == doctor.WARN  # no account yet
 

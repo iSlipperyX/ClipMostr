@@ -43,9 +43,10 @@ def read_folder_index(folder: Path) -> dict[str, dict]:
             "hook": clip.get("hook") or "",
             "rating": int(rating) if isinstance(rating, (int, float)) else None,
             "permission": auto.get("permission", ""),
-            # ClipMonster 2.3: the niche the clip was made for and the TikTok account that niche posts to
-            "niche": str(auto.get("niche") or ""),
-            "niche_id": str(auto.get("niche_id") or ""),
+            # ClipMonster 2.3: the category the clip was made for and the TikTok account that category posts to
+            # (3.2 renamed niches to categories: older files say "niche" and "niche_id")
+            "category": str(auto.get("category") or auto.get("niche") or ""),
+            "category_id": str(auto.get("category_id") or auto.get("niche_id") or ""),
             "account": str(auto.get("account") or "").strip().lstrip("@").strip(),
             # ClipMonster 2.4: a part series ("series" is unique within this folder only)
             "series": str(clip.get("series") or ""),
@@ -53,7 +54,7 @@ def read_folder_index(folder: Path) -> dict[str, dict]:
             "parts": int(parts) if isinstance(parts, (int, float)) and parts >= 1 else None,
             "license": video.get("license") or "",
             "warnings": list(qc.get("warnings") or []),
-            # Posting's account id for the niche (3.0): no name matching needed
+            # Posting's account id for the category (3.0): no name matching needed
             "account_id": str(auto.get("account_id") or ""),
             # Kept with the posting entry for its record, since the clips.json row goes when the clip is deleted
             "facts": _facts(data, clip),
@@ -103,7 +104,7 @@ def _facts(data: dict, clip: dict) -> dict:
         "how_picked": auto.get("how", ""),
         "permission": auto.get("permission", ""),
         "picked_at": auto.get("picked_at"),
-        "niche": auto.get("niche", ""),
+        "category": auto.get("category") or auto.get("niche", ""),
         "request": request.get("notes", "") if isinstance(request, dict) else "",
         "series_part": clip.get("part"),
         "series_parts": clip.get("parts"),

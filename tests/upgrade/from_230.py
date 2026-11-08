@@ -4,7 +4,8 @@
 a clipped video (jobs.db, clips.json, the analysis cache), a video still waiting, and a failed one.
 Then this version uses that profile: status, doctor, report and requests read it, automation
 clips the waiting video (re-measuring the cache 2.3.0 left, which has no fine loudness) and a
-request is placed. Nothing may be lost: the old video, its clips and the niche stay as they were.
+request is placed. Nothing may be lost: the old video, its clips and the niche (a category since 3.2) stay as
+they were.
 
     python tests/upgrade/from_230.py BASE LAB_DIR WORK_DIR
 """
@@ -101,8 +102,11 @@ def main() -> int:
         if json.loads(Path(path).read_text(encoding="utf-8"))["clips"] != clips:
             problems.append(f"{path} changed")
     now_settings = json.loads((profile / "settings.json").read_text(encoding="utf-8"))
-    if now_settings.get("niches") != old_settings.get("niches"):
-        problems.append("the niches changed")
+    # 3.2 calls niches categories: the same list, under the new name, and a copy of the old file kept
+    if now_settings.get("categories") != old_settings.get("niches") or "niches" in now_settings:
+        problems.append(f"the niches didn't become the same categories: {now_settings.get('categories')}")
+    if not (profile / "settings.before-3.2.json").exists():
+        problems.append("the settings from before 3.2 weren't kept")
     caches = list((work / "cache").glob("*.analysis.npz"))
     import numpy as np
 

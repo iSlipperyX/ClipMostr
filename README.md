@@ -18,7 +18,7 @@ Download **`ClipMonster-Setup.exe`** from the [newest release](https://github.co
 2. **Keys.** A Gemini key (free) or a Claude key for the AI, and a YouTube Data API key for finding videos. **Test keys** tries them.
 3. **YouTube sign-in**, in a Firefox profile of ClipMonster's own.
 4. **TikTok accounts.** Add each account and log in to it once.
-5. **Your first niche:** what it clips and which account it posts to.
+5. **Your first category:** what it clips and which account it posts to.
 6. **The posting schedule:** 2 posts a day, between 11:00 and 21:00, and a warm-up for new accounts.
 7. **Start with Windows**, and start automation.
 
@@ -29,7 +29,7 @@ Where things live:
 | | Where |
 |---|---|
 | The program | `%LOCALAPPDATA%\Programs\ClipMonster` |
-| Settings, niches, the automation queue and history, sign-ins | `%APPDATA%\ClipMonster` |
+| Settings, categories, the automation queue and history, sign-ins | `%APPDATA%\ClipMonster` |
 | TikTok accounts, the posting queue and what was posted | `%APPDATA%\ClipMonster\posting` |
 | Each TikTok account's browser login | `%LOCALAPPDATA%\ClipMonster\posting\browser-profiles` |
 | Updates, the previous version, models and temporary work | `%LOCALAPPDATA%\ClipMonster` |
@@ -52,9 +52,9 @@ None of it is in OneDrive. A copy unzipped by hand (before 2.8.0) offers **Insta
 | **Find clips tab** | Weight sliders and length rules. Clips update live as you move them. Clips you've edited by hand are kept. |
 | **Layout tab** | Text banners above and below the video, and a second video stacked under (or over) your clip, such as gameplay or a satisfying loop. A to-scale sketch updates as you change things, and **Live frame** draws a real frame of the selected clip exactly as it will export. Each clip can have its own banner text. The **View** picker sets up a top/bottom view in one click (Title on top, Gameplay below, Gameplay above, Meme…), and **Save…** keeps your own. |
 | **Export tab** | Format, resolution, GPU encoding, captions, loudness and more. Then **Export N clips**. |
-| **Library** | Every exported clip with thumbnails. Double-click to play; right-click to show in Explorer. Automation's videos show their niche and TikTok account, and the filter shows one niche at a time. **🧹 Clean up…** clears out what nothing needs any more (see [Clean up](#clean-up)). |
+| **Library** | Every exported clip with thumbnails. Double-click to play; right-click to show in Explorer. Automation's videos show their category and TikTok account, and the filter shows one category at a time. **🧹 Clean up…** clears out what nothing needs any more (see [Clean up](#clean-up)). |
 | **Research** | What's trending on YouTube in the countries you pick, scored for how well each video will cut into clips. Keeps checking in the background. Send the best ones to the studio with a double-click. See [Research](#research). |
-| **Niches** | One niche for each of your TikTok accounts: where its videos come from, how many it gets a day and how its clips look. See [Niches](#niches). |
+| **Categories** | One category for each of your TikTok accounts: where its videos come from, how many it gets a day and how its clips look. See [Categories](#categories). |
 
 ### How clips are found
 
@@ -72,7 +72,7 @@ Every second gets a score from up to seven signals. You decide how much each one
 
 Clips grow outward from the peaks. When there's a transcript, their edges are aligned to whole sentences, so a clip never starts or ends mid-sentence; without one, they snap to natural pauses. Intros, credits and end screens count for less. **Trim dead air** (on by default) then pulls each clip in so it starts a quarter of a second before the first word and ends half a second after the last, instead of opening on silence. Clips you've edited by hand are never trimmed.
 
-**Clean cut points.** As a last step, ClipMonster listens to the audio around each clip edge. An edge that would land in the middle of a word moves into the nearest pause, preferring the longer pause between sentences, without making the clip longer than your maximum or running into the next clip. This matters most for YouTube's auto-generated captions, which have no punctuation: the pauses the audio shows are used to find where sentences end. A clip is never longer than *Max clip length* either: when rounding out to a whole sentence would run over, it ends on the last sentence that fits. Nor is it ever shorter than *Min clip length*: a clip that comes out short grows to the end of a later sentence (or back to the start of an earlier one), and one with no room to grow is dropped. Clip length is always yours: presets and Automation's style don't change it, only a niche's or a clip request's own length does.
+**Clean cut points.** As a last step, ClipMonster listens to the audio around each clip edge. An edge that would land in the middle of a word moves into the nearest pause, preferring the longer pause between sentences, without making the clip longer than your maximum or running into the next clip. This matters most for YouTube's auto-generated captions, which have no punctuation: the pauses the audio shows are used to find where sentences end. A clip is never longer than *Max clip length* either: when rounding out to a whole sentence would run over, it ends on the last sentence that fits. Nor is it ever shorter than *Min clip length*: a clip that comes out short grows to the end of a later sentence (or back to the start of an earlier one), and one with no room to grow is dropped. Clip length is always yours: presets and Automation's style don't change it, only a category's or a clip request's own length does.
 
 **Part series.** When a great moment runs longer than one clip, it carries on in **Part 2** (and Part 3), each starting on the next sentence where the last part stopped and ending when the moment does. Parts count towards *Clips per video*, so a series takes the place of the weakest stand-alone clips, and a weak last part never pushes out a better clip. Every part except the last shows your "Follow for part 2" bottom text; if the quality check rejects a part, the part before it is made again without the promise. The clip list marks parts (P1, P2…), and `clips.json` records each clip's `series`, `part` and `parts`, counting only the parts that passed the quality check. Set the most parts in *Find clips → Part series* (3 to start with; 1 turns it off).
 
@@ -178,7 +178,7 @@ Parts that can't be measured, such as hidden like counts or a brand-new video wi
 
 New arrivals scoring at least your alert level (75 by default) are counted on the tab, as **🔥 Research (3 new)**, when you're on another tab. History and the last results are kept in `%APPDATA%\ClipMonster\research.json`, so the tab opens with your last results.
 
-**Fresh results, not the same ones.** Videos you've already used (picked, queued or clipped by automation, or sent to the Studio) are ticked, and **Hide used** (on to start with) hides them. The **Seen** column says when Research first saw each video: **New** for the last day, otherwise how long it's been showing up, or **Used**. **New only** shows just the new ones. With your niches set up, each region's chart for the categories your niches use (up to four) is checked too, at 1 unit each, so a Gaming niche sees the Gaming chart and not just the all-categories one (Settings → Research → *Also check my niches' category charts*).
+**Fresh results, not the same ones.** Videos you've already used (picked, queued or clipped by automation, or sent to the Studio) are ticked, and **Hide used** (on to start with) hides them. The **Seen** column says when Research first saw each video: **New** for the last day, otherwise how long it's been showing up, or **Used**. **New only** shows just the new ones. With your categories set up, each region's chart for the categories your categories use (up to four) is checked too, at 1 unit each, so a Gaming category sees the Gaming chart and not just the all-categories one (Settings → Research → *Also check my categories' category charts*).
 
 ### Find videos for a request
 
@@ -191,13 +191,13 @@ Type what you want into **Find videos** at the top of the Research tab, in your 
 - **Shorts are left out.** So is anything shorter than the tab's length filter.
 - **Time limit.** The menu next to the box limits results to this week, this month or this year.
 - **What's left out.** The bar above the table says what was searched and how many videos were left out. **← Back to trending** returns to the charts. Your last request stays one click away, and the box suggests your earlier requests.
-- **Using the results.** Send them to the Studio, or use **Queue in Automation** (also on any trending video). Automation then clips them next, in their niche's style and with your clip length.
+- **Using the results.** Send them to the Studio, or use **Queue in Automation** (also on any trending video). Automation then clips them next, in their category's style and with your clip length.
 - **Cost.** A request uses about 200 of the YouTube API's 10,000 free daily units, because each search costs 100 (300 when it reads a second page past repeats). The AI's rating is one short call, for the videos it hasn't rated before.
 
 ```
 ytclip find "Call of Duty MW4 with good comedy"            # the best 20, with why each matches
 ytclip find "Minecraft hardcore funny" --since month -n 10
-ytclip find "Kai Cenat rage" --queue 3 --niche Streamers   # add the best 3 to Automation's queue
+ytclip find "Kai Cenat rage" --queue 3 --category Streamers   # add the best 3 to Automation's queue
 ytclip find "MW4 funny" --no-ai --json
 ```
 
@@ -240,7 +240,7 @@ ytclip research --list-categories
 The **Automation** tab runs the whole job without you: it checks Research on your schedule, queues whatever your [picking rules](#picking-rules) pick, and clips one video at a time. Press **Start**. Automation runs as its own background process, so it keeps going after you close ClipMonster. Tick **Start with Windows** to have it start every time you sign in (it shows up in Task Manager → Startup apps as "ClipMonster Automation"). Keep the ClipMonster folder outside OneDrive, for example in `C:\Users\<you>\ClipMonster`: the health check warns when it isn't.
 
 - **Status bars.** While a video is clipped, the panel above the queue shows its steps (Download, Analyse, Transcribe, Find clips, AI polish, Export, Quality check: done ones ticked, the current one with its own percent), a bar for the whole video and about how long is left. The estimate learns from how long each step took on the last video. Between videos it shows what automation is checking (the charts, a standing request's searches). The video's row in the queue has a bar too, and so does a video downloading early. The line under the queue says what posting is doing: the next post, clips waiting, and anything that needs you. The Studio's list and status line, Research and update downloads show the same kind of bar.
-- **The queue** shows every video, what it's doing now, how many clips it made and why it was picked. Right-click a video to show its clips, try it again or remove it, or paste a link above the queue to add one yourself. Finished clips go to an `Automation` folder in your output folder, in a folder for each [niche](#niches) when you have them. Each video's `clips.json` records why it was picked, the style it was cut with, and its niche and TikTok account.
+- **The queue** shows every video, what it's doing now, how many clips it made and why it was picked. Right-click a video to show its clips, try it again or remove it, or paste a link above the queue to add one yourself. Finished clips go to an `Automation` folder in your output folder, in a folder for each [category](#categories) when you have them. Each video's `clips.json` records why it was picked, the style it was cut with, and its category and TikTok account.
 - **It survives anything.** The queue lives in `%APPDATA%\ClipMonster\jobs.db`. If the PC restarts or the process is killed halfway through a video, that video starts again next time. Downloads and analysis are cached, so the second try is quick. No video is ever queued twice.
 - **It's gentle with YouTube.** It does one download at a time, 10 minutes apart. When YouTube asks the PC to "sign in to confirm you're not a bot", it stops asking YouTube for anything for 2 hours (6 if it asks again within a day) instead of pushing harder. Press **Try now** in the Automation tab (or run `ytclip auto --try-now`) to end the pause early. Signing in ends it by itself (see below). A video that fails is tried again after 15 minutes, then after 1 hour. Videos that can never work (private, removed, members-only) are marked failed straight away.
 - **Sign in to YouTube once, and it rarely asks again.** Press **Sign in to YouTube** in the Automation tab (or Settings → Download, or run `ytclip sign-in`). It opens Firefox with a profile kept just for ClipMonster. Sign in with a spare Google account, then close that Firefox window. Every download is signed in from then on, which is what keeps YouTube from asking the PC to "confirm you're not a bot". ClipMonster never sees the password: it reads the sign-in cookies from that profile (`%LOCALAPPDATA%\ClipMonster\youtube-login`). Don't browse with that Firefox, and sign in again from the same button if YouTube ever asks again. It needs Firefox installed.
@@ -274,11 +274,11 @@ ytclip auto                    # run in this console until Ctrl+C
 ytclip auto --once             # do what's due now, then exit
 ytclip auto --status           # the queue and what automation is doing
 ytclip auto --add "https://youtu.be/VIDEO"
-ytclip auto --add "https://youtu.be/VIDEO" --niche Gaming   # queue it for one niche
+ytclip auto --add "https://youtu.be/VIDEO" --category Gaming   # queue it for one category
 ytclip auto --pause | --resume | --stop | --try-now
 ytclip auto --retry ID         # try a failed video again
 ytclip auto --install          # start with Windows (--uninstall to undo)
-ytclip request 10 --length 30-45 --niche Gaming --notes "only the funniest reactions"
+ytclip request 10 --length 30-45 --category Gaming --notes "only the funniest reactions"
 ytclip request 3 --link "https://youtu.be/VIDEO" "https://youtu.be/OTHER"
 ytclip request --list | --cancel ID
 ytclip report                  # what automation did in the last 12 hours (--hours 24, --json)
@@ -290,7 +290,7 @@ ytclip doctor                  # the health check (--offline skips checking the 
 Want a set number of clips? **Automation → Requests → New request** asks for:
 
 - **How many** clips, and **how long** each should be, e.g. 10 clips of 30 to 45 seconds;
-- **which niche** they're for (their folder, style and TikTok account), or none;
+- **which category** they're for (their folder, style and TikTok account), or none;
 - **where from:** let automation pick videos for it (with your picking rules and a YouTube Data API key), or paste the links to clip;
 - **special requests** in plain words, e.g. "only the funniest reactions, end on the punchline". With a Claude or Gemini key, the AI clip finder and the AI polish follow them.
 
@@ -298,45 +298,45 @@ A request goes ahead of everything else in the queue, and its videos don't count
 
 ### The overnight report and the health check
 
-**Automation → Overnight report** tells you what happened while you were away: clips made per niche and per request, how many the quality check rejected and the usual reasons, videos that failed and why, and any pauses (YouTube sign-in requests, a full disk, stuck work stopped), for the last 12 hours, 24 hours or 7 days. The tab tells you when there's something new to read. `ytclip report` prints the same.
+**Automation → Overnight report** tells you what happened while you were away: clips made per category and per request, how many the quality check rejected and the usual reasons, videos that failed and why, and any pauses (YouTube sign-in requests, a full disk, stuck work stopped), for the last 12 hours, 24 hours or 7 days. The tab tells you when there's something new to read. `ytclip report` prints the same.
 
-Below it, the **health check** looks at everything automation needs: ffmpeg, how old the downloader is, your YouTube and AI keys (**Check now** tries them online), the folders and free space, TikTok posting (an account for every niche, logins, the last upload-page check, a browser to post with), niches with nothing to find videos with, and requests that can't be filled. Each problem comes with the fix. Automation runs the offline part every time it starts and puts what it finds in the log. `ytclip doctor` runs it from the command line.
+Below it, the **health check** looks at everything automation needs: ffmpeg, how old the downloader is, your YouTube and AI keys (**Check now** tries them online), the folders and free space, TikTok posting (an account for every category, logins, the last upload-page check, a browser to post with), categories with nothing to find videos with, and requests that can't be filled. Each problem comes with the fix. Automation runs the offline part every time it starts and puts what it finds in the log. `ytclip doctor` runs it from the command line.
 
-### Niches
+### Categories
 
-Run a TikTok account for each topic? Give each account a niche in the **🎯 Niches** tab. A niche has:
+Run a TikTok account for each topic? Give each account a category in the **🎯 Categories** tab. A category has:
 
-- **The account:** a name, the TikTok account it **posts to** (picked from your accounts, or **Add an account…**), how many videos a day it gets (2 to start with), and a switch to pause it. A niche with no account yet keeps its clips waiting.
+- **The account:** a name, the TikTok account it **posts to** (picked from your accounts, or **Add an account…**), how many videos a day it gets (2 to start with), and a switch to pause it. A category with no account yet keeps its clips waiting.
 - **Where its videos come from:** its own channel list and Creative Commons searches. Title words and YouTube categories catch videos from the trending charts. **Standing requests** add the videos you describe (see below).
 - **How its clips look:** its own style, top/bottom view and folder of second videos (blank ones use Settings → Automation), and a note telling the AI what makes a good clip for that account. AI picks and AI polish both read the note.
 
-Every picked video goes into one niche: the one that lists its channel, then the one whose search found it, then the first with a matching title word, then the first with its category. A video that fits no niche isn't picked, and its Pick tooltip says why. Research's **Niche** column shows where each video would go.
+Every picked video goes into one category: the one that lists its channel, then the one whose search found it, then the first with a matching title word, then the first with its category. A video that fits no category isn't picked, and its Pick tooltip says why. Research's **Category** column shows where each video would go.
 
-- **Fair shares.** Each niche picks at most its own number of videos a day. **Videos picked per day** (Settings → Picking) is the limit for all of them together, handed out one pick at a time, and the niche with the fewest picks in the last day goes first. One busy niche can't take every pick.
-- **A paused niche** holds its own channels' and searches' videos back. They aren't handed to another account.
-- **Run from the Automation tab.** **Automation → Niches** shows each niche's picks today against its limit, its videos waiting and its clips today. Pause or resume it there, press **Find videos now** to check its sources straight away, or **Request clips for it**.
-- **Its own clips.** A niche can set its own **clips per video** and **clip length**, over Automation's (clip length is otherwise Settings → Clip finding's). Its **special requests** note tells the AI clip finder and the AI polish what makes a good clip for that account; with a Claude or Gemini key, a niche with a note uses the AI clip finder (within *AI calls per day*).
-- **Style.** A recipe for the video's channel or category comes first, then the niche's own style and view, then a catch-all (`*`) recipe, then Settings → Automation.
-- **Folders.** Each niche's clips go to `Automation\<niche>\`, and `clips.json` records the niche and its TikTok account, so each clip is queued for that account's posts. Renaming a niche sends new clips to its new folder. Clips already made stay where they are.
+- **Fair shares.** Each category picks at most its own number of videos a day. **Videos picked per day** (Settings → Picking) is the limit for all of them together, handed out one pick at a time, and the category with the fewest picks in the last day goes first. One busy category can't take every pick.
+- **A paused category** holds its own channels' and searches' videos back. They aren't handed to another account.
+- **Run from the Automation tab.** **Automation → Categories** shows each category's picks today against its limit, its videos waiting and its clips today. Pause or resume it there, press **Find videos now** to check its sources straight away, or **Request clips for it**.
+- **Its own clips.** A category can set its own **clips per video** and **clip length**, over Automation's (clip length is otherwise Settings → Clip finding's). Its **special requests** note tells the AI clip finder and the AI polish what makes a good clip for that account; with a Claude or Gemini key, a category with a note uses the AI clip finder (within *AI calls per day*).
+- **Style.** A recipe for the video's channel or category comes first, then the category's own style and view, then a catch-all (`*`) recipe, then Settings → Automation.
+- **Folders.** Each category's clips go to `Automation\<category>\`, and `clips.json` records the category and its TikTok account, so each clip is queued for that account's posts. Renaming a category sends new clips to its new folder. Clips already made stay where they are.
 
 **Standing requests.**
-- **What they are.** A niche's standing requests are what you'd type into Research's **Find videos**, one per line, such as *Call of Duty MW4 with good comedy*. Automation runs each one every few hours (6 by default; set it under Settings → Picking → Run standing requests every). Each run looks at videos posted in the last month.
-- **What gets picked.** It picks the videos that match at least 60 out of 100, under the same rules and limits as everything else: the niche's videos a day, the channel limit, blocked words and the minimum clip-ability.
+- **What they are.** A category's standing requests are what you'd type into Research's **Find videos**, one per line, such as *Call of Duty MW4 with good comedy*. Automation runs each one every few hours (6 by default; set it under Settings → Picking → Run standing requests every). Each run looks at videos posted in the last month.
+- **What gets picked.** It picks the videos that match at least 60 out of 100, under the same rules and limits as everything else: the category's videos a day, the channel limit, blocked words and the minimum clip-ability.
 - **Permission.** A video found for your request counts as permission to clip, like a link you add yourself. Picks say "Found for your request (90 match)". *Creative Commons only* still means only Creative Commons.
 - **The log.** It shows what each request found, and why good matches weren't picked.
 - **Cost.**
   - **YouTube quota.** Each run of a request costs about 200 quota units, so four requests every 6 hours use about 3,200 of the 10,000 a day.
   - **The AI.** With a Claude or Gemini key, the AI writes the searches and rates the matches. That's two calls a run, counted in *AI calls per day*. When the day's calls run out, the requests carry on matching by the words.
-- **Without niches.** The standing requests in Settings → Picking run instead.
+- **Without categories.** The standing requests in Settings → Picking run instead.
 
-Making your first niche moves your channel list, Creative Commons searches and standing requests into it. If you never make a niche, nothing changes. `ytclip niches` lists your niches with what each picked today, what's waiting and its clips in the last 7 days (`--json` for scripts).
+Making your first category moves your channel list, Creative Commons searches and standing requests into it. If you never make a category, nothing changes. `ytclip categories` lists your categories with what each picked today, what's waiting and its clips in the last 7 days (`--json` for scripts).
 
 ### Learning from results
 
 Posting keeps track of how your posted clips do: every half hour it writes `%APPDATA%\ClipMonster\results.json`, with the views of every ClipMonster clip that has been up for two days, compared with the usual views on that TikTok account (so "2×" means twice your usual). With **Settings → Picking → Learn from how my clips do** on (the default), ClipMonster uses it in three ways:
 
 - **Picking.** Channels whose clips beat your usual views get up to 12 extra clip-ability points when ranking and checking the minimum score, and channels whose clips flop lose up to 12. One lucky clip counts for little; the effect grows as a channel gets more posts. Research shows why in the Pick tooltip and the video's details, e.g. "Your clips from Some Pod get 2.4× your usual views (5 posts): +8."
-- **AI polish.** Once six or more clips with hooks have results, the polish sees the hooks that worked and the ones that flopped, and writes new hooks more like the hits. Once a niche has six of its own, its videos learn from just those.
+- **AI polish.** Once six or more clips with hooks have results, the polish sees the hooks that worked and the ones that flopped, and writes new hooks more like the hits. Once a category has six of its own, its videos learn from just those.
 - **Tips.** The Automation tab shows **What's working**: the best and worst channels, which clip length does best, and whether the AI rating predicts views (and so whether a higher quality-check minimum would help). Settings are never changed for you.
 
 `ytclip results` prints the same, with every channel's numbers (`--json` for scripts). Results older than 90 days are ignored.
@@ -345,18 +345,18 @@ Posting keeps track of how your posted clips do: every half hour it writes `%APP
 
 Posting runs inside automation's background process, so it keeps going with the window closed and starts with Windows. For every clip that passed the quality check, it:
 
-1. **Queues it for its niche's account.** A clip from a niche goes to the account the niche posts to. Without niches, a single account takes everything. Parts of a series stay in order, back to back.
-2. **Gets it ready.** The caption is the clip's hook, plus a credit line for Creative Commons clips (the licence requires it). The AI writes hashtags for it, fitted to the account's niche and leaning on the tags that got your posts the most views; the account's own hashtags (`#fyp` to start with) are added to every post.
+1. **Queues it for its category's account.** A clip from a category goes to the account the category posts to. Without categories, a single account takes everything. Parts of a series stay in order, back to back.
+2. **Gets it ready.** The caption is the clip's hook, plus a credit line for Creative Commons clips (the licence requires it). The AI writes hashtags for it, fitted to the account's category and leaning on the tags that got your posts the most views; the account's own hashtags (`#fyp` to start with) are added to every post.
 3. **Posts it when its time comes**, in TikTok Studio, in Microsoft Edge (or Chrome) with that account's own login. Leave **Show the browser window** on: TikTok is less likely to block a browser you can see, and you can solve a captcha if one appears.
 4. **Reads the profile** every 5 minutes, in the background: views, likes, comments, shares and followers, and which TikTok video each post became. A post that shows up on the profile is marked posted, even one you posted from your phone.
-5. **Writes a record and deletes the clip.** Once a post is on the profile, a `.txt` to read and a `.json` beside it go to `Documents\ClipMonster\Posted videos\<account>`: when it posted and its link, the caption and hashtags, the clip (title, hook, length, part), where it came from (the YouTube video, its channel and licence, where in it the clip starts and ends), why it was made (niche, how the video was picked, the clip finder's score, the AI's rating, the quality check) and how it did. The numbers are added 1 hour, 24 hours and 7 days after posting. Then the clip, its captions and thumbnail are deleted, and its row leaves the video's `clips.json`. A post that hasn't shown on the profile after 2 days keeps its files, and the record says why.
+5. **Writes a record and deletes the clip.** Once a post is on the profile, a `.txt` to read and a `.json` beside it go to `Documents\ClipMonster\Posted videos\<account>`: when it posted and its link, the caption and hashtags, the clip (title, hook, length, part), where it came from (the YouTube video, its channel and licence, where in it the clip starts and ends), why it was made (category, how the video was picked, the clip finder's score, the AI's rating, the quality check) and how it did. The numbers are added 1 hour, 24 hours and 7 days after posting. Then the clip, its captions and thumbnail are deleted, and its row leaves the video's `clips.json`. A post that hasn't shown on the profile after 2 days keeps its files, and the record says why.
 6. **Keeps an eye on TikTok.** Once a day it opens each account's upload page without posting, so a change on TikTok's side is caught before a post fails. A post that fails isn't tried again by itself (it might be half up): it waits in the Queue tab with the reason, a notification says so, and **Try again** posts it.
 
 **The schedule.** Each account posts 2 clips a day between 11:00 and 21:00, at least 3 hours apart, and each post time moves by up to 15 minutes from day to day so it doesn't look automated. More than 3 a day is past what posting studies support, and the Accounts tab says so. A **new account warms up** for two weeks: no posts for the first 3 days, then 1 a day, then 2 from day 7.
 
 The tabs:
 
-- **👤 Accounts.** Add, log in (a normal Edge window opens on TikTok's login page; log in there, with the QR code from the TikTok app if you like, and it closes by itself), log out or remove each account. Each has its own niches, schedule, who can watch, hashtags, an autopilot switch, and its profile picture, name and bio (**Apply to TikTok** fills in TikTok's Edit profile box and checks it took). **Test posting** walks the upload page with a 3-second black clip, up to just before Post, then throws it away.
+- **👤 Accounts.** Add, log in (a normal Edge window opens on TikTok's login page; log in there, with the QR code from the TikTok app if you like, and it closes by itself), log out or remove each account. Each has its own categories, schedule, who can watch, hashtags, an autopilot switch, and its profile picture, name and bio (**Apply to TikTok** fills in TikTok's Edit profile box and checks it took). **Test posting** walks the upload page with a 3-second black clip, up to just before Post, then throws it away.
 - **📤 Queue.** What each account will post and when. Pick a clip to change its caption or hashtags, move it up or down, **Post now**, **Try again** after a failure, or **Don't post**. Below it, what was posted, with its views and likes, its record and its TikTok link.
 - **📈 Performance.** Views, likes and followers today and over 30 days, your best videos, what's working, and a live feed. Notifications pop up when a clip posts, a post fails, a login runs out or a video takes off.
 
@@ -381,7 +381,7 @@ Videos/ClipMonster/
         └── clips.json    ← the same, machine readable
 ```
 
-Automation's clips go to `<output>/Automation` in the same layout, inside a folder for each niche when you have niches: `Automation/Gaming/<channel>/<date> <title> [<id>]/`. A clip request's clips go to `Automation/Requests/<date> <N clips a-b s>/` (inside the niche's folder when it's for one).
+Automation's clips go to `<output>/Automation` in the same layout, inside a folder for each category when you have categories: `Automation/Gaming/<channel>/<date> <title> [<id>]/`. A clip request's clips go to `Automation/Requests/<date> <N clips a-b s>/` (inside the category's folder when it's for one).
 
 Full downloads are cached in `<output>/.downloads`, so re-analysing or re-exporting never downloads a video twice. Your settings, presets and session live in `%APPDATA%\ClipMonster`. Each step's temporary files go in `%LOCALAPPDATA%\ClipMonster\work` and are deleted when the step ends; whatever a crash leaves there is cleared at the next start.
 
@@ -431,7 +431,7 @@ ytclip "https://youtu.be/VIDEO" --stack "C:\Videos\Gameplay" --polish --captions
 ytclip qc "C:\Users\me\Videos\ClipMonster"      # check exported clips again
 ytclip results                                  # what's working, from your posted clips' stats
 ytclip posting                                  # TikTok accounts, what's waiting, what was posted
-ytclip niches                                   # your niches and how each is doing
+ytclip categories                                   # your categories and how each is doing
 ytclip clean                                    # what Clean up would clear (--delete clears it)
 ytclip --list-presets
 ```
@@ -511,8 +511,8 @@ Run the tests with `pip install -e .[test]` and then `pytest`. They need no netw
 | `ytclip/clipability.py` | Clip-ability score for trending videos |
 | `ytclip/research.py` | One research scan, shared by the Research tab and `ytclip research` |
 | `ytclip/sources.py` | Channel list and Creative Commons searches for Research |
-| `ytclip/policy.py` | Picking rules, each niche's share, and the log of picks |
-| `ytclip/niches.py` | Niches: each TikTok account's sources, look and folder, and which niche a video goes in |
+| `ytclip/policy.py` | Picking rules, each category's share, and the log of picks |
+| `ytclip/categories.py` | Categories: each TikTok account's sources, look and folder, and which category a video goes in |
 | `ytclip/cleanup.py` | Clean up: what nothing needs any more, and clearing it; the work folder's startup sweep |
 | `ytclip/posting/service.py` | The posting worker, a thread of automation's background process: intake, posting, readings, records |
 | `ytclip/posting/intake.py`, `store.py`, `jobs.py`, `schedule.py` | New clips into the posting queue for their account; the library; what posts when |

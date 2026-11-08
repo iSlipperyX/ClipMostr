@@ -21,6 +21,7 @@ from . import cdp
 from .browser import SESSION_COOKIES, Cancelled
 
 LOGIN_URL = "https://www.tiktok.com/login"
+SIGNUP_URL = "https://www.tiktok.com/signup"  # making a new account: you fill in TikTok's own form
 
 _CANDIDATES = {
     "msedge": ("Microsoft", "Edge", "Application", "msedge.exe"),
