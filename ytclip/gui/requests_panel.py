@@ -1,7 +1,7 @@
-"""The Automation tab's Niches and Requests pages, and the New request window.
+"""The Automation tab's Categories and Requests pages, and the New request window.
 
-Niches: one row per niche with how today is going (picked against its daily cap, videos waiting,
-clips made), a pause switch that holds the niche's picking and clipping, and Find videos now.
+Categories: one row per category with how today is going (picked against its daily cap, videos waiting,
+clips made), a pause switch that holds the category's picking and clipping, and Find videos now.
 
 Requests: clip requests (orders.py) with their progress, a New request button and Cancel.
 """
@@ -17,15 +17,15 @@ from PySide6.QtWidgets import (QAbstractItemView, QComboBox, QDialog, QDialogBut
                                QHBoxLayout, QHeaderView, QLabel, QPlainTextEdit, QPushButton, QRadioButton,
                                QSpinBox, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
-from .. import niches, orders, pipeline
+from .. import categories, orders, pipeline
 from ..jobs import Job, JobDB
 from ..policy import PickLog, picks_path
 from ..research import youtube_key
 from ..settings import Settings
 from . import theme
 
-NICHE_COLUMNS = ("Niche", "Account", "Picked today", "Waiting", "Clips today", "Status")
-REQUEST_COLUMNS = ("Request", "Niche", "Ready", "Status", "Special requests")
+CATEGORY_COLUMNS = ("Category", "Account", "Picked today", "Waiting", "Clips today", "Status")
+REQUEST_COLUMNS = ("Request", "Category", "Ready", "Status", "Special requests")
 ORDER_COLOURS = {"open": theme.ACCENT_2, "done": theme.GOOD, "short": theme.WARN, "cancelled": theme.MUTED}
 
 
@@ -55,11 +55,11 @@ def _item(text: str, tip: str = "", data: Any = None) -> QTableWidgetItem:
     return it
 
 
-class NichePanel(QWidget):
-    """Each niche at a glance, with Pause / Resume and Find videos now."""
+class CategoryPanel(QWidget):
+    """Each category at a glance, with Pause / Resume and Find videos now."""
 
     notice = Signal(str)
-    request = Signal(str)  # open New request for this niche id
+    request = Signal(str)  # open New request for this category id
 
     def __init__(self, settings: Callable[[], Settings], change: Callable[[str, Any], None] | None,
                  db: JobDB, parent=None):
@@ -69,20 +69,20 @@ class NichePanel(QWidget):
         self._sig = None
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 6, 0, 0)
-        self.table = _table(NICHE_COLUMNS)
+        self.table = _table(CATEGORY_COLUMNS)
         self.table.itemSelectionChanged.connect(self._buttons)
         self.table.itemDoubleClicked.connect(lambda _i: self.toggle_pause())
-        self.empty = QLabel("No niches yet. Add them in the Niches tab: each one is a TikTok account's topic, with "
+        self.empty = QLabel("No categories yet. Add them in the Categories tab: each one is a TikTok account's topic, with "
                             "its own sources, look and folder. Automation then picks and clips for each in turn.")
         self.empty.setWordWrap(True)
         self.empty.setAlignment(Qt.AlignCenter)
         self.empty.setProperty("muted", True)
         row = QHBoxLayout()
-        self.pause_btn = QPushButton("❚❚  Pause niche")
+        self.pause_btn = QPushButton("❚❚  Pause category")
         self.pause_btn.setToolTip("Nothing new is picked for it and its waiting videos wait, until you resume it")
         self.pause_btn.clicked.connect(self.toggle_pause)
         self.find_btn = QPushButton("🔎  Find videos now")
-        self.find_btn.setToolTip("Check this niche's channels and searches at automation's next step, instead of "
+        self.find_btn.setToolTip("Check this category's channels and searches at automation's next step, instead of "
                                  "waiting for the next scheduled check")
         self.find_btn.clicked.connect(self.find_now)
         self.ask_btn = QPushButton("＋  Request clips for it…")
@@ -103,18 +103,18 @@ class NichePanel(QWidget):
 
     def refresh(self) -> None:
         s = self._settings()
-        all_niches = niches.load(s)
+        all_categories = categories.load(s)
         now = time.time()
         self.picks.reload()
         try:
-            counts = self.db.niche_counts(now - 86400)
+            counts = self.db.category_counts(now - 86400)
         except Exception:  # jobs.db busy for a moment
             counts = {}
         rows = []
-        for n in all_niches:
+        for n in all_categories:
             c = counts.get(n.id, {})
-            status = ("Paused" if n.paused else "Off (Niches tab)" if not n.enabled else "Picking and clipping")
-            rows.append((n.id, n.name, n.account, f"{self.picks.count_since(now - 86400, niche=n.id)} of {n.daily}",
+            status = ("Paused" if n.paused else "Off (Categories tab)" if not n.enabled else "Picking and clipping")
+            rows.append((n.id, n.name, n.account, f"{self.picks.count_since(now - 86400, category_id=n.id)} of {n.daily}",
                          str(c.get("waiting", 0)), str(c.get("clips", 0)), status, n.paused, n.on))
         if rows == self._sig:
             return
@@ -138,26 +138,26 @@ class NichePanel(QWidget):
         self._buttons()
 
     def _buttons(self) -> None:
-        n = niches.find(self._settings(), self.current())
+        n = categories.find(self._settings(), self.current())
         for b in (self.pause_btn, self.find_btn, self.ask_btn):
             b.setEnabled(n is not None)
-        self.pause_btn.setText("▶  Resume niche" if n and n.paused else "❚❚  Pause niche")
+        self.pause_btn.setText("▶  Resume category" if n and n.paused else "❚❚  Pause category")
         self.find_btn.setEnabled(bool(n and n.on and youtube_key(self._settings())))
 
     def toggle_pause(self) -> None:
         s = self._settings()
-        n = niches.find(s, self.current())
+        n = categories.find(s, self.current())
         if n is None or self._change is None:
             return
         n.paused = not n.paused
-        self._change("niches", niches.to_settings([n if x.id == n.id else x for x in niches.load(s)]))
+        self._change("categories", categories.to_settings([n if x.id == n.id else x for x in categories.load(s)]))
         self.notice.emit(f"{n.name} is paused: nothing is picked or clipped for it until you resume it."
                          if n.paused else f"{n.name} carries on.")
         self._sig = None
         self.refresh()
 
     def find_now(self) -> None:
-        n = niches.find(self._settings(), self.current())
+        n = categories.find(self._settings(), self.current())
         if n is None:
             return
         pipeline.request_scan(self.db, n.id)
@@ -182,7 +182,7 @@ class RequestPanel(QWidget):
         self.table.horizontalHeader().setSectionResizeMode(len(REQUEST_COLUMNS) - 1, QHeaderView.Stretch)
         self.table.itemSelectionChanged.connect(self._buttons)
         self.empty = QLabel("No requests yet. A request asks automation for a number of clips of a length, for a "
-                            "niche, from links you give or from videos it picks, with special requests for the AI.")
+                            "category, from links you give or from videos it picks, with special requests for the AI.")
         self.empty.setWordWrap(True)
         self.empty.setAlignment(Qt.AlignCenter)
         self.empty.setProperty("muted", True)
@@ -211,8 +211,8 @@ class RequestPanel(QWidget):
             mine = self.db.orders()
         except Exception:
             return
-        names = {n.id: n.name for n in niches.load(self._settings())}
-        sig = [(o.id, o.status, o.made, o.message, names.get(o.niche, "")) for o in mine]
+        names = {n.id: n.name for n in categories.load(self._settings())}
+        sig = [(o.id, o.status, o.made, o.message, names.get(o.category_id, "")) for o in mine]
         if sig == self._sig:
             return
         self._sig = sig
@@ -222,7 +222,7 @@ class RequestPanel(QWidget):
             source = "from your links" if o.links else "videos picked for it"
             cells = [_item(f"{o.count} clips of {o.length_text()}, {source}",
                            "\n".join(o.links) or "Automation picks videos for it", o.id),
-                     _item(names.get(o.niche, "(deleted niche)" if o.niche else "")),
+                     _item(names.get(o.category_id, "(deleted category)" if o.category_id else "")),
                      _item(f"{o.made} of {o.count}"),
                      _item(f"{orders.STATUS_WORDS[o.status]}: {o.message}" if o.message else
                            orders.STATUS_WORDS[o.status], o.message),
@@ -256,9 +256,9 @@ class RequestPanel(QWidget):
 
 
 class RequestDialog(QDialog):
-    """New request: how many clips, how long, for which niche, from where, and special requests."""
+    """New request: how many clips, how long, for which category, from where, and special requests."""
 
-    def __init__(self, settings: Settings, niche_id: str = "", parent=None):
+    def __init__(self, settings: Settings, category_id: str = "", parent=None):
         super().__init__(parent)
         self.setWindowTitle("New clip request")
         self.setMinimumWidth(520)
@@ -286,16 +286,16 @@ class RequestDialog(QDialog):
         row.addWidget(self.max_len)
         row.addStretch(1)
         form.addRow("How long", lengths)
-        self.niche = QComboBox(self)
-        for n in niches.load(settings):
-            self.niche.addItem(n.label + ("  (paused)" if n.paused else ""), n.id)
-        self.niche.addItem("No niche", "")
-        self.niche.setCurrentIndex(max(0, self.niche.findData(niche_id)))
-        self.niche.currentIndexChanged.connect(self._niche_changed)
-        if self.niche.count() > 1:
-            form.addRow("For", self.niche)
+        self.category_id = QComboBox(self)
+        for n in categories.load(settings):
+            self.category_id.addItem(n.label + ("  (paused)" if n.paused else ""), n.id)
+        self.category_id.addItem("No category", "")
+        self.category_id.setCurrentIndex(max(0, self.category_id.findData(category_id)))
+        self.category_id.currentIndexChanged.connect(self._category_changed)
+        if self.category_id.count() > 1:
+            form.addRow("For", self.category_id)
         else:
-            self.niche.hide()  # only "No niche": nothing to choose
+            self.category_id.hide()  # only "No category": nothing to choose
         self.pick = QRadioButton("Let automation pick videos for it")
         self.from_links = QRadioButton("Clip these videos:")
         self.pick.setChecked(True)
@@ -333,11 +333,11 @@ class RequestDialog(QDialog):
         v.addWidget(buttons)
         self.pick.toggled.connect(self._warnings)
         self.notes.textChanged.connect(self._warnings)
-        self._niche_changed()
+        self._category_changed()
 
-    def _niche_changed(self) -> None:
-        job = Job(id="", url="", niche=self.niche.currentData() or "")
-        style = pipeline.settings_for(job, self.s)[0]  # the niche's length, else Automation's style
+    def _category_changed(self) -> None:
+        job = Job(id="", url="", category_id=self.category_id.currentData() or "")
+        style = pipeline.settings_for(job, self.s)[0]  # the category's length, else Automation's style
         self.min_len.setValue(style.min_len)
         self.max_len.setValue(style.max_len)
         self._warnings()
@@ -350,9 +350,9 @@ class RequestDialog(QDialog):
         if self.pick.isChecked() and not youtube_key(self.s):
             lines.append("Automation needs a YouTube Data API key (Settings → Research) to pick videos. Give it "
                          "links instead, or add a key.")
-        n = niches.find(self.s, self.niche.currentData() or "")
+        n = categories.find(self.s, self.category_id.currentData() or "")
         if n and n.paused:
-            lines.append(f"{n.name} is paused, so nothing happens until you resume it (Automation → Niches).")
+            lines.append(f"{n.name} is paused, so nothing happens until you resume it (Automation → Categories).")
         self.warn.setText("<br>".join(f"<span style='color:{theme.WARN}'>⚠ {x}</span>" for x in lines))
         self.warn.setVisible(bool(lines))
 
@@ -363,7 +363,7 @@ class RequestDialog(QDialog):
             return
         try:
             self.order = orders.make(self.count.value(), self.min_len.value(), self.max_len.value(),
-                                     niche=self.niche.currentData() or "", links=links,
+                                     category_id=self.category_id.currentData() or "", links=links,
                                      notes=self.notes.toPlainText())
         except ValueError as exc:
             self.error.setText(str(exc))

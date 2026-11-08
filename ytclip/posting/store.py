@@ -45,15 +45,15 @@ class VideoItem:
     warnings: list[str] = field(default_factory=list)  # ClipMonster's quality check notes
     credit: str = ""  # a line the caption must carry (Creative Commons credit)
     imported_by: str = ""  # "auto" when automation's clip came in by itself, "" when added by hand
-    # The niche the clip was made for, and the account that niche posts to (posting's account id)
-    niche: str = ""  # the niche's name, e.g. "Gaming"
-    niche_id: str = ""  # stable across renames; shared back in results.json
-    for_account: str = ""  # the account id the niche posts to ("" = none)
+    # The category the clip was made for, and the account that category posts to (posting's account id)
+    category_name: str = ""  # the category's name, e.g. "Gaming"
+    category_id: str = ""  # stable across renames; shared back in results.json
+    for_account: str = ""  # the account id the category posts to ("" = none)
     # ClipMonster's facts about the clip for its record: the source video, where in it, how it was made
     facts: dict = field(default_factory=dict)
     # Part series: one moment cut into parts, each but the last saying "follow for part 2".
     # `series` is unique across the library: ClipMonster's id is only unique within one clips folder, and
-    # the same video can be clipped into several folders (one per niche, or a later run), so it's keyed on it.
+    # the same video can be clipped into several folders (one per category, or a later run), so it's keyed on it.
     series: str = ""
     part: int | None = None  # 1-based
     parts: int | None = None  # how many parts ClipMonster kept
@@ -193,10 +193,25 @@ def _parts(data) -> tuple[dict, dict, set]:
 
 
 def _parts_json(data: dict) -> tuple[dict, dict, set]:
-    items = {d["id"]: d for d in data.get("items", []) if isinstance(d, dict) and d.get("id")}
+    items = {d["id"]: _renamed(d) for d in data.get("items", []) if isinstance(d, dict) and d.get("id")}
     accounts = data.get("accounts")
     stats = {aid: d for aid, d in accounts.items() if isinstance(d, dict)} if isinstance(accounts, dict) else {}
     return items, stats, set(data.get("ignored") or [])
+
+
+# Library entries saved before 3.2, when categories were called niches.
+_OLD_KEYS = {"niche": "category_name", "niche_id": "category_id"}
+
+
+def _renamed(d: dict) -> dict:
+    if not any(k in d for k in _OLD_KEYS):
+        return d
+    d = dict(d)
+    for old, new in _OLD_KEYS.items():
+        if old in d:
+            value = d.pop(old)
+            d.setdefault(new, value)
+    return d
 
 
 def _build(cls, data: dict):
@@ -391,8 +406,8 @@ class Store:
                     item.hook = meta.get("hook", "")
                     item.caption = item.hook
                     item.warnings = list(meta.get("warnings") or [])
-                    item.niche = meta.get("niche", "")
-                    item.niche_id = meta.get("niche_id", "")
+                    item.category_name = meta.get("category", "")
+                    item.category_id = meta.get("category_id", "")
                     item.for_account = meta.get("account_id", "")
                     item.facts = dict(meta.get("facts") or {})
                     if meta.get("series"):

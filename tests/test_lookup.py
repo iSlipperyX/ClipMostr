@@ -209,7 +209,7 @@ def test_ytclip_find_lists_and_queues(monkeypatch, capsys):
         assert jobs[0].permission == "Added by you" and jobs[0].title.startswith("Call of Duty MW4 FUNNY")
     finally:
         db.close()
-    assert cli.main(["find", "MW4 funny", "--niche", "nope"]) == 2
+    assert cli.main(["find", "MW4 funny", "--category", "nope"]) == 2
 
 
 def test_find_uses_whichever_ai_settings_chose(monkeypatch):

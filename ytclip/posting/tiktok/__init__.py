@@ -79,6 +79,17 @@ def refresh_account(s: Settings, account: Account, log: Callable[[str], None], c
         return out
 
 
+def check_session(s: Settings, account: Account, log: Callable[[str], None],
+                  cancelled: Callable[[], bool]) -> tuple[bool | None, str]:
+    """Is the account's saved TikTok sign-in still good? Opens TikTok Studio's upload page in the
+    account's own browser profile, out of sight, and looks for TikTok sending it to the login page.
+    Returns (True/False, what it saw), or (None, why) when it couldn't tell (no connection, say)."""
+    from .browser import TikTokBrowser
+
+    with TikTokBrowser(s, account.browser_dir(), log, headless=True, cancelled=cancelled) as b:
+        return b.session_ok()
+
+
 def check_upload(s: Settings, account: Account, log: Callable[[str], None], cancelled: Callable[[], bool],
                  full: bool = False) -> list[tuple[str, str, str]]:
     """Check that TikTok Studio's uploader still works for this account, without posting (browser method).

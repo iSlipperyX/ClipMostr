@@ -5,6 +5,7 @@ which builds whisper-cli and points these at it; skipped everywhere else.
 """
 
 import os
+import time
 import urllib.request
 from pathlib import Path
 
@@ -57,6 +58,21 @@ def test_only_the_stretches_asked_for_land_in_place(models):
     first = _words([w for w in both if w.start < 4.0])
     assert "fellow" in first or "americans" in first, first
     assert all(not 3.9 < w.start < 5.4 for w in both)  # nothing from the gap between them
+
+
+def test_while_the_card_rests_this_build_types_out_on_the_cpu(models):
+    """What the CPU takes over with after the card fails (-ng, and the card hidden from it) is a command this
+    whisper-cli build knows, and it types the sample out just the same."""
+    exe = whisper_cpp.binary()
+    whisper_cpp._remember(exe, True, rest_until=time.time() + 600, fails=1, failed="a test")
+    try:
+        notes = []
+        _, words = whisper_cpp.transcribe(_load_audio(Path(SAMPLE)), "tiny", "en", None, 2, lambda m, f: None,
+                                          notes.append)
+    finally:
+        whisper_cpp.forget_gpu_check()
+    assert "fellow americans" in _words(words) and "country" in _words(words)
+    assert notes and notes[0].startswith("Whisper is using the CPU until ")
 
 
 @pytest.mark.skipif(not os.environ.get("CLIPMONSTER_CHECK_MODEL_URLS"), reason="checks the model downloads exist")

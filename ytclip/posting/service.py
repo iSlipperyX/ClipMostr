@@ -5,14 +5,16 @@ it keeps going with the window closed and starts with Windows. Each pass (tick):
 
 1. takes in what the window changed (the queue order, a caption, an account's schedule);
 2. does one thing the window asked for (actions.py: log in, post now, test posting, read now…);
-3. brings in automation's new clips and queues them for their niche's account (intake.py);
+3. brings in automation's new clips and queues them for their category's account (intake.py);
 4. gets them ready: a posting score (scoring.py) and the AI's hashtags;
 5. posts the clip that's due, through the account's own browser login (TikTok Studio);
 6. reads each account's profile every few minutes (live.py): views, likes, followers, and which TikTok
    video each post became;
 7. writes each posted clip's record and deletes its files once it's on the profile (records.py), and
    keeps results.json current for learning (results.py);
-8. checks TikTok's upload page once a day per account, so a change on TikTok's side is caught early.
+8. checks TikTok's upload page once a day per account, so a change on TikTok's side is caught early;
+9. checks every few hours that each account's saved sign-in still opens TikTok Studio (session_check),
+   and when it has run out, says so with a Windows notification whose button signs it in again.
 
 One browser window at a time: posting, readings and the window's actions all happen on this one thread.
 When the background process isn't running, the window runs a Service with posting=False, which only
@@ -46,6 +48,8 @@ SHARE_EVERY = 30 * 60.0
 PREPARE_PER_TICK = 2  # clips scored / given hashtags per pass, so a post that comes due never waits long
 HASHTAG_RETRY = 6 * 3600.0  # an AI hashtag call that failed is tried again after this
 STATUS_EVERY = 5.0
+SESSION_EVERY = 6 * 3600.0  # how often each signed-in account's TikTok sign-in is checked
+SESSION_RETRY = 3600.0  # after a check that couldn't tell (offline, say)
 
 
 def status_path() -> Path:
@@ -112,6 +116,8 @@ class Service:
         self.analyze_fn = jobs.analyze_item
         self.hashtags_fn = jobs.ai_hashtags
         self.check_fn = None  # tiktok.check_upload
+        self.session_fn = None  # tiktok.check_session
+        self.notify_fn = None  # notify.sign_in_needed
         self.profile_fn = None  # tiktok.apply_profile
         self.login_fn = None  # _login below
         self.logout_fn = None
@@ -223,6 +229,8 @@ class Service:
                 worked = self.read_due() or worked
             if not self._stopped() and not worked:
                 worked = self.upload_check() or worked
+            if not self._stopped() and not worked:
+                worked = self.session_check() or worked
             if self.now() - self._last_records >= RECORDS_EVERY:
                 self.finish_posted()
         self._doing("")
@@ -296,7 +304,7 @@ class Service:
         if waiting and waiting != self._unassigned_said:
             self._unassigned_said = waiting
             self.log(f"⚠ {waiting} clip{'s are' if waiting != 1 else ' is'} waiting for a TikTok account: "
-                     "pick the account in the Niches tab (or add one in the Accounts tab).")
+                     "pick the account in the Categories tab (or add one in the Accounts tab).")
         return items
 
     # --- 4. ready to post --------------------------------------------------------------------
@@ -444,12 +452,60 @@ class Service:
             self.finish_posted()
         return events
 
-    def _logged_out(self, a: Account) -> None:
+    def _logged_out(self, a: Account, detail: str = "") -> None:
         a.logged_in = False
+        a.session_check, a.session_checked_at = "expired", self.now()
+        a.session_detail = detail or a.session_detail or "TikTok's sign-in ran out."
         self._warned.discard(a.id)
         self.save()
-        self.event(a, "error", f"⚠ {a.label}'s TikTok login has run out. Log in again on the Accounts tab.",
-                   alert=True)
+        toasted = False
+        if self.posting:  # the background process: the one that's there with the window closed
+            try:
+                from .. import notify
+
+                toasted = bool((self.notify_fn or notify.sign_in_needed)(a.handle, a.id))
+            except Exception:  # noqa: BLE001 - the feed line below still says it
+                toasted = False
+        self.event(a, "login_needed", f"⚠ TikTok account {a.handle} needs signing in again: nothing posts to it "
+                   "until it is. Press Sign in again on the Accounts tab.", alert=True, toasted=toasted)
+
+    # --- 9. the sign-in check ------------------------------------------------------------------------
+
+    def session_due(self, now: float | None = None) -> Account | None:
+        """The signed-in account whose sign-in was checked longest ago, if that's SESSION_EVERY or more."""
+        now = self.now() if now is None else now
+        due = [a for a in self.accounts if a.logged_in and now - (a.session_checked_at or 0.0) >= SESSION_EVERY]
+        return min(due, key=lambda a: a.session_checked_at or 0.0) if due else None
+
+    def session_check(self, a: Account | None = None) -> bool:
+        """Check one account's saved TikTok sign-in (the one due, or `a`). True if a check ran."""
+        from . import tiktok
+
+        a = a or self.session_due()
+        if a is None:
+            return False
+        nxt = jobs.next_post(self.store, a.id) if a.autopilot else None
+        if nxt and nxt.planned_at and nxt.planned_at <= self.now() + 120:
+            return False  # a post is due: posting finds out about the sign-in by itself
+        self._doing(f"Checking {a.handle}'s TikTok sign-in")
+        try:
+            ok, detail = (self.session_fn or tiktok.check_session)(a.apply(self.s), a, lambda _m: None,
+                                                                   self._stopped)
+        except Exception as exc:  # noqa: BLE001 - the browser wouldn't start, the profile is open…
+            ok, detail = None, str(exc) or type(exc).__name__
+        now = self.now()
+        if ok is True:
+            a.session_check, a.session_detail, a.session_checked_at = "ok", detail, now
+            self.save()
+        elif ok is False:
+            self._logged_out(a, detail)
+            self.log(f"Sign-in check for {a.handle}: {detail}")
+        else:  # couldn't tell: try again in an hour, and don't mark anything
+            a.session_check, a.session_detail = "unknown", detail
+            a.session_checked_at = now - SESSION_EVERY + SESSION_RETRY
+            self.save()
+            self.log(f"Couldn't check {a.handle}'s TikTok sign-in ({detail}); trying again in an hour.")
+        return True
 
     def share(self) -> None:
         self._last_share = self.now()
@@ -571,7 +627,11 @@ class Service:
 
         kind = req.kind
         if kind == "login":
-            self._doing(f"Logging {a.label} in to TikTok")
+            mode = str(req.args.get("mode") or "link")
+            self._doing(f"{'Making a TikTok account for' if mode == 'create' else 'Signing'} {a.label}"
+                        + ("" if mode == "create" else " in to TikTok"))
+            if mode == "create":
+                return (self.login_fn or _login)(self, a, log, cancelled, finish, mode="create")
             return (self.login_fn or _login)(self, a, log, cancelled, finish)
         if kind == "logout":
             self._doing(f"Logging {a.label} out")
@@ -625,14 +685,20 @@ class Service:
         raise RuntimeError(f"Unknown request: {kind}")
 
 
-def _login(service: Service, a: Account, log: Log, cancelled: Callable[[], bool], finish: Callable[[], bool]) -> str:
+def _login(service: Service, a: Account, log: Log, cancelled: Callable[[], bool], finish: Callable[[], bool],
+           mode: str = "link") -> str:
     """Open a plain browser window on the account's own profile for you to log in (TikTok refuses logins in
-    an automated one), then check the login took and read the account."""
+    an automated one), then check the login took and read the account. mode "create" opens TikTok's sign-up
+    page instead, for making a new account there; you fill in TikTok's form yourself."""
     from .tiktok.browser import TikTokBrowser
-    from .tiktok.login import login_window
+    from .tiktok.login import LOGIN_URL, SIGNUP_URL, login_window
 
     s = service.s
-    if not login_window(s, a.browser_dir(), log, cancelled, finish=finish):
+    url = SIGNUP_URL if mode == "create" else LOGIN_URL
+    if mode == "create":
+        log("Make the account on TikTok's sign-up page in the window that opens. ClipMonster carries on by "
+            "itself once you're signed in to it.")
+    if not login_window(s, a.browser_dir(), log, cancelled, finish=finish, url=url):
         log("Couldn't find Edge or Chrome to open by itself; using ClipMonster's browser window.")
         with TikTokBrowser(s, a.browser_dir(), log, headless=False, cancelled=cancelled) as b:
             if not b.login():
@@ -644,6 +710,11 @@ def _login(service: Service, a: Account, log: Log, cancelled: Callable[[], bool]
             raise RuntimeError("TikTok's login wasn't saved in that window. Press Log in again, log in there and "
                                "wait for your feed to appear.")
         a.logged_in = True
+        a.session_check, a.session_checked_at, a.session_detail = "ok", service.now(), "Signed in just now."
+        if mode == "create" or not a.onboarded:
+            a.onboarded = mode
+        if mode == "create" and not a.warm_up_start:
+            a.start_warm_up(service.now())  # a brand-new TikTok account posts less for its first two weeks
         name = b.whoami()
     note = ""
     if name:

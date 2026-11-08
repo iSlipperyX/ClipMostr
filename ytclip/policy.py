@@ -16,7 +16,7 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from . import niches
+from . import categories
 from .learn import Lessons
 from .organize import stamp
 from .settings import PICK_FROM, Settings, app_dir
@@ -45,13 +45,13 @@ class Policy:
     block_categories: set[str] = field(default_factory=set)
     block_words: list[str] = field(default_factory=list)  # lowercased
     languages: set[str] = field(default_factory=set)  # two-letter codes; empty = any
-    use_niches: bool = False  # niches exist, so every pick must fit a switched-on one
-    niche_daily: dict[str, int] = field(default_factory=dict)  # niche id -> its picks per day
-    niche_names: dict[str, str] = field(default_factory=dict)
+    use_categories: bool = False  # categories exist, so every pick must fit a switched-on one
+    category_daily: dict[str, int] = field(default_factory=dict)  # category id -> its picks per day
+    category_names: dict[str, str] = field(default_factory=dict)
 
     @classmethod
     def from_settings(cls, s: Settings) -> "Policy":
-        on = niches.active(s)
+        on = categories.active(s)
         return cls(
             pick_from=s.pick_from if s.pick_from in dict(PICK_FROM) else "watchlist",
             min_score=float(s.pick_min_score), min_minutes=float(s.pick_min_minutes),
@@ -62,9 +62,9 @@ class Policy:
             block_categories={c for c in re.split(r"[\s,;]+", s.pick_block_categories) if c in CATEGORIES and c},
             block_words=[w.strip().lower() for w in s.pick_block_words.split(",") if w.strip()],
             languages=parse_languages(s.pick_languages),
-            use_niches=bool(niches.load(s)),
-            niche_daily={n.id: n.daily for n in on},
-            niche_names={n.id: n.name for n in on},
+            use_categories=bool(categories.load(s)),
+            category_daily={n.id: n.daily for n in on},
+            category_names={n.id: n.name for n in on},
         )
 
 
@@ -111,6 +111,11 @@ class Decision:
 # ---------------------------------------------------------------- the log of real picks
 
 
+def pick_category(pick: dict) -> str:
+    """The category id a picks.json entry was picked for ("niche" in files from before 3.2)."""
+    return str(pick.get("category_id") or pick.get("niche") or "")
+
+
 class PickLog:
     """picks.json: every video the rules picked and something then acted on."""
 
@@ -139,10 +144,10 @@ class PickLog:
         with self.lock:
             return next((p for p in self.picks if p["id"] == video_id), None)
 
-    def count_since(self, since: float, channel_id: str | None = None, niche: str | None = None) -> int:
+    def count_since(self, since: float, channel_id: str | None = None, category_id: str | None = None) -> int:
         with self.lock:
             return sum(p.get("time", 0) >= since and (channel_id is None or p.get("channel_id") == channel_id)
-                       and (niche is None or p.get("niche", "") == niche) for p in self.picks)
+                       and (category_id is None or pick_category(p) == category_id) for p in self.picks)
 
     def record(self, d: Decision, how: str, now: float | None = None) -> dict:
         """Remember an acted-on pick. how: "studio" (sent by hand) | "cli" | "auto"."""
@@ -150,7 +155,7 @@ class PickLog:
         v = d.video
         rec = {"id": v.id, "url": v.url, "title": v.title, "channel": v.channel, "channel_id": v.channel_id,
                "score": v.score, "license": v.license, "origins": list(v.origins), "permission": d.reason,
-               "time": now, "how": how, "niche": v.niche}
+               "time": now, "how": how, "category_id": v.category_id}
         with self.lock:
             self.picks = [p for p in self.picks if p["id"] != v.id]
             self.picks.append(rec)
@@ -207,47 +212,47 @@ def decide(videos: list[TrendingVideo], policy: Policy, log: PickLog, now: float
     picks made higher up this list. With lessons, a channel whose clips did well (or badly)
     once posted gets clip-ability points added (or taken off) for ranking and the minimum score.
 
-    With niches, every pick must fit one (video.niche), each niche has a daily limit of its own,
-    and the overall daily limit is handed out one pick at a time to each niche in turn (its best
-    video first), the niche with the fewest picks in the last day going first (on a tie, the one
-    with the better next video), so one busy niche can't take every pick of the day."""
+    With categories, every pick must fit one (video.category_id), each category has a daily limit of its own,
+    and the overall daily limit is handed out one pick at a time to each category in turn (its best
+    video first), the category with the fewest picks in the last day going first (on a tie, the one
+    with the better next video), so one busy category can't take every pick of the day."""
     now = now or time.time()
     notes = notes or {}
     learned = {v.id: lessons.bonus(v.channel) if lessons else (0.0, "") for v in videos}
     ranked = sorted(videos, key=lambda v: (v.score + learned[v.id][0], v.velocity), reverse=True)
     out: dict[str, Decision] = {}
-    queues: dict[str, list[tuple[TrendingVideo, str]]] = {}  # niche -> (video, permission), best first
+    queues: dict[str, list[tuple[TrendingVideo, str]]] = {}  # category -> (video, permission), best first
     for v in ranked:
         d = _check(v, policy, log, now, notes, learned[v.id])
         if isinstance(d, Decision):
             out[v.id] = d
         else:  # passed every rule but the limits
-            queues.setdefault(v.niche if policy.use_niches else "", []).append((v, d))
+            queues.setdefault(v.category_id if policy.use_categories else "", []).append((v, d))
 
     picked_today = log.count_since(now - DAY)
     per_channel: dict[str, int] = {}
-    per_niche: dict[str, int] = {}
-    earlier = {k: log.count_since(now - DAY, niche=k) for k in queues} if policy.use_niches else {}
+    per_category: dict[str, int] = {}
+    earlier = {k: log.count_since(now - DAY, category_id=k) for k in queues} if policy.use_categories else {}
     turns = list(queues.items())
 
-    def turn(kq) -> tuple:  # the niche with the fewest picks so far goes first; on a tie, the better next video
+    def turn(kq) -> tuple:  # the category with the fewest picks so far goes first; on a tie, the better next video
         k, q = kq
         head = q[0][0] if q else None
-        return (earlier.get(k, 0) + per_niche.get(k, 0),
+        return (earlier.get(k, 0) + per_category.get(k, 0),
                 -(head.score + learned[head.id][0]) if head else 0.0, -(head.velocity if head else 0.0))
 
     while any(q for _, q in turns):
         turns.sort(key=turn)  # each round
         for _, q in turns:
-            while q:  # this niche's next video that the limits allow, if any
+            while q:  # this category's next video that the limits allow, if any
                 v, permission = q.pop(0)
-                d = _limit(v, permission, policy, log, now, picked_today, per_channel, per_niche,
+                d = _limit(v, permission, policy, log, now, picked_today, per_channel, per_category,
                            learned[v.id])
                 out[v.id] = d
                 if d.picked:
                     picked_today += 1
                     per_channel[v.channel_id] = per_channel.get(v.channel_id, 0) + 1
-                    per_niche[v.niche] = per_niche.get(v.niche, 0) + 1
+                    per_category[v.category_id] = per_category.get(v.category_id, 0) + 1
                     break
     return [out[v.id] for v in ranked]
 
@@ -292,10 +297,10 @@ def _check(v: TrendingVideo, p: Policy, log: PickLog, now: float, notes: dict[st
         return skip("source", "Not Creative Commons, and you only pick Creative Commons videos.")
     if p.pick_from == "watchlist" and permission is None:
         return skip("source", "Not on your channel list and not Creative Commons.")
-    if p.use_niches and v.niche not in p.niche_daily:
-        return skip("niche", "Fits none of your niches. Add its channel, a word from its title or its category "
-                             "to a niche (Niches tab)." if not v.niche else
-                             "Its niche is switched off or paused.")
+    if p.use_categories and v.category_id not in p.category_daily:
+        return skip("unsorted", "Fits none of your categories. Add its channel, a word from its title or its category "
+                             "to a category (Categories tab)." if not v.category_id else
+                             "Its category is switched off, paused, or has no TikTok account yet.")
 
     minutes = v.duration / 60
     if p.min_minutes and minutes < p.min_minutes:
@@ -316,9 +321,9 @@ def _check(v: TrendingVideo, p: Policy, log: PickLog, now: float, notes: dict[st
 
 
 def _limit(v: TrendingVideo, permission: str, p: Policy, log: PickLog, now: float, picked_today: int,
-           per_channel: dict[str, int], per_niche: dict[str, int],
+           per_channel: dict[str, int], per_category: dict[str, int],
            learned: tuple[float, str] = (0.0, "")) -> Decision:
-    """The limits: per channel per week, per niche per day, and in all per day."""
+    """The limits: per channel per week, per category per day, and in all per day."""
     bonus, note = learned
     cid = v.channel_id
 
@@ -330,11 +335,11 @@ def _limit(v: TrendingVideo, permission: str, p: Policy, log: PickLog, now: floa
         if this_week >= p.per_channel_week:
             return skip("channel_cap", f"Already {this_week} pick{'s' if this_week != 1 else ''} from {v.channel} "
                                        f"in the last 7 days (your limit is {p.per_channel_week}).")
-    if p.use_niches:
-        cap = p.niche_daily.get(v.niche, 0)
-        today = log.count_since(now - DAY, niche=v.niche) + per_niche.get(v.niche, 0)
+    if p.use_categories:
+        cap = p.category_daily.get(v.category_id, 0)
+        today = log.count_since(now - DAY, category_id=v.category_id) + per_category.get(v.category_id, 0)
         if today >= cap:
-            return skip("niche_cap", f"{p.niche_names.get(v.niche, 'This niche')} already has its {cap} "
+            return skip("category_cap", f"{p.category_names.get(v.category_id, 'This category')} already has its {cap} "
                                      f"pick{'s' if cap != 1 else ''} for today.")
     if picked_today >= p.daily:
         return skip("daily_cap", f"The limit of {p.daily} pick{'s' if p.daily != 1 else ''} a day is reached.")

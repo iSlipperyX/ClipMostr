@@ -1,8 +1,8 @@
 """TikTok accounts: each has its own login, queue, schedule, posting defaults and stats.
 
 The posting library is shared. A clip belongs to an account once it's queued for it
-(`VideoItem.account`), and the account's stats live in the library file under its id. Each niche
-names the account it posts to (Niche.account_id), so automation's clips go straight to its queue.
+(`VideoItem.account`), and the account's stats live in the library file under its id. Each category
+names the account it posts to (Category.account_id), so automation's clips go straight to its queue.
 
 accounts.json is shared by the window and the background worker the same way the library is
 (safefile.merge_entries): you change a schedule in the window while the worker records a login check.
@@ -35,7 +35,7 @@ PER_ACCOUNT = {
     "logged_in": "browser_logged_in",
     "default_privacy": "default_privacy",
     "default_hashtags": "default_hashtags",
-    "niche": "ai_niche",
+    "audience": "ai_audience",
 }
 
 
@@ -59,7 +59,7 @@ class Account:
     # Posting defaults
     default_privacy: str = "public"
     default_hashtags: str = "#fyp"
-    niche: str = ""  # audience / topic, used by the AI's hashtags and bio suggestions
+    audience: str = ""  # audience / topic, used by the AI's hashtags and bio suggestions
     # Last check of TikTok's upload page (tiktok.check_upload): when, "ok" | "warn" | "fail", what it found
     upload_check_at: float = 0.0
     upload_check: str = ""
@@ -71,6 +71,13 @@ class Account:
     profile_applied: str = ""  # profile.fingerprint() of what was applied
     profile_applied_at: float = 0.0
     profile_error: str = ""
+    # The sign-in check every few hours (service.session_check): when, "ok" | "expired" | "unknown", and
+    # what it saw. "expired" sends a Windows notification with a button that signs the account in again.
+    session_checked_at: float = 0.0
+    session_check: str = ""
+    session_detail: str = ""
+    # How it was added: "link" (signed in to an account you had) or "create" (made on TikTok from here)
+    onboarded: str = ""
 
     def __post_init__(self) -> None:
         self.browser_profile = self.browser_profile or f"browser-profiles/{self.id}"
@@ -240,4 +247,10 @@ class Accounts:
 def _entries(data) -> dict[str, dict]:
     if not isinstance(data, dict):
         return {}
-    return {d["id"]: d for d in data.get("accounts", []) if isinstance(d, dict) and d.get("id")}
+    out = {}
+    for d in data.get("accounts", []):
+        if isinstance(d, dict) and d.get("id"):
+            if "niche" in d:  # saved before 3.2: an account's "niche" is its audience now
+                d = {k: v for k, v in d.items() if k != "niche"} | {"audience": d.get("audience") or d["niche"]}
+            out[d["id"]] = d
+    return out

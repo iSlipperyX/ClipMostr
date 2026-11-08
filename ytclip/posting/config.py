@@ -54,11 +54,11 @@ class Settings:
     ideal_min_len: float = 61.0  # TikTok's Creator Rewards pay for videos over a minute
     ideal_max_len: float = 90.0
     target_lufs: float = -14.0
-    # The AI (ytclip.ai, with ClipMonster's keys): the niche it writes hashtags for, and how many
-    ai_niche: str = ""
+    # The AI (ytclip.ai, with ClipMonster's keys): the category it writes hashtags for, and how many
+    ai_audience: str = ""
     ai_hashtag_count: int = 4
     ai_hashtags: bool = True  # each new clip gets hashtags from the AI (one quick text-only call)
-    # Posting. default_privacy, default_hashtags, ai_niche, the schedule and autopilot are per account
+    # Posting. default_privacy, default_hashtags, ai_audience, the schedule and autopilot are per account
     # (accounts.Account); Account.apply() lays them over a copy of these.
     browser_channel: str = "msedge"  # msedge | chrome
     show_browser: bool = True  # TikTok is less likely to block a browser you can see
@@ -98,6 +98,8 @@ class Settings:
         if not isinstance(data, dict):
             return cls()
         known = {f.name for f in fields(cls)}
+        if "ai_niche" in data and "ai_audience" not in data:  # saved before 3.2
+            data = data | {"ai_audience": data["ai_niche"]}
         s = cls(**{k: v for k, v in data.items() if k in known and k != "weights"})
         w = data.get("weights") or {}
         wknown = {f.name for f in fields(Weights)}
@@ -121,7 +123,7 @@ SCHEMA = [
                         help="Where each posted clip's record goes. Empty = Documents\\ClipMonster\\Posted videos"),
     main_settings.Field("ai_hashtags", "AI hashtags for each new clip", "Posting", "bool",
                         help="One quick text-only call per clip to the AI in Settings → AI, fitted to the account's "
-                             "niche and the hashtags that got its posts the most views"),
+                             "category and the hashtags that got its posts the most views"),
     main_settings.Field("ai_hashtag_count", "Hashtags per clip", "Posting", "int", lo=0, hi=10),
     main_settings.Field("caption_template", "Caption", "Posting", "str",
                         help="{caption} is the clip's hook (or what you wrote), {hashtags} the account's and the "

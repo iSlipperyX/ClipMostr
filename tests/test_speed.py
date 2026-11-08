@@ -61,6 +61,9 @@ def test_doctor_says_when_full_power_cant_use_the_card(monkeypatch):
     assert got[0].level == doctor.WARN and "doesn't include it" in got[0].detail
     monkeypatch.setattr(whisper_cpp, "unavailable", lambda: "")
     assert doctor._whisper_speed(Settings(speed="full"))[0].level == doctor.GOOD
+    monkeypatch.setattr(whisper_cpp, "rest_note", lambda: "resting until 14:32 after the graphics card failed")
+    got = doctor._whisper_speed(Settings(speed="full"))[0]
+    assert got.level == doctor.WARN and "resting until 14:32" in got.detail and "by itself" in got.fix
 
 
 # ---------------------------------------------------------------- faster-whisper
@@ -147,6 +150,47 @@ def test_the_graphics_card_is_tried_first_and_the_cpu_takes_over(fake_whisper, m
     monkeypatch.setattr(whisper_cpp, "transcribe", lambda *a, **k: ([Cue(0, 1, "gpu")], [Word(0, 1, "gpu")]))
     _, words = whisper.transcribe(Path("v.mp4"), "base", "en", 60, lambda m, f: None, gpu=True)
     assert [w.text for w in words] == ["gpu"]
+
+
+class CudaModel(FakeModel):
+    """faster-whisper on an NVIDIA card whose CUDA libraries aren't installed: it loads, then fails on the
+    first thing it's asked (CTranslate2 loads cuBLAS late)."""
+    devices: list = []
+
+    def __init__(self, name, device, compute_type, cpu_threads, download_root):
+        super().__init__(name, device, compute_type, cpu_threads, download_root)
+        CudaModel.devices.append(device)
+        self.model = types.SimpleNamespace(device="cuda" if device == "auto" else "cpu")
+
+    def transcribe(self, audio, **kw):
+        if self.model.device == "cuda":
+            raise RuntimeError("Library cublas64_12.dll is not found or cannot be loaded")
+        return super().transcribe(audio, **kw)
+
+
+def test_faster_whisper_on_a_card_that_fails_carries_on_on_the_cpu(fake_whisper, monkeypatch):
+    from ytclip import diagnostics
+
+    CudaModel.devices = []
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=CudaModel))
+    notes = []
+    _, words = whisper.transcribe(Path("v.mp4"), "base", "en", 60, lambda m, f: None, threads=8, log=notes.append)
+    assert len(words) == 30 and CudaModel.devices == ["auto", "cpu"]
+    assert notes[0].startswith("Whisper: faster-whisper failed on the graphics card (Library cublas64_12.dll is not "
+                               "found or cannot be loaded). Typing out the speech on the CPU instead (8 threads).")
+    assert "cublas64_12.dll" in diagnostics.log_path().read_text(encoding="utf-8")
+
+
+def test_a_failure_on_the_cpu_isnt_blamed_on_a_card(fake_whisper, monkeypatch):
+    class Broken(FakeModel):
+        def transcribe(self, audio, **kw):
+            raise ValueError("the audio is empty")
+
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=Broken))
+    notes = []
+    with pytest.raises(ValueError, match="the audio is empty"):
+        whisper.transcribe(Path("v.mp4"), "base", "en", 60, lambda m, f: None, log=notes.append)
+    assert notes == []  # nothing tried again, nothing said about a graphics card
 
 
 def test_a_cancel_on_the_graphics_card_isnt_a_reason_to_use_the_cpu(fake_whisper, monkeypatch):

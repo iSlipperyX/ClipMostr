@@ -102,10 +102,11 @@ class Settings:
     gemini_api_key: str = ""
     gemini_model: str = "gemini-3.8-flash"
     # Local AI (intelligence/llama_engine.py): a GGUF model on this PC, when "AI to use" is Local AI
-    local_model: str = "auto"  # auto | llama-3.2-3b | mistral-7b | custom (intelligence/models.py)
+    local_model: str = "auto"  # auto | a key of intelligence/models.MODELS | custom
     local_model_path: str = ""  # with custom: your own .gguf file
     local_gpu: bool = True  # put the model on the graphics card when there's one with room
-    local_context: int = 0  # tokens the model reads at once; 0 = the model's own (16,384)
+    local_context: int = 0  # tokens the model reads at once; 0 = sized to the model and this PC (up to 32,768)
+    local_gpu_layers: int = -1  # layers on the graphics card; -1 = as many as fit (intelligence/planner.py)
     gemini_polish_model: str = "gemini-3.8-flash"
     ai_instructions: str = (
         "Find self-contained moments that would work as standalone short-form clips: "
@@ -206,14 +207,16 @@ class Settings:
     research_auto: bool = True
     research_interval: int = 30
     research_alert: int = 75
-    research_niche_charts: bool = True  # also check the trending chart of each category your niches use
+    research_category_charts: bool = True  # also check the trending chart of each YouTube category your categories use
     research_hide_used: bool = True  # Research hides videos already picked, queued, clipped or sent
+    research_view: str = "matrix"  # Research shows: "matrix" (cards per cluster), "table" or "arbitrage"
+    research_hidden_columns: str = ""  # Research table columns hidden from its header menu, comma separated
     # Picking rules (policy.py): which researched videos may be clipped without asking
     pick_from: str = "watchlist"
     pick_languages: str = "en"  # only pick videos in these spoken languages (when YouTube knows it); "" = any
     pick_channels: str = ""
     pick_searches: str = ""
-    pick_finds: str = ""  # standing requests without niches, one per line (niches have their own)
+    pick_finds: str = ""  # standing requests without categories, one per line (categories have their own)
     pick_find_hours: int = 6  # how often automation runs each standing request
     pick_min_score: int = 65
     pick_min_minutes: float = 8.0
@@ -226,8 +229,8 @@ class Settings:
     pick_block_categories: str = "10, 1"  # Music, Film & Animation: reposts are usually claimed
     pick_block_words: str = "music video, lyric video, lyrics, official audio, trailer, full movie, full album"
     learn_from_results: bool = True  # learn.py: how posted clips did ranks channels and guides AI hooks
-    # Niches (niches.py): one TikTok account's topic each, edited in the Niches tab. Empty = no niches
-    niches: list = field(default_factory=list)
+    # Categories (categories.py): one TikTok account's topic each, edited in the Categories tab. Empty = no categories
+    categories: list = field(default_factory=list)
     # Automation (pipeline.py): the unattended runner
     auto_output_dir: str = ""  # "" = <output_dir>/Automation
     auto_preset: str = "Shorts / TikTok / Reels"
@@ -313,7 +316,9 @@ class Settings:
             # itself every day: nothing ClipMonster is done with is left taking up space.
             data = data | {"update_channel": "beta" if data.get("include_prereleases") else "stable",
                            "cleanup_auto": True}
-        return cls().apply(migrate(data))
+        from .categories import migrate_settings  # niches before 3.2
+
+        return cls().apply(migrate(migrate_settings(data)))
 
     def save(self, path: Path | None = None) -> None:
         """Write settings.json whole or not at all: automation reads it while you type in the app."""
@@ -572,9 +577,14 @@ CLEANUP_KINDS = (
     ("removed", "Clips you took out of the posting queue"),
 )
 
-LOCAL_MODELS = (("auto", "Pick for this PC"), ("llama-3.2-3b", "Llama 3.2 3B Instruct (2 GB, quick, any PC)"),
-                ("mistral-7b", "Mistral 7B Instruct v0.3 (4.4 GB, better, 8 GB+ graphics)"),
-                ("custom", "My own GGUF file"))  # intelligence/models.CHOICES
+LOCAL_MODELS = (('auto', 'Pick for this PC'),
+                ('llama-3.2-3b', 'Llama 3.2 3B · Compact · 2.0 GB · any PC, quick on the CPU too'),
+                ('qwen2.5-7b', 'Qwen2.5 7B · Standard · 4.7 GB · 8 GB+ graphics card'),
+                ('mistral-nemo-12b', 'Mistral Nemo 12B · High-capacity · 7.5 GB · 12 GB+ graphics card'),
+                ('qwen2.5-32b', 'Qwen2.5 32B · Ultra · 19.9 GB · 24 GB graphics card, or 16 GB + 32 GB RAM'),
+                ('command-r-32b', 'Command R 32B · Ultra · 19.8 GB · non-commercial licence'),
+                ('mistral-7b', "Mistral 7B v0.3 · 4.4 GB · ClipMonster 3.1's model"),
+                ('custom', 'My own GGUF file'))  # intelligence/models.CHOICES (a test keeps them the same)
 CAPTION_STYLES = (("classic", "Classic (word pop)"), ("kinetic", "Kinetic (pop, karaoke, keyword colours)"))
 APPEARANCES = (("dark", "Dark"), ("light", "Light"), ("system", "Match Windows"))
 
@@ -690,14 +700,21 @@ SCHEMA: list[Field] = [
     Field("gemini_polish_model", "Gemini model for polishing", "AI", "choice", choices=GEMINI_MODELS),
     Field("local_model", "Local AI model", "AI", "choice", choices=LOCAL_MODELS,
           help="Runs on this PC: free, private and offline once it's downloaded (from Hugging Face, once). 'Pick "
-               "for this PC' takes Mistral 7B when the graphics card has 8 GB or more, else Llama 3.2 3B, which "
-               "is also quick on a CPU"),
+               "for this PC' takes the biggest model that fits entirely on the graphics card: Qwen2.5 7B for 8-10 GB, "
+               "Mistral Nemo 12B for 11-20 GB, Qwen2.5 32B for 24 GB or more, else Llama 3.2 3B, which is also "
+               "quick on a CPU. A bigger model than that splits between the card and RAM: better picks, but slower"),
     Field("local_model_path", "Local model file (with 'My own GGUF file')", "AI", "file",
-          help="Any instruction-tuned GGUF model, such as Qwen or Gemma"),
+          help="Any instruction-tuned GGUF model, such as Qwen or Gemma. Its own header says how big it is, so "
+               "it's sized to the graphics card like the others"),
     Field("local_gpu", "Local AI on the graphics card", "AI", "bool",
-          help="Much faster. Uses Vulkan, so AMD, NVIDIA and Intel cards all work. Falls back to the CPU by itself"),
-    Field("local_context", "Local AI memory (tokens, 0 = the model's own)", "AI", "int", lo=0, hi=131072,
-          step=1024, help="How much transcript it reads at once. Longer videos are read in parts either way"),
+          help="Much faster. Uses Vulkan, so AMD, NVIDIA and Intel cards all work. If the card runs out of memory "
+               "or its driver fails, it carries on on the CPU by itself"),
+    Field("local_context", "Local AI memory (tokens, 0 = sized to this PC)", "AI", "int", lo=0, hi=131072,
+          step=1024, help="How much transcript it reads at once: up to 32,768 tokens (about an hour of talk) when "
+                          "the graphics card has room. Longer videos are read in parts either way"),
+    Field("local_gpu_layers", "Local AI layers on the card (-1 = all that fit)", "AI", "int", lo=-1,
+          hi=256, help="Leave at -1: ClipMonster and llama.cpp measure the free graphics memory and fit as many "
+                       "as they can. 0 runs it on the CPU only"),
     Field("ai_instructions", "What makes a good clip?", "AI", "text"),
     Field("ai_polish", "Polish clips with AI", "AI", "bool",
           help="One extra AI call per video, with a frame from each clip: writes a hook for the top banner and "
@@ -801,7 +818,7 @@ SCHEMA: list[Field] = [
     Field("lower_third", "Context tag with source credit", "Editing", "bool",
           help="A slim tag that slides in for a few seconds: the topic, and 'SOURCE · channel'"),
     Field("lower_third_text", "Context tag text", "Editing", "str",
-          help="{topic} (the niche, else the clip's title), {title} or {channel}"),
+          help="{topic} (the category, else the clip's title), {title} or {channel}"),
     Field("broll_folder", "B-roll folder", "Editing", "path",
           help="Your own or licensed clips only. File and folder names are matched to what's being said "
                "('money/counting cash.mp4' shows when money comes up)"),
@@ -868,9 +885,9 @@ SCHEMA: list[Field] = [
     Field("research_interval", "Check every (minutes)", "Research", "int", lo=10, hi=720, step=5),
     Field("research_alert", "Highlight new videos scoring at least", "Research", "int", lo=0, hi=100,
           help="New arrivals above this score are counted on the Research tab"),
-    Field("research_niche_charts", "Also check my niches' category charts", "Research", "bool",
-          help="With All categories, each region's chart for the categories your niches use (up to 4) is checked "
-               "too, 1 unit each: more videos for each niche than the main chart shows"),
+    Field("research_category_charts", "Also check my categories' YouTube charts", "Research", "bool",
+          help="With All categories, each region's chart for the YouTube categories your categories use (up to 4) is checked "
+               "too, 1 unit each: more videos for each category than the main chart shows"),
 
     Field("pick_from", "Pick videos from", "Picking", "choice", choices=PICK_FROM,
           help="Creators on your channel list, or Creative Commons videos, have said clips are fine. "
@@ -888,7 +905,7 @@ SCHEMA: list[Field] = [
           help="Videos you want, one request per line, in your own words, e.g. 'Call of Duty MW4 with good "
                "comedy'. Automation searches YouTube for each one every few hours and picks the best new "
                "matches, within your limits (they count as permission to clip, like adding a link yourself). "
-               "Each run of a request costs about 200 quota units. With niches, each niche has its own",
+               "Each run of a request costs about 200 quota units. With categories, each category has its own",
           placeholder="Call of Duty MW4 with good comedy\nMinecraft hardcore funny moments"),
     Field("pick_find_hours", "Run standing requests every (hours)", "Picking", "int", lo=1, hi=72),
     Field("pick_languages", "Only pick videos in", "Picking", "str",

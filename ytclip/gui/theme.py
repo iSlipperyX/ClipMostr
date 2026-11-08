@@ -253,6 +253,24 @@ QMenu::item:selected {{ background: {ACCENT}; color: {ON_ACCENT}; }}
 QMenu::separator {{ height: 1px; background: {HAIRLINE}; margin: 4px 6px; }}
 QMessageBox {{ background: {BG}; }}
 
+/* Research's command center (research_dashboard.py): filter pills, the view switch, cluster cards */
+QPushButton#pill {{ background: {seg_bg}; border: 1px solid transparent; border-radius: 12px; padding: 3px 11px;
+    color: {MUTED}; }}
+QPushButton#pill:hover {{ background: {hover}; color: {TEXT}; }}
+QPushButton#pill:checked {{ background: {sel}; border-color: {ACCENT}; color: {TEXT}; font-weight: 600; }}
+QFrame#segbar {{ background: {seg_bg}; border: none; border-radius: 8px; }}
+QPushButton#seg {{ background: transparent; border: 1px solid transparent; border-radius: 6px; padding: 4px 12px;
+    color: {MUTED}; }}
+QPushButton#seg:hover {{ color: {TEXT}; background: transparent; }}
+QPushButton#seg:checked {{ background: {raised}; border-color: {BORDER}; color: {TEXT}; font-weight: 600; }}
+QFrame#card {{ background: {PANEL}; border: 1px solid {HAIRLINE}; border-radius: {RADIUS}px; }}
+QFrame#card:hover {{ border-color: {_rgba(ACCENT, 0.55)}; }}
+QFrame#card[selected="true"] {{ border-color: {ACCENT}; }}
+QFrame#vrow {{ background: transparent; border: none; border-radius: 6px; }}
+QFrame#vrow:hover {{ background: {hover}; }}
+QFrame#banner {{ background: {soft(ACCENT, 0.12 if is_dark() else 0.08)}; border: 1px solid {_rgba(ACCENT, 0.35)};
+    border-radius: {RADIUS_CTRL}px; }}
+
 /* Sidebar navigation (navigation.py) */
 QWidget#sidebar {{ background: {SIDEBAR}; border-right: 1px solid {HAIRLINE}; }}
 QListWidget#nav {{ background: transparent; border: none; }}

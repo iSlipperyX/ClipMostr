@@ -13,7 +13,7 @@ from test_sources import FakeAPI
 from ytclip import fresh, lookup, sources
 from ytclip.jobs import Job, JobDB
 from ytclip.policy import Decision, PickLog
-from ytclip.research import ScanOptions, niche_charts, scan
+from ytclip.research import ScanOptions, category_charts, scan
 from ytclip.settings import Settings
 from ytclip.trending import ChartUnavailable, History, video_from_api
 
@@ -247,7 +247,7 @@ def test_a_video_already_in_the_queue_isnt_picked_and_doesnt_use_up_a_pick(tmp_p
     from test_standing import GAMING, FakeFind, _empty_scan
 
     FakeFind(monkeypatch, {"MW4 with good comedy": [("m1", 90), ("m2", 85)]})
-    s = _settings(niches=[GAMING | {"daily": 1}])
+    s = _settings(categories=[GAMING | {"daily": 1}])
     r = _runner(tmp_path, s, scan=_empty_scan)
     r.db.add(Job(id="m1", url="https://www.youtube.com/watch?v=m1", how="manual"), NOW)  # you queued it by hand
     assert r.research(s) == 1
@@ -267,7 +267,7 @@ def test_standing_requests_remember_their_turns_and_skip_used_videos(tmp_path, m
         return real(*a, **kw)
 
     monkeypatch.setattr(lookup, "find", spy)
-    s = _settings(niches=[GAMING])
+    s = _settings(categories=[GAMING])
     r = _runner(tmp_path, s, scan=_empty_scan)
     r.db.add(Job(id="old1", url="u"), NOW)
     r.research(s)
@@ -294,13 +294,13 @@ def test_creative_commons_searches_take_turns_with_sort_orders_and_keep_what_the
     assert any("newest first (1 new" in m for m in logs)
 
 
-def test_niches_categories_get_their_own_charts():
-    s = Settings().apply({"niches": [{"id": "g", "name": "Gaming", "categories": "20, 24"},
-                                     {"id": "c", "name": "Comedy", "categories": "23, 24"},
-                                     {"id": "x", "name": "Off", "categories": "17", "enabled": False}]})
-    assert niche_charts(s) == ["24", "20", "23"]  # the most used first; switched-off niches don't count
-    assert ScanOptions.from_settings(s).niche_charts == ["24", "20", "23"]
-    assert ScanOptions.from_settings(s.apply({"research_niche_charts": False})).niche_charts == []
+def test_categories_categories_get_their_own_charts():
+    s = Settings().apply({"categories": [{"id": "g", "name": "Gaming", "account_id": "acc1", "categories": "20, 24"},
+                                     {"id": "c", "name": "Comedy", "account_id": "acc1", "categories": "23, 24"},
+                                     {"id": "x", "name": "Off", "account_id": "acc1", "categories": "17", "enabled": False}]})
+    assert category_charts(s) == ["24", "20", "23"]  # the most used first; switched-off categories don't count
+    assert ScanOptions.from_settings(s).category_charts == ["24", "20", "23"]
+    assert ScanOptions.from_settings(s.apply({"research_category_charts": False})).category_charts == []
 
     asked = []
     base = fake_fetch()
@@ -315,7 +315,7 @@ def test_niches_categories_get_their_own_charts():
             return [v, *base(key, region, "", limit)[:1]]
         return base(key, region, category, limit)
 
-    o = scan_opts(niche_charts=["20", "23"], deep_count=0)
+    o = scan_opts(category_charts=["20", "23"], deep_count=0)
     assert o.charts == ["", "20", "23"] and o.quota == 2 * 3
     result = scan(o, History(None), fetch=fetch, deep=FakeDeep(), now=NOW)
     assert asked == [("US", ""), ("US", "20"), ("US", "23"), ("GB", ""), ("GB", "20"), ("GB", "23")]
@@ -324,7 +324,7 @@ def test_niches_categories_get_their_own_charts():
     assert not result.problems  # a category with no chart in a region is nothing to report
     shared = next(v for v in result.videos if v.id == "shared")
     assert shared.regions == {"US": 1, "GB": 2}  # its place on the main chart, not the category chart
-    assert scan_opts(category="20", niche_charts=["24"]).charts == ["20"]  # a chosen category: just that one
+    assert scan_opts(category="20", category_charts=["24"]).charts == ["20"]  # a chosen category: just that one
 
 
 def test_fresh_json_is_in_the_app_folder():
@@ -357,7 +357,7 @@ def test_a_standing_request_picks_something_new_each_run(tmp_path, monkeypatch):
     monkeypatch.setattr(lookup, "plain_plan", lambda request: lookup.Plan(
         request, [request, f"{request} funny moments"], ["mw4"], ["funny"]))
     clock = Clock()
-    s = _settings(niches=[{"id": "g", "name": "Gaming", "daily": 1, "finds": "MW4 with good comedy"}],
+    s = _settings(categories=[{"id": "g", "name": "Gaming", "account_id": "acc1", "daily": 1, "finds": "MW4 with good comedy"}],
                   pick_min_score=0, pick_channel_weekly=0)
     r = _runner(tmp_path, s, scan=_empty_scan, clock=clock)
     assert r.research(s) == 1

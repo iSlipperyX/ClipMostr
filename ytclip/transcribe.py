@@ -16,7 +16,8 @@ from typing import Callable
 
 import numpy as np
 
-from .ffmpeg import NO_WINDOW, ffmpeg_exe
+from . import diagnostics
+from .ffmpeg import NO_WINDOW, Cancelled, ffmpeg_exe
 from .settings import models_dir
 from .subtitles import Cue, Word, to_dicts
 
@@ -105,7 +106,8 @@ def transcribe(path: Path, model_name: str, language: str, duration: float, prog
                threads: int = 0, spans: list[tuple[float, float]] | None = None, checkpoint: Path | None = None,
                gpu: bool = False, log: Log | None = None) -> tuple[list[Cue], list[Word]]:
     """Type out the video, or only `spans` of it. With `gpu`, whisper.cpp on the graphics card is
-    tried first; anything going wrong there falls back to faster-whisper on the CPU."""
+    tried first (it does the run again on the CPU itself when the card fails part-way); whisper.cpp not
+    working at all falls back to faster-whisper on the CPU."""
     log = log or (lambda m: None)
     progress("Preparing audio for transcription", None)
     audio = _load_audio(path)
@@ -122,17 +124,55 @@ def transcribe(path: Path, model_name: str, language: str, duration: float, prog
             except Exception as exc:
                 why = str(exc) or exc.__class__.__name__
         log(f"Whisper on the graphics card isn't working ({why}), so it's using the CPU.")
-    return _faster_whisper(audio, model_name, language, duration, progress, threads, spans, checkpoint)
+    try:
+        return _faster_whisper(audio, model_name, language, duration, progress, threads, spans, checkpoint)
+    except _OnCardFailed as exc:  # faster-whisper on an NVIDIA card (CUDA) failed: the CPU carries on
+        diagnostics.gpu_fallback("Whisper", f"faster-whisper failed on the graphics card ({exc.cause})",
+                                 [exc.detail], f"Typing out the {'speech' if spans is None else 'clips'} on the CPU "
+                                 f"instead ({max(1, threads)} threads).", log)
+        return _faster_whisper(audio, model_name, language, duration, progress, threads, spans, checkpoint, "cpu")
+
+
+class _OnCardFailed(RuntimeError):
+    def __init__(self, cause: str, detail: str):
+        super().__init__(cause)
+        self.cause, self.detail = cause, detail
 
 
 def _faster_whisper(audio: np.ndarray, model_name: str, language: str, duration: float, progress: Progress,
                     threads: int, spans: list[tuple[float, float]] | None,
-                    checkpoint: Path | None) -> tuple[list[Cue], list[Word]]:
+                    checkpoint: Path | None, device: str = "auto") -> tuple[list[Cue], list[Word]]:
+    """faster-whisper. On `device` "auto" it uses an NVIDIA card when CUDA is there; anything failing there
+    is raised as _OnCardFailed, for the caller to do it again on the CPU (a whole video carries on from its
+    checkpoint)."""
     from faster_whisper import WhisperModel
 
     progress(f"Loading Whisper '{model_name}' model (first use downloads it)", None)
-    model = WhisperModel(model_name, device="auto", compute_type="int8", cpu_threads=threads,
-                         download_root=str(models_dir()))
+    on_card = False
+    try:
+        model = WhisperModel(model_name, device=device, compute_type="int8", cpu_threads=threads,
+                             download_root=str(models_dir()))
+        on_card = str(getattr(getattr(model, "model", None), "device", "cpu")) != "cpu"
+        return _type_out(model, audio, model_name, language, duration, progress, spans, checkpoint)
+    except Cancelled:
+        raise
+    except Exception as exc:
+        text = f"{exc.__class__.__name__}: {exc}"
+        if device != "cpu" and (on_card or _cuda_trouble(text)):
+            first = (str(exc).strip().splitlines() or [exc.__class__.__name__])[0]
+            raise _OnCardFailed(first[:160], text[:600]) from exc
+        raise
+
+
+def _cuda_trouble(text: str) -> bool:
+    """What CTranslate2 says when CUDA is there but doesn't work (a missing library, a driver too old,
+    running out of graphics memory)."""
+    low = text.lower()
+    return any(sign in low for sign in ("cuda", "cublas", "cudnn", "nvidia", "gpu")) or bool(diagnostics.classify([low]))
+
+
+def _type_out(model, audio: np.ndarray, model_name: str, language: str, duration: float, progress: Progress,
+              spans: list[tuple[float, float]] | None, checkpoint: Path | None) -> tuple[list[Cue], list[Word]]:
     cues: list[Cue] = []
     words: list[Word] = []
     if spans is None:  # the whole video, carrying on from a checkpoint

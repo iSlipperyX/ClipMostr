@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog,
 
 from ..posting import intake, jobs, live, profile, records, results, schedule, tracker
 from ..posting.accounts import Account
+from ..posting.service import SESSION_EVERY
 from ..posting.store import INTERRUPTED, VideoItem
 from . import theme
 from .posting_state import PostingState
@@ -54,7 +55,9 @@ def account_status(state: PostingState, a: Account, now: float | None = None) ->
     """One line on how the account is doing: login, posting, the next post."""
     now = time.time() if now is None else now
     if not a.logged_in:
-        return "Not logged in to TikTok: nothing posts until it is."
+        if a.session_check == "expired":
+            return "TikTok's sign-in ran out: nothing posts until it's signed in again."
+        return "Not signed in to TikTok: nothing posts until it is."
     parts = [f"Logged in as {a.handle}"]
     if not a.autopilot:
         parts.append("posting paused")
@@ -152,12 +155,15 @@ class RequestDialog(QDialog):
 
 class AccountsPage(QWidget):
     notice = Signal(str)
-    open_niches = Signal()
+    open_categories = Signal()
 
-    def __init__(self, state: PostingState, main_settings, parent=None):
+    def __init__(self, state: PostingState, main_settings, parent=None, wizard=None):
         super().__init__(parent)
         self.state = state
-        self._main = main_settings  # () -> ClipMonster's Settings (for the niches that post here)
+        # (parent, category id, account id) -> account id: the account wizard (accounts_view.py), when the
+        # main window gives one; without it, Add and Log in use the plain login window
+        self._wizard = wizard
+        self._main = main_settings  # () -> ClipMonster's Settings (for the categories that post here)
         self._current = ""
         self._filling = False
         self._save_timer = QTimer(self, singleShot=True, interval=600)
@@ -181,9 +187,9 @@ class AccountsPage(QWidget):
         self.empty = QFrame(objectName="panel")
         el = QVBoxLayout(self.empty)
         el.addWidget(QLabel("<p style='font-size:13pt'><b>Add the TikTok account clips post to</b></p>"
-                            "<p>ClipMonster posts each niche's clips to its account by itself, on a schedule, "
-                            "and reads how they do. Add an account, log in to TikTok once, then pick it for "
-                            "your niches in the Niches tab.</p>"))
+                            "<p>ClipMonster posts each category's clips to its account by itself, on a schedule, "
+                            "and reads how they do. Link an account you have, or make a new one on TikTok; you "
+                            "sign in once and it stays signed in on this PC.</p>"))
         first = QPushButton("Add an account")
         first.setObjectName("primary")
         first.clicked.connect(self.add)
@@ -247,17 +253,17 @@ class AccountsPage(QWidget):
         self.name.editingFinished.connect(lambda: self._set("name", self.name.text().strip(), relist=True))
         form.addRow("Name", self.name)
         nrow = QHBoxLayout()
-        self.niches = _muted()
-        nrow.addWidget(self.niches, 1)
-        pick = QPushButton("Niches tab")
-        pick.setToolTip("Pick which niches post to this account")
-        pick.clicked.connect(self.open_niches.emit)
+        self.categories_label = _muted()
+        nrow.addWidget(self.categories_label, 1)
+        pick = QPushButton("Categories tab")
+        pick.setToolTip("Pick which categories post to this account")
+        pick.clicked.connect(self.open_categories.emit)
         nrow.addWidget(pick)
-        form.addRow("Niches", nrow)
-        self.niche = QLineEdit(placeholderText="e.g. Rainbow Six streamer clips")
-        self.niche.setToolTip("What the account posts, in a few words: the AI writes its hashtags and bio for it")
-        self.niche.editingFinished.connect(lambda: self._set("niche", self.niche.text().strip()))
-        form.addRow("Audience", self.niche)
+        form.addRow("Categories", nrow)
+        self.audience_edit = QLineEdit(placeholderText="e.g. Rainbow Six streamer clips")
+        self.audience_edit.setToolTip("What the account posts, in a few words: the AI writes its hashtags and bio for it")
+        self.audience_edit.editingFinished.connect(lambda: self._set("audience", self.audience_edit.text().strip()))
+        form.addRow("Audience", self.audience_edit)
 
         section("Schedule")
         self.autopilot = QCheckBox("Post this account's clips by themselves")
@@ -394,7 +400,7 @@ class AccountsPage(QWidget):
         self._filling = True
         try:
             self.name.setText(a.name)
-            self.niche.setText(a.niche)
+            self.audience_edit.setText(a.audience)
             self.autopilot.setChecked(a.autopilot)
             self.per_day.setValue(int(a.posts_per_day))
             self.first.setTime(QTime.fromString(a.first_post_time, "HH:mm"))
@@ -424,6 +430,12 @@ class AccountsPage(QWidget):
         if p.fetched_at:
             lines.append(f"{live.fmt(p.followers)} followers · {live.fmt(p.likes)} likes · stats read "
                          f"{live.ago(now - p.fetched_at)} ago")
+        if a.session_checked_at and a.session_check:
+            said = {"ok": "still good", "expired": "ran out", "unknown": "couldn't be checked"}.get(a.session_check, "")
+            nxt = max(0.0, a.session_checked_at + SESSION_EVERY - now)
+            lines.append(f"Sign-in checked {live.ago(now - a.session_checked_at)} ago: {said}"
+                         + (f" · next check in {live.ago(nxt) if nxt > 60 else 'a moment'}" if a.logged_in else "")
+                         + (f" ({a.session_detail})" if a.session_check != "ok" and a.session_detail else ""))
         if a.upload_check_at:
             verdict = {"ok": "passed", "warn": "passed with a warning", "fail": "FAILED"}.get(a.upload_check, "")
             lines.append(f"Posting test {verdict} {live.ago(now - a.upload_check_at)} ago"
@@ -435,20 +447,20 @@ class AccountsPage(QWidget):
         if not self.state.worker_running():
             lines.append("Automation isn't running, so nothing posts by itself: start it in the Automation tab.")
         self.detail.setText("\n".join(lines))
-        self.login_btn.setText("Log in again" if a.logged_in else "Log in to TikTok")
+        self.login_btn.setText("Sign in again" if a.logged_in or a.session_check == "expired" else "Sign in to TikTok")
         self.login_btn.setObjectName("" if a.logged_in else "primary")
         self.login_btn.style().unpolish(self.login_btn)
         self.login_btn.style().polish(self.login_btn)
         for b in (self.test_btn, self.read_btn, self.logout_btn):
             b.setEnabled(a.logged_in)
         try:
-            from .. import niches
+            from .. import categories
 
-            mine = niches.for_account(self._main(), a.id)
+            mine = categories.for_account(self._main(), a.id)
         except Exception:  # noqa: BLE001
             mine = []
-        self.niches.setText(", ".join(n.name for n in mine) if mine else
-                            "No niche posts here yet: pick this account for a niche in the Niches tab.")
+        self.categories_label.setText(", ".join(n.name for n in mine) if mine else
+                            "No category posts here yet: pick this account for a category in the Categories tab.")
         s = self.state.settings_for(a)
         notes = schedule.describe(s, dt.date.today())
         warm = schedule.warm_up_day(s, dt.date.today())
@@ -490,6 +502,11 @@ class AccountsPage(QWidget):
         self._refresh_status()
 
     def add(self) -> None:
+        if self._wizard is not None:
+            aid = self._wizard(self)
+            if aid:
+                self.select(aid)
+            return
         a = self.state.add_account()
         self._current = a.id
         self.reload()
@@ -526,6 +543,10 @@ class AccountsPage(QWidget):
         a = self.account()
         if a is None:
             return
+        if self._wizard is not None:
+            self._wizard(self, account_id=a.id)
+            self.reload()
+            return
         rid = self.state.ask("login", account=a.id)
         dlg = RequestDialog(self.state, rid, f"Log in · {a.label}",
                             "A browser window opens on TikTok's login page. Log in there (the QR code from the "
@@ -538,10 +559,10 @@ class AccountsPage(QWidget):
         if dlg.ok:
             self.notice.emit(dlg.result)
             try:
-                from .. import niches
+                from .. import categories
 
                 main = self._main()
-                if niches.link_accounts(main, self.state.accounts):
+                if categories.link_accounts(main, self.state.accounts):
                     main.save()
             except Exception:  # noqa: BLE001
                 pass
@@ -591,7 +612,7 @@ POSTED_COLS = ("Posted", "Clip", "Account", "Views", "Likes", "Files")
 
 class QueuePage(QWidget):
     notice = Signal(str)
-    open_niches = Signal()
+    open_categories = Signal()
 
     def __init__(self, state: PostingState, parent=None):
         super().__init__(parent)
@@ -620,7 +641,7 @@ class QueuePage(QWidget):
         self.waiting.setWordWrap(True)
         self.waiting.setTextFormat(Qt.RichText)
         self.waiting.setStyleSheet(f"color: {theme.WARN}")
-        self.waiting.linkActivated.connect(lambda _l: self.open_niches.emit())
+        self.waiting.linkActivated.connect(lambda _l: self.open_categories.emit())
         outer.addWidget(self.waiting)
 
         split = QSplitter(Qt.Vertical)
@@ -781,10 +802,10 @@ class QueuePage(QWidget):
         self.summary.setText(f"   {len(queued)} waiting · {today} posting today")
         waiting = intake.unassigned(self.state.store)
         if waiting:
-            niches_ = sorted({i.niche or "no niche" for i in waiting})
+            categories_ = sorted({i.category_name or "no category" for i in waiting})
             self.waiting.setText(f"⚠ {len(waiting)} clip{'s are' if len(waiting) != 1 else ' is'} waiting for an "
-                                 f"account ({', '.join(niches_)}): pick the account in the "
-                                 "<a href='#'>Niches tab</a>.")
+                                 f"account ({', '.join(categories_)}): pick the account in the "
+                                 "<a href='#'>Categories tab</a>.")
         self.waiting.setVisible(bool(waiting))
         self._fill_posted(now)
         self._picked()
@@ -858,8 +879,8 @@ class QueuePage(QWidget):
             info = []
             if it.duration:
                 info.append(f"{it.duration:.0f} s")
-            if it.niche:
-                info.append(it.niche)
+            if it.category_name:
+                info.append(it.category_name)
             if it.source_channel:
                 info.append(f"from {it.source_channel}")
             if it.status == "failed":
@@ -990,8 +1011,12 @@ class PerformancePage(QWidget):
         ll = QVBoxLayout(left)
         ll.setContentsMargins(0, 0, 0, 0)
         ll.addWidget(_h2("Top videos (30 days)"))
-        self.top = QTableWidget(0, 4)
-        self.top.setHorizontalHeaderLabels(("Video", "Views", "Likes", "Posted"))
+        self.top = QTableWidget(0, 5)
+        self.top.setHorizontalHeaderLabels(("Video", "Views", "vs usual", "Likes", "Posted"))
+        self.top.horizontalHeaderItem(2).setToolTip(
+            "Views against this account's usual: the median of its videos from the last 30 days. ⚑ marks an "
+            "outlier, far above the rest (3 times the usual or more, and clear of how much the others vary): "
+            "worth another clip like it")
         QueuePage._table(self.top, stretch=0)
         self.top.itemDoubleClicked.connect(self._open_top)
         ll.addWidget(self.top, 1)
@@ -1099,14 +1124,24 @@ class PerformancePage(QWidget):
         self.insights.setText("  ".join(lines) if lines else
                               ("Stats read " + live.ago(now - p.fetched_at) + " ago." if p.fetched_at else
                                "No stats yet: they're read every few minutes once the account is logged in."))
-        vids = sorted((v for v in store.videos(a.id).values() if not v.create_time or now - v.create_time < 30 * 86400),
-                      key=lambda v: v.views, reverse=True)[:50]
+        recent = [v for v in store.videos(a.id).values() if not v.create_time or now - v.create_time < 30 * 86400]
+        vids = sorted(recent, key=lambda v: v.views, reverse=True)[:50]
+        usual, standouts = outlier_views(recent, now)
         self.top.setRowCount(len(vids))
         for r, v in enumerate(vids):
-            for c, text in enumerate((live.video_name(v), live.fmt(v.views), live.fmt(v.likes),
+            ratio = v.views / usual if usual else 0.0
+            vs = (("⚑ " if v.id in standouts else "") + f"×{ratio:.1f}") if usual else "–"
+            for c, text in enumerate((live.video_name(v), live.fmt(v.views), vs, live.fmt(v.likes),
                                       schedule.fmt_when(v.create_time, now) if v.create_time else "")):
                 cell = QTableWidgetItem(text)
                 cell.setData(Qt.UserRole, v.url)
+                if c == 2:
+                    cell.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                    if v.id in standouts:
+                        cell.setForeground(QColor(theme.GOOD))
+                        cell.setToolTip(f"An outlier: {ratio:.1f} times this account's usual {live.fmt(usual)} views")
+                    elif usual:
+                        cell.setToolTip(f"{ratio:.1f} times this account's usual {live.fmt(usual)} views")
                 self.top.setItem(r, c, cell)
         self.feed.clear()
         for e in reversed(events[-200:]):
@@ -1119,4 +1154,17 @@ class PerformancePage(QWidget):
 
     def _open_top(self, cell) -> None:
         _open(cell.data(Qt.UserRole) or "")
+
+
+def outlier_views(videos, now: float) -> tuple[float, set[str]]:
+    """(the account's usual views: the median of these videos, the ids of the outliers). Only videos a day old
+    or more are compared: a newer one hasn't had its first day of views yet."""
+    from statistics import median
+
+    from ..analytics import outliers
+
+    settled = {v.id: v.views for v in videos if v.create_time and now - v.create_time >= 86400}
+    if len(settled) < 4:
+        return (median(settled.values()) if settled else 0.0), set()
+    return median(settled.values()), set(outliers(settled))
 

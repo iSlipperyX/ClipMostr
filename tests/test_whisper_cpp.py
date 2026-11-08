@@ -1,11 +1,14 @@
 import io
 import json
+import sys
+import textwrap
+import time
 from pathlib import Path
 
 import numpy as np
 import pytest
 
-from ytclip import whisper_cpp
+from ytclip import diagnostics, whisper_cpp
 from ytclip.engine import Cancelled
 from ytclip.subtitles import Word
 
@@ -100,17 +103,25 @@ def fake_cli(tmp_path, monkeypatch):
     whisper_cpp.model_path("base").write_bytes(b"m" * 2_000_000)
     state = {"said": ["ggml_vulkan: Found 1 Vulkan devices:", "ggml_vulkan: 0 = AMD Radeon RX 9060 XT (AMD) | uma: 0",
                       "progress = 50%", "progress = 100%"],
-             "segments": [_seg(0.2, 0.6, " hello"), _seg(0.6, 1.0, " world.")], "code": 0, "cmds": []}
+             "segments": [_seg(0.2, 0.6, " hello"), _seg(0.6, 1.0, " world.")], "code": 0, "cmds": [], "runs": [],
+             "card": None}  # card: (exit code, what it says) for runs on the graphics card, when they fail
 
-    def run(cmd, progress, label):
+    def run(cmd, progress, label, env=None, silence=None):
+        on_card = "-ng" not in cmd
         state["cmds"].append(cmd)
-        if state["code"] == 0:
+        state["runs"].append({"card": on_card, "env": env, "silence": silence, "label": label})
+        code, said = state["code"], state["said"]
+        if on_card and state["card"]:
+            code, said = state["card"]
+        elif not on_card:
+            said = [line for line in said if "vulkan" not in line.lower()]  # the card is hidden from it
+        if code == 0:
             out = Path(cmd[cmd.index("-of") + 1]).with_suffix(".json")
             out.write_text(json.dumps({"transcription": state["segments"]}), encoding="utf-8")
-        for line in state["said"]:
+        for line in said:
             if "progress" in line:
                 progress(label, int(line.split("=")[1].strip(" %")) / 100)
-        return state["code"], state["said"]
+        return code, said
 
     monkeypatch.setattr(whisper_cpp, "run", run)
     return state
@@ -140,11 +151,112 @@ def test_no_usable_card_is_remembered(fake_cli):
 
 
 def test_a_failed_run_is_remembered_and_raises(fake_cli):
+    """whisper.cpp failing on the CPU as well isn't the graphics card: faster-whisper takes over (transcribe.py)."""
     fake_cli["code"], fake_cli["said"] = 3, ["error: failed to initialize whisper context"]
     with pytest.raises(RuntimeError, match="failed to initialize"):
         whisper_cpp.transcribe(np.zeros(16000 * 5, np.float32), "base", "en", None, 8, lambda m, f: None,
                                lambda m: None)
     assert "failed to initialize" in whisper_cpp.unavailable()
+    assert [r["card"] for r in fake_cli["runs"]] == [True, False]  # the card, then the CPU to tell them apart
+    written = diagnostics.log_path().read_text(encoding="utf-8")
+    assert "whisper.cpp stopped on the graphics card (exit code 3)" in written
+    assert "failed on the CPU too (exit code 3), so it isn't the graphics card" in written
+    assert not whisper_cpp.resting()
+
+
+# --- the graphics card failing part-way: the CPU carries on ------------------------------------------
+
+DEVICE_LOST = (3, ["ggml_vulkan: Found 1 Vulkan devices:", "ggml_vulkan: 0 = AMD Radeon RX 9060 XT (AMD) | uma: 0",
+                   "progress = 35%", "ggml_vulkan: device lost on AMD Radeon RX 9060 XT",
+                   "terminate called after throwing an instance of 'vk::DeviceLostError'",
+                   "  what():  vk::Device::waitForFences: ErrorDeviceLost"])
+
+
+def _five_seconds(notes, threads=8):
+    return whisper_cpp.transcribe(np.zeros(16000 * 5, np.float32), "base", "en", None, threads, lambda m, f: None,
+                                  notes.append)
+
+
+def test_a_card_that_fails_part_way_hands_the_same_run_to_the_cpu(fake_cli):
+    fake_cli["card"] = DEVICE_LOST
+    notes = []
+    cues, words = _five_seconds(notes, threads=12)
+    assert [w.text for w in words] == ["hello", "world."]  # the video is still typed out
+    card, cpu = fake_cli["runs"]
+    assert card["card"] and card["silence"] == whisper_cpp.GPU_SILENCE_SECONDS and card["env"] is None
+    assert not cpu["card"] and cpu["env"]["GGML_VK_VISIBLE_DEVICES"] == "" and cpu["silence"] is None
+    assert cpu["label"] == "Transcribing the speech on the CPU"
+    assert fake_cli["cmds"][1][fake_cli["cmds"][1].index("-t") + 1] == "12"  # every thread Speed allows
+    written = diagnostics.log_path().read_text(encoding="utf-8")
+    assert ("[GPU] Whisper: the graphics card failed while typing out the speech. Typing out the speech again on "
+            "the CPU (12 threads).") in written
+    assert "ggml_vulkan: device lost on AMD Radeon RX 9060 XT" in written  # what whisper.cpp itself said
+    assert notes[0].startswith("Whisper: the graphics card failed while typing out the speech.")
+    assert notes[0].endswith("(details in automation.log)")
+    assert notes[1].startswith("Whisper: typed out on the CPU; the graphics card is tried again after ")
+    assert whisper_cpp.resting() == pytest.approx(time.time() + whisper_cpp.GPU_REST_SECONDS, abs=5)
+    assert whisper_cpp.unavailable() == ""  # resting, not given up on
+    assert whisper_cpp.rest_note().startswith("resting until ")
+
+
+def test_while_the_card_rests_the_cpu_is_used_then_the_card_is_tried_again(fake_cli):
+    fake_cli["card"] = DEVICE_LOST
+    _five_seconds([])
+    fake_cli["runs"].clear()
+    notes = []
+    _, words = _five_seconds(notes)
+    assert words and [r["card"] for r in fake_cli["runs"]] == [False]  # straight to the CPU
+    assert notes[0].startswith("Whisper is using the CPU until ") and "failed a little while ago" in notes[0]
+    # Half an hour later the card is tried again, and it works.
+    state = whisper_cpp._state_path()
+    data = json.loads(state.read_text(encoding="utf-8"))
+    state.write_text(json.dumps({**data, "rest_until": time.time() - 1}), encoding="utf-8")
+    fake_cli["card"], notes = None, []
+    fake_cli["runs"].clear()
+    _five_seconds(notes)
+    assert [r["card"] for r in fake_cli["runs"]] == [True]
+    assert notes == ["Whisper is using the graphics card (AMD Radeon RX 9060 XT)."]
+    assert not whisper_cpp.resting() and not json.loads(state.read_text(encoding="utf-8")).get("fails")
+
+
+def test_a_card_that_keeps_failing_is_left_alone_until_speed_says_try_again(fake_cli):
+    fake_cli["card"] = DEVICE_LOST
+    state = whisper_cpp._state_path()
+    notes = []
+    for _ in range(whisper_cpp.GPU_FAILS_TO_STOP):
+        _five_seconds(notes)
+        data = json.loads(state.read_text(encoding="utf-8"))
+        state.write_text(json.dumps({**data, "rest_until": time.time() - 1}), encoding="utf-8")
+    assert "uses the CPU from now on" in notes[-1]
+    assert "failed 3 times in a row (the graphics card failed while typing out the speech)" in whisper_cpp.unavailable()
+    whisper_cpp.forget_gpu_check()
+    assert whisper_cpp.unavailable() == "" and not whisper_cpp.resting()
+
+
+def test_running_out_of_graphics_memory_with_the_local_ai_loaded_makes_room_first(fake_cli, monkeypatch):
+    from ytclip.intelligence import llama_engine
+
+    freed = []
+    monkeypatch.setattr(llama_engine, "free_graphics_memory", lambda: freed.append(1) or True)
+    fake_cli["card"] = (3, ["ggml_vulkan: Found 1 Vulkan devices:",
+                            "ggml_vulkan: Device memory allocation of size 1625000000 failed.",
+                            "ggml_backend_alloc_ctx_tensors_from_buft: failed to allocate Vulkan0 buffer of size 1625000000",
+                            "error: failed to initialize whisper context"])
+    fake_run = whisper_cpp.run
+
+    def run(cmd, progress, label, env=None, silence=None):
+        out = fake_run(cmd, progress, label, env, silence)
+        fake_cli["card"] = None  # with the local AI stopped, the next try fits
+        return out
+
+    monkeypatch.setattr(whisper_cpp, "run", run)
+    notes = []
+    _, words = _five_seconds(notes)
+    assert words and freed == [1]
+    assert [r["card"] for r in fake_cli["runs"]] == [True, True]  # the card again, not the CPU
+    assert "Stopped the local AI to make room" in notes[0]
+    assert notes[1] == "Whisper is using the graphics card (AMD Radeon RX 9060 XT)."
+    assert not whisper_cpp.resting()
 
 
 def test_only_the_stretches_go_through_in_one_run(fake_cli):
@@ -163,3 +275,52 @@ def test_a_cancel_stops_it(fake_cli):
 
     with pytest.raises(Cancelled):
         whisper_cpp.transcribe(np.zeros(16000 * 5, np.float32), "base", "en", None, 8, progress, lambda m: None)
+
+
+# A whisper-cli stand-in, run for real: on the graphics card it goes quiet after 5% (a card that stopped
+# answering), on the CPU (-ng) it types out one word.
+HANGS_ON_THE_CARD = textwrap.dedent("""
+    import json, sys, time
+    args = sys.argv[1:]
+    out = args[args.index("-of") + 1] + ".json"
+    print("ggml_vulkan: Found 1 Vulkan devices:", file=sys.stderr, flush=True)
+    if "-ng" not in args:
+        print("progress = 5%", file=sys.stderr, flush=True)
+        time.sleep(120)
+        sys.exit(0)
+    print("progress = 100%", file=sys.stderr, flush=True)
+    with open(out, "w") as f:
+        json.dump({"transcription": [{"offsets": {"from": 200, "to": 600}, "text": " hello"}]}, f)
+""")
+
+
+def test_a_card_that_stops_answering_is_stopped_and_the_cpu_takes_over(tmp_path, monkeypatch):
+    exe = tmp_path / "whisper-cli"
+    exe.write_bytes(b"")
+    monkeypatch.setenv("CLIPMONSTER_WHISPER_CPP", str(exe))
+    whisper_cpp.model_path("base").parent.mkdir(parents=True, exist_ok=True)
+    whisper_cpp.model_path("base").write_bytes(b"m" * 2_000_000)
+    script = tmp_path / "fake_whisper_cli.py"
+    script.write_text(HANGS_ON_THE_CARD, encoding="utf-8")
+    real = whisper_cpp.command
+    monkeypatch.setattr(whisper_cpp, "command", lambda *a, **k: [sys.executable, str(script), *real(*a, **k)[1:]])
+    monkeypatch.setattr(whisper_cpp, "GPU_SILENCE_SECONDS", 1.0)
+    notes = []
+    began = time.monotonic()
+    _, words = _five_seconds(notes)
+    assert [w.text for w in words] == ["hello"] and time.monotonic() - began < 30  # not the 120 s it'd sit there
+    assert "the graphics card stopped responding while typing out the speech" in notes[0]
+    assert "whisper-cli said nothing for" in diagnostics.log_path().read_text(encoding="utf-8")
+    assert whisper_cpp.resting()
+
+
+def test_a_long_video_on_a_slow_card_gets_longer_to_report_progress():
+    assert whisper_cpp.silence_for(60) == whisper_cpp.GPU_SILENCE_SECONDS  # 10 minutes for a short one
+    assert whisper_cpp.silence_for(3 * 3600) == pytest.approx(0.05 * 3 * 3600 / 0.4)  # 5% of 3 hours at 0.4x
+
+
+def test_exit_codes_in_plain_words():
+    assert whisper_cpp._exit(3) == "exit code 3"
+    assert whisper_cpp._exit(3221225477) == "exit code 0xc0000005"  # Windows: the program crashed
+    assert whisper_cpp._exit(-6) == "stopped by signal 6"
+    assert whisper_cpp._exit(whisper_cpp.HUNG) == "it stopped responding"

@@ -79,7 +79,7 @@ Type: filesandordirs; Name: "{app}\whisper-cpp"
 Type: filesandordirs; Name: "{app}\llama-cpp"
 
 [Icons]
-Name: "{autoprograms}\ClipMonster"; Filename: "{app}\ClipMonster.exe"
+Name: "{autoprograms}\ClipMonster"; Filename: "{app}\ClipMonster.exe"; AppUserModelID: "ClipMonster.Studio"
 Name: "{autodesktop}\ClipMonster"; Filename: "{app}\ClipMonster.exe"; Tasks: desktopicon
 
 [Run]
@@ -159,7 +159,7 @@ begin
   if CurUninstallStep = usPostUninstall then
   begin
     if SuppressibleMsgBox('Also delete ClipMonster''s data from this PC?' + #13#10#13#10 +
-              'That is your settings, niches, automation queue and history, the YouTube and Google Drive ' +
+              'That is your settings, categories, automation queue and history, the YouTube and Google Drive ' +
               'sign-ins kept by the app, and its downloads, models and updates. The clips you made are not ' +
               'touched.' + #13#10#13#10 + 'Choose No to keep it for a later reinstall.',
               mbConfirmation, MB_YESNO or MB_DEFBUTTON2, IDNO) = IDYES then

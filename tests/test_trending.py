@@ -211,11 +211,21 @@ def test_history_ignores_too_recent_snapshots(tmp_path):
     assert not v.recent
 
 
-def test_history_keeps_a_bounded_number_of_snapshots():
+def test_history_keeps_a_bounded_number_of_snapshots_reaching_back_a_day():
     h = History(None)
-    for i in range(40):
+    for i in range(300):  # a check every 10 minutes for 50 hours
         h.record(_video(views=1000 + i), NOW + i * 600)
-    assert len(h.videos["v"]["snapshots"]) == trending.SNAPSHOTS
+    snaps = h.videos["v"]["snapshots"]
+    end = NOW + 299 * 600
+    assert len(snaps) == trending.SNAPSHOTS and snaps[-1][0] == end
+    assert 24 * 3600 <= end - snaps[0][0] <= trending.SNAPSHOT_SPAN + 600  # momentum keeps its day-long baseline
+    assert end - snaps[-2][0] <= 2 * 3600  # and a recent check to measure "lately" from
+
+
+def test_thinning_snapshots_keeps_the_ends():
+    snaps = [[float(t), t] for t in range(0, 100 * 600, 600)]
+    trending.thin_snapshots(snaps, 99 * 600, keep=10)
+    assert len(snaps) == 10 and snaps[0][0] == 0 and snaps[-1][0] == 99 * 600
 
 
 def test_history_deep_cache_expires():

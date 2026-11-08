@@ -40,7 +40,7 @@ def _video(folder, clips, video_id="vid00000001"):
 @pytest.fixture
 def setup(tmp_path):
     out = tmp_path / "out"
-    s = Settings().apply({"output_dir": str(out), "niches": [{"id": "g", "name": "Gaming"}]})
+    s = Settings().apply({"output_dir": str(out), "categories": [{"id": "g", "name": "Gaming", "account_id": "acc1"}]})
     a = _video(out / "Automation" / "Gaming" / "Chan" / "2026-01-01 A [aaaaaaaaaaa]",
                [("01.mp4", False), ("02.mp4", False), ("03.mp4", True), ("04.mp4", False)], "aaaaaaaaaaa")
     b = _video(out / "Automation" / "Gaming" / "Chan" / "2026-01-02 B [bbbbbbbbbbb]",
@@ -81,7 +81,7 @@ def test_cleaning_removes_clips_their_extras_and_emptied_folders(setup):
     data = json.loads((a / "clips.json").read_text(encoding="utf-8"))
     assert [c["file"] for c in data["clips"]] == ["01.mp4"] and data["cleaned_up"]
     assert sorted(f.name for f in (a / "thumbnails").iterdir()) == ["01.jpg"]
-    # B had nothing left: it goes, but the niche folder stays (new clips for that niche go there).
+    # B had nothing left: it goes, but the category folder stays (new clips for that category go there).
     assert not b.exists() and r.folders == 1
     assert (s.output_path / "Automation" / "Gaming").is_dir()
 
@@ -133,7 +133,7 @@ def test_busy_videos_include_the_studios_list_and_the_real_id_being_clipped(tmp_
     assert cleanup.busy_ids(db, tmp_path / "none.json") == set()  # nothing is being clipped now
 
 
-def test_the_last_folders_go_but_never_the_niche_folder(setup):
+def test_the_last_folders_go_but_never_the_category_folder(setup):
     s, a, b, tm = setup
     tm.keep.clear()
     tm.posted[_key(a / "01.mp4")] = OLD

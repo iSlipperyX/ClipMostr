@@ -8,7 +8,7 @@ real downloader fetches from a local web server. On a timeline the test:
 * reports the disk nearly full for a few minutes (the disk guard cleans up, pauses, carries on);
 * makes a download fail with YouTube's sign-in request (a pause), then presses Try now;
 * queues a broken link (it fails, or waits to be tried again, and nothing else does);
-* changes settings while it runs (a style with fewer clips per video, a niche paused and resumed);
+* changes settings while it runs (a style with fewer clips per video, a category paused and resumed);
 * places a clip request with links, and cancels another.
 
 Then it checks the end state: every video done or failed for a reason, every clip on disk and
@@ -152,7 +152,7 @@ class Soak:
         self.settings(auto_output_dir=str(self.out), cache_dir=str(self.work / "cache"), auto_gap_minutes=0,
                       watchdog_minutes=1, disk_min_free_gb=10, auto_polish=False, check_updates=False,
                       auto_retries=3, cleanup_auto=False,
-                      niches=[{"id": "talk", "name": "Talk", "account": "@talk", "searches": "x"}])
+                      categories=[{"id": "talk", "name": "Talk", "account_id": "acc1", "account": "@talk", "searches": "x"}])
         self.set_control()
         self.queue_round()
         self.py("auto", "--add", f"{self.base}/no-such-video.html")  # a broken link
@@ -211,10 +211,10 @@ class Soak:
         self.settings(auto_preset="Balanced highlights")  # automation clips with its style: 5 clips, not 6
         self.say("changed Automation's style to Balanced highlights (5 clips a video) while it runs")
         changed_at = time.time()
-        self.settings(niches=[{"id": "talk", "name": "Talk", "account": "@talk", "searches": "x", "paused": True}])
+        self.settings(categories=[{"id": "talk", "name": "Talk", "account_id": "acc1", "account": "@talk", "searches": "x", "paused": True}])
         time.sleep(30)
-        self.settings(niches=[{"id": "talk", "name": "Talk", "account": "@talk", "searches": "x"}])
-        self.say("paused and resumed a niche")
+        self.settings(categories=[{"id": "talk", "name": "Talk", "account_id": "acc1", "account": "@talk", "searches": "x"}])
+        self.say("paused and resumed a category")
 
         # 6. keep it busy until the hour is up
         while time.time() - self.started < self.minutes * 60:
@@ -272,7 +272,7 @@ class Soak:
                     if (info.width, info.height) != (1080, 1920) or abs(info.duration - c["length"]) > 0.5:
                         self.problems.append(f"{j['id']}: {c['file']} is {info.width}x{info.height}, "
                                              f"{info.duration:.1f}s (clips.json says {c['length']}s)")
-            if j["updated"] > changed_at + 120 and not j["order"] and not j["niche"]:
+            if j["updated"] > changed_at + 120 and not j["order"] and not j["category_id"]:
                 kept = [c for c in data["clips"] if not c["file"].startswith("_rejected/")]
                 if len(kept) > 5:
                     self.problems.append(f"{j['id']}: {len(kept)} clips after the style changed to 5 a video")

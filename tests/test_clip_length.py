@@ -135,15 +135,15 @@ def test_automation_uses_your_clip_length_not_its_styles(tmp_path, monkeypatch):
     assert (got.min_len, got.max_len, got.aspect) == (60, 90, "vertical_blur")
 
 
-def test_a_niches_own_length_still_wins(tmp_path):
-    niche = {"id": "n1", "name": "Gaming", "min_len": 75, "max_len": 120}
-    got, _ = settings_for(Job("a", "u", niche="n1"), _auto(tmp_path, niches=[niche]))
+def test_a_categories_own_length_still_wins(tmp_path):
+    category = {"id": "n1", "name": "Gaming", "account_id": "acc1", "min_len": 75, "max_len": 120}
+    got, _ = settings_for(Job("a", "u", category_id="n1"), _auto(tmp_path, categories=[category]))
     assert (got.min_len, got.max_len) == (75, 120)
-    only_min = {"id": "n1", "name": "Gaming", "min_len": 100}  # longer than Settings' longest: that grows
-    got, _ = settings_for(Job("a", "u", niche="n1"), _auto(tmp_path, niches=[only_min]))
+    only_min = {"id": "n1", "name": "Gaming", "account_id": "acc1", "min_len": 100}  # longer than Settings' longest: that grows
+    got, _ = settings_for(Job("a", "u", category_id="n1"), _auto(tmp_path, categories=[only_min]))
     assert (got.min_len, got.max_len) == (100, 100)
-    only_max = {"id": "n1", "name": "Gaming", "max_len": 45}
-    got, _ = settings_for(Job("a", "u", niche="n1"), _auto(tmp_path, niches=[only_max]))
+    only_max = {"id": "n1", "name": "Gaming", "account_id": "acc1", "max_len": 45}
+    got, _ = settings_for(Job("a", "u", category_id="n1"), _auto(tmp_path, categories=[only_max]))
     assert (got.min_len, got.max_len) == (45, 45)
 
 

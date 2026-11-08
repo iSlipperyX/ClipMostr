@@ -64,6 +64,9 @@ class Clip:
     rating: int = 0  # the AI polish's 1-10 "does it stand alone?" (0 = not rated); qc.py rejects low ones
     rating_note: str = ""  # what holds it back, when rated low
     category: str = ""  # the AI's viral category: Controversy | Curiosity | Story | Humor | Shock (editing uses it)
+    pacing: str = ""  # the local AI's pacing style: Dramatic Push-in | Punchy Cuts | Steady (push-in: slow zoom)
+    trigger: str = ""  # the local AI's viral trigger, such as Shock/Disbelief (the category comes from it)
+    topic: str = ""  # the local AI's word for the video's subject ("Gaming"): the lower third's topic
 
     @property
     def length(self) -> float:

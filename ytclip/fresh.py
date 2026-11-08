@@ -33,9 +33,9 @@ MAX_REQUESTS = 80  # requests remembered
 DAY = 86400.0
 
 
-def request_key(text: str, niche: str = "") -> str:
-    """One request's key: the same words for the same niche are the same request."""
-    return f"{niche}|{' '.join(text.lower().split())}"
+def request_key(text: str, category: str = "") -> str:
+    """One request's key: the same words for the same category are the same request."""
+    return f"{category}|{' '.join(text.lower().split())}"
 
 
 @dataclass

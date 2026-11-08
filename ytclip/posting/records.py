@@ -6,12 +6,12 @@ the clip's record and then deletes its files:
 * the record: a .txt to read and a .json beside it, in Documents\\ClipMonster\\Posted videos\\<account>,
   with the post (when, link, caption, hashtags), the clip (title, hook, length, format, part), where it
   came from (the YouTube video, channel, licence, where in it the clip starts and ends), why it was made
-  (niche, how the video was picked, the clip finder's score, the AI's rating, the quality check) and how
+  (category, how the video was picked, the clip finder's score, the AI's rating, the quality check) and how
   it did. The numbers are snapshotted 1 hour, 24 hours and 7 days after posting and the record is
   rewritten as they come in (update_records), for 30 days.
 * then the files: the clip, ClipMonster's .srt and thumbnail for it and its row in the folder's
   clips.json and README.md, posting's thumbnail of it, and the video folder once nothing's left in it
-  (never the Automation folder itself, or a niche's folder right inside it).
+  (never the Automation folder itself, or a category's folder right inside it).
 
 No record, no deleting. A post that isn't seen on the profile within two days (TikTok may have taken it
 down, or it's private) is kept, with the reason, so nothing is lost if a post silently failed. The
@@ -272,7 +272,7 @@ def record_data(store: Store, it: VideoItem, account: Account | None, s: Setting
                                                           ("clip_score", it.source_score),
                                                           ("stands_alone", it.source_rating),
                                                           ("credit", it.credit),
-                                                          ("niche", it.niche)) if v2 not in (None, "")},
+                                                          ("category", it.category_name)) if v2 not in (None, "")},
         "qc_warnings": list(it.warnings),
         "stats": stats,
         "snapshots": {k: {"at": _iso(p[0]), "views": p[1], "likes": p[2], "comments": p[3], "shares": p[4]}
@@ -363,7 +363,7 @@ def record_text(store: Store, it: VideoItem, account: Account | None, s: Setting
                                     (f.get("license") or "").lower() else ""))
 
     lines += ["", "Why it was made:"]
-    sub("Niche", it.niche)
+    sub("Category", it.category_name)
     sub("Picked", f.get("how_picked"))
     sub("Allowed by", it.source_permission or f.get("permission"))
     sub("Request", f.get("request"))
@@ -508,7 +508,7 @@ def _clip_companions(video: Path) -> list[Path]:
 def _tidy(folder: Path, removed: set[str], roots: list[Path], remove: Callable[[Path], None]) -> None:
     """A video folder after clips left it: their rows go from its clips.json and README.md, or, with no
     clips left, its own files go and so do the folders that leaves empty (not a root, nor a folder right
-    inside one, like a niche's folder)."""
+    inside one, like a category's folder)."""
     index = folder / "clips.json"
     try:
         data = json.loads(index.read_text(encoding="utf-8"))

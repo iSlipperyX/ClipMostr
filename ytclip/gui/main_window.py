@@ -34,7 +34,7 @@ from .navigation import NavTabs
 from .player import Preview
 from .automation import Automation
 from .cleanup_dialog import CleanupDialog
-from .niches import Niches
+from .categories_tab import Categories
 from .posting_pages import AccountsPage, PerformancePage, QueuePage
 from .posting_state import PostingState
 from .research import Research
@@ -198,7 +198,7 @@ class MainWindow(QMainWindow):
         so Finish later keeps what was done."""
         from .setup_wizard import SetupWizard
 
-        self.niches.commit()
+        self.categories.commit()
         dlg = SetupWizard(self.settings, self._setup_changed, self.posting, self)
         dlg.exec()
         self._apply_settings(self.settings)
@@ -220,7 +220,7 @@ class MainWindow(QMainWindow):
             box = QMessageBox(QMessageBox.Question, APP_NAME,
                               f"There's another copy of ClipMonster in {folder}, from before it was installed. "
                               f"The one you're using now is in {updater.install_dir()}, and it has all your "
-                              "settings, niches and history (they're kept separately from the program).\n\n"
+                              "settings, categories and history (they're kept separately from the program).\n\n"
                               "Remove the old copy? Only ClipMonster's own program files are removed: anything "
                               "else you keep in that folder stays.", parent=self)
             remove = box.addButton("Remove old copy", QMessageBox.AcceptRole)
@@ -250,7 +250,7 @@ class MainWindow(QMainWindow):
                           "(%LOCALAPPDATA%\\Programs\\ClipMonster), out of OneDrive and the Desktop, with a Start "
                           "menu entry and its own Uninstall. Updates are smoother there.\n\n"
                           f"This copy, in {updater.install_dir()}, was unzipped by hand. Install ClipMonster "
-                          "now? Your settings, niches, history and clips stay exactly as they are, and "
+                          "now? Your settings, categories, history and clips stay exactly as they are, and "
                           "automation carries on. This window closes, and the installed ClipMonster opens by "
                           "itself (in about a minute) and offers to remove this copy.", parent=self)
         install = box.addButton("Install now", QMessageBox.AcceptRole)
@@ -342,29 +342,31 @@ class MainWindow(QMainWindow):
         self.posting.message.connect(self._log)
         self.posting.alert.connect(self._alert)
         self.tray = None
-        self.niches = Niches(lambda: self.settings, self._setting_changed,
-                             accounts=lambda: list(self.posting.accounts))
-        self.niches.add_account.connect(self._add_account)
-        self.niches.notice.connect(self._notice)
-        self.niches.changed.connect(self._niches_changed)
+        self.posting.sign_in_needed.connect(self._sign_in_needed)
+        self._tray_account = ""  # the account the last notification was about (clicking it signs it in)
+        self.categories = Categories(lambda: self.settings, self._setting_changed,
+                                     accounts=lambda: list(self.posting.accounts), onboard=self.onboard_account)
+        self.categories.add_account.connect(self._add_account)
+        self.categories.notice.connect(self._notice)
+        self.categories.changed.connect(self._categories_changed)
         self.tabs.section("Automate")
-        self.tabs.addTab(self.niches, "Niches", "niches")
+        self.tabs.addTab(self.categories, "Categories", "categories")
         self.automation = Automation(lambda: self.settings, change=self._setting_changed)
-        self.automation.niches_edited.connect(lambda: (self.niches.reload(), self.research.settings_changed()))
+        self.automation.categories_edited.connect(lambda: (self.categories.reload(), self.research.settings_changed()))
         self.automation.notice.connect(self._notice)
         self.automation.open_settings.connect(self._open_settings)
         self.automation.clean_up.connect(self._clean_up)
         self.library.clean_up.connect(self._clean_up)
         self.tabs.addTab(self.automation, "Automation", "automation")
-        self.accounts_page = AccountsPage(self.posting, lambda: self.settings)
+        self.accounts_page = AccountsPage(self.posting, lambda: self.settings, wizard=self.onboard_account)
         self.accounts_page.notice.connect(self._notice)
-        self.accounts_page.open_niches.connect(lambda: self.tabs.setCurrentWidget(self.niches))
+        self.accounts_page.open_categories.connect(lambda: self.tabs.setCurrentWidget(self.categories))
         self.posting.accounts_changed.connect(self._accounts_changed)
         self.tabs.section("Publish")
         self.tabs.addTab(self.accounts_page, "Accounts", "accounts")
         self.queue_page = QueuePage(self.posting)
         self.queue_page.notice.connect(self._notice)
-        self.queue_page.open_niches.connect(lambda: self.tabs.setCurrentWidget(self.niches))
+        self.queue_page.open_categories.connect(lambda: self.tabs.setCurrentWidget(self.categories))
         self.tabs.addTab(self.queue_page, "Queue", "queue")
         self.performance = PerformancePage(self.posting)
         self.tabs.addTab(self.performance, "Performance", "performance")
@@ -373,17 +375,67 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(root)
 
     def _add_account(self) -> None:
-        """"Add an account…" from a niche: the Accounts tab adds one and starts its login."""
+        """"Add a new account…" from a category: the account wizard."""
+        self.onboard_account(self)
+
+    def onboard_account(self, parent=None, category_id: str = "", account_id: str = "") -> str:
+        """The account wizard (accounts_view.py): add an account, or sign `account_id` in again. Returns the
+        account's id once it's signed in, else ""."""
+        from .accounts_view import AccountWizard
+
+        self.categories.commit()
+        dlg = AccountWizard(self.posting, lambda: self.settings, self._setting_changed, account_id=account_id,
+                            category_id=category_id, parent=parent or self)
+        dlg.exec()
+        self.posting.poll()
+        if self._save_timer.isActive():  # what the wizard changed is on disk for automation straight away
+            self._save_timer.stop()
+            self.settings.save()
+        self.categories.reload()
+        self.accounts_page.reload()
+        if dlg.ok and dlg.account_id:
+            self.accounts_page.select(dlg.account_id)
+            return dlg.account_id
+        return ""
+
+    def sign_in_again(self, account_id: str) -> None:
+        """A notification's "Sign in again" (or a clipmonster://sign-in link): the wizard, for that account."""
+        if self.posting.accounts.get(account_id) is None:
+            self._notice("That TikTok account isn't on the list any more.")
+            return
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
         self.tabs.setCurrentWidget(self.accounts_page)
-        self.accounts_page.add()
+        self.accounts_page.select(account_id)
+        if self.posting.busy(account_id) is None:
+            self.onboard_account(self, account_id=account_id)
+
+    def _sign_in_needed(self, account_id: str) -> None:
+        self._tray_account = account_id
+
+    def handle_args(self, args: list[str]) -> None:
+        """What the app was started with (or a second start handed over): clipmonster:// links, else files
+        or links to queue."""
+        from ..notify import parse_link
+
+        rest = []
+        for arg in args:
+            link = parse_link(arg)
+            if link is None:
+                rest.append(arg)
+            elif link[0] == "sign-in":
+                QTimer.singleShot(0, lambda aid=link[1]: self.sign_in_again(aid))
+        if rest:
+            self.add_sources(rest)
 
     def _accounts_changed(self) -> None:
-        from .. import niches as niche_list
+        from .. import categories as category_list
 
-        self.niches.accounts_changed()
-        if niche_list.link_accounts(self.settings, self.posting.accounts):  # a renamed @handle shows everywhere
+        self.categories.accounts_changed()
+        if category_list.link_accounts(self.settings, self.posting.accounts):  # a renamed @handle shows everywhere
             self.settings.save()
-            self.niches.reload()
+            self.categories.reload()
 
     def _alert(self, title: str, text: str) -> None:
         """A post went up or failed, a login ran out, a video took off: a notification, and the log."""
@@ -395,15 +447,23 @@ class MainWindow(QMainWindow):
         if self.tray is None:
             self.tray = QSystemTrayIcon(theme.app_icon(), self)
             self.tray.setToolTip(APP_NAME)
-            self.tray.messageClicked.connect(lambda: (self.showNormal(), self.activateWindow(),
-                                                      self.tabs.setCurrentWidget(self.performance)))
+            self.tray.messageClicked.connect(self._tray_clicked)
             self.tray.show()
         self.tray.showMessage(f"{APP_NAME} · {title}", text, QSystemTrayIcon.Information, 8000)
 
-    def _niches_changed(self) -> None:
-        """A niche was added, edited or removed: everything that shows niches follows."""
+    def _tray_clicked(self) -> None:
+        if self._tray_account:  # "… needs signing in again": straight to signing it in
+            aid, self._tray_account = self._tray_account, ""
+            self.sign_in_again(aid)
+            return
+        self.showNormal()
+        self.activateWindow()
+        self.tabs.setCurrentWidget(self.performance)
+
+    def _categories_changed(self) -> None:
+        """A category was added, edited or removed: everything that shows categories follows."""
         self.research.settings_changed()
-        self.automation.niches_changed()
+        self.automation.categories_changed()
         if self.tabs.currentWidget() is self.library:  # otherwise it refreshes when it's opened
             self.library.refresh()
 
@@ -427,12 +487,12 @@ class MainWindow(QMainWindow):
         self._notice(f"Sent {len(urls)} video{'s' if len(urls) != 1 else ''} from Research to the Studio.")
 
     def _research_queue(self, videos: list) -> None:
-        from .. import niches as niche_list
+        from .. import categories as category_list
         from .. import pipeline
 
         runner = pipeline.Runner(self.automation.db)
-        added = sum(runner.add_manual(url, title, niche if niche_list.find(self.settings, niche) else "")
-                    for url, title, niche in videos)
+        added = sum(runner.add_manual(url, title, category if category_list.find(self.settings, category) else "")
+                    for url, title, category in videos)
         self.automation.refresh()
         again = len(videos) - added
         self._notice(f"Queued {added} video{'s' if added != 1 else ''} from Research in Automation."
@@ -1642,8 +1702,8 @@ class MainWindow(QMainWindow):
         forms.refresh(self.tune_editors, new)
         forms.refresh(self.export_editors, new)
         self.research.settings_changed()
-        self.niches.reload()
-        self.automation.niches_changed()
+        self.categories.reload()
+        self.automation.categories_changed()
         self.layout_tab.set_settings(new, refresh_editors=True)
         self._update_preview_frame()
         self._update_out_label()
@@ -1669,7 +1729,7 @@ class MainWindow(QMainWindow):
         self._notice(f"Layout applied: {name}")
 
     def _open_settings(self, tab: str = "") -> None:
-        self.niches.commit()  # a niche name still being typed would be lost when the dialog's copy comes back
+        self.categories.commit()  # a category name still being typed would be lost when the dialog's copy comes back
         dlg = SettingsDialog(self.settings, self, tab)
         channel, appearance = self.settings.update_channel, self.settings.appearance
         if dlg.exec():
@@ -1854,7 +1914,7 @@ class MainWindow(QMainWindow):
             self.tray.hide()
         self.banner.shutdown()
         self.research.shutdown()
-        self.niches.shutdown()
+        self.categories.shutdown()
         self.automation.shutdown()
         self._save_session()
         self.settings.save()

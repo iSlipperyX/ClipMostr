@@ -20,7 +20,7 @@ details of, or named as only ClipMonster or yt-dlp would). Unfinished downloads 
 picked too. A download goes with its details (.video.json); a clip goes with its .srt and
 thumbnail, and leaves its clips.json (its counts and README follow); a video
 folder with no clips left goes altogether, and so do folders it leaves empty (not the Automation
-folder or a niche's folder).
+folder or a category's folder).
 
 The posting library (posting/library.json) is only ever read here.
 """
@@ -38,7 +38,7 @@ from glob import escape as glob_escape
 from pathlib import Path
 from typing import Callable
 
-from . import niches
+from . import categories
 from .download import VIDEO_EXTS, is_url, local_id, video_id
 from .settings import APP_NAME, CLEANUP_KINDS, Settings, app_dir, work_dir
 
@@ -230,7 +230,7 @@ def plan(s: Settings, now: float | None = None, busy: set[str] | frozenset = fro
     roots = [s.output_path]
     if not _inside(s.auto_output_path, s.output_path):
         roots.append(s.auto_output_path)
-    p.roots = roots + [s.auto_output_path] + [s.auto_output_path / n.folder for n in niches.load(s)]
+    p.roots = roots + [s.auto_output_path] + [s.auto_output_path / n.folder for n in categories.load(s)]
 
     if kinds & set(CLIP_KINDS):
         if lib.unreadable:

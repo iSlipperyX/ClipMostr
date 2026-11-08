@@ -2,7 +2,7 @@ import pytest
 
 pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)  # no Qt or no display libraries
 
-from ytclip import niches  # noqa: E402
+from ytclip import categories  # noqa: E402
 from ytclip.posting.accounts import Accounts  # noqa: E402
 from ytclip.posting.config import Settings as PostingSettings  # noqa: E402
 from ytclip.settings import Settings  # noqa: E402
@@ -55,20 +55,20 @@ def test_keys_are_saved_when_the_page_is_left(app, monkeypatch):
     assert ("ai_api_key", "") not in host.changes  # an untouched box isn't written
 
 
-def test_first_niche_posts_to_the_account_added(app, monkeypatch):
+def test_first_category_posts_to_the_account_added(app, monkeypatch):
     wiz, host, state = _wizard(app, monkeypatch)
     a = state.accounts.add("Gaming", state.settings)
     a.username = "gamingclips"
     state.save()
-    _to(wiz, "First niche")
-    assert wiz.niche_account.currentData() == a.id  # the one account is picked for you
-    wiz.niche_name.setText("Gaming")
-    wiz.niche_finds.setPlainText("Warzone clutch plays")
-    wiz.niche_daily.setValue(3)
+    _to(wiz, "First category")
+    assert wiz.category_account.currentData() == a.id  # the one account is picked for you
+    wiz.category_name.setText("Gaming")
+    wiz.category_finds.setPlainText("Warzone clutch plays")
+    wiz.category_daily.setValue(3)
     wiz.min_len.setValue(95)  # the wrong way round: sorted
     wiz.max_len.setValue(70)
     wiz.next.click()
-    [n] = niches.load(host.settings)
+    [n] = categories.load(host.settings)
     assert (n.name, n.account_id, n.account, n.finds, n.daily) == ("Gaming", a.id, "@gamingclips",
                                                                    "Warzone clutch plays", 3)
     assert (n.min_len, n.max_len) == (70, 95)

@@ -1,19 +1,26 @@
-"""Research tab: what's trending by region right now, scored for how well it will clip."""
+"""Research tab: what's trending by region right now, scored for how well it will clip.
+
+A command center in three views over the same filters: the opportunity matrix (a momentum heatmap over a card
+per cluster, research_dashboard.py), the table of every video, and Live arbitrage (taking off right now and not
+clipped by you yet). The panel on the right inspects the video picked in any of them: its Most replayed graph
+with the likely clips, its viral potential and its clip-ability. The numbers are analytics.py's.
+"""
 
 from __future__ import annotations
 
 import time
 from typing import Any, Callable
 
-from PySide6.QtCore import QRectF, QSize, Qt, QThread, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QRectF, QSize, Qt, QThread, QTimer, QUrl, Signal
 from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPixmap
 from PySide6.QtNetwork import QNetworkAccessManager, QNetworkReply, QNetworkRequest
 from PySide6.QtWidgets import (QAbstractItemView, QApplication, QCheckBox, QComboBox, QCompleter, QFrame, QGridLayout,
                                QHBoxLayout, QHeaderView, QInputDialog, QLabel, QLineEdit, QMenu,
-                               QPushButton, QScrollArea, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
-                               QVBoxLayout, QWidget)
+                               QPushButton, QScrollArea, QSpinBox, QSplitter, QStackedWidget, QTableWidget,
+                               QTableWidgetItem, QVBoxLayout, QWidget)
 
-from .. import clipability, fresh, learn, lookup, niches, steps
+from .. import analytics, clipability, fresh, learn, lookup, categories, steps
+from ..analytics import VIRAL_HELP, VIRAL_LABELS, VIRAL_WEIGHTS
 from ..clipability import FIT, PART_LABELS, WEIGHTS, age_text, compact, verdict
 from ..organize import stamp
 from ..policy import Decision, PickLog, Policy, decide, language_codes, picks_path
@@ -21,30 +28,34 @@ from ..research import ScanCancelled, ScanOptions, ScanResult, history_path, las
 from ..settings import Settings
 from ..trending import CATEGORIES, KEY_HELP_URL, REGIONS, History, TrendingVideo, deep_check, parse_regions
 from . import theme
+from .research_dashboard import (CategoryPills, OpportunityMatrix, ReplayGraph, ViewSwitch, delta_colour,
+                                 longevity_colour, replay_legend, score_colour)
 from .status_bars import LabeledBar
 
-COLUMNS = ("Score", "Video", "Channel", "Found in", "Views", "Views / h", "Engagement", "Length", "Posted", "Niche",
-           "Pick", "Seen", "Match")
+# The order the cells are filled in. The header shows them in another (_build moves Match, Viral, Momentum and
+# Lifespan beside what they belong with), so a column's number never changes when one is added.
+COLUMNS = ("Score", "Video", "Channel", "Found in", "Views", "Views / h", "Engagement", "Length", "Posted", "Category",
+           "Pick", "Seen", "Match", "Viral", "Momentum", "Lifespan")
+TITLE_COLUMN = COLUMNS.index("Video")
+VIEWS_COLUMN = COLUMNS.index("Views")
 PICK_COLUMN = COLUMNS.index("Pick")
 SEEN_COLUMN = COLUMNS.index("Seen")
-NICHE_COLUMN = COLUMNS.index("Niche")
+CATEGORY_COLUMN = COLUMNS.index("Category")
 MATCH_COLUMN = COLUMNS.index("Match")  # only for a request's results
+VIRAL_COLUMN = COLUMNS.index("Viral")
+MOMENTUM_COLUMN = COLUMNS.index("Momentum")
+LIFESPAN_COLUMN = COLUMNS.index("Lifespan")
+NUMBER_COLUMNS = range(VIEWS_COLUMN, CATEGORY_COLUMN)  # right-aligned
+# Columns its header's menu can hide (Score and Video always show; Category and Match show when they apply)
+CHOOSABLE = tuple(c for c in range(len(COLUMNS)) if c not in (0, TITLE_COLUMN, CATEGORY_COLUMN, MATCH_COLUMN))
+TITLE_MIN = 230  # the Video column never gets narrower than this: the table scrolls sideways instead
+VIEWS = ("matrix", "table", "arbitrage")
 ORIGIN_LABELS = {"watchlist": "Your list", "cc": "CC search", "request": "Your request"}
 SINCE_CHOICES = (("any", "Any time"), ("year", "This year"), ("month", "This month"), ("week", "This week"))
 FIND_EXAMPLE = "Call of Duty MW4 with good comedy"
 MIN_LENGTHS = ((0.0, "Any length"), (3.0, "3 min +"), (8.0, "8 min +"), (20.0, "20 min +"), (45.0, "45 min +"))
 SORT_ROLE = Qt.UserRole + 1
 NEW_HOURS = 24  # a trending video first seen this recently counts as new
-
-
-def score_colour(value: float) -> str:
-    if value >= 75:
-        return theme.GOOD
-    if value >= 55:
-        return theme.ACCENT_2
-    if value >= 40:
-        return theme.WARN
-    return theme.MUTED
 
 
 class _Job(QThread):
@@ -103,7 +114,7 @@ class _Bar(QWidget):
 
 class Research(QWidget):
     send = Signal(list)  # video URLs for the Studio
-    queue = Signal(list)  # (url, title, niche) for Automation's queue
+    queue = Signal(list)  # (url, title, category) for Automation's queue
     notice = Signal(str)  # a line for the main status bar
     log = Signal(str)
     hits_changed = Signal(int)  # new high scorers the user hasn't looked at yet
@@ -120,8 +131,14 @@ class Research(QWidget):
         self.mode = "trending"  # what the table shows: "trending" or "find" (a request's results)
         self.videos: list[TrendingVideo] = []
         self._used: set[str] = set()  # videos already picked, queued, clipped or sent (fresh.used_ids)
-        self._niche_names: dict[str, str] = {}
+        self._category_names: dict[str, str] = {}
         self.decisions: dict[str, Decision] = {}
+        self.analysis: dict[str, analytics.Insight] = {}  # video id -> its dashboard numbers (analytics.py)
+        self.cluster_filter: str | None = None  # a cluster picked from the matrix, shown on its own
+        self.view = "matrix"  # matrix | table | arbitrage
+        self._matrix_due = False  # the matrix needs redrawing next time it shows
+        self._matrix_timer = QTimer(self, singleShot=True, interval=150)  # (typing in the filter box)
+        self._matrix_timer.timeout.connect(self.refresh_matrix)
         self.job: _Job | None = None
         self.side_job: _Job | None = None
         self.hits = 0
@@ -262,9 +279,10 @@ class Research(QWidget):
         self.new_only.setToolTip(f"Only videos first seen in the last {NEW_HOURS} hours (for a request: the ones it "
                                  "hadn't shown before)")
         self.new_only.toggled.connect(self._apply_filter)
-        self.niche_filter = QComboBox()
-        self.niche_filter.setToolTip("Show the videos that fit one niche")
-        self.niche_filter.activated.connect(lambda _i: self._apply_filter())
+        self.category_filter = QComboBox()  # hidden: the category pills choose from it
+        self.category_filter.setToolTip("Show the videos that fit one category")
+        self.category_filter.activated.connect(lambda _i: self._apply_filter())
+        self._has_categories = False
         self.picks_only = QCheckBox("Picks only")
         self.picks_only.setToolTip("Show only the videos your picking rules would clip")
         self.picks_only.toggled.connect(self._apply_filter)
@@ -280,8 +298,7 @@ class Research(QWidget):
         filters.addWidget(self.auto)
         filters.addWidget(self.interval)
         filters.addStretch(1)
-        filters.addWidget(self.search, 1)
-        filters.addWidget(self.niche_filter)
+        filters.addWidget(self.category_filter)
         filters.addWidget(self.hide_used)
         filters.addWidget(self.new_only)
         filters.addWidget(self.picks_only)
@@ -308,9 +325,29 @@ class Research(QWidget):
         self.table.setAlternatingRowColors(False)
         head = self.table.horizontalHeader()
         head.setSectionResizeMode(QHeaderView.ResizeToContents)
-        head.setSectionResizeMode(1, QHeaderView.Stretch)
+        head.setSectionResizeMode(TITLE_COLUMN, QHeaderView.Fixed)  # _fit_title gives it the room left
+        head.setStyleSheet("QHeaderView::section { padding: 6px 5px; }")
         head.setSectionsClickable(True)
+        head.setContextMenuPolicy(Qt.CustomContextMenu)
+        head.customContextMenuRequested.connect(self._column_menu)
+        head.setToolTip("Right-click to choose the columns")
+        self._fit_timer = QTimer(self, singleShot=True, interval=0)
+        self._fit_timer.timeout.connect(self._fit_title)
+        head.sectionResized.connect(lambda i, _o, _n: i != TITLE_COLUMN and self._fit_timer.start())
+        self.table.installEventFilter(self)
         head.moveSection(head.visualIndex(MATCH_COLUMN), 1)  # a request's match goes beside the score
+        head.moveSection(head.visualIndex(VIRAL_COLUMN), head.visualIndex(MATCH_COLUMN) + 1)  # then viral potential
+        head.moveSection(head.visualIndex(MOMENTUM_COLUMN), head.visualIndex(COLUMNS.index("Views / h")) + 1)
+        head.moveSection(head.visualIndex(LIFESPAN_COLUMN), head.visualIndex(COLUMNS.index("Posted")) + 1)
+        for col, tip in ((VIRAL_COLUMN, "Viral potential out of 100: 35% velocity, 25% Most replayed peakiness, 20% "
+                                        "engagement, 20% how uncrowded its cluster is"),
+                         (MOMENTUM_COLUMN, "Views an hour lately against its last day (or its average since upload)"),
+                         (LIFESPAN_COLUMN, "Ephemeral: stale within about 48 hours. Evergreen: still worth a clip "
+                                           "next week"),
+                         (0, "Clip-ability out of 100: how well it will cut into clips")):
+            head_item = self.table.horizontalHeaderItem(col)
+            if head_item:
+                head_item.setToolTip(tip)
         self.table.verticalHeader().setDefaultSectionSize(30)
         self.table.itemSelectionChanged.connect(self._selected)
         self.table.itemDoubleClicked.connect(lambda _item: self._send_selected())
@@ -322,16 +359,38 @@ class Research(QWidget):
         self.empty.setWordWrap(True)
         self.empty.setProperty("muted", True)
 
+        # The views: the opportunity matrix, and the table (which Live arbitrage shows filtered)
+        self.matrix = OpportunityMatrix()
+        self.matrix.open_cluster.connect(self.show_cluster)
+        self.matrix.open_video.connect(self.select_video)
+        self.banner = QFrame()
+        self.banner.setObjectName("banner")
+        bl = QHBoxLayout(self.banner)
+        bl.setContentsMargins(12, 8, 12, 8)
+        self.banner_text = QLabel()
+        self.banner_text.setWordWrap(True)
+        self.banner_text.setTextFormat(Qt.RichText)
+        bl.addWidget(self.banner_text, 1)
+        table_page = QWidget()
+        tv = QVBoxLayout(table_page)
+        tv.setContentsMargins(0, 0, 0, 0)
+        tv.setSpacing(8)
+        tv.addWidget(self.banner)
+        tv.addWidget(self.table, 1)
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self.matrix)
+        self.stack.addWidget(table_page)
+
         left = QWidget()
         lv = QVBoxLayout(left)
         lv.setContentsMargins(0, 0, 0, 0)
-        lv.addWidget(self.table, 1)
+        lv.addWidget(self.stack, 1)
         lv.addWidget(self.empty, 1)
         row = QHBoxLayout()
         self.send_btn = QPushButton("➜  Send selected to Studio")
         self.send_btn.clicked.connect(self._send_selected)
         self.queue_btn = QPushButton("⏵  Queue in Automation")
-        self.queue_btn.setToolTip("Automation clips these next, in their niche's style, with your clip length")
+        self.queue_btn.setToolTip("Automation clips these next, in their category's style, with your clip length")
         self.queue_btn.clicked.connect(lambda: self._queue(self._selected_videos()))
         self.send_picks_btn = QPushButton()
         self.send_picks_btn.setToolTip("Send every video your picking rules picked to the Studio. They count "
@@ -345,6 +404,20 @@ class Research(QWidget):
         row.addWidget(self.send_btn)
         lv.addLayout(row)
 
+        # Category pills and the view switch, above everything they scope
+        dash = QHBoxLayout()
+        dash.setSpacing(10)
+        self.pills = CategoryPills()
+        self.pills.picked.connect(self._pill_picked)
+        self.pills.cluster_cleared.connect(lambda: self.show_cluster(None))
+        self.views = ViewSwitch()
+        self.views.changed.connect(self.set_view)
+        self.search.setFixedWidth(250)
+        dash.addWidget(self.pills, 1)
+        dash.addWidget(self.search)
+        dash.addWidget(self.views)
+        layout.addLayout(dash)
+
         split = QSplitter()
         split.addWidget(left)
         split.addWidget(self._build_detail())
@@ -352,13 +425,10 @@ class Research(QWidget):
         split.setSizes([980, 420])
         layout.addWidget(split, 1)
 
-        hint = QLabel("Clip-ability blends momentum, most-replayed peaks, engagement and freshness, then scales it by "
-                      "how much material there is to cut (length and category). The Pick column shows what your "
-                      "picking rules would clip, and why the rest were skipped. Double-click a video to send it "
-                      "to the Studio.")
-        hint.setProperty("muted", True)
-        hint.setWordWrap(True)
-        layout.addWidget(hint)
+        self.hint = QLabel()
+        self.hint.setProperty("muted", True)
+        self.hint.setWordWrap(True)
+        layout.addWidget(self.hint)
 
     def _build_key_panel(self) -> QFrame:
         self.key_panel = QFrame()
@@ -410,8 +480,18 @@ class Research(QWidget):
         self.d_score = QLabel()
         self.d_verdict = QLabel()
         self.d_verdict.setWordWrap(True)
-        score_row.addWidget(self.d_score)
-        score_row.addWidget(self.d_verdict, 1)
+        self.d_viral = QLabel()
+        self.d_viral.setToolTip("Viral potential out of 100: how likely a clip of it is to take off right now")
+        self.d_viral_caption = QLabel()
+        self.d_viral_caption.setWordWrap(True)
+        self.d_viral_caption.setTextFormat(Qt.RichText)
+        for number, caption in ((self.d_score, self.d_verdict), (self.d_viral, self.d_viral_caption)):
+            block = QVBoxLayout()
+            block.setSpacing(0)
+            block.addWidget(number)
+            block.addWidget(caption)
+            block.addStretch(1)
+            score_row.addLayout(block, 1)
 
         self.parts_box = QWidget()
         self.parts_grid = QGridLayout(self.parts_box)
@@ -427,6 +507,9 @@ class Research(QWidget):
         self.d_send = QPushButton("➜  Send to Studio")
         self.d_send.setObjectName("primary")
         self.d_send.clicked.connect(lambda: self._send([self._shown] if self._shown else []))
+        self.d_queue = QPushButton("⏵  Queue in Automation")
+        self.d_queue.setToolTip("Automation clips it next, in its category's style, with your clip length")
+        self.d_queue.clicked.connect(lambda: self._queue([self._shown] if self._shown else []))
         self.d_open = QPushButton("Open on YouTube")
         self.d_open.clicked.connect(lambda: self._shown and QDesktopServices.openUrl(QUrl(self._shown.url)))
         self.d_copy = QPushButton("Copy link")
@@ -434,10 +517,45 @@ class Research(QWidget):
         self.d_deep = QPushButton("Check replays")
         self.d_deep.setToolTip("Read this video's Most replayed graph now (no quota used)")
         self.d_deep.clicked.connect(self._check_one)
-        buttons.addWidget(self.d_send, 0, 0, 1, 2)
+        buttons.addWidget(self.d_send, 0, 0)
+        buttons.addWidget(self.d_queue, 0, 1)
         buttons.addWidget(self.d_open, 1, 0)
         buttons.addWidget(self.d_copy, 1, 1)
         buttons.addWidget(self.d_deep, 2, 0, 1, 2)
+
+        # The replay graph inspector
+        replay_head = QHBoxLayout()
+        replay_title = QLabel("Most replayed")
+        replay_title.setObjectName("h2")
+        replay_head.addWidget(replay_title)
+        replay_head.addStretch(1)
+        replay_head.addWidget(replay_legend())
+        self.replay = ReplayGraph()
+        self.d_windows = QLabel()
+        self.d_windows.setWordWrap(True)
+        self.d_windows.setTextFormat(Qt.RichText)
+        self.d_windows.setProperty("muted", True)
+        self.d_windows.setTextInteractionFlags(Qt.TextSelectableByMouse)
+
+        # Viral potential
+        viral_title = QLabel("Viral potential")
+        viral_title.setObjectName("h2")
+        self.d_momentum = QLabel()
+        self.d_momentum.setWordWrap(True)
+        self.d_momentum.setTextFormat(Qt.RichText)
+        self.d_life = QLabel()
+        self.d_life.setWordWrap(True)
+        self.d_life.setTextFormat(Qt.RichText)
+        self.d_flags = QLabel()
+        self.d_flags.setWordWrap(True)
+        self.d_flags.setTextFormat(Qt.RichText)
+        self.viral_box = QWidget()
+        self.viral_grid = QGridLayout(self.viral_box)
+        self.viral_grid.setContentsMargins(0, 0, 0, 0)
+        self.viral_grid.setVerticalSpacing(6)
+        self.viral_grid.setColumnStretch(1, 1)
+        clip_title = QLabel("Clip-ability")
+        clip_title.setObjectName("h2")
 
         v.addWidget(self.thumb, 0, Qt.AlignHCenter)
         v.addWidget(self.d_title)
@@ -445,7 +563,18 @@ class Research(QWidget):
         v.addLayout(score_row)
         v.addWidget(self.d_pick)
         v.addLayout(buttons)
-        v.addSpacing(4)
+        v.addSpacing(6)
+        v.addLayout(replay_head)
+        v.addWidget(self.replay)
+        v.addWidget(self.d_windows)
+        v.addSpacing(6)
+        v.addWidget(viral_title)
+        v.addWidget(self.d_momentum)
+        v.addWidget(self.d_life)
+        v.addWidget(self.d_flags)
+        v.addWidget(self.viral_box)
+        v.addSpacing(6)
+        v.addWidget(clip_title)
         v.addWidget(self.parts_box)
         v.addWidget(self.d_reasons)
         v.addStretch(1)
@@ -483,25 +612,29 @@ class Research(QWidget):
             w.blockSignals(False)
         regions = parse_regions(s.research_regions)
         self.regions_btn.setText(", ".join(regions) if regions else "Choose…")
-        self._fill_niche_filter(s)
+        self._fill_category_filter(s)
         self.key_panel.setVisible(not youtube_key(s))
+        self._apply_columns()
+        self.set_view(s.research_view if s.research_view in VIEWS else "matrix", save=False)
         self._update_summary()
         self._apply_filter()
 
-    def _fill_niche_filter(self, s: Settings) -> None:
-        all_niches = niches.load(s)
-        self._niche_names = {n.id: n.name for n in all_niches}
-        keep = self.niche_filter.currentData()
-        self.niche_filter.blockSignals(True)
-        self.niche_filter.clear()
-        self.niche_filter.addItem("All niches", None)
-        for n in all_niches:
-            self.niche_filter.addItem(n.name, n.id)
-        self.niche_filter.addItem("Fits no niche", "")
-        self.niche_filter.setCurrentIndex(max(0, self.niche_filter.findData(keep)))
-        self.niche_filter.blockSignals(False)
-        self.niche_filter.setVisible(bool(all_niches))
-        self.table.setColumnHidden(NICHE_COLUMN, not all_niches)
+    def _fill_category_filter(self, s: Settings) -> None:
+        all_categories = categories.load(s)
+        self._category_names = {n.id: n.name for n in all_categories}
+        keep = self.category_filter.currentData()
+        self.category_filter.blockSignals(True)
+        self.category_filter.clear()
+        self.category_filter.addItem("All categories", None)
+        for n in all_categories:
+            self.category_filter.addItem(n.name, n.id)
+        self.category_filter.addItem("Fits no category", "")
+        self.category_filter.setCurrentIndex(max(0, self.category_filter.findData(keep)))
+        self.category_filter.blockSignals(False)
+        self.category_filter.setVisible(False)  # the pills above the views pick from it
+        self._has_categories = bool(all_categories)
+        self.table.setColumnHidden(CATEGORY_COLUMN, not all_categories)
+        self._update_pills()
 
     def settings_changed(self) -> None:
         self.sync_from_settings()
@@ -860,14 +993,19 @@ class Research(QWidget):
         self.table.setSortingEnabled(False)
         self.table.setRowCount(len(self.videos))
         s = self._settings()
-        niches.assign_from_settings(self.videos, s, self.history)
+        categories.assign_from_settings(self.videos, s, self.history)
         self._mark_used()
         self.decisions = {d.video.id: d for d in decide(self.videos, Policy.from_settings(s), self.picks,
                                                         notes=notes, lessons=learn.for_settings(s))}
+        self._analyse()
+        if self.cluster_filter and not any(i.cluster == self.cluster_filter for i in self.analysis.values()):
+            self.cluster_filter = None  # that cluster isn't in these results
+            self.pills.set_cluster(None)
         for r, v in enumerate(self.videos):
             self._fill_row(r, v)
         self.table.setSortingEnabled(True)
-        self.table.sortItems(MATCH_COLUMN if self.mode == "find" else 0, Qt.DescendingOrder)
+        self._sort_for_view()
+        self._update_pills()
         self._apply_filter()
         rows = [r for r in range(self.table.rowCount()) if not self.table.isRowHidden(r)]
         target = next((r for r in rows if self._video_at(r) and self._video_at(r).id == keep), None)
@@ -956,21 +1094,24 @@ class Research(QWidget):
                  "Likes and comments per view" if rate is not None else "This channel hides its like count"),
             item(stamp(v.duration) if v.live == "none" else v.live.upper(), v.duration),
             item(age_text(v.age_hours()), -v.published),
-            self._niche_item(v),
+            self._category_item(v),
             self._pick_item(v),
             self._seen_item(v),
             self._match_item(v),
+            self._viral_item(v),
+            self._momentum_item(v),
+            self._lifespan_item(v),
         ]
         for c, cell in enumerate(cells):
-            if 4 <= c < NICHE_COLUMN:
+            if c in NUMBER_COLUMNS:
                 cell.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.table.setItem(r, c, cell)
 
-    def _niche_item(self, v: TrendingVideo) -> QTableWidgetItem:
-        name = self._niche_names.get(v.niche, "")
+    def _category_item(self, v: TrendingVideo) -> QTableWidgetItem:
+        name = self._category_names.get(v.category_id, "")
         it = _SortItem(name or "–")
-        it.setData(SORT_ROLE, name.lower() or "~")  # videos without a niche sort last
-        it.setToolTip(f"Fits the {name} niche" if name else "Fits none of your niches")
+        it.setData(SORT_ROLE, name.lower() or "~")  # videos without a category sort last
+        it.setToolTip(f"Fits the {name} category" if name else "Fits none of your categories")
         if not name:
             it.setForeground(QColor(theme.MUTED))
         return it
@@ -1001,58 +1142,133 @@ class Research(QWidget):
         it.setTextAlignment(Qt.AlignCenter)
         return it
 
+    def _viral_item(self, v: TrendingVideo) -> QTableWidgetItem:
+        ins = self.analysis.get(v.id)
+        if ins is None:
+            it = _SortItem("")
+            it.setData(SORT_ROLE, -1.0)
+            return it
+        it = _SortItem(f"{ins.viral:.0f}")
+        it.setData(SORT_ROLE, ins.viral)
+        lines = [f"Viral potential {ins.viral:.0f} out of 100"]
+        for key in VIRAL_WEIGHTS:
+            part = ins.parts.get(key)
+            lines.append(f"• {VIRAL_LABELS[key]} ({VIRAL_WEIGHTS[key]:.0%}): "
+                         + ("not measured yet" if part is None else f"{part * 100:.0f}"))
+        it.setToolTip("\n".join(lines))
+        it.setForeground(QColor(score_colour(ins.viral)))
+        f = it.font()
+        f.setBold(True)
+        it.setFont(f)
+        it.setTextAlignment(Qt.AlignCenter)
+        return it
+
+    def _momentum_item(self, v: TrendingVideo) -> QTableWidgetItem:
+        ins = self.analysis.get(v.id)
+        m = ins.momentum if ins else None
+        text = (m.short() if m else "") + ("  ⚑" if ins and ins.outlier else "") + ("  ⚡" if ins and ins.arbitrage else "")
+        it = _SortItem(text.strip())
+        it.setData(SORT_ROLE, m.delta if m and m.known else -99.0)  # measuring sorts last
+        tip = [m.text()] if m else []
+        if ins and ins.outlier:
+            tip.append(f"⚑ Outlier: {ins.outlier:g}× the median views an hour of {ins.outlier_of}")
+        if ins and ins.arbitrage:
+            tip.append(f"⚡ Live arbitrage: {ins.arbitrage_why}")
+        it.setToolTip("\n".join(tip))
+        it.setForeground(QColor(delta_colour(m.delta if m and m.known else None)))
+        it.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        return it
+
+    def _lifespan_item(self, v: TrendingVideo) -> QTableWidgetItem:
+        ins = self.analysis.get(v.id)
+        it = _SortItem({"ephemeral": "Ephemeral", "evergreen": "Evergreen"}.get(ins.longevity, "") if ins else "")
+        it.setData(SORT_ROLE, 0 if ins and ins.longevity == "ephemeral" else 1)
+        if ins:
+            it.setToolTip(f"{ins.longevity_label}: {ins.longevity_why}")
+        return it
+
+    def _analyse(self) -> None:
+        """The dashboard's numbers for every video shown (analytics.py), scored against all of them."""
+        self.analysis = analytics.insights(self.videos, self._category_names, self.history)
+        self._matrix_due = True
+
     def refresh_picks(self) -> None:
         """Run the picking rules over the current results (after a scan or a rules change)."""
         s = self._settings()
         notes = self.result.notes if self.result else {}
-        niches.assign_from_settings(self.videos, s, self.history)  # a niche may have changed
+        categories.assign_from_settings(self.videos, s, self.history)  # a category may have changed
         self._mark_used()  # the automation runner may have picked or clipped videos since
         self.decisions = {d.video.id: d for d in decide(self.videos, Policy.from_settings(s), self.picks,
                                                         notes=notes, lessons=learn.for_settings(s))}
+        self._analyse()  # clusters follow the categories, and used videos aren't arbitrage
         self.table.setSortingEnabled(False)
         for r in range(self.table.rowCount()):
             v = self._video_at(r)
             if v:
-                self.table.setItem(r, NICHE_COLUMN, self._niche_item(v))
+                self.table.setItem(r, CATEGORY_COLUMN, self._category_item(v))
                 self.table.setItem(r, PICK_COLUMN, self._pick_item(v))
                 self.table.setItem(r, SEEN_COLUMN, self._seen_item(v))
+                self.table.setItem(r, VIRAL_COLUMN, self._viral_item(v))
+                self.table.setItem(r, MOMENTUM_COLUMN, self._momentum_item(v))
+                self.table.setItem(r, LIFESPAN_COLUMN, self._lifespan_item(v))
         self.table.setSortingEnabled(True)
         if self._shown:
             self._show_detail(self._shown)
+        self._update_pills()
         self._apply_filter()
 
     def picked_videos(self) -> list[TrendingVideo]:
         return [v for v in self.videos if (d := self.decisions.get(v.id)) and d.picked]
 
-    def _apply_filter(self) -> None:
+    def passes(self, v: TrendingVideo, now: float | None = None) -> bool:
+        """Whether the filters above the views (search, category pill or cluster, Hide used, New only, Picks
+        only) let this video through. Live arbitrage adds its own on top."""
         text = self.search.text().strip().lower()
+        d = self.decisions.get(v.id)
+        category = self.category_filter.currentData() if self._has_categories else None
+        ins = self.analysis.get(v.id)
+        return not ((self.hide_used.isChecked() and (v.sent or v.used))
+                    or (self.picks_only.isChecked() and not (d and d.picked))
+                    or bool(text and text not in v.title.lower() and text not in v.channel.lower())
+                    or (category is not None and v.category_id != category)
+                    or (self.cluster_filter is not None and (ins is None or ins.cluster != self.cluster_filter))
+                    or (self.new_only.isChecked() and not self.is_new(v, now)))
+
+    def _apply_filter(self) -> None:
         hide_used = self.hide_used.isChecked()
-        only_new = self.new_only.isChecked()
-        only_picks = self.picks_only.isChecked()
-        niche = self.niche_filter.currentData() if not self.niche_filter.isHidden() else None
+        arbitrage = self.view == "arbitrage"
         shown = used = 0
         now = time.time()
         for r in range(self.table.rowCount()):
             v = self._video_at(r)
-            d = self.decisions.get(v.id) if v else None
             is_used = v is not None and (v.sent or v.used)
             used += is_used
-            hidden = v is None or (hide_used and is_used) or (only_picks and not (d and d.picked)) or bool(
-                text and text not in v.title.lower() and text not in v.channel.lower()) or (
-                niche is not None and v.niche != niche) or (only_new and not self.is_new(v, now))
+            ins = self.analysis.get(v.id) if v else None
+            hidden = v is None or not self.passes(v, now) or (arbitrage and not (ins and ins.arbitrage))
             self.table.setRowHidden(r, hidden)
             shown += not hidden
         total = len(self.videos)
         n_picked = len(self.picked_videos())
-        self.count.setText((f"{shown} of {total} videos" if shown != total else f"{total} videos")
-                           + (f" · {n_picked} picked" if n_picked else "")
-                           + (f" · {used} already used{', hidden' if hide_used else ''}" if used else ""))
+        racing = sum(1 for i in self.analysis.values() if i.arbitrage and self.passes(i.video, now))
+        self.views.set_arbitrage_count(racing)
+        self._update_banner(racing)
+        if arbitrage:
+            self.count.setText(f"{shown} to race for, of {total} videos")
+        else:
+            self.count.setText((f"{shown} of {total} videos" if shown != total else f"{total} videos")
+                               + (f" · {n_picked} picked" if n_picked else "")
+                               + (f" · {used} already used{', hidden' if hide_used else ''}" if used else ""))
         has_rows = total > 0
         self.table.setVisible(has_rows)
+        self.stack.setVisible(has_rows)
         self.empty.setVisible(not has_rows)
+        self._matrix_due = True
+        if self.view == "matrix":
+            self._matrix_timer.start()
         self.count.setVisible(has_rows)
-        self.send_btn.setVisible(has_rows)
-        self.queue_btn.setVisible(has_rows)
+        # In the matrix, the video being inspected has its own Send and Queue buttons on the right
+        self.send_btn.setVisible(has_rows and self.view != "matrix")
+        self.queue_btn.setVisible(has_rows and self.view != "matrix")
         self.send_picks_btn.setVisible(has_rows and n_picked > 0)
         self.send_picks_btn.setText(f"➜  Send {n_picked} pick{'s' if n_picked != 1 else ''} to Studio")
         if not has_rows and self.mode == "find" and self.found:
@@ -1063,6 +1279,209 @@ class Research(QWidget):
                                if youtube_key(self._settings()) else
                                "Add your YouTube Data API key above, then ClipMonster checks the trending charts "
                                "for you and scores every video for how well it will clip.")
+
+    # ================================================================== the command center
+    def set_view(self, key: str, save: bool = True) -> None:
+        """Show the matrix, the table, or the table's Live arbitrage videos."""
+        key = key if key in VIEWS else "matrix"
+        changed = key != self.view
+        self.view = key
+        self.views.set_view(key)
+        self.stack.setCurrentIndex(0 if key == "matrix" else 1)
+        self.banner.setVisible(key == "arbitrage")
+        if save and self._settings().research_view != key:
+            self._change("research_view", key)
+        if changed:
+            self._sort_for_view()
+        self._apply_filter()
+        if key == "matrix":
+            self.refresh_matrix()
+        if changed:
+            self._follow_filter()
+        self._update_hint()
+
+    def _sort_for_view(self) -> None:
+        if self.view == "arbitrage":
+            self.table.sortItems(VIRAL_COLUMN, Qt.DescendingOrder)
+        else:
+            self.table.sortItems(MATCH_COLUMN if self.mode == "find" else 0, Qt.DescendingOrder)
+
+    def refresh_matrix(self) -> None:
+        """Redraw the opportunity matrix from the videos the filters let through."""
+        self._matrix_timer.stop()
+        self._matrix_due = False
+        now = time.time()
+        shown = {k: i for k, i in self.analysis.items() if self.passes(i.video, now)}
+        found = analytics.clusters(shown, self.history, now)
+        self.matrix.show_clusters(found, now, self._matrix_note(found), self._has_categories)
+        ins = self.analysis.get(self._shown.id) if self._shown else None
+        self.matrix.mark(ins.cluster if ins else "")
+
+    def _matrix_note(self, found: list) -> str:
+        if not found:
+            return ""
+        order = ("your categories first, then YouTube's category for videos that fit none of them, each best first "
+                 "by median viral potential" if self._has_categories else "best first by median viral potential")
+        return (f"{len(found)} cluster{'s' if len(found) != 1 else ''}: {order}. Click a card for its videos, or a "
+                "video to inspect it.")
+
+    def _update_pills(self) -> None:
+        """A pill per category, with how many of these videos fit it."""
+        if not self._has_categories:
+            self.pills.set_items([], None)
+            self.pills.setVisible(self.cluster_filter is not None)
+            return
+        counts: dict[str, int] = {}
+        for v in self.videos:
+            counts[v.category_id] = counts.get(v.category_id, 0) + 1
+        items: list[tuple[str, Any, int]] = []
+        for i in range(self.category_filter.count()):
+            data = self.category_filter.itemData(i)
+            if data is None:
+                items.append(("All", None, len(self.videos)))
+            else:
+                items.append(("Fits none" if data == "" else self.category_filter.itemText(i), data,
+                              counts.get(data, 0)))
+        self.pills.set_items(items, self.category_filter.currentData())
+        self.pills.setVisible(True)
+
+    def _pill_picked(self, data: Any) -> None:
+        self.category_filter.setCurrentIndex(max(0, self.category_filter.findData(data)) if data is not None else 0)
+        self.cluster_filter = None
+        self.pills.set_cluster(None)
+        self._apply_filter()
+        self._follow_filter()
+
+    def show_cluster(self, name: str | None) -> None:
+        """Show one cluster's videos in the table (picked from the matrix), or everything again (None)."""
+        category = next((cid for cid, n in self._category_names.items() if n == name), None) if name else None
+        if category is not None:  # one of your categories: its pill
+            self.cluster_filter = None
+            self.pills.set_cluster(None)
+            self.category_filter.setCurrentIndex(max(0, self.category_filter.findData(category)))
+            self._update_pills()
+        else:
+            self.cluster_filter = name
+            if name:
+                self.category_filter.setCurrentIndex(0)  # all categories, narrowed to this cluster
+                self._update_pills()
+            self.pills.set_cluster(name)
+            self.pills.setVisible(self._has_categories or name is not None)
+        if name and self.view == "matrix":
+            self.set_view("table")
+        else:
+            self._apply_filter()
+        self._follow_filter()
+
+    def _follow_filter(self) -> None:
+        """After the view or the filters change: keep inspecting the video shown if it's still listed, else the
+        first one listed."""
+        if self.view == "matrix":
+            now = time.time()
+            if self._shown is not None and self.passes(self._shown, now):
+                return
+            listed = [i for i in self.analysis.values() if self.passes(i.video, now)]
+            best = max(listed, key=lambda i: (i.yours, i.viral), default=None)
+            self.select_video(best.video.id) if best else self._show_detail(None)
+            return
+        rows = [r for r in range(self.table.rowCount()) if not self.table.isRowHidden(r)]
+        if self._shown is not None and any(self._video_at(r) is self._shown for r in rows):
+            return
+        if rows:
+            self.table.selectRow(rows[0])
+        else:
+            self.table.clearSelection()
+            self._show_detail(None)
+
+    # ================================================================== the table's columns
+    def eventFilter(self, obj, event) -> bool:  # noqa: N802 (Qt's name)
+        if obj is self.table and event.type() == QEvent.Resize:
+            self._fit_timer.start()
+        return super().eventFilter(obj, event)
+
+    def _fit_title(self) -> None:
+        """Give the Video column the room the others leave, but never less than TITLE_MIN."""
+        head = self.table.horizontalHeader()
+        others = sum(head.sectionSize(c) for c in range(len(COLUMNS)) if c != TITLE_COLUMN and not head.isSectionHidden(c))
+        width = max(TITLE_MIN, self.table.viewport().width() - others)
+        if head.sectionSize(TITLE_COLUMN) != width:
+            head.resizeSection(TITLE_COLUMN, width)
+
+    def _hidden_columns(self) -> set[str]:
+        return {x.strip() for x in self._settings().research_hidden_columns.split(",") if x.strip()}
+
+    def _apply_columns(self) -> None:
+        hidden = self._hidden_columns()
+        for c in CHOOSABLE:
+            self.table.setColumnHidden(c, COLUMNS[c] in hidden)
+        self._fit_timer.start()
+
+    def _column_menu(self, pos) -> None:
+        head = self.table.horizontalHeader()
+        menu = QMenu(self)
+        hidden = self._hidden_columns()
+        for c in sorted(CHOOSABLE, key=head.visualIndex):
+            act = menu.addAction(COLUMNS[c])
+            act.setCheckable(True)
+            act.setChecked(COLUMNS[c] not in hidden)
+            act.toggled.connect(lambda on, name=COLUMNS[c]: self.show_column(name, on))
+        menu.addSeparator()
+        menu.addAction("Show every column", lambda: self._set_hidden_columns(set()))
+        menu.exec(head.mapToGlobal(pos))
+
+    def show_column(self, name: str, on: bool) -> None:
+        hidden = self._hidden_columns()
+        if on:
+            hidden.discard(name)
+        else:
+            hidden.add(name)
+        self._set_hidden_columns(hidden)
+
+    def _set_hidden_columns(self, hidden: set[str]) -> None:
+        value = ", ".join(n for n in COLUMNS if n in hidden)
+        if value != self._settings().research_hidden_columns:
+            self._change("research_hidden_columns", value)
+        self._apply_columns()
+
+    def select_video(self, video_id: str) -> None:
+        """Inspect a video picked from the matrix, selecting its row too (for the buttons under the table)."""
+        v = next((x for x in self.videos if x.id == video_id), None)
+        if v is None:
+            return
+        for r in range(self.table.rowCount()):
+            if self._video_at(r) is v and not self.table.isRowHidden(r):
+                self.table.selectRow(r)
+                break
+        if self._shown is not v:
+            self._show_detail(v)
+
+    def _update_banner(self, racing: int) -> None:
+        if racing:
+            head = f"<b>⚡ {racing} video{'s' if racing != 1 else ''} to race for:</b> "
+        else:
+            head = "<b>⚡ Nothing to race for right now:</b> "
+        self.banner_text.setText(
+            head + "taking off on YouTube right now and not used by you yet, best first by viral potential."
+            f"<br><span style='color:{theme.MUTED}'>ClipMonster can't search TikTok, so “not used by you yet” stands "
+            "in for “not on TikTok yet”.</span>")
+        self.banner.setToolTip("Live arbitrage: in this check's fastest fifth, or 30% faster lately than over its day "
+                               "(that needs two checks at least 20 minutes apart, so Keep checking fills it in); "
+                               "under 3 days old; longer than a minute; not picked, queued, clipped or sent by you")
+
+    def _update_hint(self) -> None:
+        if self.view == "matrix":
+            text = ("Viral potential blends velocity (35%), Most replayed peakiness (25%), engagement (20%) and how "
+                    "uncrowded its cluster is (20%). Momentum compares views an hour lately with each video's last "
+                    "day. ⚑ marks an outlier, far faster than the rest of its cluster; ⚡ one to race for.")
+        elif self.view == "arbitrage":
+            text = ("Queue them in Automation or send them to the Studio while they're rising. Hover Momentum for how "
+                    "fast each is going, and the Lifespan for how long a clip of it will stay worth posting.")
+        else:
+            text = ("Clip-ability blends momentum, most-replayed peaks, engagement and freshness, then scales it by "
+                    "how much material there is to cut (length and category). Viral is how likely a clip is to take "
+                    "off right now. The Pick column shows what your picking rules would clip, and why the rest were "
+                    "skipped. Double-click a video to send it to the Studio.")
+        self.hint.setText(text)
 
     def _video_at(self, row: int) -> TrendingVideo | None:
         it = self.table.item(row, 0)
@@ -1084,12 +1503,20 @@ class Research(QWidget):
     # ================================================================== detail
     def _show_detail(self, v: TrendingVideo | None) -> None:
         self._shown = v
-        for w in (self.d_send, self.d_open, self.d_copy, self.d_deep):
+        for w in (self.d_send, self.d_queue, self.d_open, self.d_copy, self.d_deep):
             w.setEnabled(v is not None)
-        while self.parts_grid.count():
-            w = self.parts_grid.takeAt(0).widget()
-            if w:
-                w.deleteLater()
+        for grid in (self.parts_grid, self.viral_grid):
+            while grid.count():
+                w = grid.takeAt(0).widget()
+                if w:
+                    w.hide()
+                    w.deleteLater()
+        ins = self.analysis.get(v.id) if v else None
+        self.matrix.mark(ins.cluster if ins else "")
+        self.replay.set_video(v)
+        self.d_windows.setText(self.replay.summary())
+        self.d_windows.setVisible(bool(self.d_windows.text()))
+        self._show_viral(ins)
         if v is None:
             self.thumb.setPixmap(QPixmap())
             self.thumb.setText("Select a video")
@@ -1108,14 +1535,14 @@ class Research(QWidget):
         if v.match >= 0:
             where += (f"<br><span style='color:{score_colour(v.match)}'><b>Match {v.match:.0f}</b></span>"
                       f" · {_esc(v.match_why)}")
-        if self._niche_names.get(v.niche):
-            where += f" · fits the <b>{_esc(self._niche_names[v.niche])}</b> niche"
+        if self._category_names.get(v.category_id):
+            where += f" · fits the <b>{_esc(self._category_names[v.category_id])}</b> category"
         length = stamp(v.duration) if v.live == "none" else v.live
         self.d_meta.setText(f"{_esc(v.channel)} · {compact(v.views)} views · {length} · posted {age_text(v.age_hours())} ago"
                             f"<br>{where}")
         colour = score_colour(v.score)
         self.d_score.setText(f"{v.score:.0f}")
-        self.d_score.setStyleSheet(f"color:{colour}; font-size:28pt; font-weight:800; padding-right:6px;")
+        self.d_score.setStyleSheet(f"color:{colour}; font-size:26pt; font-weight:800;")
         self.d_verdict.setText(f"<b>{verdict(v.score)}</b><br><span style='color:{theme.MUTED}'>clip-ability "
                                f"out of 100</span>")
         d = self.decisions.get(v.id)
@@ -1154,6 +1581,45 @@ class Research(QWidget):
         self.d_deep.setText("Re-check replays" if v.deep else "Check replays")
         self.d_send.setText("✓  Sent, send again" if v.sent else "➜  Send to Studio")
         self._load_thumb(v)
+
+    def _show_viral(self, ins: "analytics.Insight | None") -> None:
+        """The inspector's viral potential: its number, momentum, lifespan, flags and the four parts."""
+        if ins is None:
+            for lab in (self.d_viral, self.d_viral_caption, self.d_momentum, self.d_life, self.d_flags):
+                lab.setText("")
+            self.d_flags.setVisible(False)
+            return
+        colour = score_colour(ins.viral)
+        self.d_viral.setText(f"{ins.viral:.0f}")
+        self.d_viral.setStyleSheet(f"color:{colour}; font-size:26pt; font-weight:800;")
+        self.d_viral_caption.setText(f"<b>{viral_word(ins.viral)}</b><br><span style='color:{theme.MUTED}'>viral "
+                                     "potential out of 100</span>")
+        self.d_momentum.setText(_momentum_html(ins.momentum))
+        self.d_life.setText(f"<span style='color:{longevity_colour(ins.longevity)}'>●</span> "
+                            f"<b>{_esc(ins.longevity_label)}</b> <span style='color:{theme.MUTED}'>· "
+                            f"{_esc(ins.longevity_why)}</span>")
+        flags = []
+        if ins.outlier:
+            flags.append(f"⚑ <b>Outlier</b> <span style='color:{theme.MUTED}'>· {ins.outlier:g}× the median views an "
+                         f"hour of {_esc(ins.outlier_of)}</span>")
+        if ins.arbitrage:
+            flags.append(f"⚡ <b>Live arbitrage</b> <span style='color:{theme.MUTED}'>· {_esc(ins.arbitrage_why)}</span>")
+        self.d_flags.setText("<br>".join(flags))
+        self.d_flags.setVisible(bool(flags))
+        for row, key in enumerate(VIRAL_WEIGHTS):
+            value = ins.parts.get(key)
+            label = QLabel(VIRAL_LABELS[key])
+            label.setToolTip(f"{VIRAL_WEIGHTS[key]:.0%} of viral potential. {VIRAL_HELP[key]}")
+            pct = QLabel("—" if value is None else f"{value * 100:.0f}")
+            pct.setFixedWidth(30)
+            pct.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+            if value is None:
+                pct.setToolTip("Not measured yet: press Check replays" if key == "peakiness" else
+                               "This channel hides its likes" if key == "engagement" else "Not available")
+                label.setProperty("muted", True)
+            self.viral_grid.addWidget(label, row, 0)
+            self.viral_grid.addWidget(_Bar(value, score_colour((value or 0) * 100)), row, 1)
+            self.viral_grid.addWidget(pct, row, 2)
 
     def _load_thumb(self, v: TrendingVideo) -> None:
         if v.id in self._thumbs:
@@ -1194,6 +1660,7 @@ class Research(QWidget):
             if v.match >= 0:  # a request's result: its match stays first
                 v.reasons.insert(0, f"Match {v.match:.0f}: {v.match_why}")
             self.history.save()
+            self._analyse()  # the replay graph's peakiness is part of viral potential
             self._refresh_video(v)
             self.refresh_picks()  # a new score can change what the rules pick
             if deep.error:
@@ -1243,9 +1710,9 @@ class Research(QWidget):
         self.refresh_picks()
 
     def _queue(self, videos: list[TrendingVideo]) -> None:
-        """To Automation's queue, each in the niche it fits (or none)."""
+        """To Automation's queue, each in the category it fits (or none)."""
         if videos:
-            self.queue.emit([(v.url, v.title, v.niche) for v in videos])
+            self.queue.emit([(v.url, v.title, v.category_id) for v in videos])
 
     def _send_selected(self) -> None:
         self._send(self._selected_videos())
@@ -1277,3 +1744,20 @@ class Research(QWidget):
 
 def _esc(text: str) -> str:
     return text.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;")
+
+
+def viral_word(value: float) -> str:
+    return "Hot" if value >= 75 else "Promising" if value >= 55 else "Middling" if value >= 40 else "Quiet"
+
+
+def _momentum_html(m: "analytics.Momentum") -> str:
+    muted = theme.MUTED
+    if not m.known:
+        return (f"<b>· Momentum: measuring</b><br><span style='color:{muted}'>It needs two checks 20 minutes to 6 "
+                f"hours apart. So far: {compact(m.baseline)} views an hour since upload.</span>")
+    span = (f"{m.span_minutes / 60:.1f}".rstrip("0").rstrip(".") + " h") if m.span_minutes >= 90 else \
+        f"{m.span_minutes:.0f} min"
+    base = "its average since upload" if m.since_upload else "its last day"
+    return (f"<span style='color:{delta_colour(m.delta)}'><b>{m.arrow} {m.label} {m.delta:+.0%}</b></span>"
+            f"<br><span style='color:{muted}'>{compact(m.hourly)} views an hour over the last {span}, against "
+            f"{compact(m.baseline)} an hour for {base}</span>")

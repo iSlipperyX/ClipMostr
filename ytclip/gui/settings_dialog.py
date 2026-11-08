@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt
 from PySide6.QtWidgets import (QApplication, QDialog, QDialogButtonBox, QHBoxLayout, QLabel, QPushButton,
                                QScrollArea, QVBoxLayout, QWidget)
 
-from .. import niches, updater, youtube_login
+from .. import categories, updater, youtube_login
 from ..settings import SCHEMA, Settings, app_dir
 from ..gemini import KEY_URL as GEMINI_KEY_URL
 from ..trending import KEY_HELP_URL
@@ -20,6 +20,22 @@ ANTHROPIC_KEY_URL = "https://console.anthropic.com/settings/keys"
 GROUPS = ("General", "Download", "Clip finding", "Transcription", "Speed", "AI", "Export", "Captions", "Editing", "Layout",
           "Research", "Picking", "Automation", "Posting", "Updates")
 
+
+
+def _scrolling(page: QWidget) -> QScrollArea:
+    """A settings page in a scroll area at its own height. In a window taller than the page, the space is
+    left under it: a form hands spare height to rows that can grow, which pulled a file picker and the
+    Test keys row apart from their labels."""
+    holder = QWidget()
+    column = QVBoxLayout(holder)
+    column.setContentsMargins(0, 0, 0, 0)
+    column.setSpacing(0)
+    column.addWidget(page)
+    column.addStretch(1)
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setWidget(holder)
+    return scroll
 
 class SettingsDialog(QDialog):
     def __init__(self, settings: Settings, parent=None, tab: str = ""):
@@ -53,8 +69,8 @@ class SettingsDialog(QDialog):
         heading.setObjectName("title")
         layout.addWidget(heading)
         tabs.currentChanged.connect(lambda i: heading.setText(tabs.tabText(i)))
-        # With niches, each niche has its own channels and searches (Niches tab).
-        per_niche = {"pick_channels", "pick_searches", "pick_finds"} if niches.load(settings) else set()
+        # With categories, each category has its own channels and searches (Categories tab).
+        per_category = {"pick_channels", "pick_searches", "pick_finds"} if categories.load(settings) else set()
         for group in GROUPS:
             if group == "Posting":
                 page, self._posting_editors = forms.build_form(posting_config.SCHEMA, self.posting_settings,
@@ -66,18 +82,16 @@ class SettingsDialog(QDialog):
                 note.setWordWrap(True)
                 note.setProperty("muted", True)
                 page.layout().insertRow(0, note)
-                scroll = QScrollArea()
-                scroll.setWidgetResizable(True)
-                scroll.setWidget(page)
-                tabs.addTab(scroll, group)
+                tabs.addTab(_scrolling(page), group)
                 continue
-            fields = [f for f in SCHEMA if f.group == group and f.name not in per_niche]
+            fields = [f for f in SCHEMA if f.group == group and f.name not in per_category]
             page, editors = forms.build_form(fields, self.result_settings, self._changed)
             self._editors |= editors
             if group == "AI":
                 note = QLabel("The AI clip finder gives the video's transcript to the AI you choose and asks it "
                               "to pick self-contained moments. Local AI runs a model on this PC: free, private, "
-                              "no key (the model downloads once, 2 to 4.4 GB). Claude and Gemini run online and "
+                              "no key (the model that suits this PC downloads once, 2 to 20 GB; Test keys says "
+                              "how it would run here). Claude and Gemini run online and "
                               "need a key; AI polish sends them each clip's words and one frame, and gets back "
                               "hooks, caption fixes and where the speaker is. "
                               f"Get a Claude key at <a href='{ANTHROPIC_KEY_URL}' style='color:{theme.ACCENT_2}'>"
@@ -94,8 +108,7 @@ class SettingsDialog(QDialog):
                 test = QPushButton("Test keys")
                 test.setToolTip("Checks each key you've added, and that it can use the models picked above. "
                                 "Uses no tokens.")
-                self._key_result = QLabel("")
-                self._key_result.setWordWrap(True)
+                self._key_result = forms.WrapLabel("")
                 test.clicked.connect(self._test_key)
                 row.addWidget(test)
                 row.addWidget(self._key_result, 1)
@@ -119,22 +132,24 @@ class SettingsDialog(QDialog):
                 note.setProperty("muted", True)
                 page.layout().insertRow(0, note)
                 why = whisper_cpp.unavailable()
-                self._gpu_state = QLabel("Graphics card: " + ("ready (it's tried on the next video)" if not why
-                                                              else f"not used: {why}"))
-                self._gpu_state.setWordWrap(True)
-                row = QHBoxLayout()
-                again = QPushButton("Try the graphics card again")
-                again.setToolTip("After a graphics driver update, say: Whisper tries the card on the next video")
-                again.setVisible(bool(why) and whisper_cpp.binary() is not None)
-                again.clicked.connect(lambda: (whisper_cpp.forget_gpu_check(), again.hide(),
-                                               self._gpu_state.setText("Graphics card: tried again on the next video")))
-                row.addWidget(self._gpu_state, 1)
-                row.addWidget(again)
-                page.layout().addRow("", row)
+                rest = "" if why else whisper_cpp.rest_note()
+                self._gpu_state = forms.WrapLabel("Graphics card: " + (
+                    f"not used: {why}" if why else f"{rest}. Whisper uses the CPU until then." if rest else
+                    "ready (it's tried on the next video)"))  # on a row of its own, so a long reason wraps in full
+                page.layout().addRow("", self._gpu_state)
+                if (why or rest) and whisper_cpp.binary() is not None:
+                    again = QPushButton("Try the graphics card again")
+                    again.setToolTip("After a graphics driver update, say: Whisper tries the card on the next video")
+                    again.clicked.connect(lambda: (whisper_cpp.forget_gpu_check(), again.hide(), self._gpu_state.setText(
+                        "Graphics card: tried again on the next video")))
+                    row = QHBoxLayout()
+                    row.addWidget(again)
+                    row.addStretch(1)
+                    page.layout().addRow("", row)
             if group == "General":
                 row = QHBoxLayout()
                 again = QPushButton("Set up again…")
-                again.setToolTip("The first-run setup: tools, keys, YouTube sign-in, TikTok accounts, a niche, the "
+                again.setToolTip("The first-run setup: tools, keys, YouTube sign-in, TikTok accounts, a category, the "
                                  "posting schedule. What you've set up already is filled in")
                 again.clicked.connect(self._run_setup)
                 row.addWidget(again)
@@ -182,8 +197,8 @@ class SettingsDialog(QDialog):
                               "accounts struck, so by default only channels on your list (creators who say clips "
                               "are welcome) and Creative Commons videos are picked. The Research tab's Pick column "
                               "shows what the rules would pick, and why the rest were skipped."
-                              + (" You have niches, so each one's channels and Creative Commons searches are set "
-                                 "in the Niches tab; these rules apply to all of them." if per_niche else ""))
+                              + (" You have categories, so each one's channels and Creative Commons searches are set "
+                                 "in the Categories tab; these rules apply to all of them." if per_category else ""))
                 note.setWordWrap(True)
                 note.setProperty("muted", True)
                 page.layout().insertRow(0, note)
@@ -201,10 +216,7 @@ class SettingsDialog(QDialog):
                 note.setWordWrap(True)
                 note.setProperty("muted", True)
                 page.layout().insertRow(0, note)
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll.setWidget(page)
-            tabs.addTab(scroll, group)
+            tabs.addTab(_scrolling(page), group)
         if tab in GROUPS:
             tabs.setCurrentIndex(GROUPS.index(tab))
         heading.setText(tabs.tabText(tabs.currentIndex()))
@@ -286,8 +298,8 @@ class SettingsDialog(QDialog):
         self.accept()
 
     def _reset(self) -> None:
-        # Niches are your content, edited in their own tab, not a setting to reset.
-        self.result_settings = Settings(niches=self.result_settings.niches,
+        # Categories are your content, edited in their own tab, not a setting to reset.
+        self.result_settings = Settings(categories=self.result_settings.categories,
                                         setup_done=self.result_settings.setup_done)
         forms.refresh(self._editors, self.result_settings)
         self.posting_settings = type(self.posting_settings)()

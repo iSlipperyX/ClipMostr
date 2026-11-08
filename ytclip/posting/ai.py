@@ -81,8 +81,8 @@ def rate(item: VideoItem, s: Settings, log=None) -> dict:
     ]
     if item.source_reason:
         facts.append(f"Why the clip finder picked it: {item.source_reason}")
-    if s.ai_niche:
-        facts.append(f"The creator's niche / audience: {s.ai_niche}")
+    if s.ai_audience:
+        facts.append(f"The creator's audience: {s.ai_audience}")
     facts.append(f"Give {s.ai_hashtag_count} hashtags.")
 
     content: list[dict] = []
@@ -111,20 +111,20 @@ BIO_SCHEMA = {
 }
 
 
-def suggest_bios(s: Settings, niche: str, username: str = "", name: str = "", current: str = "",
+def suggest_bios(s: Settings, audience: str, username: str = "", name: str = "", current: str = "",
                  examples: list[str] | None = None) -> list[str]:
-    """Three short TikTok bios for an account, from its niche (and its best captions, if any)."""
+    """Three short TikTok bios for an account, from its audience (and its best captions, if any)."""
     from .profile import BIO_MAX
 
     if not has_key(s):
         raise RuntimeError(f"{NO_KEY} to get bio suggestions.")
-    if not (niche or examples or current):
-        raise RuntimeError("Fill in the account's niche / audience first, so the suggestions fit it.")
+    if not (audience or examples or current):
+        raise RuntimeError("Fill in the account's audience first, so the suggestions fit it.")
     facts = []
     if username:
         facts.append(f"Account: @{username}" + (f" (shown as “{name}”)" if name else ""))
-    if niche:
-        facts.append(f"What it posts and for whom: {niche}")
+    if audience:
+        facts.append(f"What it posts and for whom: {audience}")
     if current:
         facts.append(f"Current bio, for reference: {current}")
     if examples:
@@ -162,7 +162,7 @@ HASHTAG_SYSTEM = (
 SPAM_TAGS = {"fyp", "foryou", "foryoupage", "fy", "viral", "xyzbca", "trending", "fypシ", "explore", "explorepage"}
 
 
-def suggest_hashtags(s: Settings, item: VideoItem, niche: str = "", always: str = "",
+def suggest_hashtags(s: Settings, item: VideoItem, audience: str = "", always: str = "",
                      proven: list[tuple[str, int]] | None = None, context: dict | None = None,
                      count: int = 0) -> list[str]:
     """Hashtags (without #) for one clip, from what's known about it; text only, one quick call.
@@ -186,8 +186,8 @@ def suggest_hashtags(s: Settings, item: VideoItem, niche: str = "", always: str 
             facts.append(f"{label}: {value}")
     if item.duration:
         facts.append(f"Length: {item.duration:.0f} s")
-    if niche:
-        facts.append(f"The account posts: {niche}")
+    if audience:
+        facts.append(f"The account posts: {audience}")
     always_tags = normalize_hashtags(always).split()
     if always_tags:
         facts.append(f"Already added to every post (don't repeat): {' '.join(always_tags)}")

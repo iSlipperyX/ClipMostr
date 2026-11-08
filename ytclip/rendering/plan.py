@@ -31,6 +31,7 @@ from .filtergraph import AudioPlan
 
 Progress = Callable[[str, "float | None"], None]
 SLOW_CATEGORIES = ("Story", "Curiosity")
+PUSH_IN = "Dramatic Push-in"  # the local AI's pacing style for a slow push-in (intelligence/transcript_parser.py)
 
 
 @dataclass
@@ -50,6 +51,7 @@ class EditPlan:
     channel: str = ""
     topic: str = ""
     category: str = ""
+    pacing: str = ""  # the AI's pacing style, when it gave one
     tracked: bool = False
     notes: list[str] = field(default_factory=list)
     broll: list = field(default_factory=list)
@@ -57,6 +59,14 @@ class EditPlan:
     @property
     def cut_seconds(self) -> float:
         return round((self.end - self.start) - self.duration, 2)
+
+
+def pushes_in(plan: EditPlan) -> bool:
+    """Whether the clip gets the slow push-in: the AI's pacing style says so, or, without one, it's a story
+    or a curiosity moment."""
+    if plan.pacing:
+        return plan.pacing == PUSH_IN
+    return plan.category in SLOW_CATEGORIES
 
 
 def picture_changes(s) -> bool:
@@ -157,7 +167,7 @@ def make(src: Path, media: MediaInfo, clip, words: list[Word], s, work: Path, *,
                       normalize=s.normalize_audio, fades=s.fades, rate=44100 if s.tiktok_ready else 48000)
     plan = EditPlan(clip.start, clip.end, spans, duration, out_words, fps, audio,
                     cards_intro=bool(s.hook_intro), cards_lower=bool(s.lower_third), channel=channel, topic=topic,
-                    category=category, notes=notes)
+                    category=category, pacing=str(getattr(clip, "pacing", "") or ""), notes=notes)
     if not (wants_picture and vision_ok and picture):
         return plan
     _picture(plan, src, media, clip, words, s, work, scene_cuts, broll_used, seed, progress, log, still_at)
@@ -208,7 +218,7 @@ def _picture(plan: EditPlan, src: Path, media: MediaInfo, clip, words, s, work: 
     starts = camera.sentence_starts(plan.words)
     if s.punch_zoom:
         zoom *= camera.punch_path(out_times, starts, float(s.punch_scale))
-    if s.slow_zoom and plan.category in SLOW_CATEGORIES:
+    if s.slow_zoom and pushes_in(plan):
         gaps = []
         for a, b in zip(words_between(words, clip.start, clip.end), words_between(words, clip.start, clip.end)[1:]):
             if b.start - a.end >= camera.TOPIC_PAUSE:

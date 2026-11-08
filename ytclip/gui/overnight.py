@@ -62,7 +62,7 @@ class OvernightPanel(QWidget):
         head2.setObjectName("h2")
         self.check_btn = QPushButton("🩺  Check now")
         self.check_btn.setToolTip("Checks ffmpeg, the downloader, your keys (online), folders, free space, TikTok "
-                                  "Manager, niches and requests. Automation does the offline part each time it starts")
+                                  "Manager, categories and requests. Automation does the offline part each time it starts")
         self.check_btn.clicked.connect(self.check_now)
         row.addWidget(head2)
         row.addStretch(1)

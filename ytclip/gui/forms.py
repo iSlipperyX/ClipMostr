@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any, Callable
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSize, Qt
 from PySide6.QtGui import QColor, QFontDatabase
 from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox, QDoubleSpinBox, QFileDialog, QFormLayout,
                                QHBoxLayout, QLabel, QLineEdit, QListWidget, QListWidgetItem, QPlainTextEdit,
@@ -16,6 +16,8 @@ from ..settings import Field, Settings
 from . import qt_fonts
 
 OnChange = Callable[[str, Any], None]
+# What a "file" setting's Choose… button looks for, when it isn't a video
+FILE_KINDS = {"local_model_path": "GGUF models (*.gguf)"}
 
 
 class Editor:
@@ -23,6 +25,52 @@ class Editor:
 
     def __init__(self, widget: QWidget, get: Callable[[], Any], set_: Callable[[Any], None]):
         self.widget, self.get, self.set = widget, get, set_
+
+
+class ChoiceBox(QComboBox):
+    """A choice box that asks for about 24 characters of room, so a long choice ("Qwen2.5 32B · Ultra ·
+    19.9 GB · 24 GB graphics card…") never pushes its page wider than the window, and opens its list wide
+    enough to show every choice in full."""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+
+    def fit_choices(self) -> None:
+        self.setMinimumContentsLength(min(24, max((len(self.itemText(i)) for i in range(self.count())), default=8)))
+
+    def showPopup(self) -> None:
+        view = self.view()
+        longest = max((view.fontMetrics().horizontalAdvance(self.itemText(i)) for i in range(self.count())), default=0)
+        view.setMinimumWidth(longest + 48)  # the item's padding and a scroll bar
+        super().showPopup()
+
+
+class WrapLabel(QLabel):
+    """A word-wrapped label that's as tall as its text at the width it really has.
+
+    A form in a scroll area lays a wrapped QLabel out at its size hint, which Qt works out for a narrow
+    width, so a note that fits on one line left two empty lines under it."""
+
+    def __init__(self, text: str = "", parent=None):
+        super().__init__(text, parent)
+        self.setWordWrap(True)
+
+    def _fit(self, hint: QSize) -> QSize:
+        if self.width() > 0 and self.text():
+            hint.setHeight(self.heightForWidth(self.width()))
+        return hint
+
+    def sizeHint(self) -> QSize:
+        return self._fit(super().sizeHint())
+
+    def minimumSizeHint(self) -> QSize:
+        return self._fit(super().minimumSizeHint())
+
+    def resizeEvent(self, event) -> None:
+        super().resizeEvent(event)
+        if event.size().width() != event.oldSize().width():
+            self.updateGeometry()  # the layout asks again: a wider label needs fewer lines
 
 
 def make_editor(f: Field, value: Any, on_change: OnChange) -> Editor:
@@ -78,9 +126,10 @@ def make_editor(f: Field, value: Any, on_change: OnChange) -> Editor:
         editor = Editor(w, w.value, lambda v: w.setValue(float(v)))
 
     elif f.kind == "choice":
-        w = QComboBox()
+        w = ChoiceBox()
         for data, text in f.choices:
             w.addItem(text, data)
+        w.fit_choices()
 
         def set_choice(v: Any) -> None:
             i = w.findData(v)
@@ -158,7 +207,8 @@ def make_editor(f: Field, value: Any, on_change: OnChange) -> Editor:
 
         def choose() -> None:
             exts = " ".join(f"*{e}" for e in sorted(VIDEO_EXTS))
-            path, _ = QFileDialog.getOpenFileName(box, f.label, line.text(), f"Videos ({exts});;All files (*)")
+            kinds = FILE_KINDS.get(f.name, f"Videos ({exts})")
+            path, _ = QFileDialog.getOpenFileName(box, f.label, line.text(), f"{kinds};;All files (*)")
             if path:
                 line.setText(path)
                 emit()

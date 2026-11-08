@@ -4,9 +4,16 @@ folder as whisper-cpp/whisper-cli.exe. Its models are a different format from fa
 so each is downloaded once, on first use, to the models folder.
 
 All the stretches to type out go through one run, joined with a little silence between them, so the
-model loads once. A PC whose graphics card turns out not to be usable is remembered, and Whisper
-goes straight to the CPU there next time (transcribe.py).
-"""
+model loads once. A PC with no graphics card whisper.cpp can use is remembered, and Whisper goes
+straight to the CPU there next time (transcribe.py).
+
+When the card fails part-way (a driver timeout or "device lost", running out of graphics memory, a crash,
+or whisper.cpp saying nothing for GPU_SILENCE_SECONDS), the same run is done again by whisper.cpp on the
+CPU, with every thread Speed allows, so the video is still typed out and the run carries on; automation.log
+gets the details (diagnostics.py). The card then rests for half an hour before it's tried again, and after
+GPU_FAILS_TO_STOP failures in a row it isn't tried again until Settings → Speed says so. Running out of
+graphics memory while the local AI's model is loaded stops the local AI first (it starts again by itself
+when it's next asked something) and tries the card once more."""
 
 from __future__ import annotations
 
@@ -16,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import wave
@@ -24,6 +32,7 @@ from typing import Callable
 
 import numpy as np
 
+from . import diagnostics
 from .ffmpeg import NO_WINDOW, Cancelled, tracked
 from .settings import models_dir, work_folder
 from .subtitles import Cue, Word
@@ -48,6 +57,11 @@ GPU_FOUND = re.compile(r"ggml_vulkan: Found [1-9]|using (Vulkan|CUDA|Metal)\d* b
 NO_GPU = re.compile(r"no GPU found|ggml_vulkan: Found 0|ggml_vulkan: No devices", re.I)
 PROGRESS = re.compile(r"progress\s*=\s*(\d+)%")
 LANGUAGE = re.compile(r"auto-detected language:\s*([a-z]{2,3})")
+GPU_REST_SECONDS = 1800  # after the card fails, Whisper uses the CPU this long before trying the card again
+GPU_FAILS_TO_STOP = 3  # failures in a row before the card isn't tried again (Settings → Speed tries it afresh)
+GPU_SILENCE_SECONDS = 600.0  # whisper-cli on the card saying nothing this long has hung (it prints every 5%)
+GPU_SLOWEST = 0.4  # ...or longer for long audio: a slow card may take 1/0.4 times the audio's length per 5%
+HUNG = -999  # run()'s exit code when whisper-cli was stopped for saying nothing
 
 Progress = Callable[[str, "float | None"], None]
 Log = Callable[[str], None]
@@ -79,11 +93,11 @@ def _remembered(exe: Path) -> dict:
         return {}
 
 
-def _remember(exe: Path, ok: bool, why: str = "") -> None:
+def _remember(exe: Path, ok: bool, why: str = "", **more) -> None:
     path = _state_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps({"binary": f"{exe}|{exe.stat().st_mtime_ns}", "ok": ok, "why": why,
-                                "checked": time.time()}), encoding="utf-8")
+                                "checked": time.time(), **more}), encoding="utf-8")
 
 
 def unavailable() -> str:
@@ -95,6 +109,42 @@ def unavailable() -> str:
     if known and not known.get("ok"):
         return known.get("why") or "no usable graphics card was found last time"
     return ""
+
+
+def resting(exe: Path | None = None, now: float | None = None) -> float:
+    """When the graphics card failed lately: the time it's tried again (until then Whisper uses the CPU).
+    0 when it isn't resting."""
+    exe = exe or binary()
+    if exe is None:
+        return 0.0
+    known = _remembered(exe)
+    until = float(known.get("rest_until") or 0)
+    return until if known.get("ok", True) and until > (now or time.time()) else 0.0
+
+
+def rest_note(now: float | None = None) -> str:
+    """'resting until 14:32, after it failed while typing out the clips', or "" when the card isn't
+    resting."""
+    exe = binary()
+    until = resting(exe, now) if exe else 0.0
+    if not until:
+        return ""
+    failed = str(_remembered(exe).get("failed") or "it failed")
+    if failed.startswith("the graphics card "):
+        failed = "it " + failed[len("the graphics card "):]
+    return f"resting until {time.strftime('%H:%M', time.localtime(until))}, after {failed}"
+
+
+def _card_failed(exe: Path, problem: str) -> bool:
+    """The card failed where the CPU didn't: rest it. True when that's GPU_FAILS_TO_STOP in a row, and it
+    isn't tried again until Settings → Speed says so."""
+    known = _remembered(exe)
+    fails = int(known.get("fails") or 0) + 1
+    if fails >= GPU_FAILS_TO_STOP:
+        _remember(exe, False, f"the graphics card failed {fails} times in a row ({problem})")
+        return True
+    _remember(exe, True, rest_until=time.time() + GPU_REST_SECONDS, fails=fails, failed=problem)
+    return False
 
 
 def forget_gpu_check() -> None:
@@ -155,10 +205,17 @@ def write_wav(path: Path, audio: np.ndarray) -> None:
         w.writeframes((np.clip(audio, -1, 1) * 32767).astype("<i2").tobytes())
 
 
-def command(exe: Path, model: Path, wav: Path, out_base: Path, language: str, threads: int) -> list[str]:
-    # -ml 1 -sow: one segment per word, each with its own times. -pp: progress on stderr.
+def command(exe: Path, model: Path, wav: Path, out_base: Path, language: str, threads: int,
+            gpu: bool = True) -> list[str]:
+    # -ml 1 -sow: one segment per word, each with its own times. -pp: progress on stderr. -ng: the CPU only.
     return [str(exe), "-m", str(model), "-f", str(wav), "-l", language or "auto", "-t", str(max(1, threads)),
-            "-oj", "-of", str(out_base), "-ml", "1", "-sow", "-pp"]
+            "-oj", "-of", str(out_base), "-ml", "1", "-sow", "-pp"] + ([] if gpu else ["-ng"])
+
+
+def cpu_env() -> dict[str, str]:
+    """whisper-cli's environment for a run on the CPU: the graphics card hidden from it altogether, so a
+    driver that just failed isn't even asked what cards there are."""
+    return {**os.environ, "GGML_VK_VISIBLE_DEVICES": ""}
 
 
 def parse(data: dict, where: list[tuple[float, float, float]] | None = None) -> list[Word]:
@@ -204,16 +261,32 @@ def cues_from(words: list[Word], longest: float = 8.0, pause: float = 0.8) -> li
     return cues
 
 
-def run(cmd: list[str], progress: Progress, label: str) -> tuple[int, list[str]]:
-    """Run whisper-cli, passing on its progress. Returns its exit code and what it said."""
+def run(cmd: list[str], progress: Progress, label: str, env: dict[str, str] | None = None,
+        silence: float | None = None) -> tuple[int, list[str]]:
+    """Run whisper-cli, passing on its progress. Returns its exit code and what it said. With `silence`, a
+    run that says nothing for that many seconds is stopped, and the exit code is HUNG."""
     said: list[str] = []
     frac: float | None = None
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-                            text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
+                            text=True, encoding="utf-8", errors="replace", creationflags=NO_WINDOW, env=env)
+    heard = [time.monotonic()]
+    hung, finished = threading.Event(), threading.Event()
+
+    def watch() -> None:
+        assert silence
+        while not finished.wait(min(5.0, silence / 4)):
+            if time.monotonic() - heard[0] > silence:
+                hung.set()
+                proc.kill()
+                return
+
+    if silence:
+        threading.Thread(target=watch, name="whisper-cli watch", daemon=True).start()
     try:
         with tracked(proc):
             assert proc.stderr is not None
             for line in proc.stderr:
+                heard[0] = time.monotonic()
                 said.append(line.rstrip())
                 del said[:-400]
                 m = PROGRESS.search(line)
@@ -224,7 +297,118 @@ def run(cmd: list[str], progress: Progress, label: str) -> tuple[int, list[str]]
         proc.kill()
         proc.wait()
         raise
+    finally:
+        finished.set()
+    if hung.is_set():
+        said.append(f"ClipMonster: whisper-cli said nothing for {silence / 60:.0f} minutes, so it was stopped.")
+        return HUNG, said
     return proc.returncode, said
+
+
+def _exit(code: int) -> str:
+    if code == HUNG:
+        return "it stopped responding"
+    if code < 0:
+        return f"stopped by signal {-code}"
+    return f"exit code {code}" if code < 256 else f"exit code {code & 0xFFFFFFFF:#010x}"  # a Windows crash code
+
+
+def silence_for(seconds: float) -> float:
+    """How long whisper-cli on the card may say nothing before it counts as hung: it reports every 5% of
+    the audio, which on a slow card (GPU_SLOWEST times real time) takes a while for a long video."""
+    return max(GPU_SILENCE_SECONDS, 0.05 * seconds / GPU_SLOWEST)
+
+
+def _problem(code: int, said: list[str], what: str, silence: float = GPU_SILENCE_SECONDS) -> str:
+    """What went wrong on the graphics card, in plain words."""
+    if code == HUNG:
+        return (f"the graphics card stopped responding while typing out {what} (nothing from whisper.cpp for "
+                f"{max(1, round(silence / 60))} minutes)")
+    kind = diagnostics.classify(said)
+    if kind == "oom":
+        return f"the graphics card ran out of memory while typing out {what}"
+    if kind == "gpu":
+        return f"the graphics card failed while typing out {what}"
+    return f"whisper.cpp stopped on the graphics card ({_exit(code)})"
+
+
+def _make_room() -> bool:
+    """Stop the local AI if its model is holding graphics memory. True when it did."""
+    try:
+        from .intelligence import llama_engine
+
+        return llama_engine.free_graphics_memory()
+    except Exception:  # noqa: BLE001 - the local AI isn't there or isn't running: no room to make
+        return False
+
+
+def _attempt(exe: Path, model: Path, wav: Path, out: Path, language: str, threads: int, progress: Progress,
+             label: str, gpu: bool, silence: float | None = None) -> tuple[dict | None, int, list[str]]:
+    """One whisper-cli run: (its words as JSON, or None when it failed; its exit code; what it said). On the
+    card, `silence` is how long it may say nothing."""
+    result = out.with_suffix(".json")
+    result.unlink(missing_ok=True)  # a failed run's leftovers never count as this run's words
+    progress(label, 0.0)
+    code, said = run(command(exe, model, wav, out, language, threads, gpu), progress, label,
+                     env=None if gpu else cpu_env(), silence=(silence or GPU_SILENCE_SECONDS) if gpu else None)
+    if code == 0 and result.is_file():
+        try:
+            return json.loads(result.read_text(encoding="utf-8", errors="replace")), code, said
+        except ValueError:
+            pass  # half written: as good as a failure
+    return None, code, said
+
+
+def _failed(exe: Path, code: int, said: list[str]) -> RuntimeError:
+    """whisper.cpp itself doesn't work (on the CPU either): not again on every video, and faster-whisper
+    takes over (transcribe.py). Speed's 'Try the graphics card again' tries it afresh."""
+    tail = " ".join(line for line in said[-3:] if line) or _exit(code)
+    why = f"whisper.cpp failed: {tail[:300]}"
+    _remember(exe, False, why)
+    return RuntimeError(why)
+
+
+def _on_card(exe: Path, model: Path, wav: Path, out: Path, language: str, threads: int, progress: Progress,
+             what: str, log: Log, seconds: float) -> dict:
+    label = f"Transcribing {what} on the graphics card"
+    silence = silence_for(seconds)
+    data, code, said = _attempt(exe, model, wav, out, language, threads, progress, label, True, silence)
+    if data is None and code != HUNG and diagnostics.classify(said) == "oom" and _make_room():
+        diagnostics.gpu_fallback("Whisper", f"the graphics card ran out of memory while typing out {what}, with the "
+                                 "local AI's model loaded", said, "Stopped the local AI to make room (it starts again "
+                                 "by itself when it's next needed) and trying the card again.", log)
+        data, code, said = _attempt(exe, model, wav, out, language, threads, progress, label, True, silence)
+    if data is not None:
+        text = "\n".join(said)
+        if not GPU_FOUND.search(text) or NO_GPU.search(text):
+            _remember(exe, False, "no graphics card that supports Vulkan was found")
+            log("Whisper found no graphics card it can use, so it uses the CPU from now on. (Settings → Speed)")
+        else:
+            known = _remembered(exe)
+            if not known.get("ok") or known.get("fails"):  # the first time, or back after failing
+                _remember(exe, True)
+                found = re.search(r"ggml_vulkan: \d+ = ([^|(]+)", text)
+                log("Whisper is using the graphics card" + (f" ({found[1].strip()})" if found else "") + ".")
+        return data
+
+    # It failed on the card: the same run again on the CPU, so the video is still typed out.
+    problem = _problem(code, said, what, silence)
+    diagnostics.gpu_fallback("Whisper", problem, said, f"Typing out {what} again on the CPU "
+                             f"({max(1, threads)} threads).", log)
+    data, cpu_code, cpu_said = _attempt(exe, model, wav, out, language, threads, progress,
+                                        f"Transcribing {what} on the CPU", False)
+    if data is None:
+        diagnostics.write([f"[GPU] Whisper: whisper.cpp failed on the CPU too ({_exit(cpu_code)}), so it isn't the "
+                           "graphics card; faster-whisper takes over."]
+                          + [f"[GPU]   {line[:300]}" for line in cpu_said if line.strip()][-6:])
+        raise _failed(exe, cpu_code, cpu_said)
+    if _card_failed(exe, problem):
+        log(f"Whisper: the graphics card has failed {GPU_FAILS_TO_STOP} times in a row, so Whisper uses the CPU "
+            "from now on. (Settings → Speed → Try the graphics card again)")
+    else:
+        log(f"Whisper: typed out on the CPU; the graphics card is tried again after "
+            f"{time.strftime('%H:%M', time.localtime(resting(exe)))}.")
+    return data
 
 
 def transcribe(audio: np.ndarray, model_name: str, language: str, spans: list[tuple[float, float]] | None,
@@ -242,26 +426,19 @@ def transcribe(audio: np.ndarray, model_name: str, language: str, spans: list[tu
         if not spans:
             return [], []
         audio, where = join_spans(audio, spans)
-    label = "Transcribing speech on the graphics card" if spans is None else "Transcribing the clips on the graphics card"
+    what = "the speech" if spans is None else "the clips"
     with work_folder("whisper-") as tmp:
         wav, out = Path(tmp) / "audio.wav", Path(tmp) / "words"
         write_wav(wav, audio)
-        progress(label, 0.0)
-        code, said = run(command(exe, model, wav, out, language, threads), progress, label)
-        text = "\n".join(said)
-        if code != 0 or not out.with_suffix(".json").is_file():
-            tail = " ".join(line for line in said[-3:] if line) or f"exit code {code}"
-            why = f"whisper.cpp failed: {tail[:300]}"
-            _remember(exe, False, why)  # not again on every video: Speed's GPU check tries it afresh
-            raise RuntimeError(why)
-        data = json.loads(out.with_suffix(".json").read_text(encoding="utf-8", errors="replace"))
-    on_gpu = bool(GPU_FOUND.search(text)) and not NO_GPU.search(text)
-    if not on_gpu:
-        _remember(exe, False, "no graphics card that supports Vulkan was found")
-        log("Whisper found no graphics card it can use, so it uses the CPU from now on. (Settings → Speed)")
-    elif not _remembered(exe).get("ok"):
-        _remember(exe, True)
-        found = re.search(r"ggml_vulkan: \d+ = ([^|(]+)", text)
-        log("Whisper is using the graphics card" + (f" ({found[1].strip()})" if found else "") + ".")
+        until = resting(exe)
+        if until:  # the card failed lately: the CPU until it has rested
+            log(f"Whisper is using the CPU until {time.strftime('%H:%M', time.localtime(until))}: the graphics card "
+                "failed a little while ago (details in automation.log).")
+            data, code, said = _attempt(exe, model, wav, out, language, threads, progress,
+                                        f"Transcribing {what} on the CPU", False)
+            if data is None:
+                raise _failed(exe, code, said)
+        else:
+            data = _on_card(exe, model, wav, out, language, threads, progress, what, log, len(audio) / RATE)
     words = parse(data, where)
     return cues_from(words), words

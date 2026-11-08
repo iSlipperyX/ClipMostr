@@ -719,138 +719,138 @@ def test_stop_interrupts_a_long_research_scan(tmp_path):
         r.research(r.load())
 
 
-# ---------------------------------------------------------------- niches
+# ---------------------------------------------------------------- categories
 
-GAMING = {"id": "game01", "name": "Gaming", "account": "@gameclips", "channels": "@C0", "preset": "Gaming / action",
+GAMING = {"id": "game01", "name": "Gaming", "account_id": "acc1", "account": "@gameclips", "channels": "@C0", "preset": "Gaming / action",
           "view": "Gameplay below", "stack_folder": "D:/gameplay", "instructions": "clutch plays only"}
 
 
-def test_a_niche_gives_its_style_and_its_own_folder(tmp_path):
-    s = _settings(niches=[GAMING], auto_output_dir=str(tmp_path / "out"), ai_instructions="Good moments.")
-    game, label = settings_for(Job("a", "u", niche="game01"), s)
+def test_a_category_gives_its_style_and_its_own_folder(tmp_path):
+    s = _settings(categories=[GAMING], auto_output_dir=str(tmp_path / "out"), ai_instructions="Good moments.")
+    game, label = settings_for(Job("a", "u", category_id="game01"), s)
     assert game.output_path == tmp_path / "out" / "Gaming"
     assert game.stack_enabled and game.stack_folder == "D:/gameplay" and game.clip_count == 8
     assert game.ai_instructions == ("Good moments.\nThese clips are for a TikTok account about Gaming: "
                                     "clutch plays only")
-    assert label == "Gaming / action · Gameplay below (niche: Gaming)"
+    assert label == "Gaming / action · Gameplay below (category: Gaming)"
     plain, label = settings_for(Job("b", "u"), s)
     assert plain.output_path == tmp_path / "out" and label == "Shorts / TikTok / Reels"
-    gone, _ = settings_for(Job("c", "u", niche="deleted"), s)  # its niche was deleted: Automation's style
+    gone, _ = settings_for(Job("c", "u", category_id="deleted"), s)  # its category was deleted: Automation's style
     assert gone.output_path == tmp_path / "out"
 
 
-def test_a_recipe_still_wins_over_the_niche_style(tmp_path):
-    s = _settings(niches=[GAMING], auto_recipes="@Pod = Podcast moments", auto_output_dir=str(tmp_path / "out"))
-    pod, label = settings_for(Job("a", "u", channel="Pod", niche="game01"), s)
-    assert pod.output_path == tmp_path / "out" / "Gaming"  # still the niche's folder
-    assert pod.w_reactions == 0.35 and label == "Podcast moments · Gameplay below (niche: Gaming, recipe: @Pod)"
+def test_a_recipe_still_wins_over_the_category_style(tmp_path):
+    s = _settings(categories=[GAMING], auto_recipes="@Pod = Podcast moments", auto_output_dir=str(tmp_path / "out"))
+    pod, label = settings_for(Job("a", "u", channel="Pod", category_id="game01"), s)
+    assert pod.output_path == tmp_path / "out" / "Gaming"  # still the category's folder
+    assert pod.w_reactions == 0.35 and label == "Podcast moments · Gameplay below (category: Gaming, recipe: @Pod)"
 
 
-def test_research_queues_each_pick_for_its_niche(tmp_path):
+def test_research_queues_each_pick_for_its_category(tmp_path):
     history = History(None)
     history.sources["channels"]["@c0"] = {"id": "UCC0"}
-    s = _settings(niches=[GAMING])
+    s = _settings(categories=[GAMING])
     r = _runner(tmp_path, s, scan=lambda *a, **k: _scan_result("a", "b"), history=history)
-    assert r.research(s) == 1  # b (channel C1) fits no niche
+    assert r.research(s) == 1  # b (channel C1) fits no category
     job = r.db.get("a")
-    assert job.niche == "game01"
+    assert job.category_id == "game01"
     assert any("Picked for Gaming: Video a" in line for line in r.logs)
-    assert PickLog(tmp_path / "picks.json").picks[0]["niche"] == "game01"
+    assert PickLog(tmp_path / "picks.json").picks[0]["category_id"] == "game01"
 
 
-def test_a_niche_deleted_during_the_scan_gets_no_picks(tmp_path):
-    """A scan takes minutes; deleting a niche meanwhile keeps its videos out of the queue."""
+def test_a_category_deleted_during_the_scan_gets_no_picks(tmp_path):
+    """A scan takes minutes; deleting a category meanwhile keeps its videos out of the queue."""
     history = History(None)
     history.sources["channels"]["@c0"] = {"id": "UCC0"}
-    pods = {"id": "pod001", "name": "Podcasts", "channels": "@C1"}
-    s = _settings(niches=[GAMING, pods])
+    pods = {"id": "pod001", "name": "Podcasts", "account_id": "acc1", "channels": "@C1"}
+    s = _settings(categories=[GAMING, pods])
     current = {"s": s}
 
     def scan(*a, **k):
-        current["s"] = s.apply({"niches": [pods]})  # deleted in the Niches tab while the scan runs
+        current["s"] = s.apply({"categories": [pods]})  # deleted in the Categories tab while the scan runs
         return _scan_result("a", "b")
 
     r = _runner(tmp_path, s, scan=scan, history=history)
     r.load = lambda: current["s"]
     history.sources["channels"]["@c1"] = {"id": "UCC1"}
     assert r.research(s) == 1
-    assert r.db.get("a") is None and r.db.get("b").niche == "pod001"
+    assert r.db.get("a") is None and r.db.get("b").category_id == "pod001"
 
 
-def test_a_queued_video_whose_niche_was_deleted_leaves_the_queue(tmp_path):
-    pods = {"id": "pod001", "name": "Podcasts", "channels": "@C1"}
-    s = _settings(niches=[GAMING, pods], auto_output_dir=str(tmp_path / "out"))
+def test_a_queued_video_whose_category_was_deleted_leaves_the_queue(tmp_path):
+    pods = {"id": "pod001", "name": "Podcasts", "account_id": "acc1", "channels": "@C1"}
+    s = _settings(categories=[GAMING, pods], auto_output_dir=str(tmp_path / "out"))
     r = _runner(tmp_path, s)
-    r.add_manual("https://www.youtube.com/watch?v=abcdefghijk", niche="game01")
-    gone = s.apply({"niches": [pods]})
+    r.add_manual("https://www.youtube.com/watch?v=abcdefghijk", category_id="game01")
+    gone = s.apply({"categories": [pods]})
     r.load = lambda: gone
     r.process(r.db.next_due(NOW), gone)
     assert r.db.get("abcdefghijk") is None and not FakeEngine.made
-    assert any("its niche was deleted" in line for line in r.logs)
+    assert any("its category was deleted" in line for line in r.logs)
 
 
-def test_with_no_niches_to_be_read_a_niche_video_waits_to_be_retried(tmp_path):
-    """No niches at all may mean settings.json couldn't be read: the video stays, marked, to retry."""
-    s = _settings(niches=[GAMING], auto_output_dir=str(tmp_path / "out"))
+def test_with_no_categories_to_be_read_a_category_video_waits_to_be_retried(tmp_path):
+    """No categories at all may mean settings.json couldn't be read: the video stays, marked, to retry."""
+    s = _settings(categories=[GAMING], auto_output_dir=str(tmp_path / "out"))
     r = _runner(tmp_path, s)
-    r.add_manual("https://www.youtube.com/watch?v=abcdefghijk", niche="game01")
+    r.add_manual("https://www.youtube.com/watch?v=abcdefghijk", category_id="game01")
     r.load = Settings
     r.process(r.db.next_due(NOW), Settings())
     job = r.db.get("abcdefghijk")
-    assert job.status == "failed" and "niche isn't in your settings" in job.error and not FakeEngine.made
+    assert job.status == "failed" and "category isn't in your settings" in job.error and not FakeEngine.made
 
 
-def test_settings_older_than_the_niche_never_take_its_video_out(tmp_path):
-    """The runner was handed settings from before the niche was made (or read mid-save): it looks again."""
-    s = _settings(niches=[GAMING], auto_output_dir=str(tmp_path / "out"))
+def test_settings_older_than_the_category_never_take_its_video_out(tmp_path):
+    """The runner was handed settings from before the category was made (or read mid-save): it looks again."""
+    s = _settings(categories=[GAMING], auto_output_dir=str(tmp_path / "out"))
     r = _runner(tmp_path, s)
-    r.add_manual("https://www.youtube.com/watch?v=abcdefghijk", niche="game01")
+    r.add_manual("https://www.youtube.com/watch?v=abcdefghijk", category_id="game01")
     r.process(r.db.next_due(NOW), _settings(auto_output_dir=str(tmp_path / "out")))
     assert r.db.get("abcdefghijk").status == "done" and not any("deleted" in line for line in r.logs)
-    assert Path(FakeEngine.made[-1].s.output_dir).name == "Gaming"  # clipped with the niche's own settings
+    assert Path(FakeEngine.made[-1].s.output_dir).name == "Gaming"  # clipped with the category's own settings
 
 
-def test_a_niche_made_during_the_scan_keeps_its_first_pick(tmp_path):
-    """Making the first niche while a scan runs: its pick is clipped, not dropped as 'deleted'."""
+def test_a_category_made_during_the_scan_keeps_its_first_pick(tmp_path):
+    """Making the first category while a scan runs: its pick is clipped, not dropped as 'deleted'."""
     history = History(None)
     history.sources["channels"]["@c0"] = {"id": "UCC0"}
     s = _settings(auto_output_dir=str(tmp_path / "out"))
     current = {"s": s}
 
     def scan(*a, **k):
-        current["s"] = s.apply({"niches": [GAMING]})  # made in the Niches tab while the scan runs
+        current["s"] = s.apply({"categories": [GAMING]})  # made in the Categories tab while the scan runs
         return _scan_result("a")
 
     r = _runner(tmp_path, s, scan=scan, history=history)
     r.load = lambda: current["s"]
     r.tick()
-    assert r.db.get("a").status == "done" and r.db.get("a").niche == "game01"
+    assert r.db.get("a").status == "done" and r.db.get("a").category_id == "game01"
     assert not any("deleted" in line for line in r.logs)
 
 
-def test_a_catch_all_recipe_only_fills_in_what_the_niche_leaves_out(tmp_path):
-    s = _settings(niches=[GAMING | {"view": ""}], auto_recipes="* = Podcast moments | Title on top",
+def test_a_catch_all_recipe_only_fills_in_what_the_category_leaves_out(tmp_path):
+    s = _settings(categories=[GAMING | {"view": ""}], auto_recipes="* = Podcast moments | Title on top",
                   auto_output_dir=str(tmp_path / "out"))
-    game, label = settings_for(Job("a", "u", niche="game01"), s)
-    assert label == "Gaming / action · Title on top (niche: Gaming, recipe: *)"
-    plain, label = settings_for(Job("b", "u"), s)  # no niche: the catch-all is the recipe, as before
+    game, label = settings_for(Job("a", "u", category_id="game01"), s)
+    assert label == "Gaming / action · Title on top (category: Gaming, recipe: *)"
+    plain, label = settings_for(Job("b", "u"), s)  # no category: the catch-all is the recipe, as before
     assert label == "Podcast moments · Title on top (recipe: *)"
-    both, label = settings_for(Job("a", "u", niche="game01"), s.apply({"niches": [GAMING]}))
-    assert label == "Gaming / action · Gameplay below (niche: Gaming)"  # the niche has both: * isn't used
+    both, label = settings_for(Job("a", "u", category_id="game01"), s.apply({"categories": [GAMING]}))
+    assert label == "Gaming / action · Gameplay below (category: Gaming)"  # the category has both: * isn't used
 
 
-def test_a_recipes_own_second_videos_beat_the_niches(tmp_path):
+def test_a_recipes_own_second_videos_beat_the_categories(tmp_path):
     from ytclip.settings import LAYOUT_PRESETS, save_user_layout, save_user_preset
 
     parkour = Settings().apply(LAYOUT_PRESETS["Gameplay below"] | {"stack_folder": "C:/parkour"})
     save_user_layout("Parkour below", parkour)
     save_user_preset("Parkour preset", parkour)
-    s = _settings(niches=[GAMING], auto_recipes="@Pod = Gaming / action | Parkour below\n@Cast = Parkour preset")
-    pod, _ = settings_for(Job("a", "u", channel="Pod", niche="game01"), s)
+    s = _settings(categories=[GAMING], auto_recipes="@Pod = Gaming / action | Parkour below\n@Cast = Parkour preset")
+    pod, _ = settings_for(Job("a", "u", channel="Pod", category_id="game01"), s)
     assert pod.stack_folder == "C:/parkour"  # from the recipe's view
-    cast, _ = settings_for(Job("c", "u", channel="Cast", niche="game01"), s)
+    cast, _ = settings_for(Job("c", "u", channel="Cast", category_id="game01"), s)
     assert cast.stack_folder == "C:/parkour"  # from the recipe's saved preset
-    other, _ = settings_for(Job("b", "u", channel="Else", niche="game01"), s)
+    other, _ = settings_for(Job("b", "u", channel="Else", category_id="game01"), s)
     assert other.stack_folder == "D:/gameplay"
 
 
@@ -879,16 +879,16 @@ def test_the_runner_marks_the_video_it_is_clipping_as_busy(tmp_path):
     assert "zzzzzzzzzzz" in seen[0]
 
 
-def test_a_niche_video_carries_its_niche_into_clips_json(tmp_path):
-    s = _settings(niches=[GAMING], auto_output_dir=str(tmp_path / "out"))
+def test_a_category_video_carries_its_category_into_clips_json(tmp_path):
+    s = _settings(categories=[GAMING], auto_output_dir=str(tmp_path / "out"))
     r = _runner(tmp_path, s)
-    r.add_manual("https://www.youtube.com/watch?v=abcdefghijk", niche="game01")
+    r.add_manual("https://www.youtube.com/watch?v=abcdefghijk", category_id="game01")
     r.process(r.db.next_due(NOW), s)
     eng = FakeEngine.made[0]
     meta = eng.exported.meta["automation"]
-    assert (meta["niche"], meta["niche_id"], meta["account"]) == ("Gaming", "game01", "@gameclips")
+    assert (meta["category"], meta["category_id"], meta["account"]) == ("Gaming", "game01", "@gameclips")
     assert eng.s.output_path == tmp_path / "out" / "Gaming"
-    assert "(niche: Gaming)" in r.db.get("abcdefghijk").recipe
+    assert "(category: Gaming)" in r.db.get("abcdefghijk").recipe
 
 
 def test_clean_up_runs_once_a_day_when_switched_on(tmp_path, monkeypatch):

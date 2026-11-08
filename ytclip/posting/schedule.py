@@ -116,7 +116,7 @@ def describe(s: Settings, today: dt.date) -> list[str]:
     day = warm_up_day(s, today)
     if day is not None:
         today_n = min(warm_up_cap(s, today) or 0, fit)
-        what = "no posts yet, just watch your niche on TikTok" if today_n == 0 else f"{today_n} a day for now"
+        what = "no posts yet, just watch videos like yours on TikTok" if today_n == 0 else f"{today_n} a day for now"
         full = dt.date.fromtimestamp(s.warm_up_start) + dt.timedelta(days=WARM_UP_DAYS)
         notes.append(f"Warm-up day {day} of {WARM_UP_DAYS}: {what}. {fit} a day from {full.strftime('%a %d %b')}.")
     if fit > SUGGESTED_MAX:

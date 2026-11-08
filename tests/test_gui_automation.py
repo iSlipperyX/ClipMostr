@@ -43,7 +43,7 @@ def test_jobs_show_in_the_table(app, tmp_path):
     r = rows["Done video"]
     assert tab.table.item(r, col["Status"]).text() == "Done" and tab.table.item(r, col["Clips"]).text() == "4"
     assert tab.table.item(r, col["Why it was picked"]).text() == "On your channel list"
-    assert tab.table.isColumnHidden(col["Niche"])  # no niches, so no Niche column
+    assert tab.table.isColumnHidden(col["Category"])  # no categories, so no Category column
     broken = tab.table.item(rows["Broken"], col["Status"])
     assert broken.text() == "Failed: Gave up" and "ffmpeg died" in broken.toolTip()
     assert tab.counts.text() == "1 waiting · 0 working · 1 done · 1 failed"
@@ -131,3 +131,70 @@ def test_settings_dialog_keeps_the_longest_at_least_the_shortest(app):
     assert dlg._editors["max_len"].get() == 60
     dlg._editors["max_len"].widget.setValue(45)
     assert (dlg.result_settings.min_len, dlg.result_settings.max_len) == (45, 45)
+
+
+def test_long_choices_dont_push_a_settings_page_past_the_window(app):
+    """The local AI's model names ("Qwen2.5 32B · Ultra · 19.9 GB · 24 GB graphics card…") once pushed
+    Settings → AI 260 px past the window, cutting its text off: a choice box asks for at most about 24
+    characters, and its list opens wide enough to show every choice in full."""
+    from PySide6.QtWidgets import QComboBox, QScrollArea
+
+    from ytclip.gui.settings_dialog import SettingsDialog
+
+    dlg = SettingsDialog(Settings(), tab="AI")
+    box = dlg._editors["local_model"].widget
+    assert isinstance(box, QComboBox) and box.minimumContentsLength() <= 24
+    assert box.sizeAdjustPolicy() == QComboBox.AdjustToMinimumContentsLengthWithIcon
+    dlg.show()
+    box.showPopup()
+    longest = max(box.view().fontMetrics().horizontalAdvance(box.itemText(i)) for i in range(box.count()))
+    assert box.view().minimumWidth() >= longest
+    box.hidePopup()
+    for i in range(dlg.tabs.count()):
+        dlg.tabs.setCurrentIndex(i)
+        app.processEvents()
+        area = dlg.tabs.widget(i)
+        if isinstance(area, QScrollArea):  # a few pixels of give for other fonts; a page cut off shows
+            assert area.horizontalScrollBar().maximum() < 40, dlg.tabs.tabText(i)
+    dlg.close()
+
+
+def test_a_tall_settings_window_keeps_each_row_at_its_own_height(app):
+    """Spare height goes under the page: it once pulled the GGUF file picker and the Test keys row apart
+    from their labels."""
+    from PySide6.QtWidgets import QLineEdit
+
+    from ytclip.gui.settings_dialog import SettingsDialog
+
+    dlg = SettingsDialog(Settings(ai_provider="local"), tab="AI")
+    dlg.resize(960, 2000)
+    dlg.show()
+    for _ in range(4):
+        app.processEvents()
+    picker = dlg._editors["local_model_path"].widget
+    assert picker.height() <= picker.findChild(QLineEdit).sizeHint().height() + 4
+    page = picker.parentWidget()
+    assert page.height() <= page.sizeHint().height() + 4  # the page isn't stretched; the space is under it
+    dlg.close()
+
+
+def test_the_gguf_picker_looks_for_models(app, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog, QPushButton
+
+    from ytclip.gui.settings_dialog import SettingsDialog
+
+    asked = []
+
+    def pick(parent, title, where, kinds):
+        asked.append(kinds)
+        return "C:/models/my.gguf", ""
+
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(pick))
+    dlg = SettingsDialog(Settings(ai_provider="local"), tab="AI")
+    dlg._editors["local_model_path"].widget.findChild(QPushButton).click()
+    assert asked[0].startswith("GGUF models (*.gguf)") and dlg.result_settings.local_model_path == "C:/models/my.gguf"
+    dlg.close()
+    dlg = SettingsDialog(Settings(), tab="Layout")
+    dlg._editors["stack_video"].widget.findChild(QPushButton).click()
+    assert asked[1].startswith("Videos (") and "*.mp4" in asked[1]  # the second video's picker is unchanged
+    dlg.close()

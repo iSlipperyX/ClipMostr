@@ -66,10 +66,10 @@ def main() -> int:
     dialog.show()
     shot(dialog, "new-request-dialog")
     dialog.close()
-    mw.tabs.setCurrentWidget(mw.niches)
-    if mw.niches.list.count():
-        mw.niches.list.setCurrentRow(0)
-    shot(mw, "niches-form")
+    mw.tabs.setCurrentWidget(mw.categories)
+    if mw.categories.list.count():
+        mw.categories.list.setCurrentRow(0)
+    shot(mw, "categories-form")
     print("\n".join(shots))
     mw.close()
     return 0

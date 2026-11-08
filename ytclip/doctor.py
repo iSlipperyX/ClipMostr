@@ -1,7 +1,7 @@
 """Health check: is everything automation needs in place? Each check says what's wrong and the fix.
 
 check() looks at the PC and the settings without going online: ffmpeg, the downloader's age, the
-keys, the folders and free space, TikTok posting, niches and clip requests. With online=True it
+keys, the folders and free space, TikTok posting, categories and clip requests. With online=True it
 also asks the YouTube Data API, Anthropic and Google whether the keys work (no quota or tokens used
 for the AI keys; one quota unit for YouTube).
 
@@ -19,7 +19,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
 
-from . import niches, youtube_login
+from . import categories, youtube_login
 from .cleanup import size_text
 from .settings import Settings
 
@@ -107,7 +107,7 @@ def _keys(s: Settings, online: bool) -> list[Check]:
         out.append(Check("YouTube Data API key", GOOD, "Set"))
     from . import ai
 
-    special = any(n.instructions.strip() for n in niches.active(s))
+    special = any(n.instructions.strip() for n in categories.active(s))
     first = ai.chosen(s)
     if not has_ai_key(s):
         out.append(Check(f"{ai.name(first)} key", WARN if (special or s.auto_polish) else GOOD,
@@ -172,7 +172,7 @@ def _folders(s: Settings) -> list[Check]:
 
 
 def _posting(s: Settings) -> list[Check]:
-    """TikTok posting: accounts logged in, every niche with an account, a browser to post with."""
+    """TikTok posting: accounts logged in, every category with an account, a browser to post with."""
     from .posting import config as posting_config
     from .posting.accounts import Accounts
     from .posting.tiktok.login import find_browser
@@ -193,11 +193,10 @@ def _posting(s: Settings) -> list[Check]:
     if failing:
         out.append(Check("TikTok upload page", WARN, f"The last posting test failed for {', '.join(failing)}",
                          "Press Test posting on the Accounts tab to see which step"))
-    ids = {a.id for a in accounts}
-    loose = [n.name for n in niches.load(s) if n.enabled and n.account_id not in ids]
-    if loose and len(accounts) > 1:
-        out.append(Check("Niche accounts", WARN, f"No account picked for {', '.join(loose)}: their clips wait",
-                         "Pick the account each niche posts to in the Niches tab"))
+    ran_out = [a.label for a in accounts if not a.logged_in and a.session_check == "expired"]
+    if ran_out:
+        out.append(Check("TikTok sign-in", WARN, f"The sign-in ran out for {', '.join(ran_out)}",
+                         "Press Sign in again on the Accounts tab (or the button on the Windows notification)"))
     ps = posting_config.Settings.load()
     if find_browser(ps.browser_channel) is None and find_browser("chrome" if ps.browser_channel == "msedge"
                                                                  else "msedge") is None and os.name == "nt":
@@ -209,24 +208,36 @@ def _posting(s: Settings) -> list[Check]:
     return out
 
 
-def _niches_and_requests(s: Settings, db) -> list[Check]:
+def _categories_and_requests(s: Settings, db) -> list[Check]:
     from .research import youtube_key
 
     out = []
-    mine = niches.load(s)
+    mine = categories.load(s)
+    try:
+        from .posting.accounts import Accounts
+
+        ids = {a.id for a in Accounts.load()}
+    except Exception:  # noqa: BLE001 - the posting check says the list couldn't be read
+        ids = None
+    loose = [n.name for n in mine if n.enabled and (n.needs_account or (ids is not None and n.account_id not in ids))]
+    if loose:
+        out.append(Check("Category accounts", BAD if len(loose) == len([n for n in mine if n.enabled]) else WARN,
+                         f"No TikTok account for {', '.join(loose)}: nothing is picked or clipped for "
+                         f"{'it' if len(loose) == 1 else 'them'} until {'it has' if len(loose) == 1 else 'they have'} "
+                         "one", "Pick the account each category posts to in the Categories tab"))
     for n in mine:
         if not n.on:
             continue
         refs, bad = n.channel_refs()
-        if not refs and not n.search_list() and not n.keyword_list() and not n.category_ids():
-            out.append(Check(f"Niche {n.name}", WARN, "Has nothing to find videos with",
-                             "Add a channel or a Creative Commons search in the Niches tab"))
+        if not refs and not n.search_list() and not n.keyword_list() and not n.yt_category_ids():
+            out.append(Check(f"Category {n.name}", WARN, "Has nothing to find videos with",
+                             "Add a channel or a Creative Commons search in the Categories tab"))
         elif bad:
-            out.append(Check(f"Niche {n.name}", WARN, f"{len(bad)} channel line(s) can't be read", "Fix them in the "
-                             "Niches tab"))
+            out.append(Check(f"Category {n.name}", WARN, f"{len(bad)} channel line(s) can't be read", "Fix them in the "
+                             "Categories tab"))
     paused = [n.name for n in mine if n.paused]
     if paused:
-        out.append(Check("Paused niches", WARN, ", ".join(paused), "Resume them in Automation → Niches when ready"))
+        out.append(Check("Paused categories", WARN, ", ".join(paused), "Resume them in Automation → Categories when ready"))
     if db is not None:
         try:
             waiting = [o for o in db.orders(open_only=True) if o.picks]
@@ -267,7 +278,7 @@ def check(s: Settings, db=None, online: bool = False, now: float | None = None) 
     checks += _keys(s, online)
     checks += _folders(s)
     checks += _posting(s)
-    checks += _niches_and_requests(s, db)
+    checks += _categories_and_requests(s, db)
     checks += _youtube_sign_in(s, db, now)
     checks += _whisper_speed(s)
     checks += _pro_edit(s)
@@ -300,6 +311,10 @@ def _whisper_speed(s: Settings) -> list[Check]:
     if why:
         return [Check("Whisper on the graphics card", WARN, f"Full power uses the CPU for Whisper: {why}",
                       "Settings → Speed → Try the graphics card again (after a driver update)")]
+    rest = whisper_cpp.rest_note()
+    if rest:
+        return [Check("Whisper on the graphics card", WARN, f"The graphics card is {rest}, so Whisper uses the CPU "
+                      "until then", "Nothing to do: it's tried again by itself (details in automation.log)")]
     return [Check("Whisper on the graphics card", GOOD, "Full power types out speech on the graphics card")]
 
 
