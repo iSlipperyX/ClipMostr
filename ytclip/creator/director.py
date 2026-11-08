@@ -104,7 +104,8 @@ channel name.
 part 2, a follow-up video or a link.
 
 Honesty rules: say only things that are true. Don't invent statistics, studies, quotes, dates or names; when \
-something is a theory or legend, say so. No medical, legal or financial instructions presented as advice.
+something is a theory or legend, say so. Today's date and any sources come with the request: they beat what you \
+remember, which may be out of date. No medical, legal or financial instructions presented as advice.
 
 Storyboard rules:
 * Every scene has one picture. visual_prompt describes it for an image generator: subject, setting, lighting, \
@@ -158,6 +159,7 @@ class Storyboard:
     prompt: str = ""  # what it was made from
     written_by: str = ""  # the model that wrote it, or "your script"
     notes: list[str] = field(default_factory=list)  # what normalise() changed
+    sources: list[dict] = field(default_factory=list)  # what was looked up online (web.Source.short())
 
     @property
     def word_count(self) -> int:
@@ -470,6 +472,7 @@ class Brief:
     wpm: float = DEFAULT_WPM
     style: str = ""  # STYLES key; "" = from the category
     avoid: list[str] = field(default_factory=list)  # titles of earlier videos on this, to take a new angle
+    facts: str = ""  # today's date and what was found online (web.brief); "" = just today's date
 
 
 def write(s, brief: Brief, *, log: Log | None = None, check: Callable[[], None] | None = None,
@@ -490,6 +493,9 @@ def write(s, brief: Brief, *, log: Log | None = None, check: Callable[[], None] 
                       seconds=round(brief.seconds), lo=lo, hi=hi, words=aim, wpm=round(brief.wpm),
                       scenes_lo=scenes_lo, scenes_hi=scenes_hi, hook=HOOK_WORDS, scene_lo=SCENE_WORDS[0],
                       scene_hi=SCENE_WORDS[1] - 6, style=style.prompt)
+    from . import web
+
+    base += "\n\n" + (brief.facts or web.brief(None))
     if brief.avoid:
         base += "\nEarlier videos on this already exist; take a clearly different angle from: " + \
                 "; ".join(f'"{t}"' for t in brief.avoid[:5])

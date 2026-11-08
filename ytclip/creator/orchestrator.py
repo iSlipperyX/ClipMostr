@@ -42,7 +42,7 @@ from .. import categories as cats
 from ..ffmpeg import Cancelled, probe
 from ..organize import safe_name
 from ..settings import Settings, work_folder
-from . import compositor, director, motion, originality, sfx_library, soundbed, visual_generator, voice_engine
+from . import compositor, director, motion, originality, sfx_library, soundbed, visual_generator, voice_engine, web
 
 Log = Callable[[str], None]
 Progress = Callable[[str, "float | None"], None]
@@ -202,15 +202,21 @@ class VideoCreatorOrchestrator:
             voice = voice_engine.profile(req.voice or self.s.creator_voice)
             engines = voice_engine.pick_engines(self.s)
             wpm = voice_engine.learned_wpm(voice.key, engines[0] if engines else "kokoro")
+            found = None
+            if getattr(self.s, "creator_web", True):
+                report("Writing the script: looking it up online", None)
+                found = web.gather(req.prompt, log=self.log, check=self.check)
             brief = director.Brief(prompt=req.prompt, category=cat_name or "",
                                    instructions=category.instructions if category else "", seconds=seconds,
-                                   wpm=wpm, style=style, avoid=originality.earlier_titles(req.prompt))
+                                   wpm=wpm, style=style, avoid=originality.earlier_titles(req.prompt),
+                                   facts=web.brief(found))
             entries = originality.load()
             try:
                 board = director.write(self.s, brief, log=self.log, check=self.check, progress=report,
                                        similar=lambda b: originality.closest(b.script, entries))
             except director.DirectorError as exc:
                 raise CreatorError(str(exc)) from exc
+            board.sources = [src.short() for src in found.sources] if found else []
         if req.title:
             board.title = req.title
         board.category = cat_name or board.category
@@ -431,6 +437,7 @@ class VideoCreatorOrchestrator:
             "mix": getattr(self, "mix", {}), "timeline": compositor.describe(getattr(self, "timeline", None))
             if getattr(self, "timeline", None) else {}, "timings": dict(self.timings),
             "ai_generated": True, "caption": caption, "hashtags": board.hashtags, "notes": board.notes,
+            "sources": board.sources,
         }
         video_meta = Video(id=cid, title=board.title, channel="ClipMonster Video Creator", upload_date=time.strftime("%Y%m%d"),
                            duration=checks.get("length") or duration, url="", path=folder / name)
@@ -520,6 +527,13 @@ def readme(board: director.Storyboard, creator: dict, checks: dict, file: str) -
     for sc in board.scenes:
         lines.append(f"| {sc.scene_id} | {sc.speech_text} | {sc.visual_prompt[:90]} | {sc.camera_motion} | "
                      f"{'' if sc.sfx_cue == 'none' else sc.sfx_cue} |")
+    if board.sources:
+        lines += ["", "## Sources looked up when it was written", ""]
+        for s in board.sources:
+            when = f", {s['date'][:10]}" if s.get("date") else ""
+            who = f" ({s['publisher']}{when})" if s.get("publisher") or when else ""
+            lines.append(f"- [{s.get('title', '')}](<{s.get('url', '')}>){who}" if s.get("url") else
+                         f"- {s.get('title', '')}{who}")
     for w in checks.get("warnings") or []:
         lines.append(f"\n⚠ {w}")
     return "\n".join(lines) + "\n"

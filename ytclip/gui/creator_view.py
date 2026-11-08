@@ -315,6 +315,9 @@ class CreatorView(QWidget):
         bits = [f"Voice: <b>{voice or 'none installed'}</b>", f"Pictures: <b>{pic_text}</b>",
                 "Script: <b>" + ("the local AI" if writer == ["local"] else ", ".join(writer) if writer else
                                  "your own (no AI ready)") + "</b>"]
+        if writer:
+            bits.append("Facts: <b>" + ("looked up online first" if getattr(s, "creator_web", True) else
+                                         "from the AI's memory") + "</b>")
         self.ready.setText(" · ".join(bits) + " · <a href='settings'>Creator settings</a>")
         self.ready.setToolTip("" if writer else director.no_writer_text(s))
 
