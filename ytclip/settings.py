@@ -700,9 +700,9 @@ SCHEMA: list[Field] = [
     Field("gemini_polish_model", "Gemini model for polishing", "AI", "choice", choices=GEMINI_MODELS),
     Field("local_model", "Local AI model", "AI", "choice", choices=LOCAL_MODELS,
           help="Runs on this PC: free, private and offline once it's downloaded (from Hugging Face, once). 'Pick "
-               "for this PC' takes the biggest model that fits entirely on the graphics card: Qwen2.5 7B for 8 GB, "
-               "Mistral Nemo 12B for 12-16 GB, Qwen2.5 32B for 24 GB, else Llama 3.2 3B, which is also quick on "
-               "a CPU. A bigger model than that splits between the card and RAM: better picks, but slower"),
+               "for this PC' takes the biggest model that fits entirely on the graphics card: Qwen2.5 7B for 8-10 GB, "
+               "Mistral Nemo 12B for 11-20 GB, Qwen2.5 32B for 24 GB or more, else Llama 3.2 3B, which is also "
+               "quick on a CPU. A bigger model than that splits between the card and RAM: better picks, but slower"),
     Field("local_model_path", "Local model file (with 'My own GGUF file')", "AI", "file",
           help="Any instruction-tuned GGUF model, such as Qwen or Gemma. Its own header says how big it is, so "
                "it's sized to the graphics card like the others"),

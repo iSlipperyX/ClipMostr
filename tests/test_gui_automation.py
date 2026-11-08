@@ -157,3 +157,44 @@ def test_long_choices_dont_push_a_settings_page_past_the_window(app):
         if isinstance(area, QScrollArea):  # a few pixels of give for other fonts; a page cut off shows
             assert area.horizontalScrollBar().maximum() < 40, dlg.tabs.tabText(i)
     dlg.close()
+
+
+def test_a_tall_settings_window_keeps_each_row_at_its_own_height(app):
+    """Spare height goes under the page: it once pulled the GGUF file picker and the Test keys row apart
+    from their labels."""
+    from PySide6.QtWidgets import QLineEdit
+
+    from ytclip.gui.settings_dialog import SettingsDialog
+
+    dlg = SettingsDialog(Settings(ai_provider="local"), tab="AI")
+    dlg.resize(960, 2000)
+    dlg.show()
+    for _ in range(4):
+        app.processEvents()
+    picker = dlg._editors["local_model_path"].widget
+    assert picker.height() <= picker.findChild(QLineEdit).sizeHint().height() + 4
+    page = picker.parentWidget()
+    assert page.height() <= page.sizeHint().height() + 4  # the page isn't stretched; the space is under it
+    dlg.close()
+
+
+def test_the_gguf_picker_looks_for_models(app, monkeypatch):
+    from PySide6.QtWidgets import QFileDialog, QPushButton
+
+    from ytclip.gui.settings_dialog import SettingsDialog
+
+    asked = []
+
+    def pick(parent, title, where, kinds):
+        asked.append(kinds)
+        return "C:/models/my.gguf", ""
+
+    monkeypatch.setattr(QFileDialog, "getOpenFileName", staticmethod(pick))
+    dlg = SettingsDialog(Settings(ai_provider="local"), tab="AI")
+    dlg._editors["local_model_path"].widget.findChild(QPushButton).click()
+    assert asked[0].startswith("GGUF models (*.gguf)") and dlg.result_settings.local_model_path == "C:/models/my.gguf"
+    dlg.close()
+    dlg = SettingsDialog(Settings(), tab="Layout")
+    dlg._editors["stack_video"].widget.findChild(QPushButton).click()
+    assert asked[1].startswith("Videos (") and "*.mp4" in asked[1]  # the second video's picker is unchanged
+    dlg.close()

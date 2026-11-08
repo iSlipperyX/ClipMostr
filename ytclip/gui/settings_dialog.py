@@ -21,6 +21,22 @@ GROUPS = ("General", "Download", "Clip finding", "Transcription", "Speed", "AI",
           "Research", "Picking", "Automation", "Posting", "Updates")
 
 
+
+def _scrolling(page: QWidget) -> QScrollArea:
+    """A settings page in a scroll area at its own height. In a window taller than the page, the space is
+    left under it: a form hands spare height to rows that can grow, which pulled a file picker and the
+    Test keys row apart from their labels."""
+    holder = QWidget()
+    column = QVBoxLayout(holder)
+    column.setContentsMargins(0, 0, 0, 0)
+    column.setSpacing(0)
+    column.addWidget(page)
+    column.addStretch(1)
+    scroll = QScrollArea()
+    scroll.setWidgetResizable(True)
+    scroll.setWidget(holder)
+    return scroll
+
 class SettingsDialog(QDialog):
     def __init__(self, settings: Settings, parent=None, tab: str = ""):
         super().__init__(parent)
@@ -66,10 +82,7 @@ class SettingsDialog(QDialog):
                 note.setWordWrap(True)
                 note.setProperty("muted", True)
                 page.layout().insertRow(0, note)
-                scroll = QScrollArea()
-                scroll.setWidgetResizable(True)
-                scroll.setWidget(page)
-                tabs.addTab(scroll, group)
+                tabs.addTab(_scrolling(page), group)
                 continue
             fields = [f for f in SCHEMA if f.group == group and f.name not in per_category]
             page, editors = forms.build_form(fields, self.result_settings, self._changed)
@@ -95,8 +108,7 @@ class SettingsDialog(QDialog):
                 test = QPushButton("Test keys")
                 test.setToolTip("Checks each key you've added, and that it can use the models picked above. "
                                 "Uses no tokens.")
-                self._key_result = QLabel("")
-                self._key_result.setWordWrap(True)
+                self._key_result = forms.WrapLabel("")
                 test.clicked.connect(self._test_key)
                 row.addWidget(test)
                 row.addWidget(self._key_result, 1)
@@ -121,10 +133,9 @@ class SettingsDialog(QDialog):
                 page.layout().insertRow(0, note)
                 why = whisper_cpp.unavailable()
                 rest = "" if why else whisper_cpp.rest_note()
-                self._gpu_state = QLabel("Graphics card: " + (f"not used: {why}" if why else
-                                                              f"{rest}. Whisper uses the CPU until then." if rest else
-                                                              "ready (it's tried on the next video)"))
-                self._gpu_state.setWordWrap(True)  # on a row of its own, so a long reason wraps in full
+                self._gpu_state = forms.WrapLabel("Graphics card: " + (
+                    f"not used: {why}" if why else f"{rest}. Whisper uses the CPU until then." if rest else
+                    "ready (it's tried on the next video)"))  # on a row of its own, so a long reason wraps in full
                 page.layout().addRow("", self._gpu_state)
                 if (why or rest) and whisper_cpp.binary() is not None:
                     again = QPushButton("Try the graphics card again")
@@ -205,10 +216,7 @@ class SettingsDialog(QDialog):
                 note.setWordWrap(True)
                 note.setProperty("muted", True)
                 page.layout().insertRow(0, note)
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll.setWidget(page)
-            tabs.addTab(scroll, group)
+            tabs.addTab(_scrolling(page), group)
         if tab in GROUPS:
             tabs.setCurrentIndex(GROUPS.index(tab))
         heading.setText(tabs.tabText(tabs.currentIndex()))

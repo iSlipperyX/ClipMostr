@@ -533,3 +533,29 @@ def test_the_list_names_the_account_even_before_its_name_is_stored(app, tmp_path
     accs.save()
     tab, *_ = _tab(app, tmp_path, categories=[{"id": "g", "name": "Gaming", "account_id": a.id}])
     assert tab.list.item(0).text().splitlines()[1].startswith("@gamingclips")
+
+
+def test_the_note_under_the_account_leaves_no_gap(app, tmp_path):
+    """A wrapped note in the scrolling form is as tall as its text at its real width: one line when it
+    fits on one, more when the window is narrow."""
+    from ytclip.posting.accounts import Accounts
+
+    accs = Accounts.load()
+    a = accs.add("")
+    a.username, a.logged_in = "gamingclips", True
+    accs.save()
+    tab, *_ = _tab(app, tmp_path, categories=[{"id": "g", "name": "Gaming", "account_id": a.id}])
+    note = tab.account_note
+    heights = {}
+    for width in (1280, 640):
+        tab.resize(width, 820)
+        tab.show()
+        for _ in range(4):
+            app.processEvents()
+        assert note.isVisible() and "Accounts tab" in note.text()
+        heights[width] = note.height()
+        assert note.height() == note.heightForWidth(note.width())  # no empty lines under the text
+        assert tab.enabled.geometry().top() - note.geometry().bottom() < 16  # the next row follows it
+    line = note.fontMetrics().lineSpacing()
+    assert heights[1280] < 2 * line <= heights[640]
+    tab.close()

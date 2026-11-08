@@ -158,6 +158,7 @@ class AccountWizard(QDialog):
         self.hint.setProperty("muted", True)
         lay.addWidget(self.hint)
         self.log = QPlainTextEdit(readOnly=True)
+        self.log.setPlaceholderText("What the browser window is doing shows here.")
         self.log.setMaximumHeight(120)
         lay.addWidget(self.log, 1)
         self.where = QLabel()

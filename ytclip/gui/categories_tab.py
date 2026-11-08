@@ -31,6 +31,7 @@ from ..research import youtube_key
 from ..settings import PRESETS, Settings, all_layouts, all_presets
 from ..trending import CATEGORIES as YT_CATEGORIES
 from . import theme
+from .forms import WrapLabel
 
 STATS_EVERY = 5000  # ms between refreshes of the counts while the tab is showing
 CHANNELS_HINT = "@somepodcast  # clipping programme, credit in caption\nhttps://www.youtube.com/@streamer"
@@ -155,9 +156,8 @@ class Categories(QWidget):
             form.addRow(label)
 
         def note(text: str) -> QLabel:
-            label = QLabel(text)
+            label = WrapLabel(text)
             label.setProperty("muted", True)
-            label.setWordWrap(True)
             form.addRow(label)
             return label
 
@@ -172,8 +172,7 @@ class Categories(QWidget):
                                 "categories")
         self.account.activated.connect(self._pick_account)
         form.addRow("Posts to", self.account)
-        self.account_note = QLabel()
-        self.account_note.setWordWrap(True)
+        self.account_note = WrapLabel()
         self.account_note.setTextFormat(Qt.RichText)
         self.account_note.setAlignment(Qt.AlignLeft | Qt.AlignTop)  # right under the account it's about
         form.addRow("", self.account_note)
