@@ -52,6 +52,9 @@ class VideoItem:
     # ClipMonster's facts about the clip for its record: the source video, where in it, how it was made
     facts: dict = field(default_factory=dict)
     ai_generated: bool = False  # made by the Video Creator: TikTok's "AI-generated content" label goes on
+    # The review hold (intake.needs_review): "waiting" = queued, but it doesn't post until you OK it (Queue tab,
+    # Telegram); "ok" = you did; "" = it never needed it.
+    review: str = ""
     # Part series: one moment cut into parts, each but the last saying "follow for part 2".
     # `series` is unique across the library: ClipMonster's id is only unique within one clips folder, and
     # the same video can be clipped into several folders (one per category, or a later run), so it's keyed on it.
@@ -467,6 +470,24 @@ class Store:
             q = [i for i in self.items.values() if i.queue_pos is not None
                  and i.status in ("queued", "uploading", "failed") and (account is None or i.account == account)]
             return sorted(q, key=lambda i: i.queue_pos)
+
+    def waiting_review(self, account: str | None = None) -> list[VideoItem]:
+        """Queued videos held until you OK them, oldest first."""
+        with self.lock:
+            return sorted((i for i in self.items.values() if i.review == "waiting" and i.queue_pos is not None
+                           and i.status == "queued" and (account is None or i.account == account)),
+                          key=lambda i: i.added_at)
+
+    def approve(self, ids: list[str]) -> int:
+        """OK held videos to post when their time comes. Returns how many were waiting."""
+        n = 0
+        with self.lock:
+            for item_id in ids:
+                it = self.items.get(item_id)
+                if it is not None and it.review == "waiting":
+                    it.review = "ok"
+                    n += 1
+        return n
 
     def enqueue(self, ids: list[str], account: str) -> None:
         """Add videos to the end of `account`'s queue (videos in another queue are left where they are)."""

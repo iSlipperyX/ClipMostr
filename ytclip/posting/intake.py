@@ -54,6 +54,27 @@ def account_for(accounts: Accounts | list[Account], item: VideoItem, main=None) 
     return accounts[0] if len(accounts) == 1 else None
 
 
+REVIEW_DAYS = 14  # "new": an account's Creator videos wait for your OK until two weeks after its first one posted
+
+
+def needs_review(store: Store, main, account_id: str, item: VideoItem, now: float | None = None) -> bool:
+    """Does this video wait for your OK before it posts? Only the Video Creator's videos, per Settings →
+    Creator → Check videos before they post: always, never, or for an account's first two weeks of them
+    (until you've seen what the Creator makes for it)."""
+    if not item.ai_generated:
+        return False
+    mode = getattr(main, "creator_review", "new") if main is not None else "new"
+    if mode == "off":
+        return False
+    if mode == "always":
+        return True
+    now = time.time() if now is None else now
+    with store.lock:
+        first = min((i.posted_at or 0 for i in store.items.values() if i.account == account_id and i.ai_generated
+                     and i.status == "posted" and i.posted_at), default=0)
+    return not first or now - first < REVIEW_DAYS * 86400
+
+
 def series_order(items: list[VideoItem]) -> list[VideoItem]:
     """`items` in the same order, except that the parts of a series come together, part 1 first
     (where the first of them was), so they're queued to post one after another."""
@@ -90,6 +111,9 @@ def assign(store: Store, accounts: Accounts | list[Account], items: list[VideoIt
         if it.series:
             series_to.setdefault(it.series, owner.id)
         store.enqueue([it.id], owner.id)
+        if needs_review(store, main, owner.id, it):
+            with store.lock:
+                it.review = "waiting"
         got[owner.id] = got.get(owner.id, 0) + 1
     return got
 

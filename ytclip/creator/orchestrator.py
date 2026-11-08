@@ -42,7 +42,8 @@ from .. import categories as cats
 from ..ffmpeg import Cancelled, probe
 from ..organize import safe_name
 from ..settings import Settings, work_folder
-from . import compositor, director, motion, originality, sfx_library, soundbed, visual_generator, voice_engine, web
+from . import (compositor, director, factcheck, motion, originality, sfx_library, soundbed, visual_generator,
+               voice_engine, web)
 
 Log = Callable[[str], None]
 Progress = Callable[[str, "float | None"], None]
@@ -210,6 +211,16 @@ class VideoCreatorOrchestrator:
                                    instructions=category.instructions if category else "", seconds=seconds,
                                    wpm=wpm, style=style, avoid=originality.earlier_titles(req.prompt),
                                    facts=web.brief(found))
+            from .. import learn
+
+            lessons = learn.for_settings(self.s)
+            if lessons is not None and not lessons.empty:
+                brief.lessons = lessons.creator_text(category.id if category else "")
+                if brief.lessons:
+                    n = sum(1 for o in lessons.outcomes if o.creator)
+                    self.log(f"Learning from how your earlier videos did ({n} Creator video{'s' if n != 1 else ''}"
+                             f" with results" + (", and your clips' hooks)." if "your TikTok clips" in brief.lessons
+                                                  else ")."))
             entries = originality.load()
             try:
                 board = director.write(self.s, brief, log=self.log, check=self.check, progress=report,
@@ -217,6 +228,12 @@ class VideoCreatorOrchestrator:
             except director.DirectorError as exc:
                 raise CreatorError(str(exc)) from exc
             board.sources = [src.short() for src in found.sources] if found else []
+            mode = getattr(self.s, "creator_factcheck", "fix")
+            if mode != "off":
+                report("Writing the script: checking the facts", None)
+                checked = factcheck.check(self.s, board, brief.facts, have_sources=bool(found and found.found),
+                                          mode=mode, log=self.log, check_cancel=self.check, progress=report)
+                board.factcheck = checked.to_json()
         if req.title:
             board.title = req.title
         board.category = cat_name or board.category
@@ -438,6 +455,11 @@ class VideoCreatorOrchestrator:
             if getattr(self, "timeline", None) else {}, "timings": dict(self.timings),
             "ai_generated": True, "caption": caption, "hashtags": board.hashtags, "notes": board.notes,
             "sources": board.sources,
+            "factcheck": {k: v for k, v in (board.factcheck or {}).items() if k != "claims"} |
+            ({"fixed": sum(1 for c in board.factcheck.get("claims", []) if c.get("changed")),
+              "to_check": sum(1 for c in board.factcheck.get("claims", [])
+                              if c.get("verdict") != "supported" and not c.get("changed"))}
+             if board.factcheck else {}),
         }
         video_meta = Video(id=cid, title=board.title, channel="ClipMonster Video Creator", upload_date=time.strftime("%Y%m%d"),
                            duration=checks.get("length") or duration, url="", path=folder / name)
@@ -534,6 +556,9 @@ def readme(board: director.Storyboard, creator: dict, checks: dict, file: str) -
             who = f" ({s['publisher']}{when})" if s.get("publisher") or when else ""
             lines.append(f"- [{s.get('title', '')}](<{s.get('url', '')}>){who}" if s.get("url") else
                          f"- {s.get('title', '')}{who}")
+    fc = factcheck.readme_section(board)
+    if fc:
+        lines.append(fc.rstrip("\n"))
     for w in checks.get("warnings") or []:
         lines.append(f"\n⚠ {w}")
     return "\n".join(lines) + "\n"

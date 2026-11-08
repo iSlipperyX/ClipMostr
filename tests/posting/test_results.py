@@ -48,6 +48,16 @@ def test_outcomes_have_views_compared_with_the_usual(tmp_path):
     assert by["good"].rating == 8 and by["good"].account == a.id
 
 
+def test_outcomes_say_whether_the_creator_made_it(tmp_path):
+    store, a, (good, fine) = posted_store(tmp_path)
+    good.ai_generated = True  # the Video Creator's videos are labelled AI-generated
+    by = {r.clip: r for r in results.outcomes(store, NOW)}
+    assert by["good"].origin == "creator" and by["fine"].origin == "clip"
+    path = tmp_path / "results.json"
+    results.share(store, path, NOW)
+    assert {r["origin"] for r in json.loads(path.read_text())["outcomes"]} == {"creator", "clip"}
+
+
 def test_young_posts_and_thin_accounts_are_left_out(tmp_path):
     store, _, _ = posted_store(tmp_path, age_days=1)
     assert results.outcomes(store, NOW) == []  # under 48 hours old

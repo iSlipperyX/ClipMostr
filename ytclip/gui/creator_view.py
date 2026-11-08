@@ -160,7 +160,7 @@ class CreatorView(QWidget):
         self.ready.setProperty("muted", True)
         self.ready.setTextFormat(Qt.RichText)
         self.ready.setOpenExternalLinks(False)
-        self.ready.linkActivated.connect(lambda _l: self.open_settings.emit("Creator"))
+        self.ready.linkActivated.connect(self._link)
         v.addWidget(self.ready)
         buttons = QHBoxLayout()
         self.write_btn = QPushButton("Write storyboard")
@@ -312,6 +312,14 @@ class CreatorView(QWidget):
         writer = director.script_writers(s)
         pics = self.visuals.currentData() or s.creator_visuals
         pic_text = visual_generator.BACKEND_NAMES.get(pics, "the best available")
+        if pics in ("auto", "sdxl_turbo", "flux_schnell"):
+            sd = visual_generator.Diffusers(s, "sdxl_turbo", lambda m: None, lambda m, f: None).missing()
+            if not sd:
+                pic_text += " · AI pictures ready" if pics == "auto" else ""
+            elif "aren't set up" in sd:
+                pic_text += " · <a href='pictures'>Set up AI pictures</a>"
+            else:
+                pic_text += f" · {_esc(sd)}"
         bits = [f"Voice: <b>{voice or 'none installed'}</b>", f"Pictures: <b>{pic_text}</b>",
                 "Script: <b>" + ("the local AI" if writer == ["local"] else ", ".join(writer) if writer else
                                  "your own (no AI ready)") + "</b>"]
@@ -320,6 +328,74 @@ class CreatorView(QWidget):
                                          "from the AI's memory") + "</b>")
         self.ready.setText(" · ".join(bits) + " · <a href='settings'>Creator settings</a>")
         self.ready.setToolTip("" if writer else director.no_writer_text(s))
+
+    def _link(self, href: str) -> None:
+        if href == "pictures":
+            self.setup_pictures()
+        else:
+            self.open_settings.emit("Creator")
+
+    def setup_pictures(self) -> None:
+        """Set up the picture engine (PyTorch for this PC's card, SDXL-Turbo), after asking."""
+        from PySide6.QtWidgets import QMessageBox
+
+        from ..creator import picture_engine
+        from ..intelligence import hardware
+
+        if self.worker is not None and self.worker.isRunning():
+            return
+        hw = hardware.detect()
+        plan = picture_engine.plan_for(hw.gpu_vendor, hw.gpu_name)
+        card = hw.gpu_name or "this PC"
+        how = {"dml": f"PyTorch with DirectML, so the pictures are drawn on your {_esc(card)}",
+               "cuda": f"PyTorch with CUDA, so the pictures are drawn on your {_esc(card)}",
+               "mps": "PyTorch for Apple Silicon",
+               "cpu": "PyTorch for the processor: no graphics card it can use was found, so each picture "
+                      "takes minutes"}[plan.device]
+        answer = QMessageBox.question(
+            self, "Set up AI pictures",
+            "<p>This downloads <b>" + how + "</b>, and the <b>SDXL-Turbo</b> picture model, about <b>10 GB</b> "
+            "in all, then draws a test picture. It takes 10 to 30 minutes; you can keep using ClipMonster.</p>"
+            f"<p>It goes in {_esc(str(picture_engine.root()))} (Python and PyTorch) and the models folder (the "
+            "model). After that the pictures are made on this PC, offline.</p>"
+            "<p>SDXL-Turbo is Stability AI's model, under its Community License: free, also for videos that "
+            "earn money, while you (or your business) make under $1M a year. "
+            "<a href='https://stability.ai/license'>stability.ai/license</a></p>",
+            QMessageBox.Yes | QMessageBox.Cancel, QMessageBox.Yes)
+        if answer != QMessageBox.Yes:
+            return
+
+        def run(w: Worker):
+            from ..ffmpeg import Cancelled
+
+            def check() -> None:
+                if w.cancel_requested:
+                    raise Cancelled()
+
+            return picture_engine.install(log=w.log.emit, check=check, vendor=hw.gpu_vendor, gpu_name=hw.gpu_name,
+                                          progress=lambda m, f: w.progress.emit(m, -1.0 if f is None else float(f)))
+
+        self._start(run, "🎨 Setting up AI pictures", None)
+        self.worker.done.connect(self._pictures_ready)
+        self.worker.failed.connect(self._failed)
+
+    def _pictures_ready(self, status: dict) -> None:
+        from ..creator import picture_engine
+
+        self._finish()
+        self.result = None
+        picture = status.get("test_picture", "")
+        img = (f"<br><img src='{QUrl.fromLocalFile(picture).toString()}' width='140' height='140'>"
+               if picture and Path(picture).is_file() else "")
+        took = f" Test picture in {status['test_seconds']:.0f} s, with loading the model." if "test_seconds" in status \
+            else ""
+        self.done_text.setText(f"<b>✓ AI pictures are {_esc(picture_engine.describe())}.</b>{took} New videos use "
+                               f"them for every scene.{img}")
+        self.play_btn.setVisible(False)
+        self.folder_btn.setVisible(False)
+        self.done_panel.setVisible(True)
+        self._readiness()
+        self.notice.emit("AI pictures are set up.")
 
     def _mode_changed(self) -> None:
         mine = self.mode_script.isChecked()
@@ -356,15 +432,23 @@ class CreatorView(QWidget):
         self._filling = True
         self.table.setRowCount(0)
         if board is not None:
+            from ..creator import factcheck
+
             self.title.setText(board.title)
             self.table.setRowCount(len(board.scenes))
+            marked = factcheck.marks(board)
             for r, sc in enumerate(board.scenes):
-                cells = [str(sc.scene_id), sc.speech_text, sc.visual_prompt, sc.camera_motion.replace("_", " "),
+                notes = marked.get(sc.scene_id, [])
+                cells = [str(sc.scene_id) + (" ⚠" if any(not n.get("changed") for n in notes) else
+                                             " ✓" if notes else ""),
+                         sc.speech_text, sc.visual_prompt, sc.camera_motion.replace("_", " "),
                          "" if sc.sfx_cue == "none" else sc.sfx_cue.replace("_", " ")]
                 for c, text in enumerate(cells):
                     it = QTableWidgetItem(text)
                     if c == 0:
                         it.setFlags(it.flags() & ~Qt.ItemIsEditable)
+                    if c in (0, 1) and notes:
+                        it.setToolTip("<br>".join(_fact_note(n) for n in notes))
                     if c in (3, 4):
                         it.setToolTip("Camera: " + ", ".join(m.replace("_", " ") for m in _motions()) if c == 3 else
                                       "Sound: " + ", ".join(x.replace("_", " ") for x in _cues()))
@@ -383,7 +467,20 @@ class CreatorView(QWidget):
 
         wpm = voice_engine.learned_wpm(self.voice.currentData() or "")
         words = self.board.word_count
-        self.count.setText(f"{len(self.board.scenes)} scenes · {words} words · about {words / wpm * 60:.0f} s")
+        text = f"{len(self.board.scenes)} scenes · {words} words · about {words / wpm * 60:.0f} s"
+        fc = self.board.factcheck or {}
+        claims = fc.get("claims") or []
+        if claims:
+            fixed = sum(1 for c in claims if c.get("changed"))
+            flagged = sum(1 for c in claims if c.get("verdict") != "supported" and not c.get("changed"))
+            ok = len(claims) - fixed - flagged
+            text += f" · facts: {ok} confirmed" + (f", {fixed} fixed ✓" if fixed else "") + \
+                (f", {flagged} to check ⚠" if flagged else "")
+        elif fc.get("skipped"):
+            text += " · facts not checked"
+        self.count.setText(text)
+        self.count.setToolTip(("Fact check: " + fc["skipped"]) if fc.get("skipped") else
+                              "Hover a scene's number for what the fact check found" if claims else "")
 
     def _cell_edited(self, item: QTableWidgetItem) -> None:
         if self._filling or self.board is None:
@@ -494,6 +591,8 @@ class CreatorView(QWidget):
         where = (f"queued for <b>{_esc(result.account)}</b>" if result.account else
                  "in the Automation folder" if self.request().post else "saved")
         warn = "".join(f"<br><span style='color:{theme.WARN}'>⚠ {_esc(w)}</span>" for w in result.warnings)
+        self.play_btn.setVisible(True)
+        self.folder_btn.setVisible(True)
         self.done_text.setText(f"<b>✓ {_esc(result.storyboard.title)}</b> · {result.duration:.0f} s · "
                                f"{c.get('lufs')} LUFS · {c.get('size_mb')} MB · {where}{warn}")
         self.done_panel.setVisible(True)
@@ -586,6 +685,14 @@ def _cues() -> tuple[str, ...]:
     from ..creator.director import SFX_CUES
 
     return SFX_CUES
+
+
+def _fact_note(c: dict) -> str:
+    why = f" <i>{_esc(c['why'])}</i>" if c.get("why") else ""
+    if c.get("changed"):
+        return f"<b>Fixed by the fact check.</b> It said: \u201c{_esc(c.get('sentence', ''))}\u201d{why}"
+    what = "A source says otherwise" if c.get("verdict") == "contradicted" else "No source confirms this"
+    return f"<b>⚠ {what}:</b> \u201c{_esc(c.get('sentence', ''))}\u201d{why}"
 
 
 def _esc(text: str) -> str:

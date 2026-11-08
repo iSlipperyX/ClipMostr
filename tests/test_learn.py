@@ -19,10 +19,80 @@ from ytclip.settings import Settings
 DAY = 86400
 
 
-def row(channel="Pod", lift=1.0, hook="", length=30, rating=None, days_ago=3, views=None):
+def row(channel="Pod", lift=1.0, hook="", length=30, rating=None, days_ago=3, views=None, origin="", clip="",
+        category_id=""):
     return {"channel": channel, "video_id": "abc", "views": views if views is not None else int(1000 * lift),
             "lift": lift, "length": length, "hook": hook, "rating": rating, "score": 70,
-            "posted_at": NOW - days_ago * DAY, "account": "cats"}
+            "posted_at": NOW - days_ago * DAY, "account": "cats", "origin": origin, "clip": clip,
+            "category_id": category_id}
+
+
+def creator_row(title, lift, hook="", category_id="psy"):
+    return row("ClipMonster Video Creator", lift, hook, length=66, origin="creator", clip=title,
+               category_id=category_id)
+
+
+def test_creator_learns_from_its_own_videos_once_there_are_a_few():
+    made = [creator_row("Why you can't stop scrolling", 3.2, "Your brain is being hacked"),
+            creator_row("The 5 second rule", 2.0),
+            creator_row("Stoic habits", 1.0, "Marcus Aurelius did this daily"),
+            creator_row("Sleep myths", 0.4, "Sleep is overrated"),
+            creator_row("Gaming facts", 0.3, "Games are fun", category_id="games")]
+    clips = [row("Pod", 4.0, "He quit on air"), row("Pod", 2.0, "Wait for it"), row("Pod", 1.0, "x"),
+             row("Pod", 0.5, "y"), row("Pod", 0.4, "Boring start"), row("Pod", 0.3, "z")]
+    lessons = Lessons.from_outcomes([Outcome.from_json(r) for r in made + clips])
+    text = lessons.creator_text("psy")
+    assert text.startswith("How your earlier videos from this creator did on this account")
+    assert '- worked: "Why you can\'t stop scrolling", hook "Your brain is being hacked" (3.2×)' in text
+    assert '- flopped: "Sleep myths", hook "Sleep is overrated" (0.4×)' in text
+    assert "Gaming facts" not in text  # another category's, and this one has enough of its own
+    assert "don't copy them" in text
+    assert "ClipMonster Video Creator" not in [c.name for c in lessons.channels.values()]  # not a YouTube channel
+    good, bad = lessons.hook_examples()
+    assert "Your brain is being hacked" not in [h for h, _ in good]  # clips' polish learns from clips
+    # Too few Creator results: your clips' hooks instead, said as such.
+    few = Lessons.from_outcomes([Outcome.from_json(r) for r in made[:2] + clips])
+    text = few.creator_text("psy")
+    assert text.startswith("Hooks that worked and flopped on your TikTok clips") and '"He quit on air"' in text
+    assert Lessons.from_outcomes([Outcome.from_json(r) for r in made[:2]]).creator_text("psy") == ""
+    assert "Creator videos get" in lessons.origin_note()
+
+
+def test_the_creator_brief_carries_the_lessons(monkeypatch):
+    from ytclip.creator import director, orchestrator
+
+    write([creator_row(f"Video {i}", lift, f"Hook {i}") for i, lift in enumerate((3.0, 2.0, 1.0, 0.4, 0.3))])
+    seen = {}
+
+    def fake_write(s, brief, **kw):
+        seen["lessons"] = brief.lessons
+        from test_creator_web import _good_json
+
+        return director.normalise(director.Storyboard.from_json(_good_json()))
+
+    monkeypatch.setattr(director, "write", fake_write)
+    s = Settings().apply({"creator_web": False})
+    orchestrator.VideoCreatorOrchestrator(s).storyboard(orchestrator.CreateRequest(prompt="psychology facts"))
+    assert '"Video 0", hook "Hook 0" (3.0×)' in seen["lessons"]
+    s = s.apply({"learn_from_results": False})
+    orchestrator.VideoCreatorOrchestrator(s).storyboard(orchestrator.CreateRequest(prompt="psychology facts"))
+    assert seen["lessons"] == ""
+
+
+def test_the_script_writer_sees_the_lessons(monkeypatch):
+    from ytclip.creator import director
+
+    monkeypatch.setattr(director, "script_writers", lambda s: ["local"])
+    prompts = []
+
+    def ask(s, task, system, prompt, schema, **kw):
+        prompts.append(prompt)
+        raise ai.AIError("stop here")
+
+    with pytest.raises(director.DirectorError):
+        director.write(Settings(), director.Brief("x", lessons="How your earlier videos did: ..."), ask=ask,
+                       tries=1)
+    assert "How your earlier videos did: ..." in prompts[0]
 
 
 def write(rows, path=None):

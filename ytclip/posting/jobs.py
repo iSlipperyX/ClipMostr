@@ -220,7 +220,7 @@ def replan(store: Store, accounts: Accounts | list[Account], s: Settings, now: f
     now = time.time() if now is None else now
     for a in list(accounts):
         q = store.queue(a.id)
-        go = [i for i in q if i.status == "queued"]
+        go = [i for i in q if i.status == "queued" and i.review != "waiting"]  # held ones wait for your OK
         planned = schedule.plan(go, a.apply(s), now, store.last_post_time(a.id))
         with store.lock:
             for it in q:
