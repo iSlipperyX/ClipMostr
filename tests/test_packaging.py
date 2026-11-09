@@ -181,3 +181,37 @@ def test_real_checks_that_need_nothing_extra():
     assert selftest.check_ffmpeg().startswith("ffmpeg version")
     with pytest.raises(selftest.Missing):
         selftest.check_bundled_tools()  # only in the built app
+
+
+def mac_check_step() -> str:
+    """The script of the release workflow's step that runs the built Mac app's --self-check."""
+    lines = (ROOT / ".github" / "workflows" / "release.yml").read_text(encoding="utf-8").splitlines()
+    at = lines.index("      - name: Check the app starts and says its version")
+    start = next(i for i in range(at, len(lines)) if lines[i].strip() == "run: |") + 1
+    body = []
+    for line in lines[start:]:
+        if line.strip() and not line.startswith(" " * 10):
+            break
+        body.append(line[10:])
+    return "\n".join(body).replace("${{ needs.build.outputs.version }}", "3.6.0")
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the step is a bash script, run on a Mac")
+@pytest.mark.parametrize("code, report, passes", [
+    (0, "ClipMonster 3.6.0: window ok, ffmpeg ok", True),
+    (1, "ClipMonster 3.6.0: window ok, ffmpeg MISSING", False),  # the report says what's missing: it must be shown
+    (0, "ClipMonster 3.5.0: window ok, ffmpeg ok", False),
+])
+def test_the_mac_apps_check_shows_its_report_even_when_it_fails(tmp_path, code, report, passes):
+    import subprocess
+
+    exe = tmp_path / "dist" / "ClipMonster.app" / "Contents" / "MacOS" / "ClipMonster"
+    exe.parent.mkdir(parents=True)
+    exe.write_text(f"#!/bin/sh\necho '{report}'\nexit {code}\n", encoding="utf-8")
+    exe.chmod(0o755)
+    script = tmp_path / "step.sh"
+    script.write_text(mac_check_step(), encoding="utf-8")
+    done = subprocess.run(["bash", "--noprofile", "--norc", "-e", "-o", "pipefail", str(script)], cwd=tmp_path,
+                          capture_output=True, text=True, timeout=60)
+    assert report in done.stdout
+    assert (done.returncode == 0) == passes
