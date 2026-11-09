@@ -35,6 +35,10 @@ concurrency:  # a newer push to main replaces a dev build still being made; rele
 jobs:
   build:
     runs-on: windows-latest
+    outputs:
+      kind: ${{ steps.version.outputs.kind }}
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -211,3 +215,55 @@ jobs:
           gh release delete dev --cleanup-tag --yes || true
           gh release create dev dist/ClipMonster-Setup.exe dist/ClipMonster-windows.zip dist/SHA256SUMS.txt \
             --title "ClipMonster $VERSION" --notes-file dev-notes.md --target "$GITHUB_SHA" --prerelease --latest=false
+
+  # ClipMonster Remote for macOS, added to the same release (or the dev build) once the Windows build is up:
+  # ClipMonster-Remote-mac.dmg for Apple silicon, ClipMonster-Remote-mac-intel.dmg for Intel Macs.
+  mac:
+    needs: build
+    if: needs.build.outputs.kind != 'none'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            dmg: ClipMonster-Remote-mac.dmg
+          - os: macos-15-intel
+            dmg: ClipMonster-Remote-mac-intel.dmg
+    runs-on: ${{ matrix.os }}
+    continue-on-error: ${{ matrix.os == 'macos-15-intel' }}  # an Intel runner going away never holds up a release
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: pip install -e ".[mac,build]"
+      - name: Build
+        run: python packaging/build_mac.py --name "${{ matrix.dmg }}" --version "${{ needs.build.outputs.version }}"
+      - name: Check the app starts and says its version
+        run: |
+          said=$("dist/ClipMonster Remote.app/Contents/MacOS/ClipMonster Remote" --self-check)
+          echo "$said"
+          [[ "$said" == *"${{ needs.build.outputs.version }}"* ]] || { echo "::error::The app says '$said'"; exit 1; }
+      - name: Keep the build
+        if: needs.build.outputs.kind == 'check'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.dmg }}
+          path: dist/${{ matrix.dmg }}
+          retention-days: 7
+      - name: Add it to the release
+        if: needs.build.outputs.kind == 'release' || needs.build.outputs.kind == 'dev'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.kind == 'dev' && 'dev' || needs.build.outputs.tag }}
+        run: |
+          cd dist
+          shasum -a 256 "${{ matrix.dmg }}" > "${{ matrix.dmg }}.sha256"
+          gh release upload "$TAG" "${{ matrix.dmg }}" "${{ matrix.dmg }}.sha256" --clobber --repo "$GITHUB_REPOSITORY"

@@ -3,6 +3,7 @@ dist/
 build/
 *.spec.bak
 packaging/clipmonster.ico
+packaging/clipmonster-remote.icns
 ytclip/_build_info.py
 
 # Python

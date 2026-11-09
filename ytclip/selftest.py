@@ -24,7 +24,7 @@ SAY = "In 1971, twenty-four students went into a basement at Stanford."
 # The app's own modules that pull in the rest: if these import, so does everything they use.
 APP_MODULES = (
     "ytclip.cli", "ytclip.pipeline", "ytclip.engine", "ytclip.weekly", "ytclip.telegram.bot",
-    "ytclip.telegram.pair",
+    "ytclip.telegram.pair", "ytclip.remote.server",
     "ytclip.creator.orchestrator", "ytclip.creator.voice_engine", "ytclip.creator.compositor",
     "ytclip.posting.service", "ytclip.posting.tiktok.browser", "ytclip.posting.cover",
     "ytclip.intelligence.llama_engine", "ytclip.vision.face_tracker", "ytclip.updater", "ytclip.swap",
@@ -76,6 +76,47 @@ def check_python_tls() -> str:
     except ImportError:
         pass
     return f"{ssl.OPENSSL_VERSION}, {len(ctx.get_ca_certs()) or 'system'} certificates"
+
+
+def check_mac_link() -> str:
+    """The Mac app's server: make a certificate the way automation does, and hold a TLS connection with it."""
+    import socket
+    import tempfile
+    import threading
+
+    _need("cryptography")
+    from .remote import certs
+
+    with tempfile.TemporaryDirectory() as d:
+        key, cert = certs.ensure(Path(d), "self-test")
+        server_ctx = certs.server_context(key, cert)
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(1)
+        port = srv.getsockname()[1]
+
+        def serve():
+            conn, _ = srv.accept()
+            try:
+                with server_ctx.wrap_socket(conn, server_side=True) as tls:
+                    tls.sendall(b"ok")
+            except OSError:
+                pass
+
+        t = threading.Thread(target=serve, daemon=True)
+        t.start()
+        ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+        ctx.check_hostname, ctx.verify_mode = False, ssl.CERT_NONE
+        with socket.create_connection(("127.0.0.1", port), timeout=10) as raw, ctx.wrap_socket(raw) as tls:
+            seen = certs.protocol.fingerprint(tls.getpeercert(binary_form=True))
+            got = tls.recv(2)
+        srv.close()
+        t.join(5)
+        if seen != certs.fingerprint_of(cert) or got != b"ok":
+            raise RuntimeError("the certificate the connection showed isn't the one made")
+    import cryptography
+
+    return f"cryptography {cryptography.__version__}, TLS with a pinned certificate"
 
 
 def _qt_app():
@@ -214,6 +255,7 @@ def check_bundled_tools() -> str:
 CHECKS: tuple[tuple[str, Callable[[], str], bool], ...] = (  # (name, check, required in the built app)
     ("ClipMonster's code", check_code, True),
     ("Secure connections", check_python_tls, True),
+    ("Mac app's connection", check_mac_link, True),
     ("Window", check_qt_window, True),
     ("Window's secure connections", check_qt_tls, True),
     ("Video preview", check_qt_video, True),

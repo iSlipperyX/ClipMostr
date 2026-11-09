@@ -732,7 +732,7 @@ def run_auto(argv: list[str]) -> int:
     from . import speed
 
     return pipeline.Runner(db, log=log, priority=speed.set_priority, posting=not args.once,
-                           telegram=not args.once).run(once=args.once)
+                           telegram=not args.once, remote=not args.once).run(once=args.once)
 
 
 def run_qc(argv: list[str]) -> int:

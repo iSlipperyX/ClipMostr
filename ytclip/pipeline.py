@@ -321,7 +321,7 @@ class Runner:
                  history: Callable[[], History] | None = None, picks: Callable[[], PickLog] | None = None,
                  priority: Callable[[str], str] | None = None,
                  fetch: Callable[..., Video] = download, self_update: bool = False, posting: bool = False,
-                 telegram: bool = False):
+                 telegram: bool = False, remote: bool = False):
         self.db = db or JobDB()
         self.load = load
         self._log = log or (lambda m: None)
@@ -344,6 +344,8 @@ class Runner:
         self.poster = None  # its thread while run() runs
         self._telegram = telegram  # run the Telegram bot alongside (telegram/bot.py)
         self.telegram = None  # the bot while run() runs
+        self._remote = remote  # run the Mac app's server alongside (remote/server.py)
+        self.remote = None  # the server while run() runs
 
     # ------------------------------------------------------------ bookkeeping
     def log(self, msg: str) -> None:
@@ -573,6 +575,11 @@ class Runner:
             try:
                 self.telegram.problem(text)
             except Exception:  # noqa: BLE001 - the log has it either way
+                pass
+        if self.remote is not None:
+            try:
+                self.remote.host.problem(text)
+            except Exception:  # noqa: BLE001
                 pass
 
     # ------------------------------------------------------------ updating itself
@@ -1295,6 +1302,21 @@ class Runner:
             return None
         return bot
 
+    def start_remote(self):
+        """The Mac app's server on its threads (it listens once Settings → Mac app is on), hearing posting's
+        news too."""
+        try:
+            from .remote.server import RemoteServer
+
+            server = RemoteServer(self)
+            if self.poster is not None:
+                self.poster.service.listeners.append(server.host.on_event)
+            server.start()
+        except Exception as exc:  # noqa: BLE001 - automation runs without it
+            self.log(f"⚠ The Mac app's server couldn't start: {type(exc).__name__}: {exc}")
+            return None
+        return server
+
     def run(self, stop: Callable[[], bool] | None = None, sleep: Callable[[float], None] = time.sleep,
             once: bool = False) -> int:
         why = self.claim()
@@ -1310,6 +1332,8 @@ class Runner:
         self.poster = self.start_posting() if self._posting else None
         # The Telegram bot, when Settings → Telegram is on (telegram/bot.py): it waits quietly until it is.
         self.telegram = self.start_telegram() if self._telegram else None
+        # The Mac app's server, when Settings → Mac app is on (remote/server.py): it waits quietly until it is.
+        self.remote = self.start_remote() if self._remote else None
         stop = self._stop = stop or (lambda: False)
         try:
             self.health()
@@ -1337,6 +1361,9 @@ class Runner:
             pass
         finally:
             self.stop_prefetch()
+            if self.remote is not None:
+                self.remote.stop()
+                self.remote = None
             if self.telegram is not None:
                 self.telegram.stop()
                 self.telegram = None
@@ -1585,7 +1612,8 @@ def run_headless() -> int:
         sweep_work()  # what a crash left in the work folder
     except Exception:
         pass
-    return Runner(log=file_logger(), priority=speed.set_priority, self_update=True, posting=True, telegram=True).run()
+    return Runner(log=file_logger(), priority=speed.set_priority, self_update=True, posting=True, telegram=True,
+                  remote=True).run()
 
 
 def request_scan(db: JobDB, category_id: str = "") -> None:

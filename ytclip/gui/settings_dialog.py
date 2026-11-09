@@ -18,7 +18,7 @@ from .sign_in_dialog import SignInDialog
 
 ANTHROPIC_KEY_URL = "https://console.anthropic.com/settings/keys"
 GROUPS = ("General", "Download", "Clip finding", "Transcription", "Speed", "AI", "Export", "Captions", "Editing", "Creator", "Layout",
-          "Research", "Picking", "Automation", "Posting", "Telegram", "Updates")
+          "Research", "Picking", "Automation", "Posting", "Telegram", "Mac app", "Updates")
 
 
 
@@ -53,6 +53,7 @@ class SettingsDialog(QDialog):
         self.posting_settings = posting_config.Settings.load()
         self._posting_editors: dict[str, forms.Editor] = {}
         self._telegram = None  # Settings → Telegram's linking panel (telegram_page.py)
+        self._mac = None  # Settings → Mac app's linking panel (mac_page.py)
 
         shell = QHBoxLayout(self)
         shell.setContentsMargins(0, 0, 0, 0)
@@ -224,6 +225,18 @@ class SettingsDialog(QDialog):
                 self._telegram = TelegramLink(lambda: self.result_settings.telegram_token,
                                               lambda: self.result_settings.telegram_on)
                 page.layout().addRow(self._telegram)
+            if group == "Mac app":
+                from .mac_page import MacLink
+
+                note = QLabel("ClipMonster Remote runs ClipMonster from your Mac while this PC does the work: see what "
+                              "automation is doing, watch the videos waiting to post and OK, post or delete them, ask "
+                              "for Creator videos, clips and requests, pause automation or a category, and read the "
+                              "week's report and the log. Only Macs you link here can use it.")
+                note.setWordWrap(True)
+                note.setProperty("muted", True)
+                page.layout().insertRow(0, note)
+                self._mac = MacLink(lambda: self.result_settings.remote_on, lambda: self.result_settings.remote_port)
+                page.layout().addRow(self._mac)
             if group == "Transcription":
                 note = QLabel("When a video has no captions (or for local files) ClipMonster can transcribe "
                               "speech on your computer with Whisper. Transcripts power clip titles, "
@@ -307,6 +320,8 @@ class SettingsDialog(QDialog):
     def done(self, result: int) -> None:
         if self._telegram is not None:
             self._telegram.shutdown()  # the window stops listening to Telegram, so automation's bot can
+        if self._mac is not None:
+            self._mac.shutdown()
         super().done(result)
 
     def _run_setup(self) -> None:

@@ -18,6 +18,7 @@ dependencies = [
     "playwright>=1.48",  # posting to TikTok, in your installed Edge or Chrome
     "anthropic>=1.0",
     "opencv-python-headless>=4.9,<5",  # face tracking for the pro edit (OpenCV 5 dropped the Haar fallback)
+    "cryptography>=42",  # the Mac app's server makes its own HTTPS certificate (remote/certs.py)
 ]
 
 [project.optional-dependencies]
@@ -34,6 +35,9 @@ piper = ["piper-tts>=1.2"]
 # card first (pytorch.org). Without it, ComfyUI (if you run it), your B-roll folder or built-in textures are used.
 diffusion = ["torch>=2.3", "diffusers>=0.30", "transformers>=4.44", "accelerate>=0.33", "safetensors>=0.4"]
 build = ["pyinstaller>=6.10"]
+# ClipMonster Remote, the Mac app (ytclip/mac/; packaging/build_mac.py): its key for each PC goes in the Keychain.
+# It needs only PySide6 from the main list: pip install --no-deps -e . && pip install PySide6-Essentials keyring
+mac = ["keyring>=24"]
 test = ["pytest>=8.2"]
 
 [project.scripts]
@@ -41,6 +45,7 @@ ytclip = "ytclip.cli:main"
 
 [project.gui-scripts]
 clipmonster = "ytclip.gui.app:main"
+clipmonster-remote = "ytclip.mac.app:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -48,7 +53,7 @@ testpaths = ["tests"]
 [tool.setuptools]
 packages = ["ytclip", "ytclip.gui", "ytclip.posting", "ytclip.posting.tiktok", "ytclip.intelligence",
             "ytclip.vision", "ytclip.audio", "ytclip.rendering", "ytclip.compliance",
-            "ytclip.creator"]
+            "ytclip.creator", "ytclip.telegram", "ytclip.remote", "ytclip.mac"]
 package-data = { ytclip = ["fonts/*.ttf", "fonts/licenses/*.txt"] }
 
 [tool.setuptools.dynamic]
