@@ -1,7 +1,8 @@
-"""The Mac's key for each PC, kept in the macOS Keychain (through keyring), never in a plain file there.
+"""Secrets kept in the macOS Keychain (through keyring), never in a plain file there: the Mac's key for each PC
+it's linked to, and the app's own API keys and tokens (SettingsSecrets, for settings.keep_secrets_in).
 
-Where keyring has no safe store (a Linux test machine without a keyring daemon), the key goes in a file only
-this user can read, in the app's support folder.
+Where keyring has no safe store (a Linux test machine without a keyring daemon), they go in a file only this
+user can read, in the app's support folder.
 """
 
 from __future__ import annotations
@@ -9,11 +10,13 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 
-from . import APP_NAME
+from . import APP_NAME, OLD_NAME
 from .paths import support_dir
 
 SERVICE = APP_NAME
+OLD_SERVICE = OLD_NAME  # ClipMonster Remote's keys, read once and kept under SERVICE from then on
 
 
 def _keyring():
@@ -79,6 +82,11 @@ def load(account: str) -> str:
             got = kr.get_password(SERVICE, account)
             if got:
                 return got
+            if ":" in account and sys.platform == "darwin":  # a PC linked while the app was ClipMonster Remote
+                got = kr.get_password(OLD_SERVICE, account)
+                if got:
+                    save(account, got)
+                    return got
         except Exception:  # noqa: BLE001
             pass
     return str(_read_file().get(account) or "")
@@ -94,3 +102,29 @@ def delete(account: str) -> None:
     data = _read_file()
     if data.pop(account, None) is not None:
         _write_file(data)
+
+
+class SettingsSecrets:
+    """Where the app's settings keep their API keys and the Telegram token (settings.keep_secrets_in): the
+    Keychain, as "setting:<name>". Read once each, then remembered, since settings are saved often."""
+
+    def __init__(self):
+        self._known: dict[str, str] = {}
+        self._lock = threading.Lock()
+
+    def get(self, name: str) -> str:
+        with self._lock:
+            if name not in self._known:
+                self._known[name] = load(f"setting:{name}")
+            return self._known[name]
+
+    def set(self, name: str, value: str) -> None:
+        value = str(value or "")
+        with self._lock:
+            if self._known.get(name) == value:
+                return
+            if value:
+                save(f"setting:{name}", value)
+            else:
+                delete(f"setting:{name}")
+            self._known[name] = value

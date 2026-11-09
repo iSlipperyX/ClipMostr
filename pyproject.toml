@@ -35,9 +35,10 @@ piper = ["piper-tts>=1.2"]
 # card first (pytorch.org). Without it, ComfyUI (if you run it), your B-roll folder or built-in textures are used.
 diffusion = ["torch>=2.3", "diffusers>=0.30", "transformers>=4.44", "accelerate>=0.33", "safetensors>=0.4"]
 build = ["pyinstaller>=6.10"]
-# ClipMonster Remote, the Mac app (ytclip/mac/; packaging/build_mac.py): its key for each PC goes in the Keychain.
-# It needs only PySide6 from the main list: pip install --no-deps -e . && pip install PySide6-Essentials keyring
-mac = ["keyring>=24"]
+# ClipMonster for Mac (ytclip/mac/; packaging/build_mac.py): pip install -e ".[mac]" on a Mac. Its API keys and
+# its key for each PC go in the Keychain, and Deno (for YouTube) comes with it; whisper.cpp stands in for
+# faster-whisper, and Playwright (posting, on the PC) isn't used.
+mac = ["keyring>=24", "deno>=2.4"]
 test = ["pytest>=8.2"]
 
 [project.scripts]
@@ -45,7 +46,7 @@ ytclip = "ytclip.cli:main"
 
 [project.gui-scripts]
 clipmonster = "ytclip.gui.app:main"
-clipmonster-remote = "ytclip.mac.app:main"
+clipmonster-mac = "ytclip.mac.app:main"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

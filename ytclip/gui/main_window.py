@@ -7,7 +7,7 @@ import time
 from dataclasses import asdict, fields, replace
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QSettings, QSize, Qt, QTimer, QUrl, Signal
+from PySide6.QtCore import QEvent, QObject, QSettings, QSize, Qt, QTimer, QUrl, Signal
 from PySide6.QtGui import QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtMultimedia import QMediaPlayer
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDoubleSpinBox, QFileDialog, QFrame,
@@ -38,6 +38,7 @@ from .categories_tab import Categories
 from .posting_pages import AccountsPage, PerformancePage, QueuePage
 from .posting_state import PostingState
 from .creator_view import CreatorView
+from .flow import flow_widget
 from .research import Research
 from .settings_dialog import SettingsDialog
 from .status_bars import LabeledBar
@@ -79,6 +80,38 @@ def _panel(widget: QWidget | None = None) -> QFrame:
     return frame
 
 
+class _Fitter(QObject):
+    """Fits the Studio's rows to the room they get (a 13-inch MacBook's screen is 1440 points wide): the
+    timeline's hint shows only while the legend fits on one row, and the volume only while the transport does."""
+
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win
+
+    def eventFilter(self, obj, ev):  # noqa: N802
+        if ev.type() == QEvent.Resize:
+            self.fit(obj, ev.size().width())
+        return False
+
+    def fit(self, obj, width: int) -> None:
+        w = self.win
+        margins = obj.layout().contentsMargins()
+        room = width - margins.left() - margins.right()
+        parts = getattr(w, "_legend_parts", ())
+        if parts and parts[1].parent() is obj:
+            # everything on one row, the hint included: else the hint goes (it's the timeline's tooltip too)
+            need = sum(p.sizeHint().width() for p in parts) + 6 + 3 * 6
+            parts[2].setVisible(room >= need)
+        transport = getattr(w, "_transport", None)
+        if transport is not None and transport[1][1].parent() is obj:
+            row, optional = transport
+            # the row's own width as it is, plus whatever of the optional ones is hidden now
+            need = row.sizeHint().width() + sum(o.sizeHint().width() + row.spacing()
+                                                for o in optional if o.isHidden())
+            for o in optional:
+                o.setVisible(room >= need)
+
+
 def _label(text: str, name: str = "", muted: bool = False) -> QLabel:
     lab = QLabel(text)
     if name:
@@ -105,6 +138,9 @@ class QueueItem(QWidget):
 
     def show_state(self, p: Project, msg: str = "", frac: float | None = None,
                    status: "steps.Status | None" = None) -> None:
+        if getattr(p, "remote", None) is not None:
+            self.show_remote(p, p.remote)  # type: ignore[attr-defined]
+            return
         saved_title = (getattr(p, "_saved", None) or {}).get("title")
         name = p.video.title if p.video else saved_title or (p.source if is_url(p.source) else Path(p.source).name)
         self.title.setText(self.title.fontMetrics().elidedText(name, Qt.ElideRight, 250))
@@ -138,6 +174,57 @@ class QueueItem(QWidget):
             self.bar.set_fraction(frac)
 
 
+    def show_remote(self, p: Project, job: dict) -> None:
+        """A video ClipMonster for Mac sent to its PC to make (mac/pc_jobs.py): how it's getting on there."""
+        name = job.get("title") or job.get("name") or p.source
+        self.title.setText(self.title.fontMetrics().elidedText(name, Qt.ElideRight, 250))
+        self.title.setToolTip(name)
+        state = job.get("status") or "queued"
+        status = steps.Status.from_json(job.get("progress"))
+        colour, tip = theme.MUTED, ""
+        if job.get("note") and state in ("queued", "working", "fetching"):  # waiting for the PC to be back
+            self.sub.setText(job["note"])
+            self.sub.setToolTip("")
+            self.sub.setStyleSheet(f"color:{theme.WARN}; font-size:9pt;")
+            self.bar.setVisible(False)
+            return
+        if state == "sending":
+            text = "Sending it to your PC"
+            self.bar.set_fraction(job.get("frac"))
+        elif state == "queued":
+            ahead = int(job.get("waiting") or 0)
+            text = "On your PC · waiting" + (f" ({ahead} ahead)" if ahead else "")
+            self.bar.set_fraction(0.0, "Waiting")
+        elif state == "working":
+            colour = theme.ACCENT_2
+            if status is not None and status.step:
+                pct = f" {status.step_frac:.0%}" if status.step_frac is not None else ""
+                text = f"On your PC · Step {status.index}/{status.count} · {status.label}{pct}"
+                tip = status.summary()
+                self.bar.set_status(status)
+            else:
+                text = f"On your PC · {job.get('stage') or 'Starting'}"
+                self.bar.set_fraction(None)
+        elif state == "fetching":
+            colour = theme.ACCENT_2
+            text = job.get("stage") or "Bringing the clips to this Mac"
+            self.bar.set_fraction(job.get("frac"))
+        elif state == "done":
+            colour = theme.GOOD
+            n = int(job.get("clips") or 0)
+            text = f"Made on your PC ✓ · {n} clip{'s' if n != 1 else ''}"
+        elif state == "failed":
+            colour = theme.BAD
+            text = f"Your PC couldn't: {str(job.get('error') or '')[:80]}"
+            tip = str(job.get("error") or "")
+        else:  # cancelled, or gone from the PC
+            text = str(job.get("stage") or "Stopped")
+        self.sub.setText(text)
+        self.sub.setToolTip(tip)
+        self.sub.setStyleSheet(f"color:{colour}; font-size:9pt;")
+        self.bar.setVisible(state in ("sending", "queued", "working", "fetching"))
+
+
 class _Relay(QObject):
     """Hands lines from a worker thread to the window's log, on the window's own thread."""
 
@@ -145,6 +232,10 @@ class _Relay(QObject):
 
 
 class MainWindow(QMainWindow):
+    # ClipMonster for Mac (ytclip/mac/window.py) is this window with only its Create pages, the Studio and the
+    # Library: automation, posting and the rest stay on the PC it links to, whose own pages it adds itself.
+    MAC = False
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME}  ·  v{__version__}")
@@ -318,7 +409,12 @@ class MainWindow(QMainWindow):
         outer = QVBoxLayout(content)
         outer.setContentsMargins(14, 10, 14, 8)
         outer.setSpacing(10)
-        outer.addLayout(self._build_header())
+        self.outer = outer
+        self.header = QWidget()  # (the Mac shows it with its Create pages only)
+        head = self._build_header()
+        head.setContentsMargins(0, 0, 0, 0)
+        self.header.setLayout(head)
+        outer.addWidget(self.header)
         self.banner = UpdateBanner(self)
         outer.addWidget(self.banner)
         shell.addWidget(content, 1)
@@ -329,6 +425,25 @@ class MainWindow(QMainWindow):
         self.library.reopen.connect(lambda src: (self.add_sources([src]), self.tabs.setCurrentIndex(0)))
         self.tabs.addTab(self.library, "Library", "library")
         self.tabs.currentChanged.connect(lambda i: self.library.refresh() if i == 1 else None)
+        if self.MAC:
+            self.research = self.creator = self.posting = self.categories = self.automation = None
+            self.accounts_page = self.queue_page = self.performance = None
+            self.research_tab = -1
+            self.tray = None
+            self._tray_account = ""
+            self.library.clean_up.connect(self._clean_up)
+        else:
+            self._build_pc_pages()
+        self._build_more(self.tabs)
+        outer.addWidget(self.tabs, 1)
+        outer.addWidget(self._build_footer())
+        self.setCentralWidget(root)
+
+    def _build_more(self, tabs: NavTabs) -> None:
+        """More pages after these (ClipMonster for Mac adds its linked PC's)."""
+
+    def _build_pc_pages(self) -> None:
+        """Research, the Creator, and the pages that automate and post: the PC app's alone."""
         self.research = Research(lambda: self.settings, self._setting_changed)
         self.research.send.connect(self._research_send)
         self.research.queue.connect(self._research_queue)
@@ -378,9 +493,6 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.queue_page, "Queue", "queue")
         self.performance = PerformancePage(self.posting)
         self.tabs.addTab(self.performance, "Performance", "performance")
-        outer.addWidget(self.tabs, 1)
-        outer.addWidget(self._build_footer())
-        self.setCentralWidget(root)
 
     def _add_account(self) -> None:
         """"Add a new account…" from a category: the account wizard."""
@@ -492,7 +604,7 @@ class MainWindow(QMainWindow):
 
             # Every video in the Studio's list, opened yet or not (restored ones load when clicked).
             studio = {p.video.id if p.video is not None else source_id(p.source) for p in self.projects}
-            return (studio - {""}) | busy_ids(self.automation.db)
+            return (studio - {""}) | (busy_ids(self.automation.db) if self.automation is not None else set())
 
         dlg = CleanupDialog(lambda: self.settings, self._setting_changed, busy, self)
         dlg.cleaned.connect(self._notice)
@@ -618,6 +730,7 @@ class MainWindow(QMainWindow):
         return box
 
     def _build_center(self) -> QWidget:
+        self._fitter = _Fitter(self)
         # Preview + transport
         prev_box = _panel()
         pl = QVBoxLayout(prev_box)
@@ -677,16 +790,20 @@ class MainWindow(QMainWindow):
         tr.addStretch()
         tr.addWidget(self.time_label)
         tr.addSpacing(10)
-        tr.addWidget(_label("🔊", muted=True))
+        speaker = _label("🔊", muted=True)
+        tr.addWidget(speaker)
         tr.addWidget(vol)
         pl.addLayout(tr)
+        self._transport = (tr, (speaker, vol))  # the volume gives way first in a narrower window
+        prev_box.installEventFilter(self._fitter)
 
         # Timeline + legend
         tl_box = _panel()
         tl = QVBoxLayout(tl_box)
         tl.setContentsMargins(10, 8, 10, 8)
         legend = QHBoxLayout()
-        legend.addWidget(_label("Interest", "h2"))
+        interest = _label("Interest", "h2")
+        legend.addWidget(interest, 0, Qt.AlignTop)
         legend.addSpacing(6)
         self.legend_boxes: dict[str, QCheckBox] = {}
         self.timeline_defaults = {"heatmap", "keywords"}  # the rest are one click away
@@ -696,16 +813,22 @@ class MainWindow(QMainWindow):
             cb.setStyleSheet(f"QCheckBox {{ color: {colour}; }}")
             cb.toggled.connect(self._legend_toggled)
             self.legend_boxes[key] = cb
-            legend.addWidget(cb)
-        legend.addStretch()
-        legend.addWidget(_label("scroll = zoom · drag clip edges to trim · right-click for more", muted=True))
+        signals = flow_widget(self.legend_boxes.values(), spacing=10)  # wraps in a narrower window
+        legend.addWidget(signals, 1)
+        hint_text = "scroll = zoom · drag clip edges to trim · right-click for more"
+        self.timeline_hint = _label(hint_text, muted=True)  # shown only while everything fits on one row
+        legend.addWidget(self.timeline_hint, 0, Qt.AlignTop)
         fit = QPushButton("Fit")
         fit.setObjectName("icon")
+        fit.setToolTip("Show the whole video")
         fit.clicked.connect(lambda: self.timeline.zoom_all())
-        legend.addWidget(fit)
+        legend.addWidget(fit, 0, Qt.AlignTop)
         tl.addLayout(legend)
+        self._legend_parts = (interest, signals, self.timeline_hint, fit)
+        tl_box.installEventFilter(self._fitter)
 
         self.timeline = Timeline()
+        self.timeline.setToolTip(hint_text[0].upper() + hint_text[1:])
         self.timeline.visible = set(self.timeline_defaults)
         self.timeline.seekRequested.connect(self.seek)
         self.timeline.clipSelected.connect(lambda i: self.select_clip(i, seek=False))
@@ -989,6 +1112,16 @@ class MainWindow(QMainWindow):
         if saved:
             p.status = "saved"
             p._saved = saved  # type: ignore[attr-defined]
+        self._list_project(p)
+        if not saved:
+            self._queue_prepare(p)
+            if self.queue.currentRow() < 0:
+                self.queue.setCurrentRow(self.queue.count() - 1)
+        self._save_session()
+        return p
+
+    def _list_project(self, p: Project) -> None:
+        """A row for `p` at the end of the Videos list."""
         self.projects.append(p)
         item = QListWidgetItem()
         widget = QueueItem(p)
@@ -997,12 +1130,6 @@ class MainWindow(QMainWindow):
         self.queue.setItemWidget(item, widget)
         self.items[id(p)] = (item, widget)
         widget.show_state(p)
-        if not saved:
-            self._queue_prepare(p)
-            if self.queue.currentRow() < 0:
-                self.queue.setCurrentRow(self.queue.count() - 1)
-        self._save_session()
-        return p
 
     def _queue_prepare(self, p: Project) -> None:
         settings = self.settings.copy()
@@ -1720,9 +1847,10 @@ class MainWindow(QMainWindow):
         self.settings.save()
         forms.refresh(self.tune_editors, new)
         forms.refresh(self.export_editors, new)
-        self.research.settings_changed()
-        self.categories.reload()
-        self.automation.categories_changed()
+        if not self.MAC:
+            self.research.settings_changed()
+            self.categories.reload()
+            self.automation.categories_changed()
         self.layout_tab.set_settings(new, refresh_editors=True)
         self._update_preview_frame()
         self._update_out_label()
@@ -1748,8 +1876,11 @@ class MainWindow(QMainWindow):
         self._notice(f"Layout applied: {name}")
 
     def _open_settings(self, tab: str = "") -> None:
-        self.categories.commit()  # a category name still being typed would be lost when the dialog's copy comes back
-        dlg = SettingsDialog(self.settings, self, tab)
+        if self.categories is not None:
+            self.categories.commit()  # a category name still being typed would be lost when the dialog's copy comes back
+        from .settings_dialog import GROUPS, MAC_GROUPS
+
+        dlg = SettingsDialog(self.settings, self, tab, MAC_GROUPS if self.MAC else GROUPS)
         channel, appearance = self.settings.update_channel, self.settings.appearance
         if dlg.exec():
             self._apply_settings(dlg.result_settings)
@@ -1763,7 +1894,7 @@ class MainWindow(QMainWindow):
                 self.banner.check(manual=False)  # a new channel: see what it has straight away
         elif dlg.signed_in:  # cancelled, but the sign-in just made still counts
             self._apply_settings(self.settings.copy(cookies_browser=youtube_login.CHOICE))
-        if dlg.signed_in and self.settings.cookies_browser == youtube_login.CHOICE:
+        if dlg.signed_in and self.settings.cookies_browser == youtube_login.CHOICE and self.automation is not None:
             self.automation.end_pause_after_sign_in()
 
     # ================================================================== export
@@ -1874,7 +2005,10 @@ class MainWindow(QMainWindow):
         box.addButton(QMessageBox.Close)
         box.exec()
         if box.clickedButton() is check:
-            self.banner.check(manual=True)
+            self._check_updates_now()
+
+    def _check_updates_now(self) -> None:
+        self.banner.check(manual=True)
 
     def dragEnterEvent(self, e) -> None:
         if e.mimeData().hasUrls() or e.mimeData().hasText():
@@ -1894,7 +2028,7 @@ class MainWindow(QMainWindow):
     def _save_session(self) -> None:
         data = []
         for p in self.projects:
-            if p.status == "error":
+            if p.status == "error" or getattr(p, "remote", None) is not None:  # (a Mac's PC videos keep their own list)
                 continue
             saved = getattr(p, "_saved", None)
             clips = [asdict(c) for c in p.clips] if p.clips else (saved or {}).get("clips", [])
@@ -1928,13 +2062,14 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e) -> None:
         self._closing = True
-        self.posting.stop()
+        if self.posting is not None:
+            self.posting.stop()
         if self.tray is not None:
             self.tray.hide()
         self.banner.shutdown()
-        self.research.shutdown()
-        self.categories.shutdown()
-        self.automation.shutdown()
+        for page in (self.research, self.categories, self.automation):
+            if page is not None:
+                page.shutdown()
         self._save_session()
         self.settings.save()
         self.qs.setValue("geometry", self.saveGeometry())

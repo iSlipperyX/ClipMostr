@@ -190,6 +190,16 @@ class NavTabs(QTabWidget):
         if it is not None:
             it.setText(text)
 
+    def set_hidden(self, index: int, hidden: bool) -> None:
+        """Hide a page's row in the sidebar (or show it again); the page stays where it is."""
+        it = self.sidebar.item_for(index)
+        if it is not None:
+            it.setHidden(hidden)
+
+    def is_hidden(self, index: int) -> bool:
+        it = self.sidebar.item_for(index)
+        return it is None or it.isHidden()
+
     def set_badge(self, index: int, count: int) -> None:
         """A count at the right of the page's row (0 hides it)."""
         it = self.sidebar.item_for(index)

@@ -38,6 +38,11 @@ def threads(value: str, logical: int | None = None) -> int:
 
 
 def use_gpu(s) -> bool:
+    """Whisper on the graphics card. A PC's card only at Full power (it may be busy with a game); a Mac's
+    graphics (Metal) at Balanced too: on Apple silicon they share its memory, and are quicker and cooler than
+    its CPU for this."""
+    if sys.platform == "darwin":
+        return level(s.speed) != "quiet" and bool(s.gpu_whisper)
     return level(s.speed) == "full" and bool(s.gpu_whisper)
 
 

@@ -2,9 +2,11 @@
 
 from __future__ import annotations
 
+import platform
 import re
 import shutil
 import subprocess
+import sys
 import threading
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -18,6 +20,14 @@ NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 @lru_cache(maxsize=None)
 def ffmpeg_exe() -> str:
+    """The ffmpeg to run: the one the app brings (ClipMonster for Mac's, in ClipMonster.app; the PC app's is
+    found on its PATH), else an installed one, else imageio-ffmpeg's."""
+    if getattr(sys, "frozen", False):
+        from . import bundled
+
+        own = bundled.find("ffmpeg", "ffmpeg")
+        if own is not None:
+            return str(own)
     found = shutil.which("ffmpeg")
     if found:
         return found
@@ -168,14 +178,19 @@ def probe(path: Path) -> MediaInfo:
 
 
 HW_ENCODERS = ("h264_nvenc", "h264_amf", "h264_qsv")
+if sys.platform == "darwin":  # the Mac's media engine: every Mac since 2011 has one
+    HW_ENCODERS = ("h264_videotoolbox",)
+# Apple silicon's media engine takes a constant quality; an Intel Mac's only a bit rate.
+VT_QUALITY = sys.platform == "darwin" and platform.machine() == "arm64"
 
 
 @lru_cache(maxsize=None)
 def encoder_works(name: str) -> bool:
+    """Whether this ffmpeg can encode with `name` here, tried with the very options an export uses."""
     try:
         subprocess.run([ffmpeg_exe(), "-v", "error", "-f", "lavfi", "-i", "color=c=black:s=256x256:d=0.2",
-                        "-c:v", name, "-f", "null", "-"], check=True, capture_output=True, timeout=20,
-                       creationflags=NO_WINDOW)
+                        *encoder_args(name, 23), "-pix_fmt", "yuv420p", "-f", "null", "-"], check=True,
+                       capture_output=True, timeout=20, creationflags=NO_WINDOW)
         return True
     except Exception:
         return False
@@ -199,4 +214,11 @@ def encoder_args(encoder: str, quality: int) -> list[str]:
                 "-qp_i", q, "-qp_p", str(quality + 2), "-qp_b", str(quality + 4)]
     if encoder == "h264_qsv":
         return ["-c:v", "h264_qsv", "-preset", "medium", "-global_quality", q]
+    if encoder == "h264_videotoolbox":
+        if VT_QUALITY:  # -q:v runs 1-100, higher is better: CRF 18 is about 65, 23 about 52, 28 about 40
+            return ["-c:v", "h264_videotoolbox", "-q:v", str(round(min(85, max(30, 110 - 2.5 * quality)))),
+                    "-allow_sw", "1"]
+        rate = round(max(2.0, min(24.0, 12.0 * 0.86 ** (quality - 20))), 1)  # Mbit/s for 1080p: CRF 20 is 12
+        return ["-c:v", "h264_videotoolbox", "-b:v", f"{rate}M", "-maxrate", f"{rate * 1.5:.1f}M",
+                "-bufsize", f"{rate * 2:.0f}M", "-allow_sw", "1"]
     return ["-c:v", "libx264", "-preset", "veryfast", "-crf", q]

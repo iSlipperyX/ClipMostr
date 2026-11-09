@@ -197,8 +197,9 @@ class Categories(QWidget):
         self.sport.activated.connect(lambda _i: self._pick_sport(self.sport.currentData()))
         form.addRow("Sport", self.sport)
         self.send_to_macs = QCheckBox("Send new clips to my Macs")
-        self.send_to_macs.setToolTip("Each new clip also lands in ClipMonster Remote's Sports clips inbox on every "
-                                     "linked Mac, with a notification, ready to watch and save (Settings → Mac app)")
+        self.send_to_macs.setToolTip("Each new clip also lands in the Sports clips inbox of ClipMonster for Mac on "
+                                     "every linked Mac, with a notification, ready to watch and save (Settings → Mac "
+                                     "app)")
         self.send_to_macs.toggled.connect(lambda v: self._set("send_to_macs", bool(v)))
         form.addRow("", self.send_to_macs)
         self.sport_note = WrapLabel()

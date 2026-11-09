@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 from typing import Callable
 
@@ -18,9 +19,14 @@ from ..settings import Settings
 
 
 def reveal(path: Path) -> None:
-    """Open Explorer with the file selected."""
+    """Open Explorer (Finder on a Mac) with the file selected."""
     try:
-        subprocess.Popen(["explorer", "/select,", str(path)])
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", "-R", str(path)])
+        elif sys.platform == "win32":
+            subprocess.Popen(["explorer", "/select,", str(path)])
+        else:
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
     except OSError:
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(path.parent)))
 

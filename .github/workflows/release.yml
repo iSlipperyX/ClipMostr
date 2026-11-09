@@ -218,8 +218,10 @@ jobs:
           gh release create dev dist/ClipMonster-Setup.exe dist/ClipMonster-windows.zip dist/SHA256SUMS.txt \
             dist/install-linux.sh --title "ClipMonster $VERSION" --notes-file dev-notes.md --target "$GITHUB_SHA" --prerelease --latest=false
 
-  # ClipMonster Remote for macOS, added to the same release (or the dev build) once the Windows build is up:
-  # ClipMonster-Remote-mac.dmg for Apple silicon, ClipMonster-Remote-mac-intel.dmg for Intel Macs.
+  # ClipMonster for Mac, added to the same release (or the dev build) once the Windows build is up:
+  # ClipMonster-mac.dmg for Apple silicon (Whisper and the local AI on its graphics, through Metal) and
+  # ClipMonster-mac-intel.dmg for Intel Macs (on the CPU). whisper.cpp and llama.cpp come from the cache the
+  # Tests workflow keeps when they were built from the same scripts, else they're built here.
   mac:
     needs: build
     if: needs.build.outputs.kind != 'none'
@@ -228,9 +230,9 @@ jobs:
       matrix:
         include:
           - os: macos-latest
-            dmg: ClipMonster-Remote-mac.dmg
+            dmg: ClipMonster-mac.dmg
           - os: macos-15-intel
-            dmg: ClipMonster-Remote-mac-intel.dmg
+            dmg: ClipMonster-mac-intel.dmg
     runs-on: ${{ matrix.os }}
     continue-on-error: ${{ matrix.os == 'macos-15-intel' }}  # an Intel runner going away never holds up a release
     env:
@@ -246,11 +248,27 @@ jobs:
           cache-dependency-path: pyproject.toml
       - name: Install
         run: pip install -e ".[mac,build]"
+      - name: Whisper and the local AI from an earlier build
+        id: tools
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build/mac-tools/whisper-cpp
+            build/mac-tools/llama-cpp
+          key: mac-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packaging/build_whisper_cpp.py', 'packaging/build_llama_cpp.py') }}
       - name: Build
         run: python packaging/build_mac.py --name "${{ matrix.dmg }}" --version "${{ needs.build.outputs.version }}"
+      - name: Keep Whisper and the local AI for the next build
+        if: steps.tools.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            build/mac-tools/whisper-cpp
+            build/mac-tools/llama-cpp
+          key: ${{ steps.tools.outputs.cache-primary-key }}
       - name: Check the app starts and says its version
         run: |
-          said=$("dist/ClipMonster Remote.app/Contents/MacOS/ClipMonster Remote" --self-check)
+          said=$(dist/ClipMonster.app/Contents/MacOS/ClipMonster --self-check)
           echo "$said"
           [[ "$said" == *"${{ needs.build.outputs.version }}"* ]] || { echo "::error::The app says '$said'"; exit 1; }
       - name: Keep the build

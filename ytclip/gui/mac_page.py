@@ -48,12 +48,14 @@ class MacLink(QWidget):
         v.setContentsMargins(0, 6, 0, 0)
         v.setSpacing(8)
         how = forms.WrapLabel(
-            f"1. On your Mac, download <a href='{DOWNLOAD}' style='color:{theme.ACCENT_2}'>ClipMonster Remote</a> "
-            "(ClipMonster-Remote-mac.dmg) and drag it to Applications.<br>2. Tick <b>Let my Mac run ClipMonster</b> "
+            f"1. On your Mac, download <a href='{DOWNLOAD}' style='color:{theme.ACCENT_2}'>ClipMonster for Mac</a> "
+            "(ClipMonster-mac.dmg; ClipMonster-mac-intel.dmg for an Intel Mac) and drag it to Applications.<br>"
+            "2. Tick <b>Let my Mac run ClipMonster</b> "
             "above, Save, and keep automation running (Automation tab, or Start with Windows): the server runs with "
             "it. The first time, Windows asks whether ClipMonster may use the network: allow it on private networks."
-            "<br>3. Press <b>Link a Mac</b>. In the Mac app, type the IP address, port and authorization code it "
-            "shows (or pick this PC from the list there and type the code).")
+            "<br>3. Press <b>Link a Mac</b>. In ClipMonster on the Mac, under <b>Your PC</b> → <b>Link your PC</b>, "
+            "type the IP address, port and authorization code it shows (or pick this PC from the list there and "
+            "type the code).")
         how.setOpenExternalLinks(True)
         how.setProperty("muted", True)
         v.addWidget(how)
@@ -74,7 +76,7 @@ class MacLink(QWidget):
         box = QVBoxLayout(self.code_box)
         box.setContentsMargins(14, 10, 14, 10)
         box.setSpacing(6)
-        type_these = QLabel("In ClipMonster Remote on your Mac, type:")
+        type_these = QLabel("In ClipMonster on your Mac (Your PC → Link your PC), type:")
         type_these.setStyleSheet("font-weight: 600;")
         box.addWidget(type_these)
         grid = QGridLayout()

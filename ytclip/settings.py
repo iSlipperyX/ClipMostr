@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 import tempfile
 import time
 from dataclasses import asdict, dataclass, field, fields, replace
@@ -15,8 +16,16 @@ from .trending import CATEGORIES
 APP_NAME = "ClipMonster"
 
 
+MAC = sys.platform == "darwin"
+# A Mac keeps an app's files in ~/Library: settings and models in Application Support, scratch work in Caches.
+MAC_SUPPORT = Path.home() / "Library" / "Application Support"
+MAC_CACHES = Path.home() / "Library" / "Caches"
+
+
 def app_dir() -> Path:
-    base = os.environ.get("APPDATA") or str(Path.home() / ".config")
+    """%APPDATA%\\ClipMonster on Windows, ~/Library/Application Support/ClipMonster on a Mac, ~/.config/ClipMonster
+    on Linux: settings, presets, the session and automation's state."""
+    base = os.environ.get("APPDATA") or str(MAC_SUPPORT if MAC else Path.home() / ".config")
     path = Path(base) / APP_NAME
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -24,8 +33,9 @@ def app_dir() -> Path:
 
 def local_dir(*parts: str) -> Path:
     """%LOCALAPPDATA%\\ClipMonster (or a folder in it): this PC's own big or short-lived files, never
-    synced or roamed: models, updates, the previous version and temporary work."""
-    base = os.environ.get("LOCALAPPDATA") or str(Path.home() / ".cache")
+    synced or roamed: models, updates, the previous version and temporary work. On a Mac they go beside the
+    settings in Application Support (which nothing tidies away, unlike Caches: a model is gigabytes)."""
+    base = os.environ.get("LOCALAPPDATA") or str(MAC_SUPPORT if MAC else Path.home() / ".cache")
     path = Path(base, APP_NAME, *parts)
     path.mkdir(parents=True, exist_ok=True)
     return path
@@ -37,8 +47,25 @@ def models_dir() -> Path:
 
 
 def work_dir() -> Path:
-    """Where every step's temporary files go (cleanup.sweep_work empties what a crash left behind)."""
+    """Where every step's temporary files go (cleanup.sweep_work empties what a crash left behind). On a Mac,
+    in ~/Library/Caches, where scratch files belong."""
+    if MAC and not os.environ.get("LOCALAPPDATA"):
+        path = MAC_CACHES / APP_NAME / "work"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
     return local_dir("work")
+
+
+# The keys in settings.json (Claude, Gemini, YouTube, Telegram). ClipMonster for Mac keeps them in the Mac's
+# Keychain instead (keep_secrets_in): settings.json then holds them blank, and Settings.load fills them in.
+SECRETS = ("ai_api_key", "gemini_api_key", "youtube_api_key", "telegram_token")
+_secret_store = None
+
+
+def keep_secrets_in(store) -> None:
+    """`store` has get(name) -> str and set(name, value) (value "" forgets it); None: settings.json again."""
+    global _secret_store
+    _secret_store = store
 
 
 def work_folder(prefix: str) -> "tempfile.TemporaryDirectory[str]":
@@ -50,7 +77,7 @@ def work_folder(prefix: str) -> "tempfile.TemporaryDirectory[str]":
 @dataclass
 class Settings:
     # General
-    output_dir: str = str(Path.home() / "Videos" / APP_NAME)
+    output_dir: str = str(Path.home() / ("Movies" if MAC else "Videos") / APP_NAME)
     cache_dir: str = ""  # "" = <output_dir>/.downloads
     folder_template: str = "{channel}/{date} {title} [{id}]"
     file_template: str = "{rank:02d} - {time} - {label}"
@@ -294,7 +321,7 @@ class Settings:
     telegram_on: bool = False
     telegram_token: str = ""  # from @BotFather
     telegram_send: str = "review, new, posted, news, problems, weekly"  # telegram/bot.SENDS
-    # The Mac app (remote/): automation's HTTPS server for ClipMonster Remote on a Mac. The Macs it answers are in
+    # The Mac app (remote/): automation's HTTPS server for ClipMonster for Mac. The Macs it answers are in
     # remote.json, not here.
     remote_on: bool = False
     remote_port: int = 47320  # remote/protocol.PORT
@@ -346,10 +373,10 @@ class Settings:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 break
             except FileNotFoundError:
-                return cls()
+                return _with_secrets(cls()) if _secret_store is not None else cls()
             except (OSError, ValueError):  # held for a moment by another program (a virus scanner), or broken
                 if attempt == tries - 1:
-                    return cls()
+                    return _with_secrets(cls()) if _secret_store is not None else cls()
                 time.sleep(0.1)
         if isinstance(data, dict) and data.get("transcribe") == "always" and "speed" not in data:
             # Saved before 2.5.0, when "Always" was the only way to get Whisper's captions on clips that
@@ -362,12 +389,22 @@ class Settings:
                            "cleanup_auto": True}
         from .categories import migrate_settings  # niches before 3.2
 
-        return cls().apply(migrate(migrate_settings(data)))
+        out = cls().apply(migrate(migrate_settings(data)))
+        return _with_secrets(out) if _secret_store is not None else out
 
     def save(self, path: Path | None = None) -> None:
         """Write settings.json whole or not at all: automation reads it while you type in the app."""
         path = path or app_dir() / "settings.json"
-        text = json.dumps(asdict(self), indent=2)
+        data = asdict(self)
+        if _secret_store is not None:  # in the Keychain, not the file
+            for name in SECRETS:
+                try:
+                    if _secret_store.get(name) != data[name]:
+                        _secret_store.set(name, data[name])
+                    data[name] = ""
+                except Exception:  # noqa: BLE001 - no Keychain: the file keeps it, as on a PC
+                    pass
+        text = json.dumps(data, indent=2)
         tmp = path.with_name(path.name + ".tmp")
         tmp.write_text(text, encoding="utf-8")
         for attempt in range(5):
@@ -378,6 +415,22 @@ class Settings:
                 time.sleep(0.05)
         tmp.unlink(missing_ok=True)
         path.write_text(text, encoding="utf-8")
+
+
+def _with_secrets(s: "Settings") -> "Settings":
+    """The keys from the secret store; a key still in the file (from before) moves into it."""
+    changes = {}
+    for name in SECRETS:
+        try:
+            kept = _secret_store.get(name)
+            in_file = getattr(s, name)
+            if kept:
+                changes[name] = kept
+            elif in_file:
+                _secret_store.set(name, in_file)
+        except Exception:  # noqa: BLE001
+            continue
+    return s.copy(**changes) if changes else s
 
 
 # ---------------------------------------------------------------- old files
@@ -591,6 +644,10 @@ class Field:
 
 AI_PROVIDERS = (("claude", "Claude (Anthropic)"), ("gemini", "Gemini (Google)"),
                 ("local", "Local AI on this PC (free, private)"))  # ai.PROVIDERS
+# ClipMonster for Mac: its own local AI runs on the Mac, and a linked PC can lend its own (MAC_WORDING)
+MAC_AI_PROVIDERS = (("claude", "Claude (Anthropic)"), ("gemini", "Gemini (Google)"),
+                    ("local", "Local AI on this Mac (free, private)"),
+                    ("pc", "Your PC's local AI (free, private; your PC linked)"))
 CLAUDE_MODELS = (("claude-opus-5-5", "Claude Opus 5.5 (best)"), ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
                  ("claude-haiku-5-5", "Claude Haiku 5.5 (cheapest)"))
 GEMINI_MODELS = (("gemini-4-argon", "Gemini 4 Argon (best)"),  # gemini.MODELS
@@ -603,6 +660,8 @@ ASPECTS = (("original", "Original"), ("vertical_blur", "9:16 vertical, blurred f
            ("vertical_crop", "9:16 vertical, cropped"), ("square", "1:1 square"))
 ENCODERS = (("auto", "Auto (fastest available)"), ("libx264", "CPU (x264)"), ("h264_amf", "AMD GPU (AMF)"),
             ("h264_nvenc", "NVIDIA GPU (NVENC)"), ("h264_qsv", "Intel GPU (Quick Sync)"))
+MAC_ENCODERS = (("auto", "Auto (fastest available)"), ("libx264", "CPU (x264)"),
+                ("h264_videotoolbox", "The Mac's media engine (VideoToolbox)"))
 
 PICK_FROM = (
     ("watchlist", "My channel list and Creative Commons only"),
@@ -629,6 +688,14 @@ LOCAL_MODELS = (('auto', 'Pick for this PC'),
                 ('command-r-32b', 'Command R 32B · Ultra · 19.8 GB · non-commercial licence'),
                 ('mistral-7b', "Mistral 7B v0.3 · 4.4 GB · ClipMonster 3.1's model"),
                 ('custom', 'My own GGUF file'))  # intelligence/models.CHOICES (a test keeps them the same)
+MAC_LOCAL_MODELS = (('auto', 'Pick for this Mac'),
+                    ('llama-3.2-3b', 'Llama 3.2 3B · Compact · 2.0 GB · any Mac, Intel too'),
+                    ('qwen2.5-7b', 'Qwen2.5 7B · Standard · 4.7 GB · 16 GB+ Mac'),
+                    ('mistral-nemo-12b', 'Mistral Nemo 12B · High-capacity · 7.5 GB · 16 GB+ Mac'),
+                    ('qwen2.5-32b', 'Qwen2.5 32B · Ultra · 19.9 GB · 36 GB+ Mac'),
+                    ('command-r-32b', 'Command R 32B · Ultra · 19.8 GB · non-commercial licence'),
+                    ('mistral-7b', "Mistral 7B v0.3 · 4.4 GB · ClipMonster 3.1's model"),
+                    ('custom', 'My own GGUF file'))  # intelligence/models.MAC_CHOICES (kept the same too)
 CAPTION_STYLES = (("classic", "Classic (word pop)"), ("kinetic", "Kinetic (pop, karaoke, keyword colours)"))
 # The Video Creator's choices (a test keeps them the same as creator/'s own lists)
 CREATOR_AI = (("local", "The local AI on this PC (free)"), ("any", "The AI chosen in Settings → AI"))
@@ -1146,10 +1213,77 @@ SCHEMA: list[Field] = [
           help="What the bot tells you without being asked. Whatever you ask for in the chat is always answered "
                "there"),
     Field("remote_on", "Let my Mac run ClipMonster", "Mac app", "bool",
-          help="Automation answers ClipMonster Remote on your Mac: it shows what automation is doing, plays the "
-               "videos waiting to post so you can OK or delete them, and asks for videos, clips and requests. Only "
-               "Macs you link here can use it, over an encrypted connection. It runs while automation does"),
+          help="Automation answers ClipMonster on your Mac: it shows what automation is doing, plays the videos "
+               "waiting to post so you can OK or delete them, asks for videos, clips and requests, and lends the "
+               "Mac this PC's local AI and graphics card to make clips with. Only Macs you link here can use it, "
+               "over an encrypted connection. It runs while automation does"),
     Field("remote_port", "Port", "Mac app", "int", lo=1024, hi=65535,
           help="The network port the Mac connects to (47320 unless another program uses it). The Mac finds the "
                "PC by itself on the same network; type this port with the PC's address if it doesn't"),
 ]
+
+
+# ClipMonster for Mac shows the same settings, in the Mac's own words: its graphics run Metal, not Vulkan, its
+# videos are encoded by the Mac's media engine, and a linked PC can lend its local AI (ytclip/mac).
+MAC_WORDING = {
+    "appearance": dict(choices=(("dark", "Dark"), ("light", "Light"), ("system", "Match the Mac")),
+                       help="Dark suits editing video; Light matches a light Mac. Takes effect when ClipMonster opens "
+                            "again"),
+    "mode": dict(choices=(("auto", "Smart signals"), ("ai", "AI picks (the AI chosen under AI)"),
+                          ("chapters", "YouTube chapters"))),
+    "cookies_browser": dict(choices=(("", "None"), ("safari", "Safari"), ("chrome", "Chrome"), ("firefox", "Firefox"),
+                                     ("brave", "Brave"), ("edge", "Edge")),
+                            help="Signed-in downloads keep YouTube from asking this Mac to confirm it's not a bot, "
+                                 "and open age-restricted and members-only videos. Pick the browser you're signed in "
+                                 "to YouTube in (macOS asks once to let ClipMonster read its cookies). A spare "
+                                 "Google account is safest"),
+    "speed": dict(choices=(("quiet", "Quiet (slowest, the Mac stays free)"), ("balanced", "Balanced"),
+                           ("full", "Full power (every core and the graphics)")),
+                  help="Quiet keeps the Mac free for other things and works slowest. Balanced uses half the CPU and "
+                       "the Mac's graphics for Whisper. Full power uses every core and the graphics"),
+    "gpu_whisper": dict(label="Whisper on the Mac's graphics (Balanced and Full power)",
+                        help="Types out speech on the Mac's graphics (Metal), several times faster than the CPU on "
+                             "Apple silicon. Downloads the model for it once. Falls back to the CPU if it fails"),
+    "ai_provider": dict(choices=MAC_AI_PROVIDERS,
+                        help="Which AI picks clips, polishes them and follows special requests. Claude and Gemini "
+                             "need an API key (kept in your Mac's Keychain) and are paid per use. Local AI runs a "
+                             "model on this Mac. Your PC's local AI asks the model on your linked PC: free and "
+                             "private, and the Mac stays cool"),
+    "local_model": dict(choices=MAC_LOCAL_MODELS,
+                        help="Runs on this Mac: free, private and offline once it's downloaded (from Hugging Face, "
+                             "once). 'Pick for this Mac' takes the biggest model that fits in the memory the Mac's "
+                             "graphics can use (about two thirds of its memory on Apple silicon): Llama 3.2 3B on "
+                             "8 GB, Mistral Nemo 12B on 16 to 32 GB, Qwen2.5 32B on 36 GB or more. An Intel Mac runs "
+                             "Llama 3.2 3B on its CPU. Or pick Your PC's local AI as the AI, and the PC's model answers"),
+    "local_model_path": dict(help="Any instruction-tuned GGUF model, such as Qwen or Gemma. Its own header says how "
+                                  "big it is, so it's sized to the Mac's memory like the others"),
+    "local_gpu": dict(label="Local AI on the Mac's graphics",
+                      help="Much faster: Metal on Apple silicon, where the graphics share the Mac's memory. If it "
+                           "fails, it carries on on the CPU by itself"),
+    "local_context": dict(label="Local AI memory (tokens, 0 = sized to this Mac)",
+                          help="How much transcript it reads at once: up to 32,768 tokens (about an hour of talk) "
+                               "when the Mac has the memory for it. Longer videos are read in parts either way"),
+    "local_gpu_layers": dict(label="Local AI layers on the graphics (-1 = all that fit)",
+                             help="Leave at -1: ClipMonster and llama.cpp measure the memory the Mac's graphics can "
+                                  "use and fit as many as they can. 0 runs it on the CPU only"),
+    "encoder": dict(choices=MAC_ENCODERS,
+                    help="Auto uses the Mac's media engine (VideoToolbox), which is quick and keeps the Mac cool; "
+                         "CPU (x264) is slower and a little sharper at the same size"),
+}
+
+
+def _for_the_mac(schema: list[Field]) -> None:
+    for f in schema:
+        own = MAC_WORDING.get(f.name, {})
+        for key, value in own.items():
+            setattr(f, key, value)
+        if "label" not in own:
+            f.label = f.label.replace("this PC", "this Mac")
+        if "help" not in own:
+            f.help = f.help.replace("this PC", "this Mac").replace("the PC ", "the Mac ")
+        if "choices" not in own and f.choices:
+            f.choices = tuple((k, v.replace("this PC", "this Mac") if isinstance(v, str) else v) for k, v in f.choices)
+
+
+if MAC:
+    _for_the_mac(SCHEMA)

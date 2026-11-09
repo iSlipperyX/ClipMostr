@@ -119,7 +119,7 @@ def _keys(s: Settings, online: bool) -> list[Check]:
         out.append(Check(f"{ai.name(first)} key", WARN, f"Not set, so {ai.name(use[0])} is used instead",
                          f"Add a {ai.name(first)} key in Settings → AI, or choose {ai.name(use[0])} there"))
     for provider in use:
-        label = (ai.name(provider) if provider == "local" else f"{ai.name(provider)} key") + \
+        label = (ai.name(provider) if provider in ai.LOCALS else f"{ai.name(provider)} key") + \
             (" (if the other fails)" if provider != use[0] else "")
         if not online:
             out.append(Check(label, GOOD, "Set"))

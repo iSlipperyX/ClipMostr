@@ -22,6 +22,15 @@ Requests (JSON in and out unless said):
   POST /api/make {idea, category}         POST /api/clip {links, category}
   GET  /api/requests                      POST /api/requests {...}              POST /api/requests/<id>/cancel
   GET  /api/week                          GET  /api/log?lines=N                 POST /api/unlink (this Mac)
+
+What a Mac may hand this PC (studio.py):
+  GET  /api/ai                            whether this PC's local AI can answer, and its model
+  POST /api/ai/tasks {kind: ask|find, …}  ask it something; GET /api/ai/tasks/<id>?wait=S for the answer
+  POST /api/ai/tasks/<id>/cancel
+  PUT  /api/studio/uploads?name=N         a video from the Mac (the body is the file)
+  GET  /api/studio/jobs                   this Mac's videos made here    POST /api/studio/jobs {source|upload, settings}
+  GET  /api/studio/jobs/<id>              GET  /api/studio/jobs/<id>/file?path=P (one of its clips' files)
+  POST /api/studio/jobs/<id>/cancel | done (the Mac has the clips: they go)
 """
 
 from __future__ import annotations
@@ -45,6 +54,9 @@ from .host import Host, HostError
 
 HEARTBEAT = 5.0
 BODY_MAX = 256 * 1024
+AI_BODY_MAX = 8 * 1024 * 1024  # a question for the AI carries a whole transcript
+DRAIN_MAX = 256 * 1024 * 1024  # a video the PC says no to is read to its end (and dropped) up to this big, so the
+# Mac can hear the no; a bigger one's connection is closed on it instead
 CHUNK = 256 * 1024
 HANDSHAKE_TIMEOUT = 15.0
 IDLE_TIMEOUT = 60.0
@@ -208,6 +220,7 @@ class Handler(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
     server_version = "ClipMonster"
     sys_version = ""
+    body_read = False
 
     def log_message(self, format, *args):  # noqa: A002 - no console lines
         pass
@@ -231,11 +244,12 @@ class Handler(BaseHTTPRequestHandler):
     def fail(self, status: int, message: str) -> None:
         self.send_json(status, {"error": message})
 
-    def body(self) -> dict:
+    def body(self, limit: int = BODY_MAX) -> dict:
         n = int(self.headers.get("Content-Length") or 0)
-        if n > BODY_MAX:
+        if n > limit:
             raise HostError(413, "That's too much to send.")
         raw = self.rfile.read(n) if n else b""
+        self.body_read = True
         if not raw:
             return {}
         try:
@@ -298,11 +312,15 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):  # noqa: N802
         self.route("POST")
 
+    def do_PUT(self):  # noqa: N802
+        self.route("PUT")
+
     def route(self, method: str) -> None:
         url = urlsplit(self.path)
         q = {k: v[-1] for k, v in parse_qs(url.query).items()}
         path = url.path.rstrip("/") or "/"
         ip = self.client_address[0]
+        self.body_read = False  # (one handler answers every request on a kept-alive connection)
         try:
             if path == "/api/hello" and method == "GET":
                 return self.send_json(200, self.remote.hello())
@@ -314,17 +332,45 @@ class Handler(BaseHTTPRequestHandler):
             self.device = device
             self.dispatch(method, path, q)
         except HostError as exc:
-            if exc.status == 401:
+            if exc.status == 401 or self._unread(method):
                 self.close_connection = True
             self.fail(exc.status, exc.message)
         except (BrokenPipeError, ConnectionResetError, ssl.SSLError, TimeoutError):
             self.close_connection = True
         except Exception as exc:  # noqa: BLE001 - one bad request never stops the server
             self.remote.log(f"⚠ A request went wrong ({method} {path}): {type(exc).__name__}: {exc}")
+            if self._unread(method):
+                self.close_connection = True
             try:
                 self.fail(500, f"Something went wrong on the PC: {type(exc).__name__}: {exc}")
             except OSError:
                 self.close_connection = True
+
+    def _unread(self, method: str) -> bool:
+        """A request whose body may still be (partly) on the connection, after a no: the connection can't carry
+        another request, so it closes after the answer."""
+        if method == "PUT":
+            return not self.body_read
+        try:
+            return method == "POST" and not self.body_read and int(self.headers.get("Content-Length") or 0) > 0
+        except ValueError:
+            return True
+
+    def _drain(self, size: int) -> None:
+        """Read a body the PC won't use to its end, so the answer to it can be heard (the Mac is still sending
+        it); too big a body is left, and the connection closes on it."""
+        if not 0 < size <= DRAIN_MAX:
+            return
+        left = size
+        try:
+            while left > 0:
+                chunk = self.rfile.read(min(CHUNK, left))
+                if not chunk:
+                    return
+                left -= len(chunk)
+        except (OSError, ssl.SSLError):
+            return
+        self.body_read = True
 
     def dispatch(self, method: str, path: str, q: dict) -> None:
         host = self.remote.host
@@ -350,6 +396,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"id": self.device["id"], "name": self.device["name"]})
         if get and path == "/api/deliveries":
             return self.send_json(200, host.deliveries(self.device["id"], q.get("rev", "")))
+        if path.startswith(("/api/ai", "/api/studio")):
+            return self.lend(method, path, q)
         m = re.fullmatch(r"/api/deliveries/" + ID + r"/([a-z]+)", path)
         if m:
             did, action = m.group(1), m.group(2)
@@ -418,6 +466,52 @@ class Handler(BaseHTTPRequestHandler):
         raise HostError(404, "No such request.")
 
 
+    def lend(self, method: str, path: str, q: dict) -> None:
+        """What a Mac hands this PC: questions for its local AI, and videos to make (studio.py)."""
+        host, me = self.remote.host, self.device["id"]
+        get = method == "GET"
+        if get and path == "/api/ai":
+            return self.send_json(200, host.ai_tasks.status(fresh=True))
+        if method == "POST" and path == "/api/ai/tasks":
+            return self.send_json(200, host.ai_tasks.start(me, self.body(AI_BODY_MAX)))
+        m = re.fullmatch(r"/api/ai/tasks/" + ID + r"(?:/(cancel))?", path)
+        if m:
+            if get and not m.group(2):
+                rev = q.get("rev", "")
+                return self.send_json(200, host.ai_tasks.get(m.group(1), me, float(q.get("wait") or 0),
+                                                             int(rev) if rev.isdigit() else None))
+            if method == "POST" and m.group(2):
+                self.body()
+                return self.send_json(200, host.ai_tasks.cancel(m.group(1), me))
+            raise HostError(404, "No such request.")
+        if method == "PUT" and path == "/api/studio/uploads":
+            size = int(self.headers.get("Content-Length") or 0)
+            try:
+                host.studio.check_upload(q.get("name", ""), size)
+            except HostError:
+                self._drain(size)  # so the Mac, still sending, hears why
+                raise
+            got = host.studio.receive(q.get("name", ""), size, self.rfile.read)
+            self.body_read = True
+            return self.send_json(200, got)
+        if path == "/api/studio/jobs":
+            if get:
+                return self.send_json(200, host.studio.jobs_for(me))
+            if method == "POST":
+                return self.send_json(200, host.studio.add(me, self.device.get("name", ""), self.body()))
+        m = re.fullmatch(r"/api/studio/jobs/" + ID + r"(?:/([a-z]+))?", path)
+        if m:
+            jid, action = m.group(1), m.group(2) or ""
+            if get and not action:
+                return self.send_json(200, host.studio.job(jid, me))
+            if get and action == "file":
+                return self.send_file(host.studio.file(jid, me, q.get("path", "")))
+            if method == "POST" and action in ("cancel", "done"):
+                self.body()
+                return self.send_json(200, host.studio.cancel(jid, me) if action == "cancel" else host.studio.done(jid, me))
+        raise HostError(404, "No such request.")
+
+
 class RemoteServer:
     """Runs (and stops) the HTTPS server and the discovery answerer as Settings → Mac app says."""
 
@@ -464,9 +558,12 @@ class RemoteServer:
         self.stop_event.clear()
         self._loop = threading.Thread(target=self._run, name="remote", daemon=True)
         self._loop.start()
+        self.host.studio.start()  # videos a Mac sent: it makes them whether or not a Mac is connected now
 
     def stop(self, timeout: float = 5.0) -> None:
         self.stop_event.set()
+        self.host.ai_tasks.stop_all()
+        self.host.studio.stop(timeout)
         if self._loop is not None:
             self._loop.join(timeout)
         self._close()

@@ -460,6 +460,9 @@ class Runner:
             if low:
                 self.state(low)
                 return max(1.0, min(DISK_RECHECK, scan_wait))
+            if self.making_for_mac():  # a video your Mac sent comes first: its owner is waiting for it
+                self.state("Waiting: making clips your Mac asked for")
+                return 5.0
             self.process(job, s)
             if self.poster is not None:  # the new clips go to their account's queue now, not in a few minutes
                 self.poster.service.nudge()
@@ -475,6 +478,13 @@ class Runner:
         else:
             self.state(self.idle_text(s, next_scan, upcoming))
         return max(1.0, min(scan_wait, (upcoming - now) if upcoming else IDLE, IDLE))
+
+    def making_for_mac(self) -> bool:
+        """A linked Mac's video is being made on this PC (remote/studio.py)."""
+        try:
+            return self.remote is not None and self.remote.host.studio.busy()
+        except Exception:  # noqa: BLE001
+            return False
 
     def idle_text(self, s: Settings, next_scan: float, upcoming: float | None = None) -> str:
         """What the status says with nothing to clip, so an empty queue doesn't look stuck."""

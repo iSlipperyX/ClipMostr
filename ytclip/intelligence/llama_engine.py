@@ -122,11 +122,13 @@ def server_binary() -> Path | None:
         return Path(env) if Path(env).is_file() else None
     name = "llama-server.exe" if sys.platform == "win32" else "llama-server"
     if getattr(sys, "frozen", False):
-        found = Path(sys.executable).resolve().parent / "llama-cpp" / name
-        return found if found.is_file() else None
-    here = Path(__file__).resolve().parents[2] / "build" / "llama-cpp" / name  # a source checkout's own build
-    if here.is_file():
-        return here
+        from .. import bundled
+
+        return bundled.find("llama-cpp", name)
+    build = Path(__file__).resolve().parents[2] / "build"  # a source checkout's own build (build_mac.py's on a Mac)
+    for here in (build / "llama-cpp" / name, build / "mac-tools" / "llama-cpp" / name):
+        if here.is_file():
+            return here
     found = shutil.which("llama-server")
     return Path(found) if found else None
 

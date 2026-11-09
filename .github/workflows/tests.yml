@@ -37,8 +37,10 @@ jobs:
       - name: Test
         run: pytest -q
 
-  # ClipMonster Remote on a real Mac: the connection tests (a real HTTPS server on the Mac, pairing, streaming)
-  # and the window, then the app itself built into a .dmg, opened and checked to say its version.
+  # ClipMonster for Mac on a real Mac (Apple silicon): the link to the PC (a real HTTPS server on the Mac, pairing,
+  # streaming, the PC's AI and video maker) and the window; Whisper and the local AI as the app brings them,
+  # built for the Mac's graphics (Metal, kept in the cache) and run for real; then the app itself built into a
+  # .dmg, opened and checked: its version, its own ffmpeg with the media engine, Deno, Whisper and llama.cpp.
   mac:
     runs-on: macos-latest  # Apple silicon
     env:
@@ -51,18 +53,53 @@ jobs:
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Install
-        run: pip install -e ".[test,mac,build]"
+        run: pip install -e ".[test,mac,build]" pyyaml
       - name: Test
-        run: pytest -q tests/test_remote.py tests/test_mac_app.py tests/test_mac_inbox.py
+        run: pytest -q tests/test_remote.py tests/test_mac_app.py tests/test_mac_inbox.py tests/test_mac_studio.py
+      - name: Whisper and the local AI from an earlier build
+        id: tools
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            build/mac-tools/whisper-cpp
+            build/mac-tools/llama-cpp
+          key: mac-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packaging/build_whisper_cpp.py', 'packaging/build_llama_cpp.py') }}
+      - name: Get whisper.cpp and llama.cpp (a sample to type out, and a tiny model to load)
+        run: |
+          tag=$(python -c "import runpy; print(runpy.run_path('packaging/build_whisper_cpp.py')['TAG'])")
+          git clone --depth 1 --branch "$tag" https://github.com/ggml-org/whisper.cpp whisper-src
+          tag=$(python -c "import runpy; print(runpy.run_path('packaging/build_llama_cpp.py')['TAG'])")
+          git clone --depth 1 --branch "$tag" https://github.com/ggml-org/llama.cpp llama-src
+          python tests/local_ai/make_tiny_gguf.py llama-src build/tiny.gguf
+      - name: Build Whisper and the local AI for the Mac's graphics (Metal)
+        if: steps.tools.outputs.cache-hit != 'true'
+        run: |
+          python packaging/build_whisper_cpp.py build/mac-tools/whisper-cpp --metal --source whisper-src
+          python packaging/build_llama_cpp.py build/mac-tools/llama-cpp --metal --source llama-src
+      - name: Keep them for the next build
+        if: steps.tools.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            build/mac-tools/whisper-cpp
+            build/mac-tools/llama-cpp
+          key: ${{ steps.tools.outputs.cache-primary-key }}
+      - name: Test Whisper and the local AI for real
+        env:
+          CLIPMONSTER_WHISPER_CPP: build/mac-tools/whisper-cpp/whisper-cli
+          CLIPMONSTER_WHISPER_SAMPLE: whisper-src/samples/jfk.wav
+          CLIPMONSTER_WHISPER_GPU_BUILD: "1"
+          CLIPMONSTER_LLAMA_SERVER: build/mac-tools/llama-cpp/llama-server
+          CLIPMONSTER_TEST_GGUF: build/tiny.gguf
+        run: pytest -q tests/test_whisper_cpp_real.py tests/test_local_ai_real.py
       - name: Build the app
         run: python packaging/build_mac.py
       - name: Check the app starts
-        run: |
-          "dist/ClipMonster Remote.app/Contents/MacOS/ClipMonster Remote" --self-check
+        run: dist/ClipMonster.app/Contents/MacOS/ClipMonster --self-check
       - uses: actions/upload-artifact@v4
         with:
-          name: ClipMonster-Remote-mac
-          path: dist/ClipMonster-Remote-mac.dmg
+          name: ClipMonster-mac
+          path: dist/ClipMonster-mac.dmg
           retention-days: 7
 
   # The Linux host installer (packaging/linux/), for real on Ubuntu with systemd: install from this checkout,

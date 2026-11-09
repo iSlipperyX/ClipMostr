@@ -90,6 +90,14 @@ class Model:
         return f"{self.short} · {tier} · {self.size_gb:.1f} GB · " + (fits if self.commercial else
                                                                       "non-commercial licence")
 
+    @property
+    def mac_label(self) -> str:
+        """For Settings in ClipMonster for Mac: 'Qwen2.5 7B · Standard · 4.7 GB · 16 GB+ Mac'."""
+        if self.legacy:
+            return self.label
+        return f"{self.short} · {TIERS[self.tier][0]} · {self.size_gb:.1f} GB · " + (
+            MAC_FITS[self.tier] if self.commercial else "non-commercial licence")
+
 
 TIERS = {
     "compact": ("Compact", "any PC, quick on the CPU too"),
@@ -97,6 +105,8 @@ TIERS = {
     "high": ("High-capacity", "12 GB+ graphics card"),
     "ultra": ("Ultra", "24 GB graphics card, or 16 GB + 32 GB RAM"),
 }
+# The same on a Mac, where Apple silicon's graphics use about two thirds of its memory (hardware.detect)
+MAC_FITS = {"compact": "any Mac, Intel too", "standard": "16 GB+ Mac", "high": "16 GB+ Mac", "ultra": "36 GB+ Mac"}
 
 MODELS: dict[str, Model] = {m.key: m for m in (
     Model("llama-3.2-3b", "Llama 3.2 3B Instruct", "compact", "bartowski/Llama-3.2-3B-Instruct-GGUF",
@@ -121,6 +131,8 @@ MODELS: dict[str, Model] = {m.key: m for m in (
 )}
 COMPACT = "llama-3.2-3b"
 CHOICES = (("auto", "Pick for this PC"),) + tuple((m.key, m.label) for m in MODELS.values()) + (
+    ("custom", "My own GGUF file"),)
+MAC_CHOICES = (("auto", "Pick for this Mac"),) + tuple((m.key, m.mac_label) for m in MODELS.values()) + (
     ("custom", "My own GGUF file"),)
 
 

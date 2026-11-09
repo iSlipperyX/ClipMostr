@@ -93,7 +93,7 @@ def run_link(s: Settings, args, now: float) -> int:
         print(json.dumps({"addresses": ips, "port": port, "code": protocol.show_code(code), "until": until,
                           "running": bool(st.get("running")), "fingerprint": st.get("fingerprint", "")}))
         return 0
-    console.print("In ClipMonster Remote on your Mac, type:\n")
+    console.print("In ClipMonster on your Mac (Your PC → Link your PC), type:\n")
     console.print(f"  IP address          [bold]{ips[0] if ips else '(this computer’s address)'}[/]"
                   + (f"   [dim]or {', '.join(ips[1:3])}[/]" if len(ips) > 1 else ""))
     console.print(f"  Port                [bold]{port}[/]")

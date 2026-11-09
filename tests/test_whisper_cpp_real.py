@@ -42,8 +42,9 @@ def test_it_types_out_the_whole_sample(models):
     assert all(0 <= w.start <= w.end <= len(audio) / 16000 + 0.5 for w in words)
     assert [w.start for w in words] == sorted(w.start for w in words)
     assert cues and cues[0].start <= words[0].start + 0.01
-    # A CPU build: the PC is remembered as having no usable card, so Whisper goes to the CPU next time.
-    assert whisper_cpp.unavailable() and any("no graphics card" in n for n in notes)
+    if not os.environ.get("CLIPMONSTER_WHISPER_GPU_BUILD"):  # (the Mac's is built for its graphics: Metal)
+        # A CPU build: the PC is remembered as having no usable card, so Whisper goes to the CPU next time.
+        assert whisper_cpp.unavailable() and any("no graphics card" in n for n in notes)
 
 
 def test_only_the_stretches_asked_for_land_in_place(models):

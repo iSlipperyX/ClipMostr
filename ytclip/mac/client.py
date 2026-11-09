@@ -24,6 +24,8 @@ from urllib.parse import quote, urlencode
 from ..remote import protocol
 
 TIMEOUT = 15.0
+USER_AGENT = "ClipMonster-Mac"
+SEND_CHUNK = 1024 * 1024
 
 
 class ApiError(Exception):
@@ -143,7 +145,7 @@ class Client:
             self._local.conn = None
 
     def _headers(self, extra: dict | None = None, auth: bool = True) -> dict:
-        h = {"User-Agent": "ClipMonsterRemote", "Accept": "application/json"}
+        h = {"User-Agent": USER_AGENT, "Accept": "application/json"}
         if auth and self.device_id and self.token:
             h["Authorization"] = protocol.auth_header(self.device_id, self.token)
         h.update(extra or {})
@@ -223,28 +225,104 @@ class Client:
 
     def download(self, path: str, dest: Path, progress: Callable[[int, int], None] | None = None,
                  cancelled: Callable[[], bool] | None = None) -> Path:
+        """Save a file from the PC to `dest` (whole or not at all: a .part file until it's all there)."""
         resp = self.raw(path, timeout=120.0)
+        tmp = dest.with_name(dest.name + ".part")
         try:
             if resp.status >= 400:
-                raise ApiError(resp.status, f"The PC said {resp.status}.")
+                try:
+                    msg = json.loads(resp.read(4096) or b"{}").get("error")
+                except (ValueError, AttributeError, http.client.HTTPException, OSError):
+                    msg = ""
+                raise ApiError(resp.status, msg or f"The PC said {resp.status}.")
             total = int(resp.getheader("Content-Length") or 0)
             got = 0
-            tmp = dest.with_name(dest.name + ".part")
             with open(tmp, "wb") as f:
                 while True:
                     if cancelled and cancelled():
                         raise ApiError(499, "Stopped.")
-                    chunk = resp.read(256 * 1024)
+                    try:
+                        chunk = resp.read(256 * 1024)
+                    except (http.client.HTTPException, OSError) as exc:
+                        raise Offline(f"The file stopped arriving part way ({self._why(exc)})") from exc
                     if not chunk:
                         break
                     f.write(chunk)
                     got += len(chunk)
                     if progress:
                         progress(got, total)
+            if total and got != total:
+                raise Offline("The file stopped arriving part way. It's fetched again when the PC is back.")
             os.replace(tmp, dest)
             return dest
+        except BaseException:
+            tmp.unlink(missing_ok=True)
+            raise
         finally:
             getattr(resp, "_one_off", None) and resp._one_off.close()
+
+    def upload(self, path: Path, name: str = "", progress: Callable[[int, int], None] | None = None,
+               cancelled: Callable[[], bool] | None = None, timeout: float = 120.0) -> dict:
+        """Send a video to the PC to make clips from (PUT /api/studio/uploads), on its own connection.
+        `progress(sent, total)` as it goes. Returns {"upload": its id on the PC, "size"}."""
+        path = Path(path)
+        size = path.stat().st_size
+        target = "/api/studio/uploads?" + urlencode({"name": name or path.name})
+        conn = self._connect(timeout)
+        resp = None
+        try:
+            try:
+                conn.putrequest("PUT", target, skip_accept_encoding=True)
+                for k, v in self._headers({"Content-Type": "application/octet-stream",
+                                           "Content-Length": str(size)}).items():
+                    conn.putheader(k, v)
+                conn.endheaders()
+                sent = 0
+                with open(path, "rb") as f:
+                    while sent < size:
+                        if cancelled and cancelled():
+                            raise ApiError(499, "Stopped.")
+                        chunk = f.read(min(SEND_CHUNK, size - sent))
+                        if not chunk:
+                            raise ApiError(400, "The video got shorter while it was being sent.")
+                        conn.send(chunk)
+                        sent += len(chunk)
+                        if progress:
+                            progress(sent, size)
+                resp = conn.getresponse()
+                raw = resp.read()
+            except (http.client.HTTPException, OSError) as exc:
+                said = self._early_answer(conn)  # the PC may have said no (no room) and closed
+                if said is not None:
+                    raise said from exc
+                raise Offline(f"The video stopped going to the PC part way ({self._why(exc)})") from exc
+        finally:
+            conn.close()
+        try:
+            out = json.loads(raw) if raw else {}
+        except ValueError:
+            out = {"error": raw[:200].decode("utf-8", "replace")}
+        if resp.status >= 400:
+            raise ApiError(resp.status, str((out or {}).get("error") or f"The PC said {resp.status}."))
+        if not isinstance(out, dict) or not out.get("upload"):
+            raise ApiError(502, "The PC took the video but didn't say where it put it.")
+        return out
+
+    @staticmethod
+    def _early_answer(conn) -> ApiError | None:
+        """The no a PC sent before it stopped reading, if it's there to read."""
+        try:
+            resp = conn.getresponse()
+            raw = resp.read(4096)
+        except Exception:  # noqa: BLE001 - nothing there
+            return None
+        if resp.status < 400:
+            return None
+        try:
+            msg = json.loads(raw or b"{}").get("error")
+        except (ValueError, AttributeError):
+            msg = ""
+        return ApiError(resp.status, msg or f"The PC said {resp.status}.")
 
     # --- linking -------------------------------------------------------------------------------------------
 

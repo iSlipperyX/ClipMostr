@@ -3,7 +3,7 @@ category has it on from the start) waits here until every linked Mac has it.
 
 Automation adds a video's clips as soon as they're exported (add()), with a hard link to each clip (a copy where
 the disk can't link), so posting's Clean up deleting the clip after it posts doesn't take it from a Mac that
-hasn't fetched it yet. ClipMonster Remote lists them in its Sports clips inbox, plays them from here, saves
+hasn't fetched it yet. ClipMonster for Mac lists them in its Sports clips inbox, plays them from here, saves
 them to the Mac (by itself too, into a folder you pick) and says it has each one (got), so it's shown as new
 on no other run of the app and is let go of once every linked Mac has it.
 

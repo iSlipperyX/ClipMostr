@@ -28,12 +28,21 @@ Progress = Callable[[str, "float | None"], None]
 Log = Callable[[str], None]
 
 
-def available() -> bool:
+def has_faster_whisper() -> bool:
     try:
         import faster_whisper  # noqa: F401
         return True
     except Exception:
         return False
+
+
+def available() -> bool:
+    """Whether Whisper can run here: faster-whisper, or whisper.cpp (all the Mac app brings)."""
+    if has_faster_whisper():
+        return True
+    from . import whisper_cpp
+
+    return whisper_cpp.binary() is not None
 
 
 def _load_audio(path: Path) -> np.ndarray:
@@ -124,6 +133,10 @@ def transcribe(path: Path, model_name: str, language: str, duration: float, prog
             except Exception as exc:
                 why = str(exc) or exc.__class__.__name__
         log(f"Whisper on the graphics card isn't working ({why}), so it's using the CPU.")
+    if not has_faster_whisper():  # the Mac app: whisper.cpp is Whisper on the CPU as well
+        from . import whisper_cpp
+
+        return whisper_cpp.transcribe(audio, model_name, language, spans, threads, progress, log, cpu=True)
     try:
         return _faster_whisper(audio, model_name, language, duration, progress, threads, spans, checkpoint)
     except _OnCardFailed as exc:  # faster-whisper on an NVIDIA card (CUDA) failed: the CPU carries on

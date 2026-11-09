@@ -97,11 +97,13 @@ class ConnectPage(QWidget):
         logo = QLabel()
         logo.setPixmap(theme.app_icon_pixmap(128).scaled(72, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation))
         v.addWidget(logo, 0, Qt.AlignHCenter)
-        t = c.title("Connect to your PC")
+        t = c.title("Link your PC")
         t.setAlignment(Qt.AlignCenter)
         v.addWidget(t)
-        sub = c.WrapLabel("ClipMonster Remote runs ClipMonster on your Windows PC from this Mac. The PC does the "
-                          "clipping, the AI and the posting; you watch, OK and steer it from here.", muted=True)
+        sub = c.WrapLabel("ClipMonster makes clips on this Mac by itself. Link the PC that runs ClipMonster and "
+                          "this Mac can also use its local AI, have it make whole videos on its graphics card, "
+                          "and run its automation from here: watch, OK and post its videos, and get its sports "
+                          "clips.", muted=True)
         sub.setAlignment(Qt.AlignCenter)
         v.addWidget(sub)
         v.addSpacing(4)

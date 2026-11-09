@@ -1,5 +1,6 @@
-"""ClipMonster Remote's window (ytclip/mac/), driven against a real host server with automation's queue and
-posting's library behind it: connecting, linking with a code, the pages, and acting on a video."""
+"""ClipMonster for Mac's Your PC pages (ytclip/mac/pc.py and the pages beside it), driven against a real host
+server with automation's queue and posting's library behind it: connecting, linking with a code, the pages, and
+acting on a video."""
 
 import time
 
@@ -37,22 +38,26 @@ def linked_host(w) -> hosts.Host:
 
 @pytest.fixture
 def window(app, world):  # noqa: F811
-    from ytclip.mac.window import MainWindow
+    """The Mac window's link to the PC (pc.PCLink): what the PC's pages call their window."""
+    from ytclip.mac.window import MacWindow
 
     clip_folder(world.root, "Psychology/2026-11-08 Big Talk [abc]", clips=2)
     creator_folder(world.root)
     world.take()
     linked_host(world)
-    win = MainWindow()
-    win.notify_calls = []
-    win.notify = lambda title, text: win.notify_calls.append((title, text))
-    yield win
+    win = MacWindow()
+    link = win.link
+    link.win_ = win
+    link.notify_calls = []
+    link.notify = lambda title, text: link.notify_calls.append((title, text))
+    yield link
     win.quit()
     app.processEvents()
 
 
 def test_it_connects_to_the_last_pc_and_shows_its_status(app, window, world):  # noqa: F811
-    assert window.stack.currentWidget() is window.main
+    assert window.linked and not window.nav.is_hidden(window.i_dash) and window.nav.is_hidden(window.i_link)
+    assert window.nav.currentIndex() == 0  # it opens on the Studio, the PC's pages beside it
     assert wait(app, lambda: window.session.state == "online")
     assert wait(app, lambda: window.dashboard.c_review.value.text() == "1")
     assert "running" in window.dashboard.sub.text()
@@ -69,10 +74,10 @@ def test_ok_from_the_mac(app, window, world):  # noqa: F811
     window.videos.set_filter("review")
     assert wait(app, lambda: window.videos.detail.v is not None and window.videos.detail.v["state"] == "review")
     vid = window.videos.detail.v["id"]
-    assert window.videos.detail.ok_btn.isVisible() or not window.isVisible()
+    assert window.videos.detail.ok_btn.isVisible() or not window.win_.isVisible()
     window.videos.detail.ok_btn.click()
     assert wait(app, lambda: world.store.get(vid).review == "ok")
-    assert wait(app, lambda: "OK" in window.notice_label.text())
+    assert wait(app, lambda: "OK" in window.win_.status.text())
 
 
 def test_delete_asks_first(app, window, world, monkeypatch):  # noqa: F811
@@ -150,8 +155,9 @@ def test_unlinked_on_the_pc_goes_back_to_connect(app, window, world):  # noqa: F
         data["devices"] = []
     window.session.client.close()
     window.refresh()
-    assert wait(app, lambda: window.stack.currentWidget() is window.connect_page)
+    assert wait(app, lambda: window.nav.currentWidget() is window.connect_page)
     assert "isn't linked" in window.connect_page.message.text()
+    assert window.nav.is_hidden(window.i_dash) and not window.nav.is_hidden(window.i_link)
     assert hosts.load()[0] == []
 
 
@@ -161,12 +167,13 @@ def test_offline_shows_a_banner(app, window, world):  # noqa: F811
     world.server.configure()
     window.session.client.close()
     window.refresh()
-    assert wait(app, lambda: window.offline.isVisibleTo(window.main))
+    window.nav.setCurrentIndex(window.i_dash)
+    assert wait(app, lambda: window.offline.isVisibleTo(window.bar) and window.bar.isVisibleTo(window.win_))
     assert "Can't reach" in window.offline_text.text()
     world.s.remote_on = True
     world.server.configure()
     window.refresh()
-    assert wait(app, lambda: not window.offline.isVisibleTo(window.main))
+    assert wait(app, lambda: not window.offline.isVisibleTo(window.bar))
 
 
 @pytest.fixture
@@ -268,5 +275,5 @@ def test_self_check(app, capsys):
 
     rc = self_check(app)
     out = capsys.readouterr().out
-    assert "ClipMonster Remote" in out and "window ok" in out
+    assert "ClipMonster 3." in out and "window ok" in out and "keys in" in out
     assert rc in (0, 1)  # 1 only where Qt Multimedia can't load (Linux CI without its sound libraries)
