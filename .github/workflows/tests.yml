@@ -40,7 +40,7 @@ jobs:
   # ClipMonster Remote on a real Mac: the connection tests (a real HTTPS server on the Mac, pairing, streaming)
   # and the window, then the app itself built into a .dmg, opened and checked to say its version.
   mac:
-    runs-on: macos-14
+    runs-on: macos-latest  # Apple silicon
     env:
       QT_QPA_PLATFORM: offscreen
     steps:

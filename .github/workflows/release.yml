@@ -225,7 +225,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-latest
             dmg: ClipMonster-Remote-mac.dmg
           - os: macos-15-intel
             dmg: ClipMonster-Remote-mac-intel.dmg
