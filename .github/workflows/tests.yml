@@ -37,6 +37,34 @@ jobs:
       - name: Test
         run: pytest -q
 
+  # ClipMonster Remote on a real Mac: the connection tests (a real HTTPS server on the Mac, pairing, streaming)
+  # and the window, then the app itself built into a .dmg, opened and checked to say its version.
+  mac:
+    runs-on: macos-latest  # Apple silicon
+    env:
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: pip install -e ".[test,mac,build]"
+      - name: Test
+        run: pytest -q tests/test_remote.py tests/test_mac_app.py
+      - name: Build the app
+        run: python packaging/build_mac.py
+      - name: Check the app starts
+        run: |
+          "dist/ClipMonster Remote.app/Contents/MacOS/ClipMonster Remote" --self-check
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ClipMonster-Remote-mac
+          path: dist/ClipMonster-Remote-mac.dmg
+          retention-days: 7
+
   # Whisper through whisper.cpp, for real: a CPU build typing out its own sample, through ClipMonster's
   # wrapper (whisper_cpp.py), plus a check that every model it may download exists.
   whisper-cpp:

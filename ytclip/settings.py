@@ -293,6 +293,10 @@ class Settings:
     telegram_on: bool = False
     telegram_token: str = ""  # from @BotFather
     telegram_send: str = "review, new, posted, news, problems, weekly"  # telegram/bot.SENDS
+    # The Mac app (remote/): automation's HTTPS server for ClipMonster Remote on a Mac. The Macs it answers are in
+    # remote.json, not here.
+    remote_on: bool = False
+    remote_port: int = 47320  # remote/protocol.PORT
     # Look
     appearance: str = "dark"  # dark | light | system (gui/theme.py)
     # 2 = text sizes are letter heights (1 = raw .ass sizes, which looked different in every font)
@@ -1140,4 +1144,11 @@ SCHEMA: list[Field] = [
     Field("telegram_send", "Send me", "Telegram", "multi", choices=TELEGRAM_SENDS,
           help="What the bot tells you without being asked. Whatever you ask for in the chat is always answered "
                "there"),
+    Field("remote_on", "Let my Mac run ClipMonster", "Mac app", "bool",
+          help="Automation answers ClipMonster Remote on your Mac: it shows what automation is doing, plays the "
+               "videos waiting to post so you can OK or delete them, and asks for videos, clips and requests. Only "
+               "Macs you link here can use it, over an encrypted connection. It runs while automation does"),
+    Field("remote_port", "Port", "Mac app", "int", lo=1024, hi=65535,
+          help="The network port the Mac connects to (47320 unless another program uses it). The Mac finds the "
+               "PC by itself on the same network; type this port with the PC's address if it doesn't"),
 ]

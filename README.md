@@ -444,6 +444,34 @@ Anything else you type gets two buttons: make a video about it, or ask for clips
 
 **Videos on the phone.** A bot can send videos up to 50 MB. A bigger one goes as a smaller copy (720p or less, made on the PC and kept for 3 days), marked as such: what posts to TikTok is always the full-quality file. Videos go one at a time in the background, so the bot keeps answering while one uploads. When a video is OK'd, posted or deleted somewhere else (the Queue tab, or another phone), its message in the chat changes to match.
 
+## Your Mac (ClipMonster Remote)
+
+**ClipMonster Remote** is a Mac app that runs ClipMonster on your PC. The PC keeps doing the work: finding and clipping videos, making Creator videos, the local AI and posting to TikTok. From the Mac you can see everything and steer it. It looks like ClipMonster: the same sidebar, colours and dark or light mode.
+
+**Setting it up** (once):
+
+1. On the PC: **Settings → Mac app**, tick **Let my Mac run ClipMonster** and **Save**, and keep automation running (Automation → Start, or Start with Windows). The server runs inside automation, the way the Telegram bot does. The first time, Windows asks whether ClipMonster may use the network: allow it on **private** networks.
+2. On the Mac: download `ClipMonster-Remote-mac.dmg` (Apple silicon) or `ClipMonster-Remote-mac-intel.dmg` (Intel) from the [latest release](https://github.com/iSlipperyX/ClipMostr/releases/latest), open it and drag **ClipMonster Remote** to Applications. The app isn't signed with an Apple developer ID, so the first time macOS won't open it: open **System Settings → Privacy & Security** and press **Open Anyway** (on macOS 14 and older, right-click the app → **Open**). Allow it to find devices on your local network when the Mac asks.
+3. On the PC, press **Link a Mac**. It shows the PC's **IP address**, its **port** (47320 unless you change it in Settings → Mac app) and an eight-character **authorization code** that works for 10 minutes. Type all three in the Mac app and press **Link**. (PCs on the same network also show up in a list under the form; picking one fills in its address and port, so only the code is left to type.) The PC lists the Mac under *Linked Macs*, and from then on the Mac connects by itself.
+
+**What you can do from the Mac:**
+
+| | |
+|---|---|
+| **Overview** | What automation is doing right now, with the same step bar as the Automation tab. Also: how many videos wait for your OK, the queue, posts today, what was made in the last day and the free disk space. It lists what's up next to clip or make, each TikTok account (signed in, queued, next post) and the news (posts going up, milestones, problems). |
+| **Waiting to post** | Every video waiting to post, held ones first, with its picture. Pick one to **watch it**: it streams from the PC, so it starts at once and you can skip around. Then **✓ OK to post**, **🚀 Post now**, **↻ Try again** (a post that failed) or **🗑 Delete…**, which asks first and clears it from the PC the way [Clean up](#clean-up) does. You can change its caption and hashtags until it posts. |
+| **Posted** | The latest posts with their views, likes, comments and shares. Double-click one to open it on TikTok. |
+| **New video** | Make a Creator video about an idea, clip YouTube links, or ask for clips (how many, how long, the category, links, special requests for the AI), each for the category you pick. |
+| **Requests** | Your clip requests, how far along each one is, and **Cancel**. |
+| **Categories** | Each category's state and what's waiting for it. **Pause** or **Resume** one, or **Find videos now**. |
+| **This week**, **Log** | The [weekly report](#the-overnight-report-and-the-health-check), and automation's log as it's written. |
+
+**Pause** in the top bar pauses clipping and making videos (posting carries on). The Dock icon and the menu bar icon show how many videos wait for your OK. Mac notifications tell you when a video waits for your OK, when a post goes up and when something needs you. Closing the window keeps the menu bar icon and the notifications; **Quit** from the menu bar icon ends the app.
+
+**Away from home.** The PC isn't opened to the internet. Install [Tailscale](https://tailscale.com/download) on the PC and the Mac, signed in to the same account, and type the PC's Tailscale address (like `100.101.7.42`, or its name `justyn-pc.tail1234.ts.net`) as the IP address in the Mac app. The Mac recognises it as the same PC and connects as usual.
+
+**Security.** Every connection is encrypted with the PC's own certificate, which the Mac checks by fingerprint. Linking proves the Mac and the PC see the same certificate, so another computer on the network can't pose as either one. The code is checked through 200,000 rounds of PBKDF2 and stops working after five wrong tries. After linking, the Mac keeps its key in the macOS Keychain, and the PC keeps only a hash of it in `%APPDATA%\ClipMonster\remote.json`. **Unlink** on the PC, or **PC → Unlink this Mac** on the Mac, removes a Mac. Settings → Mac app shows *This PC's ID*, and the Mac shows the same ID under the address as you type it, so you can check they match. If you reinstall ClipMonster on the PC from scratch, it gets a new ID and each Mac has to be linked again.
+
 ## Output layout
 
 ```
@@ -577,6 +605,8 @@ python build.py
 
 This produces `dist/ClipMonster/` and `dist/ClipMonster-windows.zip`, and `dist/ClipMonster-Setup.exe` when [Inno Setup 6](https://jrsoftware.org/isinfo.php) is installed (`winget install JRSoftware.InnoSetup`; `python build.py --installer` fails without it). To include Whisper for the graphics card, first install the Vulkan SDK and run `python packaging/build_whisper_cpp.py build/whisper-cpp --vulkan`; `build.py` then copies it in. The local AI's `llama-server` is built the same way: `python packaging/build_llama_cpp.py build/llama-cpp --vulkan`. The release workflow does all of it. From source without that build, `pip install -e .[local]` installs llama-cpp-python, which the local AI uses instead. During development, run the app with `python -m ytclip.gui.app` and the command line with `python -m ytclip`.
 
+To build ClipMonster Remote on a Mac: `pip install -e .[mac,build]`, then `python packaging/build_mac.py`. It writes `dist/ClipMonster Remote.app` and `dist/ClipMonster-Remote-mac.dmg`. Run it from source with `python -m ytclip.mac`.
+
 Run the tests with `pip install -e .[test]` and then `pytest`. They need no network or API key.
 
 | Module | Role |
@@ -589,6 +619,8 @@ Run the tests with `pip install -e .[test]` and then `pytest`. They need no netw
 | `ytclip/vision/` | Face tracking, the virtual camera (follow, punch-ins, push-ins), B-roll choice, rendering the moved picture |
 | `ytclip/audio/`, `ytclip/rendering/` | Dead-air and filler cuts, ducking, mastering; the edit plan, the audio graph, kinetic caption tags, hook card and lower-third |
 | `ytclip/compliance/duration_guard.py`, `ytclip/posting/tracker.py` | Creator Rewards: clips over a minute, and progress to the program's goals |
+| `ytclip/remote/` | The Mac app's server inside automation: linking (`protocol.py`, shared with the Mac), the PC's certificate, the linked Macs (`state.py`), what the Mac can see and do (`host.py`), HTTPS and discovery (`server.py`) |
+| `ytclip/mac/` | ClipMonster Remote, the Mac app: the pinned connection and Keychain, finding PCs, the loopback video proxy, and its window and pages |
 | `ytclip/gemini.py` | Google's Gemini API over plain HTTPS: streamed JSON answers, key checks |
 | `ytclip/polish.py` | AI polish: hooks, caption fixes, speaker crops, burned-in subtitle check |
 | `ytclip/qc.py` | Quality check: silence, black/frozen picture, length/size, mid-sentence edges, AI ratings |
