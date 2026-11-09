@@ -87,6 +87,7 @@ class Settings:
     w_keywords: float = 0.30
     w_voice: float = 0.25  # how animated the voice is (intelligence/viral_heuristics.py)
     w_emotion: float = 0.20  # how strong and swinging the words' sentiment is
+    sport: str = ""  # a sports category's sport (sports.py): its own signals and whole-play clips; "" = not sports
     # Transcription
     transcribe: str = "auto"  # auto | clips | always | never
     whisper_model: str = "base"

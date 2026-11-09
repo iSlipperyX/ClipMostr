@@ -33,7 +33,7 @@ class _Handler(BaseHTTPRequestHandler):
         self._pass()
 
     def _pass(self, head: bool = False) -> None:
-        m = re.fullmatch(r"/([0-9a-f]{32})/v/([A-Za-z0-9_\-~.]{1,80})/(file|thumb)", self.path.split("?", 1)[0])
+        m = re.fullmatch(r"/([0-9a-f]{32})/([vd])/([A-Za-z0-9_\-~.]{1,80})/(file|thumb)", self.path.split("?", 1)[0])
         if not m or not secrets.compare_digest(m.group(1), self.server.secret):
             self.send_error(404)
             return
@@ -45,7 +45,8 @@ class _Handler(BaseHTTPRequestHandler):
         if self.headers.get("Range"):
             headers["Range"] = self.headers["Range"]
         try:
-            resp = client.raw(client.video_path(m.group(2), m.group(3)), headers, timeout=60.0)
+            where = client.video_path if m.group(2) == "v" else client.delivery_path  # a video, or a sent clip
+            resp = client.raw(where(m.group(3), m.group(4)), headers, timeout=60.0)
         except Exception:  # noqa: BLE001 - the player shows it can't play
             self.send_error(502, "The PC couldn't be reached")
             return
@@ -94,8 +95,9 @@ class MediaProxy:
     def port(self) -> int:
         return self._server.server_address[1]
 
-    def url(self, item_id: str, what: str = "file") -> str:
-        return f"http://127.0.0.1:{self.port}/{self._server.secret}/v/{quote(item_id, safe='')}/{what}"
+    def url(self, item_id: str, what: str = "file", kind: str = "v") -> str:
+        """kind: v for a video in posting's library, d for a clip sent to the Macs (the inbox)."""
+        return f"http://127.0.0.1:{self.port}/{self._server.secret}/{kind}/{quote(item_id, safe='')}/{what}"
 
     def close(self) -> None:
         self._server.shutdown()

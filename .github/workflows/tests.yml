@@ -53,7 +53,7 @@ jobs:
       - name: Install
         run: pip install -e ".[test,mac,build]"
       - name: Test
-        run: pytest -q tests/test_remote.py tests/test_mac_app.py
+        run: pytest -q tests/test_remote.py tests/test_mac_app.py tests/test_mac_inbox.py
       - name: Build the app
         run: python packaging/build_mac.py
       - name: Check the app starts

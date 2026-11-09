@@ -29,6 +29,7 @@ from ..categories import MAX_CLIPS, MAX_CREATOR_DAILY, MAX_DAILY, MAX_LEN, Categ
 from ..policy import PickLog, picks_path
 from ..research import youtube_key
 from ..settings import PRESETS, Settings, all_layouts, all_presets
+from ..sports import choices as sport_choices, get as sport_named
 from ..trending import CATEGORIES as YT_CATEGORIES
 from . import theme
 from .forms import WrapLabel
@@ -186,6 +187,24 @@ class Categories(QWidget):
         self.daily.setToolTip("Videos picked for this category in 24 hours. Each video makes several clips")
         self.daily.valueChanged.connect(lambda v: self._set("daily", int(v)))
         form.addRow("Videos", self.daily)
+        self.sport = QComboBox()
+        self.sport.addItem("Not sports", "")
+        for sid, label in sport_choices():
+            self.sport.addItem(label, sid)
+        self.sport.setToolTip("A sports category's clips are found by the crowd erupting, the commentator's big calls "
+                              "and the replays, and each one is cut as a whole play: the build-up, the moment and "
+                              "the reaction")
+        self.sport.activated.connect(lambda _i: self._pick_sport(self.sport.currentData()))
+        form.addRow("Sport", self.sport)
+        self.send_to_macs = QCheckBox("Send new clips to my Macs")
+        self.send_to_macs.setToolTip("Each new clip also lands in ClipMonster Remote's Sports clips inbox on every "
+                                     "linked Mac, with a notification, ready to watch and save (Settings → Mac app)")
+        self.send_to_macs.toggled.connect(lambda v: self._set("send_to_macs", bool(v)))
+        form.addRow("", self.send_to_macs)
+        self.sport_note = WrapLabel()
+        self.sport_note.setProperty("muted", True)
+        self.sport_note.setTextFormat(Qt.RichText)
+        form.addRow("", self.sport_note)
 
         section("Where its videos come from")
         self.channels = QPlainTextEdit()
@@ -408,7 +427,11 @@ class Categories(QWidget):
             line2 = " · ".join([who] + (sources or ["no sources yet"]))
             line3 = (f"Today {today}/{n.daily} · {c.get('waiting', 0)} waiting · {c.get('clips', 0)} clips this week"
                      if n.on else n.state.split(":")[0] + ": nothing is picked")
-            it.setText(f"{n.name}\n{line2}\n{line3}")
+            sport = n.sport_info
+            title = f"{sport.emoji} {n.name}" if sport else n.name
+            if n.send_to_macs:
+                line2 += " · to your Macs"
+            it.setText(f"{title}\n{line2}\n{line3}")
             it.setForeground(QColor(theme.WARN if n.enabled and n.needs_account else
                                     theme.TEXT if n.on else theme.MUTED))
             it.setToolTip(str(self._folder_of(n)))
@@ -428,6 +451,9 @@ class Categories(QWidget):
             self._fill_accounts(n)
             self.enabled.setChecked(n.enabled)
             self.daily.setValue(n.daily)
+            self.sport.setCurrentIndex(max(0, self.sport.findData(n.sport)))
+            self.send_to_macs.setChecked(n.send_to_macs)
+            self._sport_note(n)
             self.channels.setPlainText(n.channels)
             self.searches.setPlainText(n.searches)
             self.finds.setPlainText(n.finds)
@@ -595,6 +621,36 @@ class Categories(QWidget):
         if n is not None:
             self._fill_accounts(n)
         self._refresh_stats()
+
+    def _pick_sport(self, sport_id: str) -> None:
+        """A sport for the category: the first time, its clips also go to the Macs, and its videos come from
+        YouTube's Sports category too unless it already has YouTube categories."""
+        n = self._category()
+        if n is None or self._filling or n.sport == (sport_id or ""):
+            return
+        changes: dict = {"sport": sport_id or ""}
+        if sport_id and not n.sport:
+            changes["send_to_macs"] = True
+            if not n.yt_categories.strip():
+                changes["yt_categories"] = "17"
+        self._replace(replace(n, **changes))
+        self._fill_form()
+
+    def _sport_note(self, n: Category) -> None:
+        sport = sport_named(n.sport)
+        if sport is None:
+            self.sport_note.setText("")
+            self.sport_note.setVisible(False)
+            return
+        lo, hi = sport.lengths
+        length = (f"{n.min_len or lo:.0f}–{n.max_len or max(hi, n.min_len):.0f} s" if n.min_len or n.max_len
+                  else f"{lo:.0f}–{hi:.0f} s (its sport's, unless Clip length below says otherwise)")
+        self.sport_note.setText(
+            f"{sport.emoji} Clips are whole plays: about {sport.lead:.0f} s of build-up, the moment, and the reaction "
+            f"until the crowd settles, {length}. It looks for {sport.words}.<br>"
+            f"<span style='color:{theme.WARN}'>League and broadcaster footage is usually claimed on TikTok (copyright), "
+            "and can be muted or taken down. Channels that allow reuse, or your own footage, are safest.</span>")
+        self.sport_note.setVisible(True)
 
     def _set(self, name: str, value) -> None:
         if self._filling:

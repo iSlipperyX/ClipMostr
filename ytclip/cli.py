@@ -20,6 +20,7 @@ from .organize import stamp
 from .settings import (ASPECTS, LAYOUT_PRESETS, PRESETS, PRO_EDIT, Settings, all_layouts, all_presets,
                        find_layout)
 from .qc import REJECTED as QC_REJECTED
+from .sports import SPORTS
 from .stackpool import pool_files
 
 # Redirected output on Windows defaults to cp1252, which can't encode ✓, → or most
@@ -89,6 +90,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--bleep", action="store_true", help="mask strong swearing in captions (f*ck, sh*t)")
     p.add_argument("--qc", action="store_true", help="check each clip after export; failures move to _rejected")
     p.add_argument("--keywords", help="comma-separated words/phrases to boost")
+    p.add_argument("--sport", choices=sorted(SPORTS), help="clip it as sports: the crowd, the commentary and replays "
+                                                         "find the plays, each clip a whole play (and that sport's "
+                                                         "clip lengths, unless --min/--max)")
     p.add_argument("-q", "--quality", type=int, help="max download height, e.g. 720")
     p.add_argument("--encoder", choices=["auto", "libx264", "h264_amf", "h264_nvenc", "h264_qsv"])
     p.add_argument("--fast", action="store_true", help="copy streams instead of re-encoding")
@@ -196,7 +200,10 @@ def settings_from_args(args: argparse.Namespace) -> Settings:
         "ai_provider": args.ai,
         "caption_censor": True if args.bleep else None,
         "qc_enabled": True if args.qc else None,
+        "sport": args.sport,
     }
+    if args.sport and args.min_len is None and args.max_len is None:
+        overrides["min_len"], overrides["max_len"] = SPORTS[args.sport].lengths
     if args.pro:
         overrides |= PRO_EDIT
     if args.creator_rewards:

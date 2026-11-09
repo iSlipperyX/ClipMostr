@@ -342,6 +342,17 @@ Every picked video goes into one category: the one that lists its channel, then 
 
 Making your first category moves your channel list, Creative Commons searches and standing requests into it. If you never make a category, nothing changes. `ytclip categories` lists your categories with what each picked today, what's waiting and its clips in the last 7 days (`--json` for scripts).
 
+### Sports categories
+
+Give a category a **Sport** (Categories tab → *The category* → Sport: soccer, basketball, American football, baseball, ice hockey, tennis, boxing/MMA, golf, cricket, motorsport, or *Any sport*) and its videos are clipped as sports, from a full match or a highlights video:
+
+- **What finds the plays.** The **crowd erupting**: louder than the last two minutes of the match, noise-like (a roar, not one voice) and lasting a few seconds, so a whistle or one fan shouting doesn't count. The **commentator's big calls** for that sport (*"what a goal"*, *"touchdown"*, *"down goes…"*, a stretched *"gooooal"*), credited to the seconds just before them, where the play is. The commentator **getting animated**. **Replays** (*"let's see that again"*, *"another angle"*), which mark the half minute before them, and the **burst of camera cuts** after a big moment (close-ups, the bench). YouTube's *Most replayed*, [Cheering]/[Applause] captions and your title words count too.
+- **Each clip is one whole play.** A few seconds of build-up before the crowd starts to rise (12 s for soccer, 8 s for basketball…), the moment, and the reaction until the roar dies down, ending before the replay starts. Clip edges never get pulled in to the commentary (*Trim dead air* is skipped), and only move outwards to finish the commentator's sentence.
+- **Lengths.** Each sport has its own clip length (soccer 15–40 s, basketball 10–30 s…) unless the category sets **Clip length**. With Creator Rewards on, clips are still made over a minute.
+- **The AI.** In AI mode the AI is told to pick whole plays of that sport (goals, saves, buzzer-beaters, knockouts…), and the AI polish writes hooks that build suspense without giving the ending away.
+- **Sent to your Macs.** Choosing a sport also ticks **Send new clips to my Macs** (and YouTube's *Sports* category, if the category had none): every new clip lands in ClipMonster Remote's **Sports clips** inbox on each linked Mac, with a notification (see [Your Mac](#your-mac-clipmonster-remote)). Any category can have it ticked.
+- **Copyright.** League and broadcaster footage is usually claimed on TikTok and can be muted or taken down. Channels that allow reuse, or your own footage, are safest.
+
 ### Learning from results
 
 Posting keeps track of how your posted clips do: every half hour it writes `%APPDATA%\ClipMonster\results.json`, with the views of every ClipMonster clip that has been up for two days, compared with the usual views on that TikTok account (so "2×" means twice your usual). With **Settings → Picking → Learn from how my clips do** on (the default), ClipMonster uses it in three ways:
@@ -461,12 +472,13 @@ Anything else you type gets two buttons: make a video about it, or ask for clips
 | **Overview** | What automation is doing right now, with the same step bar as the Automation tab. Also: how many videos wait for your OK, the queue, posts today, what was made in the last day and the free disk space. It lists what's up next to clip or make, each TikTok account (signed in, queued, next post) and the news (posts going up, milestones, problems). |
 | **Waiting to post** | Every video waiting to post, held ones first, with its picture. Pick one to **watch it**: it streams from the PC, so it starts at once and you can skip around. Then **✓ OK to post**, **🚀 Post now**, **↻ Try again** (a post that failed) or **🗑 Delete…**, which asks first and clears it from the PC the way [Clean up](#clean-up) does. You can change its caption and hashtags until it posts. |
 | **Posted** | The latest posts with their views, likes, comments and shares. Double-click one to open it on TikTok. |
+| **Sports clips** | Every new clip from a category with **Send new clips to my Macs** (every [sports category](#sports-categories)), newest first, with a notification as each arrives (and a count of what came while the Mac was off). Watch it, **Save to Mac**, **Save as…**, **Show in Finder**, **Open** it in QuickTime, copy the link to the moment in the source video, or **Remove from inbox**. With **Save new clips to this Mac by themselves** on (it is to start with), each one is downloaded as it arrives into `~/Movies/ClipMonster/<category>/` (pick another folder at the top). The PC keeps each clip for a week, or until every linked Mac has it, so it still reaches a Mac that was asleep, even after the clip posts and [Clean up](#clean-up) deletes it. |
 | **New video** | Make a Creator video about an idea, clip YouTube links, or ask for clips (how many, how long, the category, links, special requests for the AI), each for the category you pick. |
 | **Requests** | Your clip requests, how far along each one is, and **Cancel**. |
 | **Categories** | Each category's state and what's waiting for it. **Pause** or **Resume** one, or **Find videos now**. |
 | **This week**, **Log** | The [weekly report](#the-overnight-report-and-the-health-check), and automation's log as it's written. |
 
-**Pause** in the top bar pauses clipping and making videos (posting carries on). The Dock icon and the menu bar icon show how many videos wait for your OK. Mac notifications tell you when a video waits for your OK, when a post goes up and when something needs you. Closing the window keeps the menu bar icon and the notifications; **Quit** from the menu bar icon ends the app.
+**Pause** in the top bar pauses clipping and making videos (posting carries on). The Dock icon and the menu bar icon show how many videos wait for your OK. Mac notifications tell you when a video waits for your OK, when a sports clip arrives, when a post goes up and when something needs you. Closing the window keeps the menu bar icon and the notifications; **Quit** from the menu bar icon ends the app.
 
 **Away from home.** The PC isn't opened to the internet. Install [Tailscale](https://tailscale.com/download) on the PC and the Mac, signed in to the same account, and type the PC's Tailscale address (like `100.101.7.42`, or its name `justyn-pc.tail1234.ts.net`) as the IP address in the Mac app. The Mac recognises it as the same PC and connects as usual.
 
@@ -592,6 +604,7 @@ ytclip "https://youtu.be/VIDEO" --preset shorts
 ytclip "https://www.youtube.com/@channel/videos" --limit 5 -n 3
 ytclip "C:\Videos\podcast.mp4" --mode ai --captions -f vertical_crop
 ytclip "https://youtu.be/VIDEO" --keywords "goal, penalty" --dry-run
+ytclip "https://youtu.be/MATCH" --sport soccer --captions    # whole plays, found by the crowd and the commentary
 ytclip "C:\Videos\stream.mp4" --layout "Gameplay below + title" --captions
 ytclip "C:\Videos\stream.mp4" --stack "C:\Videos\parkour.mp4" --top-text "{title}" --bottom-text "Follow for part 2" --captions
 ytclip "https://youtu.be/VIDEO" --stack "C:\Videos\Gameplay" --polish --captions --bleep --qc
@@ -612,7 +625,7 @@ ytclip --list-presets
 
 Pro edit: `--pro` turns on everything in *Settings → Editing* · `--creator-rewards` clips over a minute · `--music FOLDER` · `--broll FOLDER` · `--ai local` the local AI. `ytclip local-ai [status|download|test]` checks, downloads or tries the local AI.
 
-Main options: `-n` number of clips · `--min/--max` length in seconds · `--mode auto|ai|chapters` · `-f original|vertical_blur|vertical_crop|square` · `--captions` · `--polish` AI hooks and caption fixes · `--bleep` mask swearing · `--qc` check clips after export · `--stack VIDEO|FOLDER` · `--keywords` · `-q` max download resolution · `--encoder` · `--limit` videos per playlist · `-o` output folder · `--dry-run` analyse without exporting · `--cookies-from-browser clipmonster` to download with ClipMonster's own sign-in (`ytclip sign-in`), or `chrome`, `firefox`... for a browser's.
+Main options: `-n` number of clips · `--min/--max` length in seconds · `--mode auto|ai|chapters` · `-f original|vertical_blur|vertical_crop|square` · `--captions` · `--polish` AI hooks and caption fixes · `--bleep` mask swearing · `--qc` check clips after export · `--stack VIDEO|FOLDER` · `--keywords` · `--sport soccer|basketball|…` clip it as [sports](#sports-categories) · `-q` max download resolution · `--encoder` · `--limit` videos per playlist · `-o` output folder · `--dry-run` analyse without exporting · `--cookies-from-browser clipmonster` to download with ClipMonster's own sign-in (`ytclip sign-in`), or `chrome`, `firefox`... for a browser's.
 
 ## Updates
 
@@ -675,6 +688,7 @@ Run the tests with `pip install -e .[test]` and then `pytest`. They need no netw
 |---|---|
 | `ytclip/engine.py` | Pipeline: open → measure (cached) → transcribe → find clips → export |
 | `ytclip/analyze.py` | Signals, scoring and clip picking |
+| `ytclip/sports.py` | Sports categories: the crowd, commentary-call and replay signals, and cutting each clip as a whole play |
 | `ytclip/ai.py` | AI clip finder, and the one place Claude and Gemini are called from (choosing the AI, falling back) |
 | `ytclip/intelligence/` | Local AI: hardware and free memory (`hardware.py`), the model catalogue and download, the model file's header (`gguf.py`), the layer split and memory length (`planner.py`), llama.cpp (`llama_engine.py`), the transcript parser; offline voice and sentiment signals |
 | `ytclip/diagnostics.py` | Graphics card failures that Whisper and the local AI worked around, written to `automation.log` |
@@ -682,8 +696,8 @@ Run the tests with `pip install -e .[test]` and then `pytest`. They need no netw
 | `ytclip/audio/`, `ytclip/rendering/` | Dead-air and filler cuts, ducking, mastering; the edit plan, the audio graph, kinetic caption tags, hook card and lower-third |
 | `ytclip/compliance/duration_guard.py`, `ytclip/posting/tracker.py` | Creator Rewards: clips over a minute, and progress to the program's goals |
 | `packaging/linux/` | The Linux host: `install.sh` (attached to releases as `install-linux.sh`), the `clipmonster` admin command, the virtual screen and desktop, and their systemd services. `ytclip/linux_host.py` sets a host's settings the first time |
-| `ytclip/remote/` | The Mac app's server inside automation: linking (`protocol.py`, shared with the Mac), the PC's certificate, the linked Macs (`state.py`), what the Mac can see and do (`host.py`), HTTPS and discovery (`server.py`) |
-| `ytclip/mac/` | ClipMonster Remote, the Mac app: the pinned connection and Keychain, finding PCs, the loopback video proxy, and its window and pages |
+| `ytclip/remote/` | The Mac app's server inside automation: linking (`protocol.py`, shared with the Mac), the PC's certificate, the linked Macs (`state.py`), what the Mac can see and do (`host.py`), clips sent to the Macs (`deliveries.py`), HTTPS and discovery (`server.py`) |
+| `ytclip/mac/` | ClipMonster Remote, the Mac app: the pinned connection and Keychain, finding PCs, the loopback video proxy, and its window and pages (the Sports clips inbox: `inbox.py`) |
 | `ytclip/gemini.py` | Google's Gemini API over plain HTTPS: streamed JSON answers, key checks |
 | `ytclip/polish.py` | AI polish: hooks, caption fixes, speaker crops, burned-in subtitle check |
 | `ytclip/qc.py` | Quality check: silence, black/frozen picture, length/size, mid-sentence edges, AI ratings |

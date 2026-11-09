@@ -238,6 +238,8 @@ def settings_for(job: Job, s: Settings, order: "orders.Order | None" = None,
     out = out.apply(overrides)
     label = " · ".join(x for x in (preset or "My settings", view) if x)
     why = [f"category: {category.name}"] if category else []
+    if category and category.sport_info:
+        why.append(f"{category.sport_info.label.lower()}: whole plays, by the crowd and the commentary")
     if order is not None:
         why.append(f"request: {order.count} clips of {order.length_text()}")
     if overrides.get("mode") == "ai":
@@ -1188,9 +1190,42 @@ class Runner:
         if p.timings:
             self.log(f"  {title} {timing_text(p.timings)}.")
             self.db.set_meta("last_timings", json.dumps({k: round(v, 1) for k, v in p.timings.items()}))
+        self.deliver(folder, category)
         if job.order:
             self.order_progress(job.order)
         self.prune(s)
+
+    def deliver(self, folder, category) -> int:
+        """A category with Send new clips to my Macs (every sports category, to start with): its new clips wait
+        in the linked Macs' inbox (remote/deliveries.py), and a Mac that's connected is told at once.
+        Returns how many were sent."""
+        if category is None or not category.send_to_macs or not folder:
+            return 0
+        from .remote import deliveries, state as remote_state
+
+        try:
+            macs = [d["id"] for d in remote_state.load()["devices"]]
+            if not macs:
+                return 0
+            made = deliveries.add(Path(folder), category, self.now())
+            deliveries.prune(macs, self.now())
+        except Exception as exc:  # noqa: BLE001 - the clips are made and queued either way
+            self.log(f"⚠ The clips couldn't be sent to your Macs: {exc}")
+            return 0
+        if not made:
+            return 0
+        sport = category.sport_info
+        what = f"{sport.label} clip" if sport else "clip"
+        mark = f"{sport.emoji} " if sport else ""
+        text = (f"{mark}New {what}: {made[0]['title']}" if len(made) == 1 else
+                f"{mark}{len(made)} new {what}s from {made[0]['source_title'] or category.name}")
+        self.log(f"Sent {len(made)} clip{'s' if len(made) != 1 else ''} to your Macs' inbox.")
+        if self.remote is not None:
+            try:
+                self.remote.host.add_event("delivery", text, item=made[0]["id"])
+            except Exception:  # noqa: BLE001
+                pass
+        return len(made)
 
     def failed(self, job: Job, error: str, s: Settings) -> None:
         now = self.now()

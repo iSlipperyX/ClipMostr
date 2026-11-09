@@ -21,6 +21,7 @@ from .client import ApiError, Client, Offline, WrongPC
 
 STATUS_EVERY = 3000  # ms
 VIDEOS_EVERY = 6000
+DELIVERIES_EVERY = 20000  # the sports clips inbox (news of a new one asks at once)
 EVENTS_WAIT = 12.0  # s a long poll waits (under the client's timeout)
 
 
@@ -61,6 +62,7 @@ class Session(QObject):
 
     status = Signal(dict)
     videos = Signal(list)
+    deliveries = Signal(dict)  # the clips the PC sent to this Mac (inbox.py); {"unsupported": True} on an older PC
     event = Signal(dict)
     connection = Signal(str, str)  # "online" | "offline" | "unlinked" | "wrong_pc", and what to say
 
@@ -73,7 +75,8 @@ class Session(QObject):
         self.last_status: dict = {}
         self.last_videos: list = []
         self._videos_rev = ""
-        self._busy = {"status": False, "videos": False}
+        self._busy = {"status": False, "videos": False, "deliveries": False}
+        self._deliveries_rev = ""
         self._stop = threading.Event()
         self._events_thread: threading.Thread | None = None
         self._seq = -1
@@ -83,6 +86,9 @@ class Session(QObject):
         self.videos_timer = QTimer(self)
         self.videos_timer.setInterval(VIDEOS_EVERY)
         self.videos_timer.timeout.connect(self.refresh_videos)
+        self.deliveries_timer = QTimer(self)
+        self.deliveries_timer.setInterval(DELIVERIES_EVERY)
+        self.deliveries_timer.timeout.connect(self.refresh_deliveries)
 
     # --- running -----------------------------------------------------------------------------------------
 
@@ -90,8 +96,10 @@ class Session(QObject):
         self._stop.clear()
         self.refresh_status()
         self.refresh_videos(force=True)
+        self.refresh_deliveries(force=True)
         self.status_timer.start()
         self.videos_timer.start()
+        self.deliveries_timer.start()
         self._events_thread = threading.Thread(target=self._events_loop, name="remote-events", daemon=True)
         self._events_thread.start()
 
@@ -99,6 +107,7 @@ class Session(QObject):
         self._stop.set()
         self.status_timer.stop()
         self.videos_timer.stop()
+        self.deliveries_timer.stop()
         self.client.close()
 
     def call(self, fn: Callable[[Client], object], ok: Callable | None = None, fail: Callable | None = None) -> None:
@@ -166,6 +175,26 @@ class Session(QObject):
             self._busy["videos"] = False
 
         self.call(lambda c: c.get("/api/videos", rev=known) if known else c.get("/api/videos"), ok, fail)
+
+    def refresh_deliveries(self, force: bool = False) -> None:
+        if self._busy["deliveries"]:
+            return
+        self._busy["deliveries"] = True
+        known = "" if force else self._deliveries_rev
+
+        def ok(got):
+            self._busy["deliveries"] = False
+            self._deliveries_rev = got.get("rev") or ""
+            if not got.get("same"):
+                self.deliveries.emit(got)
+
+        def fail(exc):
+            self._busy["deliveries"] = False
+            if isinstance(exc, ApiError) and exc.status == 404:  # a PC from before 3.6: nothing to send
+                self.deliveries_timer.stop()
+                self.deliveries.emit({"unsupported": True})
+
+        self.call(lambda c: c.get("/api/deliveries", rev=known) if known else c.get("/api/deliveries"), ok, fail)
 
     def _events_loop(self) -> None:
         """The news feed: one long poll at a time, on its own connection."""

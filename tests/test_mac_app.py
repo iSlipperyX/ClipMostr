@@ -7,18 +7,13 @@ import pytest
 
 pytest.importorskip("PySide6.QtWidgets")
 
-from PySide6.QtWidgets import QApplication, QMessageBox  # noqa: E402
+from PySide6.QtWidgets import QMessageBox  # noqa: E402
 
 from test_remote import mac_home, world  # noqa: E402,F401 - fixtures
 from test_telegram import clip_folder, creator_folder  # noqa: E402
 from ytclip.mac import hosts  # noqa: E402
 from ytclip.mac import client as mclient  # noqa: E402
 from ytclip.remote import state  # noqa: E402
-
-
-@pytest.fixture
-def app():
-    return QApplication.instance() or QApplication([])
 
 
 def wait(app, cond, timeout=10.0):
