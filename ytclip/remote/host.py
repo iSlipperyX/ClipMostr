@@ -693,3 +693,77 @@ class Host:
         if size > n * 400 and out:
             out = out[1:]  # the first line was cut in half
         return {"lines": out[-n:]}
+
+    # --- clips sent to the Macs (deliveries.py) ---------------------------------------------------------------
+
+    def deliveries(self, device_id: str, known_rev: str = "") -> dict:
+        """The clips waiting for this Mac, newest first, and which categories send them."""
+        from . import deliveries
+
+        items = deliveries.for_device(device_id)
+        r = rev([(i["id"], i["got"], i["seen"]) for i in items])
+        if known_rev and known_rev == r:
+            return {"rev": r, "same": True}
+        sending = []
+        for c in self._categories():
+            if c.send_to_macs:
+                sport = c.sport_info
+                sending.append({"id": c.id, "name": c.name, "sport": sport.label if sport else "",
+                                "emoji": sport.emoji if sport else "", "on": c.on})
+        return {"rev": r, "same": False, "items": items, "new": sum(1 for i in items if i["new"]),
+                "sending": sending, "keep_days": deliveries.KEEP_DAYS}
+
+    def _delivery(self, item_id: str) -> dict:
+        from . import deliveries
+
+        item = deliveries.find(item_id)
+        if item is None:
+            raise HostError(404, "That clip isn't on the PC any more (each one is kept a week).")
+        return item
+
+    def delivery_file(self, item_id: str) -> Path:
+        from . import deliveries
+
+        p = deliveries.file_of(self._delivery(item_id))
+        if p is None:
+            raise HostError(404, "That clip's file isn't on the PC any more.")
+        return p
+
+    def delivery_thumb(self, item_id: str) -> Path:
+        from . import deliveries
+
+        item = self._delivery(item_id)
+        p = deliveries.file_of(item, "thumb")
+        if p is not None:
+            return p
+        src = deliveries.file_of(item)
+        if src is None:
+            raise HostError(404, "No picture for it.")
+        from ..posting.media import thumbnail
+
+        dest = deliveries.folder() / f"{item['id']}.jpg"
+        try:
+            thumbnail(src, dest, min(1.5, max(0.0, float(item.get("length") or 3.0) / 3)))
+        except Exception as exc:  # noqa: BLE001
+            raise HostError(404, f"No picture for it ({exc}).") from exc
+        with deliveries.edit() as data:
+            for i in data["items"]:
+                if i.get("id") == item["id"]:
+                    i["thumb"] = dest.name
+        return dest
+
+    def delivery_mark(self, item_id: str, device_id: str, what: str) -> dict:
+        from . import deliveries
+
+        if what not in ("got", "seen", "dismissed"):
+            raise HostError(404, "No such request.")
+        if not deliveries.mark(item_id, device_id, what, self.now()):
+            raise HostError(404, "That clip isn't on the PC any more.")
+        if what == "dismissed":
+            try:
+                from . import state
+
+                deliveries.prune([d["id"] for d in state.load()["devices"]], self.now())
+            except (OSError, TimeoutError):
+                pass
+        return {"message": {"got": "Saved on this Mac.", "seen": "", "dismissed": "Removed from this Mac's inbox."}[what]}

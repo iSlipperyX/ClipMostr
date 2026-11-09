@@ -43,6 +43,11 @@ SIGNAL_LABELS = {
     "keywords": "Keywords",
     "voice": "Animated voice",
     "emotion": "Emotional words",
+    # sports categories (sports.py)
+    "crowd": "Crowd roar",
+    "calls": "Commentator calls",
+    "replay": "Replays",
+    "aftermath": "Close-ups after",
 }
 
 
@@ -82,6 +87,7 @@ class Measurements:
     cues: list[Cue] = field(default_factory=list)
     fine: np.ndarray = field(default_factory=lambda: np.zeros(0))  # loudness (dBFS) per FINE seconds
     centroid: np.ndarray = field(default_factory=lambda: np.zeros(0))  # spectral centroid (Hz) per HOP seconds
+    flatness: np.ndarray = field(default_factory=lambda: np.zeros(0))  # how noise-like, 0-1, per HOP seconds (sports.py)
 
     @property
     def seconds(self) -> int:
@@ -119,11 +125,13 @@ def _minmax(x: np.ndarray) -> np.ndarray | None:
 
 def loudness(path: Path, duration: float = 0,
              progress: Callable[[float], None] | None = None,
-             centroid: list | None = None) -> tuple[np.ndarray, np.ndarray]:
+             centroid: list | None = None, flatness: list | None = None) -> tuple[np.ndarray, np.ndarray]:
     """RMS loudness in dBFS for every HOP-second frame, and for every FINE-second frame (the short
     pauses between sentences and words, see cuts.py), in one pass through ffmpeg. Pass a list as
-    `centroid` and it gets the spectral centroid of every HOP-second frame too (one array)."""
+    `centroid` and it gets the spectral centroid of every HOP-second frame too (one array), and as
+    `flatness` how noise-like each one is (sports.spectral_flatness, for the crowd)."""
     from .intelligence.viral_heuristics import spectral_centroid
+    from .sports import spectral_flatness
 
     cmd = [ffmpeg_exe(), "-v", "error", "-i", str(path), "-vn", "-ac", "1",
            "-ar", str(SAMPLE_RATE), "-f", "s16le", "-"]
@@ -146,6 +154,8 @@ def loudness(path: Path, duration: float = 0,
             fine.append((20 * np.log10(np.sqrt(np.mean(small**2, axis=1)) / 32768 + 1e-9)).astype(np.float32))
             if centroid is not None:
                 centroid.append(spectral_centroid(frames, SAMPLE_RATE))
+            if flatness is not None:
+                flatness.append(spectral_flatness(frames, SAMPLE_RATE))
             leftover = buf[usable:]
             done += len(frames)
             if progress and duration:
@@ -153,6 +163,9 @@ def loudness(path: Path, duration: float = 0,
     if centroid is not None:
         parts = [c for c in centroid if isinstance(c, np.ndarray)]
         centroid[:] = [np.concatenate(parts) if parts else np.zeros(0, np.float32)]
+    if flatness is not None:
+        parts = [f for f in flatness if isinstance(f, np.ndarray)]
+        flatness[:] = [np.concatenate(parts) if parts else np.zeros(0, np.float32)]
     return (np.concatenate(chunks) if chunks else np.zeros(0),
             np.concatenate(fine) if fine else np.zeros(0, np.float32))
 

@@ -14,7 +14,7 @@ from ..steps import Status
 from . import common as c
 
 NEWS_KEPT = 12
-EVENT_ICONS = {"posted": "✔", "error": "✖", "problem": "⚠", "login_needed": "⚠", "milestone": "🏁", "hot": "🔥",
+EVENT_ICONS = {"delivery": "📥", "posted": "✔", "error": "✖", "problem": "⚠", "login_needed": "⚠", "milestone": "🏁", "hot": "🔥",
                "linked": "💻"}
 
 

@@ -145,27 +145,34 @@ class Engine:
         v = p.video
         assert v is not None
         cache = self.s.cache_path / f"{v.id}.analysis.npz"
-        db, fine, centroid, scene_cuts, scenes_done = None, None, None, [], False
+        db, fine, centroid, flatness, scene_cuts, scenes_done = None, None, None, None, [], False
         if cache.exists():
             try:
                 data = np.load(cache)
                 db, scene_cuts, scenes_done = data["db"], list(data["cuts"]), bool(data["scenes_done"])
                 fine = data["fine"] if "fine" in data.files else None  # caches before 2.4.0 have no fine loudness
                 centroid = data["centroid"] if "centroid" in data.files else None  # nor before 3.1.0 the voice
+                flatness = data["flatness"] if "flatness" in data.files else None  # nor before 3.6.0 the crowd
             except Exception:
                 db = None
-        if db is None or fine is None or centroid is None:
+        if flatness is None and not self.s.sport and db is not None:
+            flatness = np.zeros(0, np.float32)  # only sports needs it: no need to listen again for it
+        if db is None or fine is None or centroid is None or flatness is None:
             with timed(p, "audio"):
                 got: list = []
-                db, fine = loudness(v.path, v.duration, lambda f: self.progress("Measuring audio", f), centroid=got)
+                flat: list = []
+                db, fine = loudness(v.path, v.duration, lambda f: self.progress("Measuring audio", f), centroid=got,
+                                    flatness=flat)
                 centroid = got[0] if got else np.zeros(0, np.float32)
+                flatness = flat[0] if flat else np.zeros(0, np.float32)
         if self.s.detect_scenes and not scenes_done:
             with timed(p, "scenes"):
                 scene_cuts = self._scenes(v)
             scenes_done = True
         self.s.cache_path.mkdir(parents=True, exist_ok=True)
+        extra = {"flatness": flatness} if len(flatness) else {}  # an empty one would read as measured
         np.savez_compressed(cache, db=db, fine=fine, centroid=centroid, cuts=np.array(scene_cuts, dtype=float),
-                            scenes_done=scenes_done)
+                            scenes_done=scenes_done, **extra)
 
         with timed(p, "transcript"):
             cues, words, source = self._transcript(p)
@@ -176,7 +183,7 @@ class Engine:
         p.words, p.transcript_source = words, source
         p.measurements = Measurements(duration=v.duration, db=db, heatmap=v.heatmap,
                                       scene_cuts=scene_cuts if self.s.detect_scenes else [], cues=cues, fine=fine,
-                                      centroid=centroid)
+                                      centroid=centroid, flatness=flatness)
 
     def _scenes(self, v: Video) -> list[float]:
         """Scene cuts, decoding the video on the graphics card unless Speed is Quiet (and on the
@@ -294,9 +301,14 @@ class Engine:
 
             self.progress("AI is picking clips", None)
             try:
+                told = self.s.ai_instructions
+                if self.sport is not None:
+                    from .sports import ai_guide
+
+                    told = f"{ai_guide(self.sport)}\n{told}".strip()
                 clips, model = find_clips_ai(
                     v.title, v.duration, sents, p.score, self.s.clip_count, *self.lengths(v.duration),
-                    self.s.ai_instructions, self.s, self.log,
+                    told, self.s, self.log,
                     check=lambda: self.progress("AI is picking clips", None))
                 self.progress("AI is picking clips", None)  # a cancel during the call discards its result
                 clips = self._fit(clips, sents, m, v.duration)
@@ -324,6 +336,12 @@ class Engine:
             align = bool(sents) and self.s.snap_to_pauses
 
             def pick(count: int) -> list[Clip]:
+                if self.sport is not None:  # each clip is one whole play, cut around its moment
+                    from . import sports
+
+                    return sports.pick_moments(p.score, p.signals.get("crowd"), count, *self.lengths(v.duration),
+                                               self.sport, max(self.s.min_gap, 8.0), self.s.quality_floor,
+                                               sports.replay_times(m.cues))
                 return pick_clips(p.score, m.db, count, *self.lengths(v.duration),
                                   self.s.min_gap, self.s.quality_floor, self.s.snap_to_pauses and not align,
                                   0.0 if align else self.s.pad_start, 0.0 if align else self.s.pad_end)
@@ -337,9 +355,15 @@ class Engine:
                 clips = self._fit(clips, sents, m, v.duration)
                 spares = self._fit(spares, sents, m, v.duration, silent=True)
                 for c in clips + spares:
-                    c.score = clip_score(p.score, c.start, c.end)
+                    if self.sport is None:  # (a play keeps the score of its moment)
+                        c.score = clip_score(p.score, c.start, c.end)
                 clips.sort(key=lambda c: c.score, reverse=True)
             p.clips = clips
+            if self.sport is not None:
+                from .sports import reason
+
+                for c in clips:
+                    c.reason = c.reason or reason(c, p.signals, m.cues, self.sport)
             self.parts(p, sents, spares)
         p.mode_used = mode
         self.trim(p)
@@ -421,8 +445,8 @@ class Engine:
 
     def trim(self, p: Project) -> None:
         """Pull clip edges in to the speech (Trim dead air), leaving hand-edited clips alone."""
-        if not (self.s.trim_silence and p.words):
-            return
+        if not (self.s.trim_silence and p.words) or self.sport is not None:
+            return  # (sports: the crowd after the last word is the point, and the build-up may have none)
         floor = self.lengths(p.video.duration if p.video else 0.0)[0]  # never shorter than Min clip length
         n = 0
         for c, (_, part, parts) in zip(p.clips, series.labels(p.clips)):
@@ -458,6 +482,10 @@ class Engine:
             about = f"These clips are for a TikTok account about {category.name}."
             guide = "\n\n".join(x for x in (about + (f" {category.instructions.strip()}" if category.instructions.strip()
                                                        else ""), guide) if x)
+        if self.sport is not None:
+            from .sports import polish_guide
+
+            guide = "\n\n".join(x for x in (polish_guide(self.sport), guide) if x)
         notes = str(((p.meta.get("automation") or {}).get("request") or {}).get("notes") or "").strip()
         if notes:  # a clip request's special requests shape the hooks and bottom lines too
             guide = "\n\n".join(x for x in (f"Special requests for these clips: {notes}", guide) if x)
@@ -495,7 +523,11 @@ class Engine:
         kept: list[Clip] = []
         dropped = 0
         for c in sorted(clips, key=lambda c: c.score, reverse=True):
-            if sents and self.s.snap_to_pauses:
+            if sents and self.s.snap_to_pauses and self.sport is not None:
+                from .sports import outward
+
+                c.start, c.end = outward(c.start, c.end, sents, max_len, duration)  # never into the play
+            elif sents and self.s.snap_to_pauses:
                 c.start, c.end = fit_to_sentences(c.start, c.end, sents, min_len, max_len)
                 c.start, c.end = breathing_room(c.start, c.end, sents, 0.15, 0.3)
                 c.end = cap_length(c.start, c.end, sents, min_len, max_len)
@@ -518,11 +550,33 @@ class Engine:
     def rescore(self, p: Project) -> None:
         m = p.measurements
         assert m is not None
-        p.signals = build_signals(m, self.s.keyword_list)
-        p.score = combine(p.signals, self.s.weights, m.seconds)
+        sport = self.sport
+        if sport is not None:
+            from . import sports
+
+            p.signals = sports.build_signals(m, sport, self.s.keyword_list)
+        else:
+            p.signals = build_signals(m, self.s.keyword_list)
+        p.score = combine(p.signals, self.weights, m.seconds)
         for c in p.clips:
             if c.origin != "ai":
                 c.score = clip_score(p.score, c.start, c.end)
+
+    @property
+    def sport(self):
+        """The sport these settings clip (sports.Sport), or None."""
+        from .sports import get
+
+        return get(getattr(self.s, "sport", ""))
+
+    @property
+    def weights(self) -> dict[str, float]:
+        """The signal weights: Settings → Picking's sliders, or the sports ones for a sport."""
+        if self.sport is not None:
+            from .sports import weights
+
+            return weights(self.s.weights)
+        return self.s.weights
 
     def label(self, p: Project, words: int = 8) -> None:
         for c in p.clips:
@@ -530,7 +584,7 @@ class Engine:
                 c.title = " ".join(p.transcript(c).split()[:words])
 
     def signal_names(self, p: Project) -> list[str]:
-        names = [SIGNAL_LABELS[k] for k in p.signals if self.s.weights.get(k, 0) > 0]
+        names = [SIGNAL_LABELS[k] for k in p.signals if self.weights.get(k, 0) > 0]
         if p.mode_used == "ai":
             from .ai import model_for
 

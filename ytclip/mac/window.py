@@ -22,6 +22,7 @@ from . import APP_NAME, common as c
 from . import hosts, prefs
 from .connect import ConnectPage
 from .dashboard import Dashboard
+from .inbox import InboxPage
 from .pages import AskPage, CategoriesPage, LogPage, PostedPage, RequestsPage, WeekPage
 from .proxy import MediaProxy
 from .session import Session, Tasks
@@ -157,6 +158,7 @@ class MainWindow(QMainWindow):
         self.ask = AskPage(self)
         self.requests = RequestsPage(self)
         self.posted = PostedPage(self)
+        self.inbox = InboxPage(self)
         self.categories = CategoriesPage(self)
         self.week = WeekPage(self)
         self.log = LogPage(self)
@@ -165,6 +167,7 @@ class MainWindow(QMainWindow):
         self.nav.section("Videos")
         self.i_videos = self.nav.addTab(self.videos, "Waiting to post", "queue")
         self.i_posted = self.nav.addTab(self.posted, "Posted", "performance")
+        self.i_inbox = self.nav.addTab(self.inbox, "Sports clips", "library")
         self.nav.section("Ask")
         self.i_ask = self.nav.addTab(self.ask, "New video", "creator")
         self.i_requests = self.nav.addTab(self.requests, "Requests", "library")
@@ -177,6 +180,7 @@ class MainWindow(QMainWindow):
         self.dashboard.open_page.connect(lambda name: self.nav.setCurrentIndex(
             {"posted": self.i_posted, "requests": self.i_requests, "categories": self.i_categories}[name]))
         self.videos.counts.connect(self._review_count)
+        self.inbox.counts.connect(self._inbox_count)
 
         self._menus()
         self._tray()
@@ -205,8 +209,8 @@ class MainWindow(QMainWindow):
         pc.addAction("Unlink this Mac…", self.unlink)
         go = mb.addMenu("Go")
         for i, (label, key) in enumerate((("Overview", "1"), ("Waiting to post", "2"), ("Posted", "3"),
-                                          ("New video", "4"), ("Requests", "5"), ("Categories", "6"),
-                                          ("This week", "7"), ("Log", "8"))):
+                                          ("Sports clips", "4"), ("New video", "5"), ("Requests", "6"),
+                                          ("Categories", "7"), ("This week", "8"), ("Log", "9"))):
             act = QAction(label, self)
             act.setShortcut(QKeySequence(f"Ctrl+{key}"))
             act.triggered.connect(lambda _=False, i=i: self._go(i))
@@ -247,6 +251,9 @@ class MainWindow(QMainWindow):
         self.tray_review = menu.addAction("")
         self.tray_review.triggered.connect(lambda: (self._raise(), self._open_videos("review")))
         self.tray_review.setVisible(False)
+        self.tray_inbox = menu.addAction("")
+        self.tray_inbox.triggered.connect(lambda: (self._raise(), self.nav.setCurrentIndex(self.i_inbox)))
+        self.tray_inbox.setVisible(False)
         menu.addSeparator()
         self.tray_pause = menu.addAction("Pause automation", self.toggle_pause)
         menu.addAction(f"Open {APP_NAME}", self._raise)
@@ -279,6 +286,7 @@ class MainWindow(QMainWindow):
         self.session = Session(host, self.tasks, self)
         self.session.status.connect(self._status)
         self.session.videos.connect(self._videos)
+        self.session.deliveries.connect(self.inbox.show_deliveries)
         self.session.event.connect(self._event)
         self.session.connection.connect(self._connection)
         self.proxy = MediaProxy(lambda: self.session.client if self.session is not None else None)
@@ -288,10 +296,12 @@ class MainWindow(QMainWindow):
         self.stack.setCurrentWidget(self.main)
         self.nav.setCurrentIndex(self.i_dash)
         self._review_seen = None
+        self.inbox.connected()
         self.session.start()
 
     def close_session(self) -> None:
         self.videos.stop()
+        self.inbox.disconnect_()
         if self.session is not None:
             self.session.stop()
             self.session.deleteLater()
@@ -401,11 +411,21 @@ class MainWindow(QMainWindow):
         except Exception:  # noqa: BLE001
             pass
 
+    def _inbox_count(self, n: int) -> None:
+        self.nav.set_badge(self.i_inbox, n)
+        if self.tray is not None:
+            self.tray_inbox.setText(f"🏆 {c.plural(n, 'new sports clip')}")
+            self.tray_inbox.setVisible(bool(n))
+
     def _event(self, e: dict) -> None:
         self.dashboard.add_event(e)
         if e.get("old"):
             return
         kind = e.get("kind")
+        if kind == "delivery":  # the inbox says it (once it has the clip), not the news
+            if self.session is not None:
+                self.session.refresh_deliveries()
+            return
         if e.get("alert") or kind in ("error", "problem", "login_needed"):
             self.notify("ClipMonster needs you", e.get("text") or "")
         elif kind in ("posted", "milestone", "hot"):
@@ -448,6 +468,8 @@ class MainWindow(QMainWindow):
         page = self.nav.widget(i)
         if page is not self.videos:
             self.videos.stop()
+        if page is not self.inbox:
+            self.inbox.stop()
         if self.session is not None and hasattr(page, "load"):
             page.load()
 

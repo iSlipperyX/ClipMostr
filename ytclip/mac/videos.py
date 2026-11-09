@@ -32,9 +32,10 @@ class Thumbs(QObject):
 
     ready = Signal(str)
 
-    def __init__(self, session_getter, parent=None):
+    def __init__(self, session_getter, parent=None, kind: str = "v"):
         super().__init__(parent)
         self._session = session_getter
+        self.kind = kind  # v: posting's videos; d: clips sent to the Macs (inbox.py)
         self.pix: dict[str, QPixmap] = {}
         self._asked: set[str] = set()
 
@@ -46,7 +47,8 @@ class Thumbs(QObject):
     def key(self, v: dict) -> str:
         s = self._session()
         host = s.host.id if s else ""
-        return hashlib.sha1(f"{host}:{v['id']}:{v.get('thumb_v', 0)}".encode()).hexdigest()[:20]
+        kind = "" if self.kind == "v" else f"{self.kind}:"
+        return hashlib.sha1(f"{host}:{kind}{v['id']}:{v.get('thumb_v', 0)}".encode()).hexdigest()[:20]
 
     def get(self, v: dict) -> QPixmap | None:
         k = self.key(v)
@@ -72,8 +74,10 @@ class Thumbs(QObject):
                             pass
                         self.ready.emit(vid)
 
-                s.call(lambda cl, vid=v["id"]: cl.fetch(cl.video_path(vid, "thumb"), 2 * 1024 * 1024), ok,
-                       lambda _e: None)
+                def path(cl, vid):
+                    return cl.video_path(vid, "thumb") if self.kind == "v" else cl.delivery_path(vid, "thumb")
+
+                s.call(lambda cl, vid=v["id"]: cl.fetch(path(cl, vid), 2 * 1024 * 1024), ok, lambda _e: None)
         return None
 
 

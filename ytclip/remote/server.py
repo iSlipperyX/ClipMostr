@@ -348,6 +348,20 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, host.log_tail(int(q.get("lines") or 300)))
         if get and path == "/api/whoami":
             return self.send_json(200, {"id": self.device["id"], "name": self.device["name"]})
+        if get and path == "/api/deliveries":
+            return self.send_json(200, host.deliveries(self.device["id"], q.get("rev", "")))
+        m = re.fullmatch(r"/api/deliveries/" + ID + r"/([a-z]+)", path)
+        if m:
+            did, action = m.group(1), m.group(2)
+            if get and action == "file":
+                return self.send_file(host.delivery_file(did))
+            if get and action == "thumb":
+                return self.send_file(host.delivery_thumb(did), "image/jpeg")
+            if not get and action in ("got", "seen", "dismiss"):
+                self.body()
+                return self.send_json(200, host.delivery_mark(did, self.device["id"],
+                                                              "dismissed" if action == "dismiss" else action))
+            raise HostError(404, "No such request.")
         m = re.fullmatch(r"/api/videos/" + ID + r"(?:/([a-z\-]+))?", path)
         if m:
             vid, action = m.group(1), m.group(2) or ""

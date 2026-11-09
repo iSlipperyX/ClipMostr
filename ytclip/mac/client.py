@@ -295,3 +295,7 @@ class Client:
 
     def video_path(self, item_id: str, what: str = "") -> str:
         return f"/api/videos/{quote(item_id, safe='')}" + (f"/{what}" if what else "")
+
+    def delivery_path(self, item_id: str, what: str = "file") -> str:
+        """A clip the PC sent to the Macs (the inbox): its file, thumb, or got/seen/dismiss."""
+        return f"/api/deliveries/{quote(item_id, safe='')}/{what}"

@@ -92,6 +92,8 @@ class Category:
     paused: bool = False  # paused in the Automation tab: nothing new is picked and its waiting videos wait
     creator_daily: int = 0  # Video Creator videos a day, planned and made by automation (creator/schedule.py)
     creator_topics: str = ""  # ideas for them, one per line (# starts a comment); trending topics fill in
+    sport: str = ""  # a sports category (sports.py): crowd, commentary and whole plays pick its clips; "" = not sports
+    send_to_macs: bool = False  # each new clip also goes to the linked Macs' inbox (remote/deliveries.py)
 
     @classmethod
     def from_json(cls, d) -> "Category | None":
@@ -118,6 +120,9 @@ class Category:
         if n.min_len and n.max_len and n.max_len < n.min_len:
             n.min_len, n.max_len = n.max_len, n.min_len
         n.name = " ".join(n.name.split())
+        from .sports import get as sport_named
+
+        n.sport = sport.id if (sport := sport_named(n.sport)) else ""
         # A hand-written category with no id gets one made from its name, so every read agrees on it.
         n.id = re.sub(r"[^\w-]", "", n.id) or hashlib.sha1(n.folder.lower().encode()).hexdigest()[:8]
         return n if n.name else None
@@ -156,15 +161,27 @@ class Category:
             return "Off: nothing new is picked"
         return ""
 
+    @property
+    def sport_info(self):
+        """Its sport (sports.Sport), or None when it isn't a sports category."""
+        from .sports import get
+
+        return get(self.sport)
+
     def clip_overrides(self) -> dict:
-        """The category's own clip count and length, for the settings its videos are clipped with."""
+        """The category's own clip count and length, for the settings its videos are clipped with. A sports
+        category with no length of its own gets its sport's (a play is shorter than a story), and its sport."""
         out: dict = {}
         if self.clips_per_video:
             out["clip_count"] = self.clips_per_video
-        if self.min_len:
-            out["min_len"] = self.min_len
-        if self.max_len:
-            out["max_len"] = self.max_len
+        sport = self.sport_info
+        lo, hi = sport.lengths if sport else (0.0, 0.0)
+        if self.min_len or (sport and not self.max_len):
+            out["min_len"] = self.min_len or min(lo, self.max_len or lo)
+        if self.max_len or sport:
+            out["max_len"] = self.max_len or max(hi, self.min_len)
+        if sport:
+            out["sport"] = sport.id
         return out
 
     @property
