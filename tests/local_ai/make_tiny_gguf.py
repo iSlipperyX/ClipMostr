@@ -16,6 +16,7 @@ from pathlib import Path
 
 def main() -> int:
     src, out = Path(sys.argv[1]), Path(sys.argv[2])
+    out.parent.mkdir(parents=True, exist_ok=True)  # (build/ isn't there yet on a fresh checkout)
     sys.path.insert(0, str(src / "gguf-py"))
     import gguf
     import numpy as np
