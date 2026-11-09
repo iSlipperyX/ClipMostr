@@ -1,5 +1,6 @@
 """What the Windows build leaves out (ClipMonster.spec): files that come with the libraries ClipMonster uses
-but that it never loads. About 150 MB of the app folder and a quarter of the download.
+but that it never loads: 1,347 files and 183 MB of the app folder in the 3.5.0 build, whose update zip came to 203 MB
+(3.3.0's: 412 MB).
 
 Each rule says why its files are never needed. tests/test_packaging.py checks the rules against the file
 names of a real build: that each rule still finds its files, and that everything ClipMonster does load stays.
