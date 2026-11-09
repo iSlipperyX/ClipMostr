@@ -12,6 +12,8 @@ import time
 
 from ..remote import protocol
 
+RESEND_EVERY = 0.4  # s: the question goes out again while waiting, in case one was lost (it's UDP)
+
 
 def _targets() -> list[str]:
     """Where to send the broadcast: everywhere on this network, and the /24 this Mac is on."""
@@ -38,23 +40,37 @@ def discover(timeout: float = 1.5, port: int = protocol.DISCOVERY_PORT, targets:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     except OSError:
         return []
+    hello = protocol.DISCOVER_HELLO + nonce.encode()
+    where = targets or _targets()
+
+    def ask() -> None:
+        for t in where:
+            try:
+                s.sendto(hello, (t, port))
+            except OSError:
+                continue
+
     try:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
         s.bind(("", 0))
-        for t in targets or _targets():
-            try:
-                s.sendto(protocol.DISCOVER_HELLO + nonce.encode(), (t, port))
-            except OSError:
-                continue
+        protocol.udp_no_resets(s)
+        ask()
         until = time.monotonic() + timeout
+        again = time.monotonic() + RESEND_EVERY
         while True:
-            left = until - time.monotonic()
+            now = time.monotonic()
+            left = until - now
             if left <= 0:
                 break
-            s.settimeout(left)
+            if now >= again:
+                ask()
+                again = now + RESEND_EVERY
+            s.settimeout(max(0.01, min(left, again - now)))
             try:
                 data, addr = s.recvfrom(4096)
-            except (socket.timeout, OSError):
+            except (socket.timeout, ConnectionResetError):  # (Windows: one target refused the question)
+                continue
+            except OSError:
                 break
             try:
                 d = json.loads(data)
