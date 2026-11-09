@@ -75,6 +75,73 @@ def local_addresses() -> list[str]:
     return [ip for ip in found if not ip.startswith("127.") and not ip.startswith("169.254.")]
 
 
+GCE_PRODUCT = Path("/sys/class/dmi/id/product_name")
+GCE_EXTERNAL_IP = ("http://169.254.169.254/computeMetadata/v1/instance/network-interfaces/0/access-configs/0/"
+                   "external-ip")
+_outside: tuple[float, list[str]] | None = None
+OUTSIDE_FOR = 600.0  # s an outside address is remembered
+
+
+def on_google_cloud() -> bool:
+    """A Google Compute Engine VM (its firmware says so; nothing is asked over the network)."""
+    try:
+        return "Google" in GCE_PRODUCT.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+
+
+def gce_external_ip(timeout: float = 0.6) -> str:
+    """This VM's external IP address, from Google's metadata server ('' when it has none)."""
+    import urllib.request
+
+    req = urllib.request.Request(GCE_EXTERNAL_IP, headers={"Metadata-Flavor": "Google"})
+    try:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=timeout) as r:
+            ip = r.read(64).decode("ascii", "replace").strip()
+    except (OSError, ValueError):
+        return ""
+    return ip if re.fullmatch(r"[0-9.]{7,15}", ip) else ""
+
+
+def tailscale_ips(timeout: float = 2.0) -> list[str]:
+    """This computer's Tailscale addresses (100.x.y.z), when Tailscale is installed and up."""
+    import shutil
+    import subprocess
+
+    exe = shutil.which("tailscale")
+    if not exe:
+        return []
+    try:
+        out = subprocess.run([exe, "ip", "-4"], capture_output=True, text=True, timeout=timeout,
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    return [ip for ip in out.split() if re.fullmatch(r"100\.[0-9.]+", ip)]
+
+
+def outside_addresses(now: float | None = None) -> list[str]:
+    """Addresses a Mac elsewhere reaches this computer at: Tailscale first (private and encrypted), then a
+    Google Cloud VM's external IP. Looked up at most every ten minutes."""
+    global _outside
+    now = time.monotonic() if now is None else now
+    if _outside is not None and now - _outside[0] < OUTSIDE_FOR:
+        return list(_outside[1])
+    found = tailscale_ips()
+    if on_google_cloud():
+        ip = gce_external_ip()
+        if ip and ip not in found:
+            found.append(ip)
+    _outside = (now, found)
+    return list(found)
+
+
+def mac_addresses() -> list[str]:
+    """Every address to type in the Mac app, the one most likely to work first: Tailscale, a cloud VM's
+    external IP, then this computer's own network addresses."""
+    out = outside_addresses()
+    return out + [ip for ip in local_addresses() if ip not in out]
+
+
 class _Server(ThreadingHTTPServer):
     daemon_threads = True
     # POSIX: a restart can listen again at once (old connections in TIME_WAIT). Windows: SO_REUSEADDR would let a
@@ -486,7 +553,7 @@ class RemoteServer:
         except Exception:  # noqa: BLE001
             pass
         state.write_status({"at": self.now(), "pid": os.getpid(), "listening": self.listening, "port": self.port,
-                            "fingerprint": self.fp, "error": self.error, "addresses": local_addresses()
+                            "fingerprint": self.fp, "error": self.error, "addresses": mac_addresses()
                             if self.listening else [], "devices": len(devices)}, self.status_file)
 
     # --- keys and pairing ---------------------------------------------------------------------------------

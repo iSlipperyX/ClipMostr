@@ -4,7 +4,7 @@ ClipMonster runs TikTok clip accounts by itself. It finds YouTube videos worth c
 
 You can still do it by hand: paste YouTube links (or drop in your own video files), fine-tune the clips on a timeline and export them in landscape, vertical or square format. And from your phone, a [Telegram bot](#your-phone-telegram) of your own asks automation for videos, shows you what's waiting to post and deletes the bad ones from the PC.
 
-It comes as a Windows desktop app, **`ClipMonster.exe`**, plus a command-line tool, **`ytclip.exe`**, for batch jobs and scripts. Since 3.0.0 it includes what used to be the separate TikTok Manager app: one install, one set of updates.
+It comes as a Windows desktop app, **`ClipMonster.exe`**, plus a command-line tool, **`ytclip.exe`**, for batch jobs and scripts. It also installs on a [Linux server](#linux-host-google-cloud), such as a Google Cloud VM, which you run from your Mac. Since 3.0.0 it includes what used to be the separate TikTok Manager app: one install, one set of updates.
 
 ---
 
@@ -472,6 +472,68 @@ Anything else you type gets two buttons: make a video about it, or ask for clips
 
 **Security.** Every connection is encrypted with the PC's own certificate, which the Mac checks by fingerprint. Linking proves the Mac and the PC see the same certificate, so another computer on the network can't pose as either one. The code is checked through 200,000 rounds of PBKDF2 and stops working after five wrong tries. After linking, the Mac keeps its key in the macOS Keychain, and the PC keeps only a hash of it in `%APPDATA%\ClipMonster\remote.json`. **Unlink** on the PC, or **PC → Unlink this Mac** on the Mac, removes a Mac. Settings → Mac app shows *This PC's ID*, and the Mac shows the same ID under the address as you type it, so you can check they match. If you reinstall ClipMonster on the PC from scratch, it gets a new ID and each Mac has to be linked again.
 
+## Linux host (Google Cloud)
+
+ClipMonster can also run on a Linux server, such as a Google Cloud VM, with nobody at it. It does everything the PC does: finds and clips videos, makes Creator videos and posts them. You run it from your Mac with [ClipMonster Remote](#your-mac-clipmonster-remote), and from your phone with the [Telegram bot](#your-phone-telegram).
+
+**Making the VM.** In the Google Cloud console, **Compute Engine → VM instances → Create instance**:
+
+- **Machine:** e2-standard-8 (8 vCPUs, 32 GB) or bigger. Clipping and rendering run on the CPU. A VM has no graphics card unless you add one (a G2 machine with an NVIDIA L4), so the local AI is slow on it: pick **Gemini** or **Claude** in Settings → AI instead.
+- **Boot disk:** Ubuntu 24.04 LTS (x86/64), 100 GB or more. Downloads and clips take room.
+- Leave the firewall boxes unticked. The Mac app has its own rule, below.
+
+**Installing.** Open **SSH** on the VM and run:
+
+```
+curl -fsSL https://github.com/iSlipperyX/ClipMostr/releases/latest/download/install-linux.sh | sudo bash
+```
+
+It takes 15 to 30 minutes the first time. It installs ClipMonster in `/opt/clipmonster` with what it needs: Python, ffmpeg, Node.js, Google Chrome for posting, Firefox for the YouTube sign-in, and the local AI and whisper.cpp built for the VM's CPU (`--gpu vulkan` builds them for an NVIDIA card; `--no-ai-build` skips them). It runs as its own user, `clipmonster`, whose settings, sign-ins and clips live in `/var/lib/clipmonster`. Three services keep it going and start again after a reboot:
+
+| Service | |
+|---|---|
+| `clipmonster-display` | A virtual screen. Posting runs Chrome on it like a window you can see. |
+| `clipmonster` | Automation, with the Mac app's server and the Telegram bot. |
+| `clipmonster-desktop` | Only while you ask for it: that screen, with ClipMonster's own window, in your web browser. |
+
+Running the same command again updates ClipMonster and keeps everything. So does `sudo clipmonster update`. Options: `--version X.Y.Z`, `--dev` (the newest code), `--port N` (the Mac app's port), `--tailscale`, `--no-swap`. It adds a swap file when the VM has none.
+
+**Setting it up: `sudo clipmonster desktop`.** This turns on a desktop with ClipMonster's window open, reachable only through an SSH tunnel. The command prints the exact line to run on your Mac, like:
+
+```
+gcloud compute ssh clipmonster-vm --zone us-east1-b --project my-project -- -N -L 6080:localhost:6080
+```
+
+Then open `http://localhost:6080/vnc.html?autoconnect=1&resize=scale` in your browser. There you do what the [first start](#running-it) does on Windows:
+
+- Fill in your keys in Settings.
+- Add your TikTok accounts and sign in to each one in the Chrome window that opens.
+- Sign in to YouTube (Settings → Download).
+- Make your categories.
+
+`sudo clipmonster desktop off` closes the desktop when you're done. Automation keeps running either way.
+
+**Linking your Mac: `sudo clipmonster link-mac`.** It shows the **IP address**, **port** and **authorization code** to type in ClipMonster Remote, and waits until the Mac is linked. The address is the VM's external IP, or its Tailscale address when Tailscale is installed.
+
+Google Cloud blocks the Mac app's port until a firewall rule allows it. `sudo clipmonster firewall` prints the two `gcloud` commands for your VM. They allow only your home internet address, which [ifconfig.me](https://ifconfig.me) shows you. If your home address changes often, use Tailscale instead: `--tailscale` installs it, then run `sudo tailscale up` on the VM, install Tailscale on the Mac, and type the VM's Tailscale address in the Mac app. That way no port is opened at all.
+
+**Every day:**
+
+| `sudo clipmonster …` | |
+|---|---|
+| `status` | The services, the Mac app's server, the linked Macs and automation's queue |
+| `link-mac`, `unlink NAME` | Link or unlink a Mac |
+| `desktop [on/off]` | ClipMonster's window and the browsers, for sign-ins and Settings |
+| `start`, `stop`, `restart`, `logs [-f]` | Automation |
+| `update [--dev]`, `uninstall [--purge]` | `--purge` also deletes the settings, sign-ins and clips |
+| `ytclip ARGS` | Any [command-line](#command-line-ytclipexe) command, as ClipMonster's user |
+
+**Good to know:**
+
+- **YouTube often asks cloud servers to sign in.** Its "confirm you're not a bot" check is much more common from a data centre than from home. Signing ClipMonster in to YouTube (a spare Google account) usually gets past it. When it doesn't, automation pauses downloads and tells you, the same as on the PC.
+- **TikTok sees a data-centre address.** Posts from a cloud server can get less reach, or need a captcha more often, than posts from home. Captchas show up on the desktop, where you can solve them. Watch the first week's views before you move every account over.
+- **Notifications** come through the Mac app and Telegram. Windows' own pop-ups don't exist on Linux.
+
 ## Output layout
 
 ```
@@ -619,6 +681,7 @@ Run the tests with `pip install -e .[test]` and then `pytest`. They need no netw
 | `ytclip/vision/` | Face tracking, the virtual camera (follow, punch-ins, push-ins), B-roll choice, rendering the moved picture |
 | `ytclip/audio/`, `ytclip/rendering/` | Dead-air and filler cuts, ducking, mastering; the edit plan, the audio graph, kinetic caption tags, hook card and lower-third |
 | `ytclip/compliance/duration_guard.py`, `ytclip/posting/tracker.py` | Creator Rewards: clips over a minute, and progress to the program's goals |
+| `packaging/linux/` | The Linux host: `install.sh` (attached to releases as `install-linux.sh`), the `clipmonster` admin command, the virtual screen and desktop, and their systemd services. `ytclip/linux_host.py` sets a host's settings the first time |
 | `ytclip/remote/` | The Mac app's server inside automation: linking (`protocol.py`, shared with the Mac), the PC's certificate, the linked Macs (`state.py`), what the Mac can see and do (`host.py`), HTTPS and discovery (`server.py`) |
 | `ytclip/mac/` | ClipMonster Remote, the Mac app: the pinned connection and Keychain, finding PCs, the loopback video proxy, and its window and pages |
 | `ytclip/gemini.py` | Google's Gemini API over plain HTTPS: streamed JSON answers, key checks |

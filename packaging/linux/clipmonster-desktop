@@ -1,0 +1,31 @@
+#!/usr/bin/env bash
+# The host's desktop in a web browser (clipmonster-desktop.service, `sudo clipmonster desktop`): the virtual
+# screen through VNC and noVNC, both on 127.0.0.1 only (reach it through an SSH tunnel), with ClipMonster's
+# own window open on it. Closing that window opens it again; `clipmonster desktop off` ends all of it.
+set -euo pipefail
+num="${DISPLAY#:}"
+num="${num%%.*}"
+vnc=$((5900 + num))
+web="${CLIPMONSTER_DESKTOP_PORT:-6080}"
+novnc=""
+for d in /usr/share/novnc /usr/share/noVNC /usr/share/webapps/novnc; do
+  [ -f "$d/vnc.html" ] && novnc="$d" && break
+done
+[ -n "$novnc" ] || { echo "noVNC isn't installed (apt install novnc)" >&2; exit 1; }
+
+x11vnc -display "$DISPLAY" -localhost -rfbport "$vnc" -forever -shared -nopw -quiet -noxdamage -noxrecord \
+  -xkb -o /dev/null &
+if command -v websockify >/dev/null; then
+  websockify --web "$novnc" "127.0.0.1:$web" "127.0.0.1:$vnc" &
+else
+  python3 -m websockify --web "$novnc" "127.0.0.1:$web" "127.0.0.1:$vnc" &
+fi
+(
+  sleep 1
+  while true; do
+    "${CLIPMONSTER_VENV:-/opt/clipmonster/venv}/bin/python" -m ytclip.gui.app || true
+    sleep 3
+  done
+) &
+wait -n
+kill 0 2>/dev/null || true

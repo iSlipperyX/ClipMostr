@@ -1,0 +1,19 @@
+#!/usr/bin/env bash
+# The host's virtual screen (clipmonster-display.service): Xvfb with a small window manager. Posting runs
+# Chrome on it like a window you can see, and `clipmonster desktop` shows it in your web browser.
+set -euo pipefail
+num="${DISPLAY#:}"
+num="${num%%.*}"
+num="${num:-7}"
+rm -f "/tmp/.X${num}-lock" "/tmp/.X11-unix/X${num}" 2>/dev/null || true  # left by a crash
+Xvfb ":$num" -screen 0 2560x1440x24 -dpi 96 -nolisten tcp -noreset &
+xvfb=$!
+for _ in $(seq 100); do
+  [ -S "/tmp/.X11-unix/X${num}" ] && break
+  kill -0 "$xvfb" 2>/dev/null || exit 1
+  sleep 0.1
+done
+xsetroot -display ":$num" -solid '#1e1f24' 2>/dev/null || true
+DISPLAY=":$num" openbox --sm-disable &
+wait -n
+kill 0 2>/dev/null || true

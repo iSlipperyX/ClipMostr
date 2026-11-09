@@ -17,7 +17,7 @@ def test_launch_options_avoid_flags_that_show_a_warning_bar(tmp_path):
     assert not any(a.startswith(w) for a in opts["args"] for w in WARNED)
     assert opts["ignore_default_args"] == ["--enable-automation"]  # no "controlled by automated software" bar
     assert opts["chromium_sandbox"] is (os.name == "nt")  # Playwright adds --no-sandbox without this
-    assert opts["channel"] == "msedge"
+    assert opts["channel"] == ("msedge" if os.name == "nt" else "chrome")  # Linux hosts post with Chrome
 
 
 def test_navigator_webdriver_reads_like_a_normal_browser(tmp_path):

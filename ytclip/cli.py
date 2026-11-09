@@ -1535,6 +1535,14 @@ def main(argv: list[str] | None = None) -> int:
         return run_find(argv[1:])
     if argv[:1] == ["auto"]:
         return run_auto(argv[1:])
+    if argv[:1] == ["remote"]:
+        from .remote.cli import main as run_remote
+
+        return run_remote(argv[1:])
+    if argv[:1] == ["host-setup"]:
+        from .linux_host import main as run_host_setup
+
+        return run_host_setup(argv[1:])
     if argv[:1] == ["qc"]:
         return run_qc(argv[1:])
     args = build_parser().parse_args(argv)

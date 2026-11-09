@@ -1,0 +1,14 @@
+[Unit]
+Description=ClipMonster's desktop in your web browser (noVNC on 127.0.0.1:6080, reached through SSH)
+After=clipmonster-display.service
+Requires=clipmonster-display.service
+
+[Service]
+Type=simple
+User=clipmonster
+Group=clipmonster
+EnvironmentFile=/etc/clipmonster/env
+WorkingDirectory=/var/lib/clipmonster
+ExecStart=/opt/clipmonster/bin/clipmonster-desktop
+Restart=on-failure
+RestartSec=5

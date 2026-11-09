@@ -1,0 +1,16 @@
+[Unit]
+Description=ClipMonster's virtual screen (Xvfb): posting shows Chrome on it, the desktop shows it to you
+After=network.target
+
+[Service]
+Type=simple
+User=clipmonster
+Group=clipmonster
+EnvironmentFile=/etc/clipmonster/env
+WorkingDirectory=/var/lib/clipmonster
+ExecStart=/opt/clipmonster/bin/clipmonster-display
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

@@ -27,10 +27,24 @@ _CANDIDATES = {
     "msedge": ("Microsoft", "Edge", "Application", "msedge.exe"),
     "chrome": ("Google", "Chrome", "Application", "chrome.exe"),
 }
+# Linux (the Linux host installer puts in Google Chrome) and macOS: the program on PATH or where it installs
+_ELSEWHERE = {
+    "msedge": ("microsoft-edge-stable", "microsoft-edge", "/opt/microsoft/msedge/msedge",
+               "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"),
+    "chrome": ("google-chrome-stable", "google-chrome", "/opt/google/chrome/chrome",
+               "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+}
 
 
 def find_browser(channel: str) -> Path | None:
     """The installed msedge.exe / chrome.exe, or None (then the app falls back to the Playwright window)."""
+    if os.name != "nt":
+        import shutil
+
+        for name in _ELSEWHERE.get(channel or "msedge", _ELSEWHERE["msedge"]):
+            found = shutil.which(name) if "/" not in name else (name if Path(name).is_file() else None)
+            if found:
+                return Path(found)
     roots = [os.environ.get(v) for v in ("PROGRAMFILES(X86)", "PROGRAMFILES", "LOCALAPPDATA")]
     rel = _CANDIDATES.get(channel or "msedge", _CANDIDATES["msedge"])
     for root in filter(None, roots):
