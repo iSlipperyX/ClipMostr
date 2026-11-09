@@ -95,7 +95,15 @@ jobs:
             sleep 1
           done
           sudo -u clipmonster env DISPLAY=:7 xwininfo -root -tree | grep -i '"[^"]*clipmonster'
+          sleep 5
+          sudo -u clipmonster env DISPLAY=:7 ffmpeg -loglevel error -f x11grab -video_size 2560x1440 -i :7 \
+            -frames:v 1 /tmp/linux-desktop.png
           sudo clipmonster desktop off
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-host-desktop
+          path: /tmp/linux-desktop.png
+          retention-days: 7
       - name: Update in place, then uninstall
         run: |
           sudo bash /opt/clipmonster/install.sh --source "$GITHUB_WORKSPACE" --no-ai-build --no-swap --yes

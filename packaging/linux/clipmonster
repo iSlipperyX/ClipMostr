@@ -99,7 +99,7 @@ cmd_desktop() {
   else
     echo "     ssh -N -L $NOVNC_PORT:localhost:$NOVNC_PORT ${SUDO_USER:-you}@$(hostname -f 2>/dev/null || hostname)"
   fi
-  echo "2. Open  http://localhost:$NOVNC_PORT/vnc.html?autoconnect=1&resize=remote"
+  echo "2. Open  http://localhost:$NOVNC_PORT/vnc.html?autoconnect=1&resize=scale"
   echo
   echo "There: Settings (categories, AI, posting), Accounts → add each TikTok account and sign in, and"
   echo "Settings → Download → Sign in to YouTube. Closing ClipMonster's window there opens it again."

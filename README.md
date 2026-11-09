@@ -504,7 +504,7 @@ Running the same command again updates ClipMonster and keeps everything. So does
 gcloud compute ssh clipmonster-vm --zone us-east1-b --project my-project -- -N -L 6080:localhost:6080
 ```
 
-Then open `http://localhost:6080/vnc.html?autoconnect=1&resize=remote` in your browser. There you do what the [first start](#running-it) does on Windows:
+Then open `http://localhost:6080/vnc.html?autoconnect=1&resize=scale` in your browser. There you do what the [first start](#running-it) does on Windows:
 
 - Fill in your keys in Settings.
 - Add your TikTok accounts and sign in to each one in the Chrome window that opens.

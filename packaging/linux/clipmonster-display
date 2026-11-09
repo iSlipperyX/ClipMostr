@@ -6,7 +6,7 @@ num="${DISPLAY#:}"
 num="${num%%.*}"
 num="${num:-7}"
 rm -f "/tmp/.X${num}-lock" "/tmp/.X11-unix/X${num}" 2>/dev/null || true  # left by a crash
-Xvfb ":$num" -screen 0 1680x1050x24 -dpi 96 -nolisten tcp -noreset &
+Xvfb ":$num" -screen 0 2560x1440x24 -dpi 96 -nolisten tcp -noreset &
 xvfb=$!
 for _ in $(seq 100); do
   [ -S "/tmp/.X11-unix/X${num}" ] && break
