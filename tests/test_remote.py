@@ -29,8 +29,11 @@ from ytclip.settings import Settings
 REAL_ITERATIONS, REAL_MIN = protocol.ITERATIONS, protocol.MIN_ITERATIONS
 
 
-def free_port() -> int:
-    s = socket.socket()
+def free_port(kind: int = socket.SOCK_STREAM) -> int:
+    """A port nothing listens on at 127.0.0.1, for TCP or (kind=socket.SOCK_DGRAM) for UDP. A free TCP port can
+    still be closed to UDP: Windows reserves ranges of ports for each separately, and other programs hold UDP ports
+    of their own."""
+    s = socket.socket(socket.AF_INET, kind)
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
     s.close()
@@ -512,14 +515,14 @@ def test_hosts_and_keys_are_remembered():
 
 def test_discovery_finds_the_pc(world):
     world.server.discovery = True
-    port = free_port()
+    port = free_port(socket.SOCK_DGRAM)  # (a free TCP port failed here once on Windows: it was closed to UDP)
     import ytclip.remote.protocol as p
 
     old = p.DISCOVERY_PORT
     p.DISCOVERY_PORT = port
     try:
         world.server._open_discovery()
-        assert world.server._udp is not None  # listening for the question
+        assert world.server._udp is not None, world.logs[-2:]  # listening for the question (else why not)
         found = discover.discover(timeout=3.0, port=port, targets=["127.0.0.1"])
         # a Mac that asked and went away before the answer (on Windows, the answer bouncing back made the
         # PC's next read fail) doesn't stop the PC answering the next one
