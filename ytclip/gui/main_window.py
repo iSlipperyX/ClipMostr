@@ -419,6 +419,14 @@ class MainWindow(QMainWindow):
         if self.posting.busy(account_id) is None:
             self.onboard_account(self, account_id=account_id)
 
+    def weekly_report(self) -> None:
+        """The weekly report's notification (a clipmonster://report link): Performance, with the report open."""
+        self.showNormal()
+        self.raise_()
+        self.activateWindow()
+        self.tabs.setCurrentWidget(self.performance)
+        self.performance.open_weekly()
+
     def _sign_in_needed(self, account_id: str) -> None:
         self._tray_account = account_id
 
@@ -434,6 +442,8 @@ class MainWindow(QMainWindow):
                 rest.append(arg)
             elif link[0] == "sign-in":
                 QTimer.singleShot(0, lambda aid=link[1]: self.sign_in_again(aid))
+            elif link[0] == "report":
+                QTimer.singleShot(0, self.weekly_report)
         if rest:
             self.add_sources(rest)
 

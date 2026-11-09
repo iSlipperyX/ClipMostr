@@ -10,8 +10,10 @@ the clip's record and then deletes its files:
   it did. The numbers are snapshotted 1 hour, 24 hours and 7 days after posting and the record is
   rewritten as they come in (update_records), for 30 days.
 * then the files: the clip, ClipMonster's .srt and thumbnail for it and its row in the folder's
-  clips.json and README.md, posting's thumbnail of it, and the video folder once nothing's left in it
-  (never the Automation folder itself, or a category's folder right inside it).
+  clips.json and README.md, posting's thumbnail and cover of it, and the video folder once nothing's left
+  in it (never the Automation folder itself, or a category's folder right inside it). A Video Creator
+  video's folder goes the same way, with its scene pictures and storyboard: its record keeps the prompt,
+  the script, the voice, the pictures' source, the sources and the fact check.
 
 No record, no deleting. A post that isn't seen on the profile within two days (TikTok may have taken it
 down, or it's private) is kept, with the reason, so nothing is lost if a post silently failed. The
@@ -174,6 +176,8 @@ def finish(store: Store, accounts: Accounts | list[Account], s: Settings, roots:
         with store.lock:
             if it.thumb and not Path(it.thumb).exists():
                 it.thumb = ""
+            if it.cover and not Path(it.cover).exists():
+                it.cover = ""
             if failed:  # tried again next time
                 continue
             it.cleaned_at = now
@@ -181,9 +185,73 @@ def finish(store: Store, accounts: Accounts | list[Account], s: Settings, roots:
         r.cleaned += 1
     for folder, names in touched.items():
         try:
-            _tidy(folder, names, roots, remove)
+            r.freed += _tidy(folder, names, roots, remove)
         except OSError as exc:
             r.failed.append((str(folder), str(exc) or exc.__class__.__name__))
+    return r
+
+
+@dataclass
+class Discarded:
+    removed: list[str] = field(default_factory=list)  # the library entries taken out
+    freed: int = 0  # bytes
+    failed: list[tuple[str, str]] = field(default_factory=list)  # (file, why)
+
+
+def discard(store: Store, item_id: str, s: Settings, roots: list[Path],
+            remove: Callable[[Path], None] | None = None) -> Discarded:
+    """Delete a video you don't want posted (the Telegram bot's Delete): every library entry of it that
+    hasn't posted (one per account it's queued for), and its files, the way Clean up clears a posted clip:
+    the clip, its captions and thumbnail, posting's thumbnail and cover, and its row in the folder's
+    clips.json and README.md, or the folder when it was the last clip there (with a Creator video's scene
+    pictures and storyboard). No record is written: it never went out. The entries are taken out of the
+    library for good (automation won't bring them back). ValueError says why it can't be: it's posting
+    right now, or it's posted already."""
+    remove = remove or (move_to_trash if s.recycle else _unlink)
+    with store.lock:
+        it = store.items.get(item_id)
+        if it is None:
+            raise ValueError("It isn't in the posting library any more.")
+        same = [o for o in store.items.values() if o.path and _key(o.path) == _key(it.path)] if it.path else [it]
+        if any(o.status == "uploading" for o in same):
+            raise ValueError("It's being posted right now. Wait for the post to finish, then delete it on TikTok "
+                             "if it's not wanted.")
+        if it.status == "posted":
+            raise ValueError("It's posted already, so its files go by themselves once TikTok shows the post. To "
+                             "take it down, delete it on TikTok.")
+        going = [o for o in same if o.status != "posted"]
+        if it not in going:
+            going.append(it)
+    r = Discarded()
+    video = Path(it.path) if it.path else None
+    files: list[Path] = []
+    if video is not None and video.is_file():
+        files.append(video)
+        files += [c for c in _clip_companions(video) if c.is_file()]
+    from .cover import covers_dir
+
+    for o in going:
+        for picture, home in ((o.thumb, thumbs_dir()), (o.cover, covers_dir())):
+            p = Path(picture) if picture else None
+            if p is not None and p.is_file() and _inside(p, home) and p not in files:
+                files.append(p)
+    for f in files:
+        size = _size(f)
+        try:
+            remove(f)
+        except OSError as exc:
+            r.failed.append((str(f), str(exc) or exc.__class__.__name__))
+            continue
+        r.freed += size
+    if video is not None and not video.exists():
+        try:
+            r.freed += _tidy(video.parent, {video.name}, roots, remove)
+        except OSError as exc:
+            r.failed.append((str(video.parent), str(exc) or exc.__class__.__name__))
+    if video is not None and video.exists():  # the video itself couldn't go: the entries stay, to try again
+        return r
+    r.removed = [o.id for o in going]
+    store.remove(r.removed)
     return r
 
 
@@ -266,7 +334,9 @@ def record_data(store: Store, it: VideoItem, account: Account | None, s: Setting
                  "size_bytes": info.get("size_bytes"), "file": it.path, "hook": it.hook,
                  "part": it.part, "parts": it.parts, "posting_score": it.total,
                  "ai_rating": it.ai.get("appeal") if it.ai else None},
-        "source": {k.removeprefix("source_"): v2 for k, v2 in it.facts.items()} | {k: v2 for k, v2 in (("channel", it.source_channel), ("url", it.source_url),
+        "ai_generated": bool(it.ai_generated),
+        "creator": creator_story(it) or None,
+        "source": {k.removeprefix("source_"): v2 for k, v2 in it.facts.items() if k != "creator"} | {k: v2 for k, v2 in (("channel", it.source_channel), ("url", it.source_url),
                                                           ("reason", it.source_reason),
                                                           ("permission", it.source_permission),
                                                           ("clip_score", it.source_score),
@@ -312,6 +382,9 @@ def record_text(store: Store, it: VideoItem, account: Account | None, s: Setting
         + (f" ({HOW[it.posted_via]})" if it.posted_via in HOW else ""))
     row("TikTok link", it.tiktok_url or (v.url if v else "") or "not seen on TikTok yet")
     row("Part", it.part_label)
+    if it.cover_set is not None and it.cover_at is not None:
+        row("Cover", f"{it.cover_why}, {it.cover_at:.1f} s in" if it.cover_set else
+            f"TikTok's own pick (ours, {it.cover_why}, didn't go in)")
     if it.attempts > 1:
         row("Tries", it.attempts)
 
@@ -351,7 +424,10 @@ def record_text(store: Store, it: VideoItem, account: Account | None, s: Setting
     sub("Quality notes", "; ".join(it.warnings))
 
     f = it.facts
-    if f or it.source_channel or it.source_url:
+    story = creator_story(it)
+    if story:
+        lines += ["", "Made by the Video Creator:"] + creator_lines(story)
+    elif f or it.source_channel or it.source_url:
         lines += ["", "Where it came from:"]
         sub("Video", f.get("source_title"))
         sub("Channel", it.source_channel or f.get("source_channel"))
@@ -381,6 +457,61 @@ def record_text(store: Store, it: VideoItem, account: Account | None, s: Setting
         lines.append(it.keep_reason)
     lines.append(f"Record written {_when(now)}.")
     return "\n".join(lines + [""])
+
+
+def creator_story(it: VideoItem) -> dict:
+    """How a Video Creator video was made (clipsjson.creator_story): from the posting library, or for one queued
+    before 3.5, from its folder while that's still there, and then kept in the entry for the record's rewrites."""
+    have = it.facts.get("creator")
+    if isinstance(have, dict) and have:
+        return have
+    if not it.ai_generated or not it.path:
+        return {}
+    from .clipsjson import creator_story as read
+
+    found = read(Path(it.path).parent)
+    if found:
+        it.facts["creator"] = found  # the caller saves the store
+    return found
+
+
+def creator_lines(story: dict) -> list[str]:
+    """The record's "Made by the Video Creator" lines."""
+    out = []
+
+    def sub(name: str, value) -> None:
+        if value not in (None, "", []):
+            out.append(f"  {name + ':':<15}{value}")
+
+    sub("Prompt", story.get("prompt"))
+    sub("Written by", story.get("written_by"))
+    voice, engine = story.get("voice"), story.get("voice_engine")
+    sub("Voice", f"{voice} ({engine})" if voice and engine else voice or engine)
+    sub("Look", story.get("look"))
+    sub("Pictures", ", ".join(story.get("pictures") or []))
+    sub("Music", story.get("music"))
+    check = story.get("factcheck") or {}
+    if check.get("skipped"):
+        sub("Fact check", f"not run ({check['skipped']})")
+    elif check:
+        bits = [f"{check.get('checked', 0)} sentences checked" + (f" by {check['model']}" if check.get("model") else "")]
+        if check.get("fixed"):
+            bits.append(f"{check['fixed']} fixed")
+        if check.get("to_check"):
+            bits.append(f"{check['to_check']} to check yourself")
+        sub("Fact check", ", ".join(bits))
+    sub("Labelled", "AI-generated")
+    sources = story.get("sources") or []
+    if sources:
+        out.append("  Sources:")
+        for src in sources:
+            name = " · ".join(x for x in (src.get("title"), src.get("publisher"), src.get("date")) if x)
+            out.append(f"    - {name}" + (f" <{src['url']}>" if src.get("url") else ""))
+    script = (story.get("script") or "").strip()
+    if script:
+        out.append("  Script" + (f" ({story['scenes']} scenes):" if story.get("scenes") else ":"))
+        out += [f"    {line}" for line in script.splitlines() if line.strip()]
+    return out
 
 
 def _caption(it: VideoItem, account: Account | None, s: Settings) -> str:
@@ -471,6 +602,11 @@ def _files(it: VideoItem, users: dict[str, list[VideoItem]]) -> tuple[list[Path]
     thumb = Path(it.thumb) if it.thumb else None
     if thumb and thumb.is_file() and _inside(thumb, thumbs_dir()):
         files.append(thumb)
+    from .cover import covers_dir
+
+    picture = Path(it.cover) if it.cover else None
+    if picture and picture.is_file() and _inside(picture, covers_dir()):
+        files.append(picture)
     return files, other
 
 
@@ -505,17 +641,21 @@ def _clip_companions(video: Path) -> list[Path]:
     return out
 
 
-def _tidy(folder: Path, removed: set[str], roots: list[Path], remove: Callable[[Path], None]) -> None:
+SCENE_PICTURES = ("scene_*.png", "scene_*.jpg", "scene_*.jpeg", "scene_*.webp")  # the Creator's (orchestrator)
+
+
+def _tidy(folder: Path, removed: set[str], roots: list[Path], remove: Callable[[Path], None]) -> int:
     """A video folder after clips left it: their rows go from its clips.json and README.md, or, with no
-    clips left, its own files go and so do the folders that leaves empty (not a root, nor a folder right
-    inside one, like a category's folder)."""
+    clips left, its own files go (a Video Creator video's storyboard and scene pictures too) and so do the
+    folders that leaves empty (not a root, nor a folder right inside one, like a category's folder).
+    Returns the bytes it freed."""
     index = folder / "clips.json"
     try:
         data = json.loads(index.read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        return
+        return 0
     if not isinstance(data, dict) or not isinstance(data.get("clips"), list):
-        return
+        return 0
     gone = {_key(folder / n) for n in removed}
     keep = [rec for rec in data["clips"] if not (isinstance(rec, dict) and isinstance(rec.get("file"), str)
                                                  and _key(folder / rec["file"]) in gone)]
@@ -538,20 +678,28 @@ def _tidy(folder: Path, removed: set[str], roots: list[Path], remove: Callable[[
                 _rewrite(readme, _readme_without(readme.read_text(encoding="utf-8"), files))
             except OSError:
                 pass
-        return
-    # Nothing left to post from this video: its folder goes (rejected clips in it too).
+        return 0
+    # Nothing left to post from this video: its folder goes (rejected clips in it too, and a Creator video's
+    # storyboard and scene pictures: its record has the script).
     rejected = folder / REJECTED_DIR
     extra = sorted(rejected.iterdir()) if rejected.is_dir() else []
+    scenes = folder / "scenes"
+    pictures = sorted({p for pattern in SCENE_PICTURES for p in scenes.glob(pattern)}) if scenes.is_dir() else []
+    freed = 0
     for f in [index, folder / "README.md", *sorted((folder / "thumbnails").glob("[0-9][0-9].jpg")),
-              *[e for e in extra if e.is_file()], *sorted(folder.glob("*.srt"))]:
+              *[e for e in extra if e.is_file()], *sorted(folder.glob("*.srt")),
+              *([folder / "storyboard.json"] if data.get("creator") else []), *pictures]:
         if f.is_file():
+            size = _size(f)
             remove(f)
-    for d in (folder / "thumbnails", rejected):
+            freed += size
+    for d in (folder / "thumbnails", rejected, scenes):
         _rmdir(d)
     keep_dirs = {_key(r) for r in roots} | {_key(c) for r in roots if r.is_dir() for c in _subdirs(r)}
     d = folder
     while _key(d) not in keep_dirs and any(_inside(d, r) for r in roots) and _rmdir(d):
         d = d.parent
+    return freed
 
 
 def _subdirs(root: Path) -> list[Path]:

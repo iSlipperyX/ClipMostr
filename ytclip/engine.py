@@ -647,6 +647,8 @@ class Engine:
             made.append((s, next_part))
             length = edit["duration"] if edit else clip.length
             if edit:
+                if "hook_card" in edit:  # when its headline card is fully up: posting makes that the TikTok cover
+                    extra["hook_card"] = edit.pop("hook_card")
                 extra["edit"] = edit
             if self.s.tiktok_ready:
                 for warning in tiktok_warnings(folder / name, length):
@@ -770,10 +772,14 @@ class Engine:
             return None
         if edit.notes:
             self.log(f"{dest.name}: {'; '.join(edit.notes)}.")
+        from .rendering import cards
+
+        card = cards.complete_at(clip, s) if edit.cards_intro else None
         return {"duration": round(edit.duration, 2), "cut_seconds": edit.cut_seconds, "category": edit.category,
                 "tracked": edit.tracked, "music": edit.audio.music.name if edit.audio.music else "",
                 "broll": [b.path.name for b in edit.broll], "mastered": bool(edit.audio.master),
-                "measured_lufs": (edit.audio.measured or {}).get("input_i"), "_words": edit.words}
+                "measured_lufs": (edit.audio.measured or {}).get("input_i"), "_words": edit.words,
+                **({"hook_card": card} if card else {})}
 
     def _rewards_length(self, p: Project, clip: Clip, clips: list[Clip]) -> None:
         """Creator Rewards: a clip that would come out a minute or less after its cuts runs on."""

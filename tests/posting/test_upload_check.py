@@ -1,9 +1,9 @@
 """The posting test: walks a stand-in for TikTok Studio's uploader and never clicks Post."""
 
-import os
 import time
 
 import pytest
+import studio_page
 
 from ytclip.posting import jobs
 from ytclip.posting.accounts import Account
@@ -11,57 +11,15 @@ from ytclip.posting.config import Settings
 from ytclip.posting.store import Store, VideoItem
 from ytclip.posting.tiktok import browser
 
-STUDIO = """<!doctype html><html><body>
-<input type="file" id="f">
-<div id="form" hidden>
-  <div class="public-DraftEditor-content" contenteditable="true">caption</div>
-  {privacy}
-  <button data-e2e="post_video_button" onclick="document.title='POSTED'">Post</button>
-  <button id="discard" onclick="document.title='DISCARDED'">Discard</button>
-</div>
-<script>document.getElementById('f').onchange = () => document.getElementById('form').hidden = false;</script>
-</body></html>"""
-PRIVACY = """<div data-e2e="video_visibility_container"><button role="combobox">Everyone</button></div>"""
-
-
 @pytest.fixture
 def studio(tmp_path, monkeypatch):
     """A TikTokBrowser whose page is a plain Chromium tab showing a fake upload page."""
-    pw_mod = pytest.importorskip("playwright.sync_api")
-    pw = pw_mod.sync_playwright().start()
-    chromium = None
-    for opts in ({}, {"executable_path": os.environ.get("TOKMANAGER_TEST_CHROMIUM", "")}):
-        if opts.get("executable_path", None) == "":
-            continue
-        try:
-            chromium = pw.chromium.launch(**opts)
-            break
-        except Exception:
-            pass
-    if chromium is None:  # no browser installed (e.g. CI); set TOKMANAGER_TEST_CHROMIUM to point at one
-        pw.stop()
-        pytest.skip("no Chromium for Playwright")
-    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
-
-    def make(privacy=True, html=None):
-        page_file = tmp_path / "studio.html"
-        page_file.write_text(html or STUDIO.replace("{privacy}", PRIVACY if privacy else ""), encoding="utf-8")
-        monkeypatch.setattr(browser, "UPLOAD_URL", page_file.as_uri())
-        b = browser.TikTokBrowser(Settings(), tmp_path / "profile", log=lambda m: None)
-        b.page = chromium.new_page()
-        monkeypatch.setattr(b, "logged_in", lambda: True)
-        monkeypatch.setattr(b, "_sleep", lambda s: None)
-        return b
-
-    yield make
-    chromium.close()
-    pw.stop()
+    with studio_page.opened(tmp_path, monkeypatch) as make:
+        yield make
 
 
-def clip(tmp_path):
-    p = tmp_path / "clip.mp4"
-    p.write_bytes(b"not really a video")
-    return p
+clip = studio_page.clip
+STUDIO = studio_page.STUDIO
 
 
 def test_full_check_finds_everything_and_never_posts(studio, tmp_path):
@@ -71,14 +29,15 @@ def test_full_check_finds_everything_and_never_posts(studio, tmp_path):
     results = b.check_upload_page(clip(tmp_path))
     assert [(step, r) for step, r, _ in results] == [
         ("Logged in", "ok"), ("Upload page opens", "ok"), ("Video picker", "ok"),
-        ("Caption box", "ok"), ("Who can watch", "ok"), ("Post button", "ok")]
+        ("Caption box", "ok"), ("Who can watch", "ok"), ("Post button", "ok"),
+        ("Cover editor", "warn")]  # this stand-in has none: posts would keep TikTok's own cover
     assert "POSTED" not in titles and b.page.url == "about:blank"
 
 
 def test_missing_privacy_picker_is_only_a_warning(studio, tmp_path):
     results = studio(privacy=False).check_upload_page(clip(tmp_path))
     assert ("Who can watch", "warn") in [(s, r) for s, r, _ in results]
-    assert results[-1][:2] == ("Post button", "ok")
+    assert ("Post button", "ok") in [(s, r) for s, r, _ in results]
 
 
 def test_quick_check_stops_at_the_file_picker(studio):

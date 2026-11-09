@@ -18,7 +18,7 @@ from .sign_in_dialog import SignInDialog
 
 ANTHROPIC_KEY_URL = "https://console.anthropic.com/settings/keys"
 GROUPS = ("General", "Download", "Clip finding", "Transcription", "Speed", "AI", "Export", "Captions", "Editing", "Creator", "Layout",
-          "Research", "Picking", "Automation", "Posting", "Updates")
+          "Research", "Picking", "Automation", "Posting", "Telegram", "Updates")
 
 
 
@@ -52,6 +52,7 @@ class SettingsDialog(QDialog):
 
         self.posting_settings = posting_config.Settings.load()
         self._posting_editors: dict[str, forms.Editor] = {}
+        self._telegram = None  # Settings → Telegram's linking panel (telegram_page.py)
 
         shell = QHBoxLayout(self)
         shell.setContentsMargins(0, 0, 0, 0)
@@ -209,6 +210,20 @@ class SettingsDialog(QDialog):
                 note.setWordWrap(True)
                 note.setProperty("muted", True)
                 page.layout().insertRow(0, note)
+            if group == "Telegram":
+                from .telegram_page import TelegramLink
+
+                note = QLabel("A Telegram bot of your own, run by automation: from your phone you can ask for "
+                              "videos (a Creator video about an idea, clips of a link, a request), watch the videos "
+                              "waiting to post, OK them or delete bad ones from this PC, pause automation and read "
+                              "the week's report. It tells you when a video waits for your OK and when something "
+                              "needs you. Only phones you link here can use it.")
+                note.setWordWrap(True)
+                note.setProperty("muted", True)
+                page.layout().insertRow(0, note)
+                self._telegram = TelegramLink(lambda: self.result_settings.telegram_token,
+                                              lambda: self.result_settings.telegram_on)
+                page.layout().addRow(self._telegram)
             if group == "Transcription":
                 note = QLabel("When a video has no captions (or for local files) ClipMonster can transcribe "
                               "speech on your computer with Whisper. Transcripts power clip titles, "
@@ -288,6 +303,11 @@ class SettingsDialog(QDialog):
         except OSError:
             pass
         super().accept()
+
+    def done(self, result: int) -> None:
+        if self._telegram is not None:
+            self._telegram.shutdown()  # the window stops listening to Telegram, so automation's bot can
+        super().done(result)
 
     def _run_setup(self) -> None:
         self.run_setup = True

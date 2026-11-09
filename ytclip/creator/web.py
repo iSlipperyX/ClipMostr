@@ -215,11 +215,11 @@ def _key(title: str) -> str:
 
 
 def gather(prompt: str, *, log: Log | None = None, check: Callable[[], None] | None = None,
-           opener: Opener = _get) -> Research:
-    """Search the news and Wikipedia for the prompt's topic and read the newest articles. Never raises for a
-    site that's down: what couldn't be reached is in .problems."""
+           opener: Opener = _get, query: str = "") -> Research:
+    """Search the news and Wikipedia for the prompt's topic (or `query`, as it is) and read the newest articles.
+    Never raises for a site that's down: what couldn't be reached is in .problems."""
     log = log or (lambda m: None)
-    query = query_of(prompt)
+    query = " ".join(query.split()) or query_of(prompt)
     res = Research(query)
     news: list[Source] = []
     for name, fn in (("Google News", google_news), ("Bing News", bing_news), ("Wikipedia", wikipedia)):

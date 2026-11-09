@@ -2,7 +2,7 @@
 
 ClipMonster runs TikTok clip accounts by itself. It finds YouTube videos worth clipping, cuts and edits them into vertical clips with captions, posts each one to the right TikTok account on a schedule, reads how they do, keeps a record of every posted video and deletes its file once it's up. Set it up once and leave it running.
 
-You can still do it by hand: paste YouTube links (or drop in your own video files), fine-tune the clips on a timeline and export them in landscape, vertical or square format.
+You can still do it by hand: paste YouTube links (or drop in your own video files), fine-tune the clips on a timeline and export them in landscape, vertical or square format. And from your phone, a [Telegram bot](#your-phone-telegram) of your own asks automation for videos, shows you what's waiting to post and deletes the bad ones from the PC.
 
 It comes as a Windows desktop app, **`ClipMonster.exe`**, plus a command-line tool, **`ytclip.exe`**, for batch jobs and scripts. Since 3.0.0 it includes what used to be the separate TikTok Manager app: one install, one set of updates.
 
@@ -308,6 +308,8 @@ A request goes ahead of everything else in the queue, and its videos don't count
 
 **Automation → Overnight report** tells you what happened while you were away: clips made per category and per request, how many the quality check rejected and the usual reasons, videos that failed and why, and any pauses (YouTube sign-in requests, a full disk, stuck work stopped), for the last 12 hours, 24 hours or 7 days. The tab tells you when there's something new to read. `ytclip report` prints the same.
 
+**The weekly report.** At 9 am on Mondays (or the first time automation runs after that), a notification sums up the past week on each TikTok account: what was posted (clips, Creator videos and anything posted by hand), its views against the week before, how many of them were on videos over a minute (the views Creator Rewards pays for) and where it stands on the program's goals, followers gained, the week's best and weakest post, any older video that took off, and whether clips or Creator videos did better. Then what automation made, and what's waiting for you. Click the notification, or **Performance → Weekly report**, to read it; a copy goes to `%APPDATA%\ClipMonster\reports`, and to your phone when the [Telegram bot](#your-phone-telegram) is set up. A week's views come from a small daily record of every video's views (three weeks kept). Until that reaches back a week, an older video's views are worked out from its stats history, and the report says "about". *Settings → Automation → Weekly report on Monday mornings* turns it off; `ytclip report --week` prints it.
+
 Below it, the **health check** looks at everything automation needs: ffmpeg, how old the downloader is, your YouTube and AI keys (**Check now** tries them online), the folders and free space, TikTok posting (an account for every category, logins, the last upload-page check, a browser to post with), categories with nothing to find videos with, and requests that can't be filled. Each problem comes with the fix. Automation runs the offline part every time it starts and puts what it finds in the log. `ytclip doctor` runs it from the command line.
 
 ### Categories
@@ -325,6 +327,7 @@ Every picked video goes into one category: the one that lists its channel, then 
 - **Run from the Automation tab.** **Automation → Categories** shows each category's picks today against its limit, its videos waiting and its clips today. Pause or resume it there, press **Find videos now** to check its sources straight away, or **Request clips for it**.
 - **Its own clips.** A category can set its own **clips per video** and **clip length**, over Automation's (clip length is otherwise Settings → Clip finding's). Its **special requests** note tells the AI clip finder and the AI polish what makes a good clip for that account; with a Claude or Gemini key, a category with a note uses the AI clip finder (within *AI calls per day*).
 - **Style.** A recipe for the video's channel or category comes first, then the category's own style and view, then a catch-all (`*`) recipe, then Settings → Automation.
+- **Creator videos a day.** A category can have [Video Creator](#video-creator) videos made for it every day too (Categories tab → Video Creator: up to 6 a day). Automation plans them once a day, taking ideas in turn from the category's own **Topics** (one idea per line, each used at most once a month) and from what's trending in its part of YouTube right now (phrases several of the newest videos share, like "GTA 6", looked up online so the script is about the topic and today's news on it, never a retelling of someone's video), then its title words. They're made overnight from 1 am, within Automation's working hours, so they're ready to post in the morning, or as soon as they're planned (*Settings → Creator → Make the daily videos*). Nothing is planned for a category that's off, paused or without an account, and a video that fails isn't replaced that day.
 - **Folders.** Each category's clips go to `Automation\<category>\`, and `clips.json` records the category and its TikTok account, so each clip is queued for that account's posts. Renaming a category sends new clips to its new folder. Clips already made stay where they are.
 
 **Standing requests.**
@@ -357,7 +360,7 @@ The **Creator** tab (and `ytclip create`) makes an original, faceless video from
 1. **Write it for me** with a prompt ("3 stoic habits that will change your life"), or **Use my script** to paste your own narration (the first sentence is the hook; a blank line starts a new scene).
 2. Pick the **category** (its folder and account), the **voice** (▶ plays a sample), the **length** and the **look**. *Over a minute* keeps it 62–85 seconds, so it counts for Creator Rewards.
 3. **Write storyboard** shows the script scene by scene: what's said, the picture, the camera move and the sound. Double-click anything to change it.
-4. **Make video** renders it (about 3–5 minutes for a 65-second video), or **Add to automation queue** lets automation make it in turn with the clips.
+4. **Make video** renders it (a few minutes for a 65-second video), or **Add to automation queue** lets automation make it in turn with the clips. A category can also get Creator videos [every day by itself](#categories).
 
 How each part works:
 
@@ -367,6 +370,7 @@ How each part works:
 - **Voice.** [Kokoro-82M](https://github.com/thewh1teagle/kokoro-onnx) (natural, downloads about 340 MB once), else Piper, else Windows' own voices, else eSpeak NG. Eight narrators: Deep Male Narrator, Energetic Storyteller, Documentary, Warm Female, Bright Female, Hushed, British Male and Calm Male. When a voice runs long or short for the target, it's read again a little faster or slower, and the pace it actually reads at is learnt for the next script. Whisper then lines every caption word up with the voice.
 - **Pictures.** ComfyUI if it's running on this PC (any checkpoint; SDXL-Turbo and FLUX.1-schnell get their own settings, or use your own workflow JSON with `{{prompt}}`, `{{negative}}`, `{{seed}}`, `{{width}}`, `{{height}}`), else **AI pictures** (SDXL-Turbo, or FLUX.1-schnell on a 16 GB+ NVIDIA card), else clips and pictures from your B-roll folder matched by name, else built-in moody textures in the look's colours.
 - **AI pictures, one click.** The installed app has no PyTorch (it's several GB and depends on the graphics card), so the Creator tab's **Set up AI pictures** link (or `ytclip create --setup-pictures`) builds a separate picture engine in `%LOCALAPPDATA%\ClipMonster\picture-engine`: [uv](https://github.com/astral-sh/uv) fetches a private Python 3.11 and PyTorch with **DirectML** for AMD and Intel cards (CUDA for NVIDIA, the processor build otherwise), then diffusers, then the SDXL-Turbo model (about 7 GB, into the models folder) and draws a test picture. About 10 GB and 10–30 minutes in all, once. After that every scene's picture is drawn on your card, offline (576×1024, 4 steps). If half precision draws a black picture on your card, it switches to full precision by itself. SDXL-Turbo is Stability AI's model under its [Community License](https://stability.ai/license): free, also for videos that earn money, while you make under $1M a year. A source install with PyTorch and diffusers in its own Python (`pip install -e .[diffusion]`) uses that instead. Each scene falls back on its own, so one failed picture never stops the video. The local AI's model is unloaded first to give the picture model the graphics memory.
+- **Rendering.** Several scenes are animated at once (none in parallel with *Settings → Speed → Quiet*, a few with Balanced or Full power) and encoded on the graphics card when ffmpeg can use it (AMF on a Radeon, NVENC, Quick Sync), near-lossless, before the one final encode. If the card's encoder fails on a scene, that scene is made again on the processor and the rest follow.
 - **Motion.** Every picture gets a camera move: push in (zoom 1 → 1.15), pull out, pans in six directions or a push to one side, with a hint of roll, drawn at sub-pixel precision so nothing shimmers. Scenes change just before their first word, with 0.3-second dissolves, dips to black, slides or zooms.
 - **Sound.** The voice is compressed and set to −14 LUFS; the music sits under it and ducks while it speaks; whooshes, risers, bass drops and hits land on the cuts and the cues the script asks for; a limiter keeps peaks under −1 dBTP. Music comes from your music folder (sorted by mood folders like `dark` or `epic`, if you have them), else a calm bed is composed for the mood. Sound effects are built in; put your own WAVs in a folder (*Settings → Creator → Sound effects folder*), named or foldered by cue (`whoosh`, `riser`, `impact`...) and they're used instead. Only use music and sounds you have the rights to.
 - **Checked by you, at first.** *Settings → Creator → Check videos before they post*: an account's Creator videos wait in its queue (⏸ **Needs your OK** in the Queue tab) until you watch one and press **OK to post**, for its first two weeks of Creator videos (the default), always, or never. *Post now* counts as your OK. Clips never wait.
@@ -387,8 +391,10 @@ Posting runs inside automation's background process, so it keeps going with the 
 2. **Gets it ready.** The caption is the clip's hook, plus a credit line for Creative Commons clips (the licence requires it). The AI writes hashtags for it, fitted to the account's category and leaning on the tags that got your posts the most views; the account's own hashtags (`#fyp` to start with) are added to every post.
 3. **Posts it when its time comes**, in TikTok Studio, in Microsoft Edge (or Chrome) with that account's own login. Leave **Show the browser window** on: TikTok is less likely to block a browser you can see, and you can solve a captcha if one appears. The wait for the upload follows TikTok's own progress, so a big clip on a slow connection gets as long as it keeps moving (15 minutes, plus time for anything over 100 MB at 2 Mbit/s), and an upload stuck at the same percentage for 4 minutes stops with that said. A clip over 100 MB is only posted once TikTok says the upload is done.
 4. **Reads the profile** every 5 minutes, in the background: views, likes, comments, shares and followers, and which TikTok video each post became. A post that shows up on the profile is marked posted, even one you posted from your phone.
-5. **Writes a record and deletes the clip.** Once a post is on the profile, a `.txt` to read and a `.json` beside it go to `Documents\ClipMonster\Posted videos\<account>`: when it posted and its link, the caption and hashtags, the clip (title, hook, length, part), where it came from (the YouTube video, its channel and licence, where in it the clip starts and ends), why it was made (category, how the video was picked, the clip finder's score, the AI's rating, the quality check) and how it did. The numbers are added 1 hour, 24 hours and 7 days after posting. Then the clip, its captions and thumbnail are deleted, and its row leaves the video's `clips.json`. A post that hasn't shown on the profile after 2 days keeps its files, and the record says why.
+5. **Writes a record and deletes the clip.** Once a post is on the profile, a `.txt` to read and a `.json` beside it go to `Documents\ClipMonster\Posted videos\<account>`: when it posted and its link, the caption and hashtags, the clip (title, hook, length, part), where it came from (the YouTube video, its channel and licence, where in it the clip starts and ends), why it was made (category, how the video was picked, the clip finder's score, the AI's rating, the quality check) and how it did. The numbers are added 1 hour, 24 hours and 7 days after posting. Then the clip, its captions and thumbnail are deleted, and its row leaves the video's `clips.json`; a video folder with nothing left goes too, which for a Video Creator video means its scene pictures and storyboard (its record keeps the prompt, the script, the voice, where the pictures came from, the sources and the fact check). A post that hasn't shown on the profile after 2 days keeps its files, and the record says why.
 6. **Keeps an eye on TikTok.** Once a day it opens each account's upload page without posting, so a change on TikTok's side is caught before a post fails. A post that fails isn't tried again by itself (it might be half up): it waits in the Queue tab with the reason, a notification says so, and **Try again** posts it.
+
+**The cover.** Each post gets a cover of ClipMonster's choosing instead of TikTok's first frame (which, for a clip that opens on a hook card, is a dark frame with half a headline): the moment the clip's hook card is fully up, else the frame with the clearest, biggest face near the middle (sharp, well exposed), else the clearest frame. It goes in through TikTok Studio's cover editor just before Post, and the Queue tab shows it. If the editor isn't there or doesn't take it, the post goes up with TikTok's own pick: a cover never stops a post. *Settings → Posting → TikTok cover*: the hook card or the best face, the best face only, or TikTok's own pick.
 
 **The schedule.** Each account posts 2 clips a day between 11:00 and 21:00, at least 3 hours apart, and each post time moves by up to 15 minutes from day to day so it doesn't look automated. More than 3 a day is past what posting studies support, and the Accounts tab says so. A **new account warms up** for two weeks: no posts for the first 3 days, then 1 a day, then 2 from day 7.
 
@@ -404,6 +410,39 @@ ClipMonster never sees your TikTok password: each account's login stays in its o
 ytclip posting             # each account, its login, what's waiting and the next post; the last posts
 ytclip posting --posted 30
 ```
+
+## Your phone (Telegram)
+
+A Telegram bot of your own runs ClipMonster from your phone while automation runs on the PC: ask for videos, watch what's waiting to post, OK it or delete the bad ones from the PC, and hear about what needs you.
+
+**Setting it up** (five minutes, once):
+
+1. In Telegram, open [@BotFather](https://t.me/BotFather), send `/newbot`, and pick a name and a username for your bot (the username ends in `bot`). BotFather replies with a token like `123456789:AAH…`.
+2. In ClipMonster, **Settings → Telegram**: paste the token, tick **Use the Telegram bot** and press **Check the token**.
+3. Press **Link a phone**. A six-letter code shows for 10 minutes: send it to your bot in Telegram, or press **Open Telegram** and then **Start**. The phone shows up under *Linked phones*.
+4. **Save**, and keep automation running (Automation → Start, or Start with Windows). The bot runs inside automation, so it answers whenever automation runs, with the window closed too.
+
+Only the phones you link can use it. Anyone else who finds the bot is told it's private, and a chat that sends five wrong codes is ignored for an hour. Only private chats can be linked, not groups; **Unlink** takes a phone off, and **Send a test** says hello to each linked phone. Use a bot just for ClipMonster: Telegram lets one program at a time read a bot's messages, so a bot another project already uses won't work here (the bot says so in automation's log). The token is kept with your other keys in `%APPDATA%\ClipMonster`.
+
+**From the chat.** The buttons under the message box do the same as the commands:
+
+| | |
+|---|---|
+| 📊 **Status** · `/status` | What automation is doing right now, what's waiting to be clipped, made and posted, the next post, the videos waiting for your OK, accounts that need signing in to TikTok, and the free disk space. **📌 Keep this up to date** pins it as a live dashboard that updates itself every 2 minutes (`/dashboard`, `/dashboard off`). |
+| 🎬 **Videos** · `/videos` | Everything waiting to post: the ones held for your OK first, then in posting order. Tap one for the video itself with its card (account, category, when it posts, length and score, what it's from or the Creator's prompt, the caption) and **✅ OK to post**, **🚀 Post it now** and **🗑 Delete**. |
+| ✨ **Make a video** · `/make the real story of the Bermuda Triangle` | A Video Creator video about an idea, for the category you pick, in automation's queue. The video comes back to the chat when it's made. |
+| ✂️ **Clip a link** · `/clip`, or just send a YouTube link | Clips that video for the category you pick, and sends you the clips when they're done. |
+| 📋 **Requests** · `/request 10 30-45s Gaming funny reactions only` | A [clip request](#clip-requests) in plain words: how many, how long, the category, links if you have them, and anything special for the AI. `/requests` lists them, with **Cancel**. |
+| ⏯ **Pause or resume** · `/pause`, `/resume` | Pauses clipping and making videos. Posting carries on. |
+| 📅 **This week** · `/week` | The [weekly report](#the-overnight-report-and-the-health-check) for the past 7 days. |
+
+Anything else you type gets two buttons: make a video about it, or ask for clips about it.
+
+**Deleting from the phone** asks first, then clears the video the way [Clean up](#clean-up) clears a posted clip: the clip, its captions, thumbnail and cover, and its row in the folder's `clips.json` and `README.md`, or the whole folder when it was the last clip there (with a Creator video's scene pictures and storyboard). It goes to the Recycle Bin when *Settings → Posting → Send deleted clips to the Recycle Bin* is on, and automation never brings it back. A video that's uploading or already posted can't be deleted from the phone.
+
+**What it tells you by itself**, as *Settings → Telegram → Send me* says: each video that waits for your OK (with the video, so you can OK or delete it there and then), new clips and videos queued to post, each post as it goes up, milestones and videos taking off, problems that need you (a TikTok sign-in running out, a post failing, YouTube asking this PC to sign in, low disk space) and the weekly report. What you ask for in the chat is always answered. When you link a phone, the videos already waiting for your OK come as one message rather than one upload each.
+
+**Videos on the phone.** A bot can send videos up to 50 MB. A bigger one goes as a smaller copy (720p or less, made on the PC and kept for 3 days), marked as such: what posts to TikTok is always the full-quality file. Videos go one at a time in the background, so the bot keeps answering while one uploads. When a video is OK'd, posted or deleted somewhere else (the Queue tab, or another phone), its message in the chat changes to match.
 
 ## Output layout
 
@@ -476,6 +515,8 @@ ytclip create --file prompts.txt --category DailyFacts --schedule   # a video pe
 ytclip create --script story.txt --storyboard-only                  # check the storyboard first (JSON)
 ytclip create --check                           # what's ready here: script writer, voices, pictures
 ytclip create --setup-pictures                  # AI pictures on this PC's graphics card (about 10 GB, once)
+ytclip report --week                            # the weekly report: each TikTok account's past 7 days
+ytclip self-test                                # check this install's libraries all load
 ytclip --list-presets
 ```
 
@@ -496,6 +537,7 @@ ClipMonster updates itself from this project's GitHub Releases, on the channel p
 - New versions download quietly in the background and are checked against their SHA-256. The bar then says the update is ready: **Restart now** installs it in a few seconds, and closing ClipMonster installs it too. With the window closed, automation installs updates itself between videos and carries on. Turn that off with *Get updates by themselves*; you're then offered each update instead.
 - Switching to a steadier channel offers its newest version straight away (**Switch now**), even though its number is lower.
 - **Go back to** (Settings → Updates) reinstalls the version you had before the last update, and skips the one you left.
+- The update download is a zip packed with LZMA, the smallest zip there is. Windows' own *Extract all* can't open it: use 7-Zip, or run `ClipMonster-Setup.exe` to install by hand. ClipMonster's updater unpacks it itself.
 - Downloads, the unpacked update and the previous version are kept in `%LOCALAPPDATA%\ClipMonster\updates`. The download is deleted once unpacked, and the unpacked copy once it's installed. The update helper's log is `updates\update.log` there.
 - Installing replaces only the app's own files, with the old ones kept until the new ones are in; if anything fails, the old version is put back. Settings, history and clips are never touched.
 - From the command line: `ytclip --check-update`, `ytclip --update` (add `--channel beta` to try another channel once), `ytclip --update --go-back`.

@@ -115,21 +115,26 @@ class Service:
         self.refresh_fn = jobs.refresh_account
         self.analyze_fn = jobs.analyze_item
         self.hashtags_fn = jobs.ai_hashtags
+        self.cover_fn = jobs.cover_item
         self.check_fn = None  # tiktok.check_upload
         self.session_fn = None  # tiktok.check_session
         self.notify_fn = None  # notify.sign_in_needed
         self.profile_fn = None  # tiktok.apply_profile
         self.login_fn = None  # _login below
         self.logout_fn = None
+        # Called with (account, kind, text, alert, item) for each feed line: the Telegram bot listens here
+        self.listeners: list[Callable] = []
 
     # --- bookkeeping --------------------------------------------------------------------
 
     def log(self, msg: str) -> None:
         self._log(msg)
 
-    def event(self, account: Account | None, kind: str, text: str, alert: bool = False, **extra) -> None:
-        """A line in the account's feed (and the automation log)."""
+    def event(self, account: Account | None, kind: str, text: str, alert: bool = False,
+              item: VideoItem | None = None, **extra) -> None:
+        """A line in the account's feed (and the automation log), passed on to the listeners."""
         self.log(text)
+        self._tell(account, kind, text, alert, item)
         if account is None:
             return
         try:
@@ -137,6 +142,13 @@ class Service:
                                                                          alert=alert, **extra)])
         except OSError:
             pass
+
+    def _tell(self, account: Account | None, kind: str, text: str, alert: bool, item: VideoItem | None = None) -> None:
+        for fn in list(self.listeners):
+            try:
+                fn(account, kind, text, alert, item)
+            except Exception:  # noqa: BLE001 - a listener's problem never stops posting
+                pass
 
     def watcher(self, account_id: str) -> live.Watcher:
         w = self.watchers.get(account_id)
@@ -333,6 +345,20 @@ class Service:
                 except Exception as exc:  # noqa: BLE001 - ffmpeg couldn't read it: it still posts
                     self.log(f"⚠ Couldn't score “{it.headline}”: {exc}")
                 done += 1
+        covered = 0
+        for it in q:  # the TikTok cover (cover.py), for the next few to post
+            if covered >= PREPARE_PER_TICK or self._stopped():
+                break
+            if not it.score or not it.exists() or not jobs.needs_cover(it, self.s):
+                continue
+            self._doing(f"Choosing a cover for “{it.headline}”")
+            try:
+                self.cover_fn(self.store, it.id, self.s, self.log)
+            except Exception as exc:  # noqa: BLE001 - it posts with TikTok's own pick
+                self.log(f"⚠ No cover for “{it.headline}”: {exc}")
+                with self.store.lock:
+                    it.cover_why = f"none: {exc}"[:200]
+            covered += 1
         if not self.s.ai_hashtags or self._stopped():
             return
         try:
@@ -399,10 +425,10 @@ class Service:
                 self.log(f"Stopped posting “{item.headline}”: it's marked failed in case it went up; check TikTok.")
             else:
                 self.event(account, "error", f"✖ Couldn't post “{item.headline}” to {account.handle}: {msg}",
-                           alert=True)
+                           alert=True, item=item)
             return False
         self.save()
-        self.event(account, "posted", f"✔ Posted “{item.headline}” to {account.handle}.", alert=True)
+        self.event(account, "posted", f"✔ Posted “{item.headline}” to {account.handle}.", alert=True, item=item)
         # Read the profile soon, so the post is linked (and its files cleared) without waiting a whole interval
         w = self.watcher(account.id)
         w.next_at = min(w.next_at or self.now() + 90, self.now() + 90)
@@ -439,6 +465,7 @@ class Service:
                 self._logged_out(a)
             if w.failures == 1 or w.stopped:
                 self.log(f"Stats for {a.handle}: {exc}")
+            self._heard(a, events)
             return events
         except OSError as exc:
             return w.failed(self.s, f"{exc}.", "other", self.now())
@@ -446,6 +473,7 @@ class Service:
             self._logged_out(a)
         had = {i.id for i in self.store.items.values() if i.account == a.id and i.tiktok_id}
         events = w.apply(self.store, a, self.s, r)
+        self._heard(a, events)
         linked = [i for i in self.store.items.values() if i.account == a.id and i.tiktok_id and i.id not in had]
         for it in linked:
             self.log(f"“{it.headline}” is up on {a.handle}: {it.tiktok_url or it.tiktok_id}.")
@@ -457,6 +485,12 @@ class Service:
         if linked:
             self.finish_posted()
         return events
+
+    def _heard(self, a: Account, events: list[live.Event]) -> None:
+        """The stats reading's alerts (a video taking off, a milestone, reading stopped) for the listeners."""
+        for e in events or []:
+            if e.alert:
+                self._tell(a, e.kind, e.text, True)
 
     def _logged_out(self, a: Account, detail: str = "") -> None:
         a.logged_in = False

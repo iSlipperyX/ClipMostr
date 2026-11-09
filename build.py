@@ -15,6 +15,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
@@ -94,6 +95,27 @@ def write_version_info(version: str) -> None:
 """, encoding="utf-8")
 
 
+def make_zip(app_dir: Path, dest: Path) -> Path:
+    """The app folder as ClipMonster-windows.zip: what installed copies download and unpack to update.
+
+    Packed with LZMA, about a third smaller than the usual Deflate (3.4.0's 411 MB zip would have been
+    305 MB). Every ClipMonster's updater unpacks it: they all use Python's zipfile, which reads LZMA with the
+    lzma module the build always includes. Windows' own zip folders can't open LZMA entries; 7-Zip can, and
+    ClipMonster-Setup.exe is what people download anyway. Read back in full before it's used, so a damaged
+    archive stops the build instead of an update."""
+    part = dest.with_name(dest.name + ".part")
+    part.unlink(missing_ok=True)
+    with zipfile.ZipFile(part, "w", zipfile.ZIP_LZMA) as zf:
+        for path in [app_dir, *sorted(app_dir.rglob("*"))]:
+            zf.write(path, path.relative_to(app_dir.parent).as_posix())  # folders get their own entries
+    with zipfile.ZipFile(part) as zf:
+        bad = zf.testzip()
+        if bad:
+            raise SystemExit(f"The zip came out damaged ({bad} doesn't read back)")
+    part.replace(dest)
+    return dest
+
+
 def find_iscc() -> Path | None:
     """Inno Setup's compiler, if it's installed."""
     found = shutil.which("iscc")
@@ -153,9 +175,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Included llama.cpp from {llama_cpp}")
     else:
         print("No llama.cpp build, so the local AI isn't included (packaging/build_llama_cpp.py makes one)")
-    archive = shutil.make_archive(str(DIST / ZIP_NAME.removesuffix(".zip")), "zip", DIST, "ClipMonster")
+    archive = make_zip(app_dir, DIST / ZIP_NAME)
     size = sum(f.stat().st_size for f in app_dir.rglob("*") if f.is_file()) / 1e6
-    print(f"\nBuilt {app_dir / 'ClipMonster.exe'} ({size:.0f} MB folder)\nZip: {archive}")
+    print(f"\nBuilt {app_dir / 'ClipMonster.exe'} ({size:.0f} MB folder)\n"
+          f"Zip: {archive} ({archive.stat().st_size / 1e6:.0f} MB)")
     try:
         setup = build_installer(version, app_dir)
         print(f"Installer: {setup} ({setup.stat().st_size / 1e6:.0f} MB)")

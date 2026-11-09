@@ -68,6 +68,12 @@ class VideoItem:
     analyzed_at: float = 0.0
     analyze_error: str = ""
     thumb: str = ""
+    # The TikTok cover (cover.py): the picture set in TikTok Studio's cover editor, the moment of the clip it's
+    # from and why that one ("the hook card", "a face", "the clearest frame"; "none: <why>" when it couldn't be made)
+    cover: str = ""
+    cover_at: float | None = None
+    cover_why: str = ""
+    cover_set: bool | None = None  # once posted: True = TikTok took it, False = TikTok's own pick stayed
     ai: dict = field(default_factory=dict)  # score, hook, verdict, caption, hashtags, ideas
     # Post settings
     caption: str = ""

@@ -72,6 +72,7 @@ class CreateRequest:
     rewards: bool | None = None  # keep it 62-85 s (None = Settings)
     storyboard: dict | None = None  # an (edited) storyboard to make as it is
     post: bool = True  # into the Automation folder (queued for posting); False = Output/Created
+    search: str = ""  # what to look up online ("" = from the prompt); the schedule's trending topics set it
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -206,7 +207,8 @@ class VideoCreatorOrchestrator:
             found = None
             if getattr(self.s, "creator_web", True):
                 report("Writing the script: looking it up online", None)
-                found = web.gather(req.prompt, log=self.log, check=self.check)
+                found = web.gather(req.prompt, log=self.log, check=self.check,
+                                   **({"query": req.search} if req.search.strip() else {}))
             brief = director.Brief(prompt=req.prompt, category=cat_name or "",
                                    instructions=category.instructions if category else "", seconds=seconds,
                                    wpm=wpm, style=style, avoid=originality.earlier_titles(req.prompt),
@@ -340,17 +342,18 @@ class VideoCreatorOrchestrator:
         timeline = compositor.make_timeline(starts, duration, s.creator_transition,
                                             [sc.sfx_cue for sc in board.scenes])
         spans = timeline.spans
-        clips: list[Path] = []
-        n = len(spans)
-        report = self.stage("Animating scene")
-        for i, ((a, b), vis, sc) in enumerate(zip(spans, visuals, board.scenes)):
-            self.check()
-            move = motion.get(sc.camera_motion, s.creator_motion)
-            dest = work / f"scene_{i + 1:02d}.mp4"
-            compositor.render_scene(vis.path, vis.kind, b - a, dest, move,
-                                    progress=lambda f, i=i: report(f"Animating scene {i + 1} of {n}", (i + f) / n),
-                                    check=self.check)
-            clips.append(dest)
+        jobs = [compositor.SceneJob(vis.path, vis.kind, b - a, work / f"scene_{i + 1:02d}.mp4",
+                                    motion.get(sc.camera_motion, s.creator_motion))
+                for i, ((a, b), vis, sc) in enumerate(zip(spans, visuals, board.scenes))]
+        workers = compositor.scene_workers(s, len(jobs))
+        encoder = compositor.scene_encoder(s)
+        started = time.monotonic()
+        clips, used = compositor.render_scenes(jobs, workers=workers, encoder=encoder,
+                                               progress=self.stage("Animating scene"), check=self.check, log=self.log)
+        where = "the processor (x264)" if used == "libx264" else f"the graphics card ({used})"
+        self.log(f"Animated {len(jobs)} scene{'s' if len(jobs) != 1 else ''} in {time.monotonic() - started:.0f} s"
+                 + (f", {workers} at a time" if workers > 1 else "") + f", encoded on {where}.")
+        self.render_info = {"scene_workers": workers, "scene_encoder": used}
         # The sound
         mix_report = self.stage("Mixing the sound")
         mix_report("Mixing the sound", None)
@@ -371,14 +374,17 @@ class VideoCreatorOrchestrator:
                                                      cs, emphasis=emphasis, emphasis_colour=style.emphasis),
                                            encoding="utf-8")
         has_cards = False
+        self.hook_card = None
         if s.creator_hook_card and hook_adds(board):
             from ..analyze import Clip
 
-            text = cards.build(compositor.WIDTH, compositor.HEIGHT, cs, Clip(0, duration, 0, board.title, hook=board.hook),
-                               intro=True, lower=False, duration=duration)
+            card_clip = Clip(0, duration, 0, board.title, hook=board.hook)
+            text = cards.build(compositor.WIDTH, compositor.HEIGHT, cs, card_clip, intro=True, lower=False,
+                               duration=duration)
             if text:
                 (work / "cards.ass").write_text(text, encoding="utf-8")
                 has_cards = True
+                self.hook_card = cards.complete_at(card_clip, cs)  # the TikTok cover (posting/cover.py)
         self.timeline = timeline
         out = work / "final.mp4"
         put = self.stage("Putting the video together")
@@ -453,8 +459,9 @@ class VideoCreatorOrchestrator:
             "pictures": sorted({visual_generator.BACKEND_NAMES.get(v.source, v.source) for v in visuals}),
             "mix": getattr(self, "mix", {}), "timeline": compositor.describe(getattr(self, "timeline", None))
             if getattr(self, "timeline", None) else {}, "timings": dict(self.timings),
+            "render": getattr(self, "render_info", {}),
             "ai_generated": True, "caption": caption, "hashtags": board.hashtags, "notes": board.notes,
-            "sources": board.sources,
+            "sources": board.sources, "script": board.script,
             "factcheck": {k: v for k, v in (board.factcheck or {}).items() if k != "claims"} |
             ({"fixed": sum(1 for c in board.factcheck.get("claims", []) if c.get("changed")),
               "to_check": sum(1 for c in board.factcheck.get("claims", [])
@@ -464,7 +471,8 @@ class VideoCreatorOrchestrator:
         video_meta = Video(id=cid, title=board.title, channel="ClipMonster Video Creator", upload_date=time.strftime("%Y%m%d"),
                            duration=checks.get("length") or duration, url="", path=folder / name)
         details = [{"qc": checks, "ai_generated": True, "caption": board.caption, "hashtags": board.hashtags,
-                    "scenes": len(board.scenes)}]
+                    "scenes": len(board.scenes),
+                    **({"hook_card": self.hook_card} if getattr(self, "hook_card", None) else {})}]
         write_index(folder, video_meta, [clip], [name], ["Video Creator"], "creator",
                     extra={"automation": auto, "creator": creator}, details=details)
         (folder / "storyboard.json").write_text(board.dumps(), encoding="utf-8")
@@ -511,16 +519,18 @@ class VideoCreatorOrchestrator:
                 db.close()
 
 
-def queue(db, req: CreateRequest, category_id: str = "", now: float | None = None) -> str:
-    """Put a video in automation's queue for the Video Creator to make (a GENERATIVE_CREATOR job in jobs.db).
-    Returns the job's id."""
+def queue(db, req: CreateRequest, category_id: str = "", now: float | None = None,
+          origins: list[str] | None = None, due: float = 0.0) -> str:
+    """Put a video in automation's queue for the Video Creator to make (a GENERATIVE_CREATOR job in jobs.db),
+    made once `due` (a time) has come. `origins` says who asked: ["creator"] by hand, ["creator", "schedule"]
+    the daily schedule, ["creator", "telegram"] a message. Returns the job's id."""
     from ..jobs import Job, JobType
 
     cid = new_id()
     job_id = f"create-{cid}"
     db.add(Job(id=job_id, url=f"creator:{cid}", title=req.label(), channel="Video Creator", permission=PERMISSION,
-               origins=["creator"], how="creator", stage="Waiting", category_id=category_id,
-               kind=JobType.GENERATIVE_CREATOR.value, request=req.to_json()), now or time.time())
+               origins=list(origins or ["creator"]), how="creator", stage="Waiting", category_id=category_id,
+               kind=JobType.GENERATIVE_CREATOR.value, request=req.to_json(), next_try=due), now or time.time())
     return job_id
 
 

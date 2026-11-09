@@ -36,6 +36,7 @@ from .trending import CATEGORIES as YT_CATEGORIES, History, TrendingVideo
 
 DEFAULT_DAILY = 2
 MAX_DAILY = 50
+MAX_CREATOR_DAILY = 6  # Video Creator videos a day (each takes minutes of this PC's time)
 _RESERVED = re.compile(r"con|prn|aux|nul|com[0-9¹²³]|lpt[0-9¹²³]|conin\$|conout\$", re.I)  # Windows device names
 # Scripts written without spaces between words: a title word there is found anywhere in the title.
 _NO_SPACES_RANGES = ("\u0e00-\u0eff\u1000-\u109f\u1780-\u17ff"  # Thai, Lao, Burmese, Khmer
@@ -89,6 +90,8 @@ class Category:
     min_len: float = 0.0  # clip length in seconds; 0 = Automation's style decides
     max_len: float = 0.0
     paused: bool = False  # paused in the Automation tab: nothing new is picked and its waiting videos wait
+    creator_daily: int = 0  # Video Creator videos a day, planned and made by automation (creator/schedule.py)
+    creator_topics: str = ""  # ideas for them, one per line (# starts a comment); trending topics fill in
 
     @classmethod
     def from_json(cls, d) -> "Category | None":
@@ -109,6 +112,7 @@ class Category:
         except (TypeError, ValueError):
             n.daily = DEFAULT_DAILY
         n.clips_per_video = _number(n.clips_per_video, int, 0, MAX_CLIPS)
+        n.creator_daily = _number(n.creator_daily, int, 0, MAX_CREATOR_DAILY)
         n.min_len = _number(n.min_len, float, 0.0, MAX_LEN)
         n.max_len = _number(n.max_len, float, 0.0, MAX_LEN)
         if n.min_len and n.max_len and n.max_len < n.min_len:

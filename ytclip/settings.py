@@ -179,6 +179,7 @@ class Settings:
     creator_web: bool = True  # look the topic up online (news, Wikipedia) before the script is written
     creator_factcheck: str = "fix"  # check the script against what was found: fix | flag | off
     creator_review: str = "new"  # Creator videos wait for your OK before posting: new (first 2 weeks) | always | off
+    creator_schedule_when: str = "night"  # the categories' daily Creator videos: night (from 1 am) | now
     creator_voice: str = "en_male_deep"  # creator/voice_engine.VOICES
     creator_tts: str = "auto"  # auto | kokoro | piper | windows | espeak
     creator_kokoro_model: str = "full"  # full (310 MB, best) | compact (88 MB)
@@ -286,6 +287,12 @@ class Settings:
     cleanup_auto: bool = True  # automation does it once a day
     cleanup_kinds: str = "partial, previews, rejected, posted, removed"
     cleanup_days: int = 3
+    weekly_report: bool = True  # weekly.py: automation sends it on Monday mornings
+    # Telegram (telegram/): automation's bot, so a phone can ask for videos, watch what's waiting to post and delete
+    # bad ones. The phones it answers are in telegram.json, not here.
+    telegram_on: bool = False
+    telegram_token: str = ""  # from @BotFather
+    telegram_send: str = "review, new, posted, news, problems, weekly"  # telegram/bot.SENDS
     # Look
     appearance: str = "dark"  # dark | light | system (gui/theme.py)
     # 2 = text sizes are letter heights (1 = raw .ass sizes, which looked different in every font)
@@ -320,7 +327,7 @@ class Settings:
     def apply(self, overrides: dict) -> "Settings":
         known = {f.name for f in fields(self)}
         clean = {k: v for k, v in overrides.items() if k in known}
-        for key in ("ai_api_key", "gemini_api_key", "youtube_api_key"):
+        for key in ("ai_api_key", "gemini_api_key", "youtube_api_key", "telegram_token"):
             if isinstance(clean.get(key), str):
                 clean[key] = clean[key].strip()  # pasted keys often carry a stray space
         return replace(self, **clean)
@@ -633,8 +640,16 @@ CREATOR_VISUALS = (("auto", "Best available"), ("comfyui", "ComfyUI on this PC")
                    ("sdxl_turbo", "AI pictures: SDXL-Turbo"), ("flux_schnell", "AI pictures: FLUX.1-schnell (NVIDIA)"),
                    ("local_broll", "My B-roll folder"),
                    ("texture", "Built-in moving textures"))
+CREATOR_WHEN = (("night", "Overnight, from 1 am"), ("now", "As soon as they're planned"))
 CREATOR_REVIEW = (("new", "For an account's first two weeks"), ("always", "Always"), ("off", "Never"))
 CREATOR_FACTCHECK = (("fix", "Fix what the sources contradict"), ("flag", "Mark it only"), ("off", "Off"))
+# What the Telegram bot sends without being asked (telegram/bot.SENDS; a test keeps them the same)
+TELEGRAM_SENDS = (("review", "Videos waiting for your OK, with the video"),
+                  ("new", "New clips and videos queued to post"),
+                  ("posted", "Each post as it goes up"),
+                  ("news", "Milestones and videos taking off"),
+                  ("problems", "Problems that need you: a sign-in running out, a post failing, low disk space"),
+                  ("weekly", "The weekly report on Monday mornings"))
 CREATOR_TRANSITIONS = (("mixed", "Varied (dissolves, dips, slides)"), ("fade", "Cross-dissolve"),
                        ("fadeblack", "Dip to black"), ("dissolve", "Grainy dissolve"))
 CREATOR_MUSIC = (("auto", "My music folder, else composed"), ("folder", "My music folder only"),
@@ -896,6 +911,9 @@ SCHEMA: list[Field] = [
           help="A Creator video waits in its account's queue until you OK it (Queue tab, or Telegram), so you see "
                "what the AI made before your followers do. \"First two weeks\" stops asking two weeks after an "
                "account's first Creator video posted"),
+    Field("creator_schedule_when", "Make the daily videos", "Creator", "choice", choices=CREATOR_WHEN,
+          help="Each category's \"Creator videos a day\" (Categories tab) are planned once a day. Overnight, they're "
+               "made from 1 am (within Automation's working hours), so they're ready to post in the morning"),
     Field("creator_voice", "Voice", "Creator", "choice", choices=CREATOR_VOICES),
     Field("creator_tts", "Voice engine", "Creator", "choice", choices=CREATOR_TTS,
           help="Kokoro sounds most natural and downloads once (about 340 MB). Piper is lighter. Windows' own "
@@ -1107,4 +1125,19 @@ SCHEMA: list[Field] = [
                "clipped or in the Studio's list. Posted clips are cleared by posting itself once they're up"),
     Field("cleanup_days", "Only things older than (days)", "Automation", "int", lo=1, hi=365,
           help="Posted clips count from when you posted them; everything else from when it was made"),
+    Field("weekly_report", "Weekly report on Monday mornings", "Automation", "bool",
+          help="At 9 am on Mondays (or the first time automation runs after that) a notification sums up the "
+               "week on each TikTok account: views against the week before, followers, the best and weakest "
+               "post, clips against Creator videos, Creator Rewards progress. It goes to Telegram too once the "
+               "bot is set up. Performance → Weekly report shows it any time"),
+    Field("telegram_on", "Use the Telegram bot", "Telegram", "bool",
+          help="Automation runs a Telegram bot of your own, so you can ask for videos, watch what's waiting to post "
+               "and delete bad ones from your phone. Only the phones you link can use it. It runs while automation "
+               "does"),
+    Field("telegram_token", "Bot token", "Telegram", "secret", placeholder="123456789:AAH…",
+          help="In Telegram, open @BotFather, send /newbot and pick a name and a username: it gives you the token. "
+               "Use a bot just for ClipMonster: two programs can't share one"),
+    Field("telegram_send", "Send me", "Telegram", "multi", choices=TELEGRAM_SENDS,
+          help="What the bot tells you without being asked. Whatever you ask for in the chat is always answered "
+               "there"),
 ]

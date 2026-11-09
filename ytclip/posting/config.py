@@ -67,6 +67,7 @@ class Settings:
     allow_duet: bool = True
     allow_stitch: bool = True
     ai_generated_label: bool = False
+    cover: str = "auto"  # the TikTok cover (cover.py): auto (the hook card, else the best face) | face | off
     caption_template: str = "{caption} {hashtags}"
     default_hashtags: str = "#fyp"
     # Schedule (per account; these only seed new accounts)
@@ -113,6 +114,9 @@ class Settings:
         safefile.save(self.path(), asdict(self))
 
 
+COVERS = (("auto", "The hook card, else the best face"), ("face", "The best face"),
+          ("off", "TikTok's own pick (the first frame)"))
+
 SCHEMA = [
     main_settings.Field("delete_after_post", "Delete a clip once it's posted", "Posting", "bool",
                         help="A record of the clip and how it did is kept in the records folder; the video, its "
@@ -132,6 +136,11 @@ SCHEMA = [
     main_settings.Field("allow_duet", "Allow duets", "Posting", "bool"),
     main_settings.Field("allow_stitch", "Allow stitches", "Posting", "bool"),
     main_settings.Field("ai_generated_label", "Label posts as AI-generated", "Posting", "bool"),
+    main_settings.Field("cover", "TikTok cover", "Posting", "choice", choices=COVERS,
+                        help="The picture your profile grid and search show for each post. The hook card is the "
+                             "clip's opening headline, fully up (when its edit or the Video Creator gave it one); the "
+                             "best face is the clearest, biggest face near the middle. If TikTok's cover editor "
+                             "changes and ClipMonster can't set it, the post still goes up, with TikTok's own pick"),
     main_settings.Field("browser_channel", "Browser to post with", "Posting", "choice",
                         choices=(("msedge", "Microsoft Edge"), ("chrome", "Google Chrome"))),
     main_settings.Field("show_browser", "Show the browser while posting", "Posting", "bool",

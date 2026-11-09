@@ -12,7 +12,7 @@ import time
 from pathlib import Path
 
 from PySide6.QtCore import QSignalBlocker, Qt, QTime, QTimer, QUrl, Signal
-from PySide6.QtGui import QColor, QDesktopServices
+from PySide6.QtGui import QColor, QDesktopServices, QPixmap
 from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QFormLayout, QFrame,
                                QHBoxLayout, QHeaderView, QLabel, QLineEdit, QListWidget,
                                QListWidgetItem, QMessageBox, QPlainTextEdit, QProgressBar, QPushButton, QScrollArea,
@@ -610,6 +610,9 @@ QUEUE_COLS = ("Posts", "Clip", "Account", "Score", "Hashtags")
 POSTED_COLS = ("Posted", "Clip", "Account", "Views", "Likes", "Files")
 
 
+COVER_W, COVER_H = 63, 112  # the cover preview, 9:16
+
+
 class QueuePage(QWidget):
     notice = Signal(str)
     open_categories = Signal()
@@ -661,6 +664,15 @@ class QueuePage(QWidget):
         sl.addWidget(self.clip_title)
         self.clip_info = _muted()
         sl.addWidget(self.clip_info)
+        cover_row = QHBoxLayout()
+        self.cover_pic = QLabel()
+        self.cover_pic.setFixedSize(COVER_W, COVER_H)
+        self.cover_pic.setStyleSheet(f"border-radius: 6px; background: {theme.FIELD}")
+        self.cover_note = _muted()
+        self.cover_note.setWordWrap(True)
+        cover_row.addWidget(self.cover_pic)
+        cover_row.addWidget(self.cover_note, 1, Qt.AlignTop)
+        sl.addLayout(cover_row)
         sl.addWidget(QLabel("Caption"))
         self.caption = QPlainTextEdit()
         self.caption.setFixedHeight(70)
@@ -713,7 +725,14 @@ class QueuePage(QWidget):
         sl.addWidget(self.open_btn)
         sl.addStretch(1)
         side.setMinimumWidth(300)
-        tl.addWidget(side, 1)
+        # In a short window the panel scrolls rather than squeezing its rows on top of each other (the wrapped
+        # notes and the cover take more height than the queue's share of the window can give)
+        side_scroll = QScrollArea(widgetResizable=True)
+        side_scroll.setFrameShape(QFrame.NoFrame)
+        side_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        side_scroll.setMinimumWidth(320)
+        side_scroll.setWidget(side)
+        tl.addWidget(side_scroll, 1)
         split.addWidget(top)
 
         bottom = QWidget()
@@ -739,7 +758,7 @@ class QueuePage(QWidget):
         self.posted.itemDoubleClicked.connect(lambda _i: self._posted_item() and _open(self._posted_item().record))
         bl.addWidget(self.posted, 1)
         split.addWidget(bottom)
-        split.setSizes([480, 320])
+        split.setSizes([600, 220])  # the queue and its panel get most of the height
         outer.addWidget(split, 1)
 
     @staticmethod
@@ -899,6 +918,7 @@ class QueuePage(QWidget):
             self.clip_title.setText("Pick a clip to change its caption, order or post it now.")
             self.clip_info.setText("")
             self.review_box.setVisible(False)
+            self._show_cover(None)
             return
         self._filling = True
         try:
@@ -915,6 +935,7 @@ class QueuePage(QWidget):
             if it.warnings:
                 info.append("\n⚠ " + "; ".join(it.warnings))
             self.clip_info.setText(" · ".join(info))
+            self._show_cover(it)
             if self.caption.toPlainText().strip() != it.caption:
                 self.caption.setPlainText(it.caption)
             self.tags.setText(it.hashtags)
@@ -928,6 +949,29 @@ class QueuePage(QWidget):
         self.retry_btn.setVisible(it.status == "failed")
         self.retry_btn.setToolTip("It may have gone up already: check the account on TikTok first"
                                   if it.last_error == INTERRUPTED else "Queue it again")
+
+    def _show_cover(self, it: VideoItem | None) -> None:
+        """The TikTok cover it'll post with (posting/cover.py), small, and where it's from."""
+        mode = getattr(self.state.settings, "cover", "auto")
+        picture = Path(it.cover) if it is not None and it.cover else None
+        shown = picture is not None and picture.is_file()
+        self.cover_pic.setVisible(shown)
+        if shown:
+            pix = QPixmap(str(picture))
+            self.cover_pic.setPixmap(pix.scaled(COVER_W, COVER_H, Qt.KeepAspectRatioByExpanding,
+                                                Qt.SmoothTransformation) if not pix.isNull() else QPixmap())
+        if it is None:
+            self.cover_note.setText("")
+        elif mode == "off":
+            self.cover_note.setText("Cover: TikTok's own pick (Settings → Posting → TikTok cover).")
+        elif shown:
+            self.cover_note.setText(f"<b>TikTok cover</b><br>{it.cover_why[:1].upper() + it.cover_why[1:]}, "
+                                    f"{it.cover_at or 0:.1f} s in. It's put in TikTok's cover editor just before "
+                                    "Post.")
+        elif it.cover_why.startswith("none:"):
+            self.cover_note.setText(f"Cover: TikTok's own pick, as one couldn't be made ({it.cover_why[5:].strip()}).")
+        else:
+            self.cover_note.setText("Cover: chosen a little before it posts (the hook card, else the best face).")
 
     def _edit(self, field: str, value: str) -> None:
         it = self._item()
@@ -1025,6 +1069,11 @@ class PerformancePage(QWidget):
         self.which.activated.connect(lambda _i: self.refresh())
         head.addWidget(self.which)
         head.addStretch(1)
+        weekly_btn = QPushButton("📅  Weekly report")
+        weekly_btn.setToolTip("The past 7 days on every account: views against the week before, followers, the best "
+                              "and weakest post, clips against Creator videos. Automation sends it on Monday mornings")
+        weekly_btn.clicked.connect(self.open_weekly)
+        head.addWidget(weekly_btn)
         outer.addLayout(head)
         self.tiles = QHBoxLayout()
         self.tile_labels = {}
@@ -1192,6 +1241,11 @@ class PerformancePage(QWidget):
 
     def _open_top(self, cell) -> None:
         _open(cell.data(Qt.UserRole) or "")
+
+    def open_weekly(self) -> None:
+        from .weekly_view import WeeklyDialog
+
+        WeeklyDialog(self.state, self).exec()
 
 
 def outlier_views(videos, now: float) -> tuple[float, set[str]]:

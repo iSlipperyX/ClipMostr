@@ -340,6 +340,12 @@ class JobDB:
                                     (since,)).fetchall()
         return [(r["time"], r["kind"]) for r in rows]
 
+    def created_since(self, since: float) -> list[Job]:
+        """Jobs queued since `since`, oldest first."""
+        with self._lock:
+            rows = self.con.execute("SELECT * FROM jobs WHERE created >= ? ORDER BY created", (since,)).fetchall()
+        return [Job.from_row(r) for r in rows]
+
     def jobs_since(self, since: float) -> list[Job]:
         """Jobs that finished, failed or changed since `since`, newest first."""
         with self._lock:

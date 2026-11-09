@@ -52,6 +52,47 @@ def analyze_item(store: Store, item_id: str, s: Settings) -> VideoItem:
     return item
 
 
+def cover_item(store: Store, item_id: str, s: Settings, log: Log | None = None, **kw) -> VideoItem:
+    """Choose and save the clip's TikTok cover (cover.py); the Queue tab's thumbnail becomes that frame. A clip
+    that can't have one gets cover_why "none: <why>" and posts with TikTok's own pick."""
+    from . import cover
+
+    item = store.get(item_id)
+    if item is None:
+        raise KeyError(item_id)
+    try:
+        made = cover.make(item, s.cover, **kw)
+    except Exception as exc:  # noqa: BLE001 - an unreadable frame: TikTok picks
+        with store.lock:
+            item.cover, item.cover_at = "", None
+            item.cover_why = f"none: {exc}"[:200]
+        if log:
+            log(f"⚠ No cover for “{item.headline}” ({exc}): TikTok picks one.")
+        return item
+    if made is None:
+        return item
+    pick, picture = made
+    with store.lock:
+        item.cover, item.cover_at, item.cover_why = str(picture), pick.at, pick.why
+    thumb = thumbs_dir() / f"{item.id}.jpg"
+    try:
+        thumbnail(Path(item.path), thumb, pick.at)
+        with store.lock:
+            item.thumb = str(thumb)
+    except Exception:  # noqa: BLE001 - the old thumbnail stays
+        pass
+    if log:
+        log(f"Cover for “{item.headline}”: {cover.describe(item)}.")
+    return item
+
+
+def needs_cover(item: VideoItem, s: Settings) -> bool:
+    """The clip should have a cover made before it posts (none made or tried yet, or its picture is gone)."""
+    if getattr(s, "cover", "auto") == "off" or item.cover_why.startswith("none:"):
+        return False
+    return not (item.cover and Path(item.cover).is_file())
+
+
 def ai_item(store: Store, item_id: str, s: Settings, log: Log | None = None,
             account: Account | None = None) -> VideoItem:
     """The AI rates the video and writes a caption, for `account`'s audience when one is given."""
@@ -163,6 +204,8 @@ def post_item(store: Store, item_id: str, s: Settings, account: Account, log: Lo
         raise KeyError(item_id)
     if item.account != account.id:
         raise RuntimeError(f"“{item.name}” is queued for a different account.")
+    if needs_cover(item, s) and item.exists():  # not made ahead (posted straight away): a few seconds now
+        cover_item(store, item.id, s, log)
     with store.lock:
         item.status = "uploading"
         item.attempts += 1
@@ -185,6 +228,7 @@ def post_item(store: Store, item_id: str, s: Settings, account: Account, log: Lo
         item.planned_at = None
         item.publish_id = result.get("publish_id", "")
         item.posted_via = result.get("via", "")
+        item.cover_set = result.get("cover_set")
         if result.get("tiktok_id"):
             item.tiktok_id = result["tiktok_id"]
             if account.username:
