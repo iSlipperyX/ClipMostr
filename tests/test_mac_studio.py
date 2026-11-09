@@ -85,7 +85,8 @@ def fresh_engine():
 def mac_jobs(tmp_path, **settings) -> MacJobs:
     s = Settings(output_dir=str(tmp_path / "pc-out"), **settings)
     events = []
-    mj = MacJobs(lambda: s, lambda m: None, lambda kind, text, item="": events.append((kind, text, item)),
+    mj = MacJobs(lambda: s, lambda m: None,
+                 lambda kind, text, item="", device="": events.append((kind, text, item, device)),
                  root=tmp_path / "mac_jobs", engine=FakeEngine)
     mj.said = events
     return mj
@@ -272,6 +273,295 @@ def test_a_video_that_fails_says_why(tmp_path):
     got = mj.job(j["id"], "mac1")
     assert got["status"] == "failed" and got["error"] == "This video is private."
     assert "✗" in mj.said[-1][1]
+
+
+def working(mj, job_id, device="mac1"):
+    """Wait until the video is being made."""
+    end = time.time() + 5
+    while mj.job(job_id, device)["status"] != "working" and time.time() < end:
+        time.sleep(0.02)
+
+
+def test_the_list_is_saved_though_windows_is_reading_it(tmp_path, monkeypatch):
+    mj = mac_jobs(tmp_path)
+    real, tries = Path.replace, []
+
+    def replace(self, target):
+        if self.name == "jobs.json.tmp":
+            tries.append(1)
+            if len(tries) < 4:  # Windows: a Mac's poll has jobs.json open this instant
+                raise PermissionError(13, "Access is denied")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "replace", replace)
+    monkeypatch.setattr(studio.time, "sleep", lambda s: None)
+    j = mj.add("mac1", "MacBook", {"source": URL})
+    assert len(tries) == 4 and mj.job(j["id"], "mac1")["status"] == "queued"
+
+
+def test_a_macs_poll_reads_the_list_once_and_under_the_lock(tmp_path, monkeypatch):
+    mj = mac_jobs(tmp_path)
+    up = mj.receive("My Clip.mov", 4, lambda n: b"abcd")
+    mj.add("mac1", "MacBook", {"upload": up["upload"]})
+    mj.add("mac1", "MacBook", {"source": URL})
+    load, reads = mj._load, []
+
+    def loading():
+        reads.append(mj.lock._is_owned())
+        return load()
+
+    monkeypatch.setattr(mj, "_load", loading)
+    got = mj.jobs_for("mac1")
+    assert [j["waiting"] for j in got["jobs"]] == [1, 0] and reads == [True]
+    del reads[:]
+    mj._prune_uploads()
+    assert reads == [True]
+
+
+def test_progress_that_cant_be_saved_never_fails_the_video(tmp_path, monkeypatch):
+    clock = [1000.0]
+    save = {}
+
+    class Slow(FakeEngine):
+        def prepare(self, p):
+            monkeypatch.setattr(mj, "_save", save["broken"])
+            for i in range(3):
+                clock[0] += 5  # each line is due to be saved
+                self.progress("Transcribing", i / 3)
+            monkeypatch.setattr(mj, "_save", save["real"])
+            super().prepare(p)
+
+    def broken(jobs):
+        raise PermissionError(13, "Access is denied")
+
+    mj = mac_jobs(tmp_path)
+    mj._engine, mj.now = Slow, lambda: clock[0]
+    save.update(real=mj._save, broken=broken)
+    j = mj.add("mac1", "MacBook", {"source": URL})
+    mj.make(mj._next())
+    assert mj.job(j["id"], "mac1")["status"] == "done"
+
+
+def test_one_bad_save_never_ends_the_making(tmp_path, monkeypatch):
+    mj = mac_jobs(tmp_path)
+    monkeypatch.setattr(studio, "LOOP_RETRY", 0.01)
+    nxt, change, failed = mj._next, mj._change, []
+
+    def flaky_next():
+        if not failed:
+            failed.append("next")
+            raise PermissionError(13, "Access is denied")
+        return nxt()
+
+    def flaky_change(job_id, **changes):
+        if changes.get("status") in ("working", "failed") and len(failed) < 3:
+            failed.append(changes["status"])  # the save as it starts, then the one that says it failed
+            raise PermissionError(13, "Access is denied")
+        return change(job_id, **changes)
+
+    monkeypatch.setattr(mj, "_next", flaky_next)
+    monkeypatch.setattr(mj, "_change", flaky_change)
+    j = mj.add("mac1", "MacBook", {"source": URL})
+    mj.start()
+    try:
+        end = time.time() + 10
+        while mj.job(j["id"], "mac1")["status"] != "done" and time.time() < end:
+            time.sleep(0.02)
+        assert failed == ["next", "working", "failed"] and mj._thread.is_alive()
+        assert mj.job(j["id"], "mac1")["status"] == "done"
+    finally:
+        mj.stop()
+
+
+def test_videos_still_arriving_count_against_the_room(tmp_path, monkeypatch):
+    mj = mac_jobs(tmp_path)
+    gb = 1024 ** 3
+    monkeypatch.setattr(studio.shutil, "disk_usage", lambda p: SimpleNamespace(free=10 * gb))
+    arriving, go = threading.Event(), threading.Event()
+
+    def read(n):
+        arriving.set()
+        go.wait(5)
+        return b""  # then it stops part way
+
+    errors = []
+
+    def first():
+        try:
+            mj.receive("one.mp4", 5 * gb, read)
+        except HostError as exc:
+            errors.append(exc.status)
+
+    t = threading.Thread(target=first)
+    t.start()
+    try:
+        assert arriving.wait(5)
+        assert mj.room() == 3 * gb  # 10 free, 5 on their way, 2 kept for the clips
+        with pytest.raises(HostError) as no:
+            mj.check_upload("two.mp4", 4 * gb)
+        assert no.value.status == 507
+        with pytest.raises(HostError) as no:
+            mj.receive("two.mp4", 4 * gb, lambda n: b"")
+        assert no.value.status == 507
+        assert mj.check_upload("small.mp4", 2 * gb) == "small.mp4"
+    finally:
+        go.set()
+        t.join(5)
+    assert errors == [400] and mj.room() == 8 * gb and not mj._incoming
+
+
+def test_a_video_made_for_a_mac_never_spends_the_pcs_keys(tmp_path, monkeypatch):
+    from ytclip.intelligence import llama_engine
+
+    mj = mac_jobs(tmp_path, ai_provider="claude", ai_api_key="sk-ant-pc", gemini_api_key="g-pc", ai_fallback=True)
+    monkeypatch.setattr(llama_engine, "backend_name", lambda: "llama.cpp")
+    job = {"id": "0123456789abcdef", "settings": {"mode": "ai", "ai_polish": True}}
+
+    monkeypatch.setattr(ai, "local_ready", lambda s: False)  # no model yet: smart signals, nothing polished
+    s = mj.settings_for(job)
+    assert (s.ai_provider, s.ai_fallback, s.mode, s.ai_polish) == ("local", False, "auto", False)
+    assert not {"claude", "gemini"} & set(ai.order(s))
+
+    monkeypatch.setattr(ai, "local_ready", lambda s: True)
+    s = mj.settings_for(job)
+    assert (s.ai_provider, s.ai_fallback, s.mode, s.ai_polish) == ("local", False, "ai", True)
+    assert ai.order(s) == ["local"]  # and when it fails, nothing else is asked
+
+    def cant(s):
+        raise OSError("the model folder can't be read")
+
+    monkeypatch.setattr(ai, "local_ready", cant)
+    s = mj.settings_for(dict(job, settings={"mode": "heatmap", "ai_polish": True}))
+    assert (s.ai_provider, s.mode, s.ai_polish) == ("local", "heatmap", False)
+
+
+def test_clean_up_leaves_the_videos_being_made_for_a_mac(tmp_path, isolated_profile):
+    from ytclip import cleanup
+    from ytclip.jobs import JobDB
+    from ytclip.settings import app_dir
+
+    mj = mac_jobs(tmp_path)
+    mj.root = app_dir() / "mac_jobs"
+    db = JobDB(tmp_path / "jobs.db")
+    none = tmp_path / "none.json"
+    assert cleanup.busy_ids(db, none) == set()
+    waiting = mj.add("mac1", "MacBook", {"source": "https://youtu.be/waiting1234"})
+    j = mj.add("mac1", "MacBook", {"source": URL})
+    assert cleanup.busy_ids(db, none) == {"waiting1234", "abcdefghijk"}
+
+    FakeEngine.gate = threading.Event()
+    mj.cancel(waiting["id"], "mac1")
+    t = threading.Thread(target=mj.make, args=(mj._next(),))
+    t.start()
+    working(mj, j["id"])
+    assert cleanup.busy_ids(db, none) == {"abcdefghijk"}
+    FakeEngine.gate.set()
+    t.join(5)
+    saved = json.loads((mj.root / "jobs.json").read_text(encoding="utf-8"))["jobs"]
+    assert [x.get("video_id") for x in saved if x["id"] == j["id"]] == ["abc"]  # its own id, once it was opened
+    assert cleanup.busy_ids(db, none) == set()  # made: nothing of it is needed in the cache any more
+
+    (mj.root / "jobs.json").write_text(json.dumps({"jobs": [
+        {"id": "a", "status": "working", "source": "https://example.com/odd", "video_id": "realid12345"}, "junk"]}))
+    assert cleanup.busy_ids(db, none) == {"https://example.com/odd", "realid12345"}
+    (mj.root / "jobs.json").write_text("not json")
+    assert cleanup.busy_ids(db, none) == set()
+
+
+def test_an_unlinked_macs_videos_are_dropped(tmp_path):
+    mj = mac_jobs(tmp_path)
+    linked = {"mac1", "mac2"}
+    mj.linked = lambda: linked
+    made = mj.add("mac2", "Old Mac", {"source": URL})
+    mj.make(mj._next())  # one is made and waits to be fetched
+    up = mj.receive("Theirs.mov", 4, lambda n: b"abcd")
+    first = mj.add("mac2", "Old Mac", {"upload": up["upload"]})
+    for _ in range(studio.JOBS_MAX - 1):
+        mj.add("mac2", "Old Mac", {"source": URL})
+    with pytest.raises(HostError) as no:
+        mj.add("mac1", "MacBook", {"source": URL})
+    assert no.value.status == 429
+
+    linked = None  # remote.json can't be read just now: nothing is dropped
+    assert mj._next()["id"] == first["id"] and len(mj._load()) == studio.JOBS_MAX + 1
+    linked = {"mac1"}  # Old Mac was unlinked: its videos no longer count, and none is made
+    mine = mj.add("mac1", "MacBook", {"source": URL})
+    assert mj._next()["id"] == mine["id"]
+    assert [j["device"] for j in mj._load()] == ["mac1"]
+    assert not (tmp_path / "mac_jobs" / "uploads" / up["upload"]).exists()
+    assert not (tmp_path / "mac_jobs" / made["id"]).exists()  # the clips nobody can fetch
+
+
+def test_a_video_being_made_stops_when_its_mac_is_unlinked(tmp_path, monkeypatch):
+    mj = mac_jobs(tmp_path)
+    monkeypatch.setattr(studio, "LINK_CHECK", 0.0)
+    linked = {"mac1"}
+    mj.linked = lambda: linked
+    FakeEngine.gate = threading.Event()
+    j = mj.add("mac1", "MacBook", {"source": URL})
+    t = threading.Thread(target=mj.make, args=(mj._next(),))
+    t.start()
+    working(mj, j["id"])
+    assert mj._next() is None and t.is_alive()  # it isn't touched while its Mac is linked
+    linked = set()
+    t.join(5)
+    assert not t.is_alive() and mj._load() == [] and not mj._forget and not mj._cancel
+    assert not (tmp_path / "mac_jobs" / j["id"]).exists()
+
+
+def test_a_refused_videos_upload_doesnt_stay(tmp_path):
+    mj = mac_jobs(tmp_path)
+    uploads = tmp_path / "mac_jobs" / "uploads"
+    used = mj.receive("First.mov", 4, lambda n: b"abcd")
+    mj.add("mac1", "MacBook", {"upload": used["upload"]})
+    for _ in range(studio.JOBS_MAX - 1):
+        mj.add("mac1", "MacBook", {"source": URL})
+    up = mj.receive("Late.mov", 4, lambda n: b"abcd")
+    for sent in (up["upload"], used["upload"]):
+        with pytest.raises(HostError) as no:
+            mj.add("mac1", "MacBook", {"upload": sent})
+        assert no.value.status == 429
+    assert [p.name for p in uploads.iterdir()] == [used["upload"]]  # the one a waiting video is made from stays
+
+
+def test_stray_uploads_are_swept_without_waiting_for_another(tmp_path, monkeypatch):
+    mj = mac_jobs(tmp_path)
+    uploads = tmp_path / "mac_jobs" / "uploads"
+    used = mj.receive("First.mov", 4, lambda n: b"abcd")
+    mj.add("mac1", "MacBook", {"upload": used["upload"]})
+    mj.receive("Stray.mov", 4, lambda n: b"abcd")
+    (uploads / "0123456789abcdef").mkdir()
+    (uploads / "0123456789abcdef" / "Half.mov.part").write_bytes(b"ab")  # automation was killed mid-upload
+    assert mj._next() is not None and len(list(uploads.iterdir())) == 3  # fresh ones are left alone
+    mj.now = lambda: time.time() + studio.UPLOAD_KEEP + 60
+    assert mj._next() is not None
+    assert [p.name for p in uploads.iterdir()] == [used["upload"]]
+
+    gb = 1024 ** 3
+    for arrive in (lambda: mj.check_upload("New.mov", gb) == "New.mov",
+                   lambda: mj.receive("New.mov", 4, lambda n: b"abcd")["size"] == 4):
+        mj.now = time.time
+        stray = uploads / mj.receive("Stray.mov", 4, lambda n: b"abcd")["upload"]
+        mj.now = lambda: time.time() + studio.UPLOAD_KEEP + 60
+        monkeypatch.setattr(studio.shutil, "disk_usage",  # the stray one is what fills the disk
+                            lambda p: SimpleNamespace(free=(1 if stray.exists() else 10) * gb))
+        assert arrive() and not stray.exists()
+
+
+def test_news_of_a_video_is_for_the_mac_that_sent_it(tmp_path):
+    mj = mac_jobs(tmp_path)
+    j = mj.add("mac1", "MacBook", {"source": URL})
+    mj.make(mj._next())
+    assert mj.said[-1] == ("studio", "✓ 2 clips from Big Talk are ready for your Mac", j["id"], "mac1")
+
+    class Broken(FakeEngine):
+        def prepare(self, p):
+            raise RuntimeError("This video is private.")
+
+    mj._engine = Broken
+    j = mj.add("mac2", "iMac", {"source": URL})
+    mj.make(mj._next())
+    assert mj.said[-1][2:] == (j["id"], "mac2")
 
 
 # ================================================================== the PC: its local AI for a Mac
@@ -667,6 +957,38 @@ def test_another_mac_cant_see_or_take_my_videos(world):  # noqa: F811
         with pytest.raises(ApiError) as no:
             call()
         assert no.value.status == 404
+
+
+def test_another_mac_doesnt_hear_about_my_videos(world):  # noqa: F811
+    world.host.studio._engine = FakeEngine
+    world.host.studio.start()
+    mine, _ = world.linked()
+    theirs, _ = world.linked()
+    seq = theirs.get("/api/events")["seq"]
+    j = mine.post("/api/studio/jobs", {"source": URL})
+    end = time.time() + 15
+    while mine.get(f"/api/studio/jobs/{j['id']}")["status"] != "done" and time.time() < end:
+        time.sleep(0.1)
+    world.host.add_event("problem", "Low disk space", alert=True)
+    got = mine.get("/api/events", after=seq)
+    assert [(e["kind"], e["item"]) for e in got["events"]] == [("studio", j["id"]), ("problem", "")]
+    other = theirs.get("/api/events", after=seq)
+    assert [e["kind"] for e in other["events"]] == ["problem"] and other["seq"] == got["seq"]  # one count for all
+
+
+def test_unlinking_a_mac_drops_the_videos_it_sent(world, tmp_path):  # noqa: F811
+    world.host.studio._engine = FakeEngine
+    mine, _ = world.linked()
+    theirs, _ = world.linked()
+    video = tmp_path / "Mine.mov"
+    video.write_bytes(b"abcd" * 1000)
+    up = mine.upload(video, video.name)
+    mine.post("/api/studio/jobs", {"upload": up["upload"], "name": video.name})
+    kept = theirs.post("/api/studio/jobs", {"source": URL})
+    mine.post("/api/unlink")
+    nxt = world.host.studio._next()
+    assert nxt["id"] == kept["id"] and [j["id"] for j in world.host.studio._load()] == [kept["id"]]
+    assert not (world.host.studio.root / "uploads" / up["upload"]).exists()
 
 
 # ================================================================== the Mac's window: Make on Your PC

@@ -107,6 +107,16 @@ def find_device(data: dict, device_id: str, token: str) -> dict | None:
     return None
 
 
+def linked_ids(where: Path | None = None) -> set[str] | None:
+    """The linked Macs' ids, or None when remote.json can't be read just now (which is not "no Mac is linked")."""
+    p = where or path()
+    if not p.exists():  # no Mac was ever linked
+        return set()
+    if not isinstance(safefile.read_raw(p), dict):
+        return None
+    return {d["id"] for d in load(p)["devices"]}
+
+
 def unlink(data: dict, device_id: str) -> bool:
     before = len(data["devices"])
     data["devices"] = [d for d in data["devices"] if d.get("id") != device_id]

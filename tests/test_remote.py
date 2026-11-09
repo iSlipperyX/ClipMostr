@@ -407,6 +407,27 @@ def test_events_wait_for_news(world):
     assert c.get("/api/events", after=got["seq"])["events"][0]["kind"] == "problem"
 
 
+def test_news_for_one_mac_isnt_told_to_the_others(world):
+    world.host.add_event("studio", "✓ 2 clips from Big Talk are ready for your Mac", item="j1", device="mac-a")
+    world.host.add_event("problem", "Low disk space", alert=True)
+    seq = world.host.seq
+    assert [e["kind"] for e in world.host.events_after(0, "mac-a")["events"]] == ["studio", "problem"]
+    assert world.host.events_after(0, "mac-b") == {"seq": seq, "events": world.host.events_after(seq - 1)["events"]}
+    assert len(world.host.events_after(0)["events"]) == 2  # the PC's own view: all of it
+    world.host.add_event("studio", "✗ Big Talk: no clips", item="j2", device="mac-a")
+    t = time.monotonic()
+    got = world.server.wait_events(seq, 1.0, "mac-b")  # nothing for this Mac: it waits, and its place moves on
+    assert time.monotonic() - t > 0.8 and got == {"seq": seq + 1, "events": []}
+
+
+def test_which_macs_are_linked(world, tmp_path):
+    assert state.linked_ids(tmp_path / "none.json") == set()
+    _, got = world.linked()
+    assert state.linked_ids(world.server.state_file) == {got["device_id"]} == world.host.studio.linked()
+    world.server.state_file.write_text("{ half a file", encoding="utf-8")
+    assert state.linked_ids(world.server.state_file) is None  # can't be read: not the same as nobody linked
+
+
 def test_week_and_log(world, monkeypatch):
     c, _ = world.linked()
     w = c.get("/api/week")

@@ -417,7 +417,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, host.status())
         if get and path == "/api/events":
             return self.send_json(200, self.remote.wait_events(int(q.get("after") or 0),
-                                                               min(EVENTS_WAIT_MAX, float(q.get("wait") or 0))))
+                                                               min(EVENTS_WAIT_MAX, float(q.get("wait") or 0)),
+                                                               self.device["id"]))
         if get and path == "/api/videos":
             return self.send_json(200, host.videos(q.get("rev", "")))
         if get and path == "/api/posted":
@@ -559,6 +560,7 @@ class RemoteServer:
         self.runner = runner
         self.host = host or Host(runner, now=now)
         self.state_file = state_file
+        self.host.studio.linked = lambda: state.linked_ids(self.state_file)  # an unlinked Mac's videos go
         self.status_file = status_file
         self.cert_dir = cert_dir
         self.now = now
@@ -830,10 +832,10 @@ class RemoteServer:
             state.unlink(data, device_id)
         self.log("A Mac unlinked itself.")
 
-    def wait_events(self, after: int, wait: float) -> dict:
+    def wait_events(self, after: int, wait: float, device: str | None = None) -> dict:
         until = time.monotonic() + max(0.0, wait)
         while True:
-            got = self.host.events_after(after)
+            got = self.host.events_after(after, device)
             if got["events"] or time.monotonic() >= until or self.stop_event.is_set() or after > got["seq"]:
                 return got
             time.sleep(0.4)
