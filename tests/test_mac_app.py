@@ -8,6 +8,7 @@ import pytest
 
 pytest.importorskip("PySide6.QtWidgets")
 
+from PySide6.QtCore import QCoreApplication, QEvent  # noqa: E402
 from PySide6.QtWidgets import QMessageBox  # noqa: E402
 
 from test_remote import mac_home, world  # noqa: E402,F401 - fixtures
@@ -34,6 +35,9 @@ def shut(app, win) -> None:
     win._quitting = True
     win.close()
     app.processEvents()
+    # Gone now, not when the test run ends: closed again then, it would save over the real settings.
+    win.deleteLater()
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
 
 
 def linked_host(w) -> hosts.Host:
@@ -286,6 +290,59 @@ def test_self_check(app, capsys):
     out = capsys.readouterr().out
     assert "ClipMonster 3." in out and "window ok" in out and "keys in" in out and "HTTPS certificates" in out
     assert rc in (0, 1)  # 1 where a tool it runs isn't installed here
+
+
+def mac_windows(app) -> list:
+    from ytclip.mac.window import MacWindow
+
+    return [w for w in app.topLevelWidgets() if isinstance(w, MacWindow)]
+
+
+def test_a_shut_window_is_gone(app):
+    """A window only closed stays alive until the test run ends, and is closed again then, when the test's own
+    settings folder is no longer in force: it saved its settings and its list over the developer's real ones."""
+    pytest.importorskip("ytclip.gui.main_window", exc_type=ImportError)  # no Qt Multimedia libraries (Linux CI)
+    from ytclip.mac.window import MacWindow
+
+    win = MacWindow(auto_connect=False)
+    assert win in mac_windows(app)
+    shut(app, win)
+    assert mac_windows(app) == []
+
+
+def test_self_check_leaves_no_window(app):
+    pytest.importorskip("ytclip.gui.main_window", exc_type=ImportError)  # no Qt Multimedia libraries (Linux CI)
+    from ytclip.mac.app import self_check
+
+    self_check(app)
+    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    assert mac_windows(app) == []
+
+
+def test_windows_left_at_the_end_save_into_a_temp_folder(app, tmp_path, monkeypatch):
+    """Whatever is still open when the test run ends is closed with the settings folders pointed away from the
+    real ones (a window saves when it closes)."""
+    from PySide6.QtWidgets import QWidget
+
+    from conftest import close_leftovers
+    from ytclip.settings import app_dir, local_dir
+
+    saved = []
+
+    class Saver(QWidget):
+        def closeEvent(self, e):
+            saved.extend([app_dir(), local_dir()])
+            super().closeEvent(e)
+
+    real = tmp_path / "real"
+    for key in ("APPDATA", "LOCALAPPDATA", "HOME", "USERPROFILE"):
+        monkeypatch.setenv(key, str(real))
+    w = Saver()
+    w.show()
+    close_leftovers(app, tmp_path / "spare")
+    assert len(saved) == 2 and all(tmp_path / "spare" in p.parents for p in saved)
+    assert w not in app.topLevelWidgets()
+    assert not real.exists()
 
 
 def test_the_built_app_trusts_the_certificates_it_brought(monkeypatch, tmp_path):
