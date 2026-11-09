@@ -4,6 +4,7 @@ installer's own consistency (its scripts, services and options). The install its
 GitHub's Ubuntu machine (.github/workflows/tests.yml, linux-host)."""
 
 import json
+import os
 import re
 import shutil
 import subprocess
@@ -170,7 +171,7 @@ def test_gce_metadata_answer_is_checked(monkeypatch):
 
 # --- Chrome on Linux ---------------------------------------------------------------------------------------
 
-@pytest.mark.skipif(not hasattr(shutil, "which") or __import__("os").name == "nt", reason="Linux and macOS")
+@pytest.mark.skipif(os.name == "nt", reason="Linux and macOS")
 def test_chrome_is_found_on_linux(monkeypatch, tmp_path):
     from ytclip.posting.tiktok import login
 
@@ -184,8 +185,11 @@ def test_chrome_is_found_on_linux(monkeypatch, tmp_path):
 # --- the installer -----------------------------------------------------------------------------------------
 
 SCRIPTS = ["install.sh", "clipmonster", "clipmonster-display", "clipmonster-desktop"]
+# Running the scripts needs a Linux (or macOS) bash: on Windows `bash` is WSL's, which may have no Linux at all
+posix_shell = pytest.mark.skipif(os.name == "nt", reason="the Linux host's scripts run on Linux")
 
 
+@posix_shell
 @pytest.mark.parametrize("name", SCRIPTS)
 def test_scripts_parse_and_are_executable(name):
     path = LINUX / name
@@ -193,6 +197,7 @@ def test_scripts_parse_and_are_executable(name):
     assert subprocess.run(["bash", "-n", str(path)], capture_output=True).returncode == 0
 
 
+@posix_shell
 @pytest.mark.skipif(not shutil.which("shellcheck"), reason="shellcheck isn't installed")
 def test_shellcheck():
     got = subprocess.run(["shellcheck", "-S", "warning", *[str(LINUX / n) for n in SCRIPTS]],
@@ -201,22 +206,23 @@ def test_shellcheck():
 
 
 def test_the_installer_installs_every_script_and_service_it_uses():
-    install = (LINUX / "install.sh").read_text()
+    install = (LINUX / "install.sh").read_text(encoding="utf-8")
     units = sorted(p.name for p in (LINUX / "systemd").glob("*.service"))
     assert units == ["clipmonster-desktop.service", "clipmonster-display.service", "clipmonster.service"]
     for unit in units:
         assert unit in install
-        text = (LINUX / "systemd" / unit).read_text()
+        text = (LINUX / "systemd" / unit).read_text(encoding="utf-8")
         for exe in re.findall(r"^Exec\w*=-?(\S+)", text, re.M):
             name = Path(exe).name
             assert exe.startswith("/opt/clipmonster/"), exe
             assert name in ("ytclip",) or f'"$HERE/{name}"' in install, f"{unit} runs {exe}, which isn't installed"
         assert "User=clipmonster" in text and "EnvironmentFile=/etc/clipmonster/env" in text
-    admin = (LINUX / "clipmonster").read_text()
+    admin = (LINUX / "clipmonster").read_text(encoding="utf-8")
     for unit in units:
         assert unit in admin
 
 
+@posix_shell
 def test_the_installer_checks_its_options_before_anything():
     def go(*args):
         return subprocess.run(["bash", str(LINUX / "install.sh"), *args], capture_output=True, text=True)
@@ -227,6 +233,7 @@ def test_the_installer_checks_its_options_before_anything():
     assert "--gpu is" in go("--gpu", "amd").stderr
 
 
+@posix_shell
 def test_the_admin_command_explains_itself():
     got = subprocess.run(["bash", str(LINUX / "clipmonster"), "help"], capture_output=True, text=True)
     assert got.returncode == 0
