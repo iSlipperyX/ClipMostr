@@ -388,6 +388,15 @@ def test_turning_it_off_and_on(world):
     assert c.get("/api/status")
 
 
+def test_turning_it_off_drops_macs_still_connected(world):
+    c, _ = world.linked()
+    assert c.get("/api/status")  # its connection stays open between requests (keep-alive)
+    world.s.remote_on = False
+    world.server.configure()
+    with pytest.raises(mclient.Offline):  # not answered on the old connection either
+        c.get("/api/status")
+
+
 def test_a_port_in_use_is_said_plainly(world):
     other = RemoteServer(world.runner, host=world.host, state_file=world.tmp / "remote.json",
                          status_file=world.tmp / "rs2.json", cert_dir=world.tmp / "certs", bind="127.0.0.1",

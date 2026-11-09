@@ -152,13 +152,27 @@ class _Server(ThreadingHTTPServer):
     def __init__(self, addr, handler, ctx: ssl.SSLContext, remote: "RemoteServer"):
         self.ctx = ctx
         self.remote = remote
+        self.open_sockets: set = set()  # every connection a Mac has open, closed when the server stops
+        self._sockets_lock = threading.Lock()
         super().__init__(addr, handler)
+
+    def close_connections(self) -> None:
+        """End every open connection, so a Mac kept connected (HTTP keep-alive) notices at once that the
+        server stopped, instead of being answered until its connection goes idle."""
+        with self._sockets_lock:
+            socks, self.open_sockets = list(self.open_sockets), set()
+        for s in socks:
+            try:
+                s.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
 
     def finish_request(self, request, client_address):
         """The TLS handshake on the request's own thread, so a slow one never holds up the others."""
+        self._track(request, True)
         try:
             request.settimeout(HANDSHAKE_TIMEOUT)
-            tls = self.ctx.wrap_socket(request, server_side=True)
+            tls = self.ctx.wrap_socket(request, server_side=True)  # (request is now tls's)
             tls.settimeout(IDLE_TIMEOUT)
         except (OSError, ssl.SSLError):
             try:
@@ -166,13 +180,24 @@ class _Server(ThreadingHTTPServer):
             except OSError:
                 pass
             return
+        finally:
+            self._track(request, False)
+        self._track(tls, True)
         try:
             self.RequestHandlerClass(tls, client_address, self)
         finally:
+            self._track(tls, False)
             try:
                 tls.close()
             except OSError:
                 pass
+
+    def _track(self, sock, open_: bool) -> None:
+        with self._sockets_lock:
+            if open_:
+                self.open_sockets.add(sock)
+            else:
+                self.open_sockets.discard(sock)
 
     def handle_error(self, request, client_address):  # noqa: D401 - quiet: a dropped connection isn't news
         pass
@@ -494,6 +519,7 @@ class RemoteServer:
             try:
                 httpd.shutdown()
                 httpd.server_close()
+                httpd.close_connections()
             except OSError:
                 pass
         udp, self._udp = self._udp, None
