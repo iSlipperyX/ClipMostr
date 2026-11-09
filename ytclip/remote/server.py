@@ -40,6 +40,7 @@ import mimetypes
 import os
 import re
 import socket
+import socketserver
 import ssl
 import threading
 import time
@@ -65,6 +66,43 @@ FAILS_PER_MINUTE = 12  # wrong keys from one address before it's made to wait a 
 ID = r"([A-Za-z0-9_\-~.]{1,80})"
 
 
+class _OwnName:
+    """The addresses this computer's own name stands for, looked up in the background and remembered for a
+    minute. The lookup asks the network's name server, which can take half a minute to give up on a name it
+    doesn't know (GitHub's Mac runners took 35 s on every server start), so nothing waits on it longer than
+    `wait`: until it's back, the addresses are the ones from the last lookup (none at first)."""
+
+    FOR = 60.0  # s a lookup is remembered
+
+    def __init__(self):
+        self.addresses: list[str] = []
+        self.at: float | None = None  # when the last lookup came back (monotonic)
+        self._looking = threading.Lock()  # held while one is under way
+
+    def get(self, wait: float = 1.0) -> list[str]:
+        stale = self.at is None or time.monotonic() - self.at >= self.FOR
+        if stale and self._looking.acquire(blocking=False):
+            back = threading.Event()
+            threading.Thread(target=self._look, args=(back,), name="own-name", daemon=True).start()
+            back.wait(wait)
+        return list(self.addresses)
+
+    def _look(self, back: threading.Event) -> None:
+        try:
+            try:
+                infos = socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET)
+                self.addresses = list(dict.fromkeys(info[4][0] for info in infos))
+            except (OSError, UnicodeError):
+                self.addresses = []
+            self.at = time.monotonic()
+        finally:
+            self._looking.release()
+            back.set()
+
+
+_own_name = _OwnName()
+
+
 def local_addresses() -> list[str]:
     """This PC's addresses on its networks (not 127.0.0.1), the likely one first."""
     found: list[str] = []
@@ -77,13 +115,7 @@ def local_addresses() -> list[str]:
             s.close()
     except OSError:
         pass
-    try:
-        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ip = info[4][0]
-            if ip not in found:
-                found.append(ip)
-    except OSError:
-        pass
+    found += [ip for ip in _own_name.get() if ip not in found]
     return [ip for ip in found if not ip.startswith("127.") and not ip.startswith("169.254.")]
 
 
@@ -167,6 +199,12 @@ class _Server(ThreadingHTTPServer):
         self.open_sockets: set = set()  # every connection a Mac has open, closed when the server stops
         self._sockets_lock = threading.Lock()
         super().__init__(addr, handler)
+
+    def server_bind(self) -> None:
+        # TCPServer's own bind, without the socket.getfqdn() HTTPServer adds: a name lookup nothing here uses,
+        # which for 0.0.0.0 asks the network for this computer's name and can take half a minute
+        socketserver.TCPServer.server_bind(self)
+        self.server_name, self.server_port = str(self.server_address[0]), self.server_address[1]
 
     def close_connections(self) -> None:
         """End every open connection, so a Mac kept connected (HTTP keep-alive) notices at once that the

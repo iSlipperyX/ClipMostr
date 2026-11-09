@@ -444,6 +444,44 @@ def test_a_port_in_use_is_said_plainly(world):
     assert f"Port {world.port}" in other.error
 
 
+def test_a_name_server_that_never_answers_holds_nothing_up(world, monkeypatch):
+    """Where the network's name server takes half a minute to give up on this computer's name (GitHub's Mac
+    runners: every server start took 35 s), starting the server and saying where it listens don't wait on it."""
+    from ytclip.remote import server as srv
+
+    world.server.stop()
+    answer, asked = threading.Event(), []
+    real = socket.getaddrinfo
+
+    def slow(host, *args, **kwargs):
+        if host == socket.gethostname():
+            asked.append(host)
+            answer.wait(30)  # (until the test ends)
+        return real(host, *args, **kwargs)
+
+    def by_address(*_a):
+        raise AssertionError("a name was looked up by its address")
+
+    monkeypatch.setattr(srv, "_own_name", srv._OwnName())
+    monkeypatch.setattr(socket, "getaddrinfo", slow)
+    monkeypatch.setattr(socket, "gethostbyaddr", by_address)
+    try:
+        started = time.monotonic()
+        assert world.server.configure()
+        world.server._write_status()
+        assert srv.mac_addresses() is not None and srv.local_addresses() is not None
+        assert time.monotonic() - started < 5
+        assert asked == [socket.gethostname()]  # looked up once, in the background
+    finally:
+        answer.set()
+    end = time.monotonic() + 10
+    while srv._own_name.at is None and time.monotonic() < end:  # it comes back, and is remembered
+        time.sleep(0.02)
+    assert srv._own_name.at is not None
+    srv.local_addresses()
+    assert asked == [socket.gethostname()]
+
+
 def test_heartbeat_for_the_window(world):
     world.server._write_status()
     st = state.read_status(world.server.status_file)
