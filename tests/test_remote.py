@@ -47,6 +47,40 @@ def mac_home(tmp_path, monkeypatch):
 
     prefs.set("check_updates", False)
     Settings(setup_done=True).save()
+    asked = no_one_to_answer(monkeypatch)
+    yield
+    assert not asked, f"the app asked something no one was there to answer: {asked}"
+
+
+def no_one_to_answer(monkeypatch) -> list[str]:
+    """A message or question the app shows that the test doesn't answer itself is closed at once and fails the
+    test, instead of waiting for a click for ever (a run on GitHub's Mac sat silent until it was stopped).
+    Returns what was shown. A test that expects one patches QMessageBox.exec (or the call) itself."""
+    asked: list[str] = []
+    try:
+        from PySide6.QtWidgets import QDialog, QMessageBox
+    except ImportError:  # (no Qt: nothing can ask)
+        return asked
+
+    def box_exec(box, *_a, **_k):
+        asked.append(f"{box.windowTitle()}: {box.text()}")
+        return 0
+
+    def dialog_exec(dialog, *_a, **_k):
+        asked.append(f"{type(dialog).__name__} {dialog.windowTitle()!r}")
+        return 0
+
+    def static(kind):
+        def show(_parent, title, text, *_a, **_k):
+            asked.append(f"{kind} {title}: {text}")
+            return QMessageBox.StandardButton.NoButton
+        return staticmethod(show)
+
+    monkeypatch.setattr(QMessageBox, "exec", box_exec)
+    monkeypatch.setattr(QDialog, "exec", dialog_exec)
+    for kind in ("question", "information", "warning", "critical"):
+        monkeypatch.setattr(QMessageBox, kind, static(kind))
+    return asked
 
 
 @pytest.fixture

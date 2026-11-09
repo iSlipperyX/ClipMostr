@@ -9,7 +9,7 @@ pytest.importorskip("PySide6.QtWidgets")
 
 from PySide6.QtWidgets import QMessageBox  # noqa: E402
 
-from test_mac_app import linked_host, wait  # noqa: E402
+from test_mac_app import linked_host, shut, wait  # noqa: E402
 from test_remote import mac_home, world  # noqa: E402,F401 - fixtures
 from test_sports import exported  # noqa: E402
 from ytclip.categories import Category  # noqa: E402
@@ -36,6 +36,7 @@ def sent(world, tmp_path, monkeypatch):  # noqa: F811
 @pytest.fixture
 def mac(app, world, sent, tmp_path, monkeypatch):  # noqa: F811
     """make() opens ClipMonster for Mac and gives its link to the PC (pc.PCLink), which holds the inbox."""
+    pytest.importorskip("ytclip.gui.main_window", exc_type=ImportError)  # no Qt Multimedia libraries (Linux CI)
     from ytclip.mac.window import MacWindow
 
     prefs.set("inbox_folder", str(tmp_path / "Movies"))
@@ -54,8 +55,7 @@ def mac(app, world, sent, tmp_path, monkeypatch):  # noqa: F811
     made = []
     yield make
     for win in made:
-        win.quit()
-    app.processEvents()
+        shut(app, win)
 
 
 def device_id(win) -> str:

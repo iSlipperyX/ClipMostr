@@ -676,12 +676,13 @@ pytest.importorskip("PySide6.QtWidgets")
 from PySide6.QtGui import QAction, QShortcut  # noqa: E402
 from PySide6.QtWidgets import QMessageBox  # noqa: E402
 
-from test_mac_app import linked_host, wait  # noqa: E402
+from test_mac_app import linked_host, shut, wait  # noqa: E402
 
 
 @pytest.fixture
 def mac(app, world, tmp_path):  # noqa: F811
     """ClipMonster for Mac, linked to the world's PC, saving clips in its own folder."""
+    pytest.importorskip("ytclip.gui.main_window", exc_type=ImportError)  # no Qt Multimedia libraries (Linux CI)
     from ytclip.mac.window import MacWindow
 
     Settings(setup_done=True, output_dir=str(tmp_path / "Mac clips")).save()
@@ -693,8 +694,7 @@ def mac(app, world, tmp_path):  # noqa: F811
     win.device_id = host.device_id
     assert wait(app, lambda: win.link.online and (win.link.lends() or {}).get("studio"), timeout=15)
     yield win
-    win.quit()
-    app.processEvents()
+    shut(app, win)
 
 
 def only_job(win):
@@ -930,26 +930,29 @@ def test_api_keys_stay_out_of_settings_json(tmp_path):
     from ytclip import settings as S
     from ytclip.mac import keychain
 
-    S.keep_secrets_in(keychain.SettingsSecrets())
-    try:
-        S.Settings(ai_api_key="sk-ant-1", gemini_api_key="g-1").save()
-        path = S.app_dir() / "settings.json"
-        raw = json.loads(path.read_text(encoding="utf-8"))
-        assert raw["ai_api_key"] == "" and raw["gemini_api_key"] == ""
-        assert keychain.load("setting:ai_api_key") == "sk-ant-1"
-        if os.name == "posix":  # (no Keychain here: a file only this user reads)
-            assert (keychain._file().stat().st_mode & 0o077) == 0
-        assert S.Settings.load().ai_api_key == "sk-ant-1"
-
-        raw["youtube_api_key"] = "yt-1"  # written before the keys moved: it moves now
-        path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.MonkeyPatch.context() as mp:
+        # the file keys go to without a keyring: a Mac runner's own Keychain is left alone by the tests
+        mp.setattr(keychain, "_keyring", lambda: None)
         S.keep_secrets_in(keychain.SettingsSecrets())
-        assert S.Settings.load().youtube_api_key == "yt-1" and keychain.load("setting:youtube_api_key") == "yt-1"
+        try:
+            S.Settings(ai_api_key="sk-ant-1", gemini_api_key="g-1").save()
+            path = S.app_dir() / "settings.json"
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            assert raw["ai_api_key"] == "" and raw["gemini_api_key"] == ""
+            assert keychain.load("setting:ai_api_key") == "sk-ant-1" and keychain.where() == "a private file"
+            if os.name == "posix":  # a file only this user reads
+                assert (keychain._file().stat().st_mode & 0o077) == 0
+            assert S.Settings.load().ai_api_key == "sk-ant-1"
 
-        S.Settings.load().copy(ai_api_key="").save()  # taken out in Settings: forgotten
-        assert keychain.load("setting:ai_api_key") == "" and S.Settings.load().gemini_api_key == "g-1"
-    finally:
-        S.keep_secrets_in(None)
+            raw["youtube_api_key"] = "yt-1"  # written before the keys moved: it moves now
+            path.write_text(json.dumps(raw), encoding="utf-8")
+            S.keep_secrets_in(keychain.SettingsSecrets())
+            assert S.Settings.load().youtube_api_key == "yt-1" and keychain.load("setting:youtube_api_key") == "yt-1"
+
+            S.Settings.load().copy(ai_api_key="").save()  # taken out in Settings: forgotten
+            assert keychain.load("setting:ai_api_key") == "" and S.Settings.load().gemini_api_key == "g-1"
+        finally:
+            S.keep_secrets_in(None)
 
 
 def test_settings_on_the_mac_speak_of_the_mac():
@@ -1202,6 +1205,7 @@ def test_the_build_gathers_fresh_tools_and_rebuilds_stale_ones(tmp_path, monkeyp
 def test_the_built_apps_self_check_starts_everything_it_brought(app, tmp_path, monkeypatch, capsys):
     """`ClipMonster.app/Contents/MacOS/ClipMonster --self-check`, as the workflows run it on each build: every
     program the app brought is started, and one that doesn't start fails the build."""
+    pytest.importorskip("ytclip.gui.main_window", exc_type=ImportError)  # no Qt Multimedia libraries (Linux CI)
     from ytclip import bundled, ffmpeg
     from ytclip.mac.app import self_check
 

@@ -28,6 +28,14 @@ def wait(app, cond, timeout=10.0):
     return cond()
 
 
+def shut(app, win) -> None:
+    """Close ClipMonster for Mac for good, as Quit does once it may: without asking "Quit ClipMonster?" first, which
+    a test that left something going would otherwise be stopped by."""
+    win._quitting = True
+    win.close()
+    app.processEvents()
+
+
 def linked_host(w) -> hosts.Host:
     c, got = w.linked()
     h = hosts.Host(id=got["host_id"], name=got["name"], address="127.0.0.1", port=w.port, fp=got["fp"],
@@ -39,6 +47,7 @@ def linked_host(w) -> hosts.Host:
 @pytest.fixture
 def window(app, world):  # noqa: F811
     """The Mac window's link to the PC (pc.PCLink): what the PC's pages call their window."""
+    pytest.importorskip("ytclip.gui.main_window", exc_type=ImportError)  # no Qt Multimedia libraries (Linux CI)
     from ytclip.mac.window import MacWindow
 
     clip_folder(world.root, "Psychology/2026-11-08 Big Talk [abc]", clips=2)
@@ -51,8 +60,7 @@ def window(app, world):  # noqa: F811
     link.notify_calls = []
     link.notify = lambda title, text: link.notify_calls.append((title, text))
     yield link
-    win.quit()
-    app.processEvents()
+    shut(app, win)
 
 
 def test_it_connects_to_the_last_pc_and_shows_its_status(app, window, world):  # noqa: F811
@@ -271,9 +279,10 @@ def test_a_found_pc_fills_in_its_address(app, world, connect_page):  # noqa: F81
 
 
 def test_self_check(app, capsys):
+    pytest.importorskip("ytclip.gui.main_window", exc_type=ImportError)  # no Qt Multimedia libraries (Linux CI)
     from ytclip.mac.app import self_check
 
     rc = self_check(app)
     out = capsys.readouterr().out
     assert "ClipMonster 3." in out and "window ok" in out and "keys in" in out
-    assert rc in (0, 1)  # 1 only where Qt Multimedia can't load (Linux CI without its sound libraries)
+    assert rc in (0, 1)  # 1 where a tool it runs isn't installed here

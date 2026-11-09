@@ -40,14 +40,18 @@ def main() -> int:
     p.add_argument("--tag", default=TAG)
     p.add_argument("--source", type=Path, help="an existing llama.cpp checkout instead of cloning one")
     args = p.parse_args()
-    work = Path(tempfile.mkdtemp(prefix="llama-cpp-"))
-    src = args.source or work / "src"
+    # The real folders, not the shortcuts to them: a Mac's temporary folder (/var/folders) is a shortcut to
+    # /private/var/folders, and a build that sees both names works out wrong paths between them.
+    work = Path(tempfile.mkdtemp(prefix="llama-cpp-")).resolve()
+    src = args.source.resolve() if args.source else work / "src"
     if not args.source:
         run(["git", "clone", "--depth", "1", "--branch", args.tag, REPO, str(src)])
     build = work / "build"
     flags = ["-DCMAKE_BUILD_TYPE=Release", "-DBUILD_SHARED_LIBS=OFF", "-DLLAMA_BUILD_TESTS=OFF",
              "-DLLAMA_BUILD_EXAMPLES=OFF", "-DLLAMA_BUILD_TOOLS=ON", "-DLLAMA_BUILD_SERVER=ON",
              "-DLLAMA_OPENSSL=OFF",  # it only talks to ClipMonster, on 127.0.0.1
+             # without llama.cpp's own chat page, which ClipMonster never shows: nothing downloaded while it builds
+             "-DLLAMA_USE_PREBUILT_UI=OFF", "-DLLAMA_BUILD_UI=OFF",
              # Not tuned to the build machine's CPU: it runs on any PC (or Mac) from the last ten years.
              "-DGGML_NATIVE=OFF"]
     if platform.machine().lower() in ("x86_64", "amd64"):

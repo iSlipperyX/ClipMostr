@@ -25,12 +25,13 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 APP = "ClipMonster"
-ICON_SIZES = (16, 32, 64, 128, 256, 512, 1024)
+ICON_SIZES = (16, 32, 128, 256, 512)  # what an .iconset holds, each also drawn at twice the size (@2x)
 TOOLS = ROOT / "build" / "mac-tools"
 
 
@@ -46,12 +47,9 @@ def make_icon(out: Path) -> Path:
     with tempfile.TemporaryDirectory() as d:
         iconset = Path(d) / "icon.iconset"
         iconset.mkdir()
-        for size in ICON_SIZES:
-            if size <= 512:
-                app_icon_pixmap(size).save(str(iconset / f"icon_{size}x{size}.png"), "PNG")
-            if size >= 32:
-                half = size // 2
-                app_icon_pixmap(size).save(str(iconset / f"icon_{half}x{half}@2x.png"), "PNG")
+        for size in ICON_SIZES:  # only the names iconutil knows: icon_16x16.png ... icon_512x512@2x.png
+            app_icon_pixmap(size).save(str(iconset / f"icon_{size}x{size}.png"), "PNG")
+            app_icon_pixmap(size * 2).save(str(iconset / f"icon_{size}x{size}@2x.png"), "PNG")
         subprocess.run(["iconutil", "-c", "icns", str(iconset), "-o", str(out)], check=True)
     return out
 
@@ -143,10 +141,23 @@ def build(dmg_name: str, version: str = "", tools: Path = TOOLS, build_missing: 
         stage.mkdir()
         subprocess.run(["ditto", str(app), str(stage / f"{APP}.app")], check=True)
         (stage / "Applications").symlink_to("/Applications")  # drag the app onto it
-        subprocess.run(["hdiutil", "create", "-volname", APP, "-srcfolder", str(stage), "-ov", "-format", "UDZO",
-                        str(dmg)], check=True)
+        make_dmg(stage, dmg)
     print(f"built {dmg} ({dmg.stat().st_size / 1e6:.1f} MB)")
     return dmg
+
+
+def make_dmg(folder: Path, dmg: Path, tries: int = 5) -> None:
+    """`folder` as a compressed disk image. Tried again a few times: hdiutil sometimes finds the disk it makes
+    the image on busy ("Resource busy"), which GitHub's Mac runners do now and then."""
+    for attempt in range(1, tries + 1):
+        done = subprocess.run(["hdiutil", "create", "-volname", APP, "-srcfolder", str(folder), "-ov",
+                               "-format", "UDZO", str(dmg)])
+        if done.returncode == 0:
+            return
+        if attempt < tries:
+            print(f"hdiutil failed ({done.returncode}); trying again", flush=True)
+            time.sleep(5 * attempt)
+    raise SystemExit(f"hdiutil couldn't make {dmg.name}")
 
 
 if __name__ == "__main__":
