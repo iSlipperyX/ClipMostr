@@ -395,7 +395,8 @@ class MacJobs:
             if j.get("status") == "queued":
                 d["waiting"] = queued.index(j["id"]) if j["id"] in queued else 0
             out.append(d)
-        return {"jobs": out, "busy": self.working}
+        count = sum(1 for j in everything if j.get("status") in ("queued", "working"))
+        return {"jobs": out, "busy": self.working, "count": count, "limit": JOBS_MAX}  # (of all Macs: is there room)
 
     def job(self, job_id: str, device: str) -> dict:
         j = self._find(job_id, device)

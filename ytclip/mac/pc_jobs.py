@@ -6,6 +6,9 @@ MacJobs), one video at a time between automation's own, on its graphics card and
 brings the clips into its own output folder, where the Library shows them, and tells the PC it has them
 (POST …/done) so the PC can let them go.
 
+The PC takes so many videos at once (remote/studio.py JOBS_MAX). More than that wait here, on the Mac, and go one
+at a time as the PC makes room; a PC that says it's full is asked again a little later.
+
 The list is kept in pc_jobs.json, so a video carries on while the Mac app is closed: the PC keeps making it, and
 its clips are fetched when the app opens again. Each video belongs to the PC it was sent to; one sent to another
 PC waits until that PC is linked again.
@@ -29,7 +32,10 @@ from .client import ApiError, Offline
 from .paths import support_dir
 
 POLL_MS = 4000  # how often the PC is asked how its videos are getting on (while it's making any)
-ACTIVE = ("sending", "queued", "working", "fetching")
+FULL_WAIT = 30.0  # s before a PC that said it has all the videos it takes is tried again
+ACTIVE = ("waiting", "sending", "queued", "working", "fetching")  # waiting: still on this Mac, to go to the PC
+ON_PC = ("queued", "working")
+TO_GO = "Waiting to go to your PC"
 FINISHED = ("done", "failed", "cancelled")
 KEEP_DAYS = 7  # a finished video stays in the Studio's list this long (or until it's removed)
 DAY = 86400.0
@@ -40,6 +46,13 @@ def settings_to_send(s) -> dict:
     from ..remote.studio import travelling
 
     return {name: getattr(s, name) for name in travelling() if hasattr(s, name)}
+
+
+class _Full(ApiError):
+    """The PC has all the videos it takes for now."""
+
+    def __init__(self):
+        super().__init__(429, "Your PC has all the videos it takes for now.")
 
 
 def _inside(path: Path, folder: Path) -> bool:
@@ -68,7 +81,9 @@ class PCJobs(QObject):
         self.now = now
         self.jobs: dict[str, dict] = {}
         self._threads: dict[str, threading.Event] = {}  # key -> its stop flag, while it's sending or fetching
-        self._polling = False
+        self._fetching: dict[str, Path] = {}  # key -> the folder its clips are coming into
+        self._polling = None  # the session a poll is out on
+        self._hold_until = 0.0  # the PC said it's full: nothing more is sent before this
         self._moved.connect(self._apply)
         self._ended.connect(self._thread_ended)
         self._load()
@@ -125,6 +140,10 @@ class PCJobs(QObject):
         if job is None:
             return
         was = job.get("status")
+        if "hold" in changes:  # from a send: the PC is full (or gone), so the next waits a while
+            if changes["hold"]:
+                self._hold_until = self.now() + FULL_WAIT
+            changes = {k: v for k, v in changes.items() if k != "hold"}
         job.update(changes)
         if changes.keys() - {"frac", "stage"}:  # not every tick of a transfer
             job["updated"] = self.now()
@@ -136,9 +155,15 @@ class PCJobs(QObject):
                 self.landed.emit(key)
             elif now == "failed":
                 self.failed.emit(key)
+            if was in ON_PC and now not in ON_PC:  # the PC has room for another
+                self._hold_until = 0.0
+            if now != "sending":
+                self._send_next()
 
     def _thread_ended(self, key: str) -> None:
         self._threads.pop(key, None)
+        if self._fetching.pop(key, None) is not None:
+            self.poll()  # another video's clips may be waiting for this folder
 
     # --- sending --------------------------------------------------------------------------------------------
 
@@ -169,25 +194,41 @@ class PCJobs(QObject):
             name = src if kind == "url" else Path(src).name
             self.jobs[key] = {
                 "key": key, "host": session.host.id, "host_name": self.link.name, "kind": kind, "source": src,
-                "name": name, "title": "" if kind == "url" else Path(src).stem, "id": "", "status": "sending",
-                "frac": 0.0 if kind == "file" else None, "stage": "Sending it to your PC", "progress": None,
+                "name": name, "title": "" if kind == "url" else Path(src).stem, "id": "", "status": "waiting",
+                "frac": None, "stage": TO_GO, "progress": None,
                 "waiting": 0, "error": "", "clips": 0, "rejected": 0, "files": [], "folder": "", "here": "",
                 "created": now, "updated": now, "settings": sent}
             keys.append(key)
             self._save()
             self.added.emit(key)
-            self._start_send(key)
+        self._send_next()
         return keys
 
     def send_again(self, key: str) -> None:
         job = self.jobs.get(key)
         if job is None or job.get("status") not in ("failed", "cancelled") or self.can_send():
             return
-        self._apply(key, {"status": "sending", "id": "", "error": "", "frac": 0.0 if job["kind"] == "file" else None,
-                          "stage": "Sending it to your PC", "progress": None, "files": [], "folder": "", "here": "",
+        self._apply(key, {"status": "waiting", "id": "", "error": "", "frac": None, "stage": TO_GO, "progress": None,
+                          "files": [], "folder": "", "here": "", "cleared": "",
                           "host": self.link.session.host.id, "host_name": self.link.name,
-                          "settings": settings_to_send(self.settings())})
-        self._start_send(key)
+                          "settings": settings_to_send(self.settings())})  # (and it goes when it's its turn)
+
+    def _send_next(self) -> None:
+        """The next waiting video on its way, if the PC can take one now: one goes at a time, and no more are
+        there at once than the PC takes."""
+        from ..remote.studio import JOBS_MAX
+
+        if self.can_send() or self.now() < self._hold_until:
+            return
+        if any(j.get("status") == "sending" for j in self.jobs.values()):
+            return
+        mine = [j for j in self.ordered() if self._here(j)]
+        if sum(1 for j in mine if j.get("status") in ON_PC) >= JOBS_MAX:
+            return
+        for j in mine:
+            if j.get("status") == "waiting":
+                self._start_send(j["key"])
+                return
 
     def _start_send(self, key: str) -> None:
         job = self.jobs[key]
@@ -196,6 +237,8 @@ class PCJobs(QObject):
             return
         stop = threading.Event()
         self._threads[key] = stop
+        self._apply(key, {"status": "sending", "frac": 0.0 if job["kind"] == "file" else None,
+                          "stage": "Sending it to your PC"})
         room = int((self.link.lends() or {}).get("room") or 0)
         kind, source = job["kind"], job["source"]
         body = {"settings": job.get("settings") or {}, "title": job.get("title") or ""}
@@ -216,6 +259,9 @@ class PCJobs(QObject):
                     if room and size > room:
                         raise ApiError(507, f"Your PC hasn't room for this video ({c.size(size)}; it has "
                                             f"{c.size(room)} to spare).")
+                    has = client.get("/api/studio/jobs")  # (a video isn't sent over just to be refused)
+                    if int(has.get("limit") or 0) and int(has.get("count") or 0) >= int(has["limit"]):
+                        raise _Full()
                     last = [0.0]
 
                     def sending(done: int, total: int) -> None:
@@ -242,8 +288,12 @@ class PCJobs(QObject):
             except ApiError as exc:
                 if stop.is_set():
                     self._moved.emit(key, {"status": "cancelled", "stage": "Stopped", "frac": None, "error": ""})
-                else:
-                    self._moved.emit(key, {"status": "failed", "error": exc.message, "frac": None, "stage": ""})
+                elif exc.status == 429:  # full: it waits here and goes later (the PC didn't keep a file sent)
+                    self._moved.emit(key, {"status": "waiting", "stage": "Waiting for room on your PC",
+                                           "frac": None, "error": "", "hold": True})
+                else:  # (a PC that went away mid-send: the ones still waiting don't each try it in turn)
+                    self._moved.emit(key, {"status": "failed", "error": exc.message, "frac": None, "stage": "",
+                                           "hold": isinstance(exc, Offline)})
             except Exception as exc:  # noqa: BLE001 - a failure in words, on the row
                 self._moved.emit(key, {"status": "failed", "error": f"{type(exc).__name__}: {exc}", "frac": None,
                                        "stage": ""})
@@ -271,46 +321,60 @@ class PCJobs(QObject):
         return s is not None and job.get("host") == s.host.id
 
     def poll(self) -> None:
-        if self._polling or not self.link.online:
+        self._send_next()
+        session = self.link.session
+        if session is None or not self.link.online or self._polling is session:
             return
         mine = [j for j in self.ordered() if self._here(j) and j.get("id")]
         for j in mine:  # clips the PC finished while they couldn't be fetched (offline, or the app was closed)
             if j["status"] == "fetching" and j["key"] not in self._threads:
                 self._start_fetch(j["key"])
-        if not any(j["status"] in ("queued", "working") for j in mine):
+        asked = {j["key"]: j["id"] for j in mine if j["status"] in ON_PC}
+        if not asked:
             return
-        self._polling = True
+        self._polling = session  # (one at a time on a link; a poll lost with its link doesn't hold up the next)
 
         def ok(got: dict) -> None:
-            self._polling = False
+            if self._polling is session:
+                self._polling = None
+            if self.link.session is not session:  # another PC since, or linked again: not about these videos
+                return
             by_id = {d.get("id"): d for d in got.get("jobs") or [] if isinstance(d, dict)}
-            for j in [j for j in self.ordered() if self._here(j) and j.get("id")]:
-                if j["status"] not in ("queued", "working"):
+            for key, job_id in asked.items():  # only the ones asked about: one sent since isn't in this answer
+                j = self.jobs.get(key)
+                if j is None or j.get("id") != job_id or j.get("status") not in ON_PC:
                     continue
-                d = by_id.get(j["id"])
+                d = by_id.get(job_id)
                 if d is None:
-                    self._apply(j["key"], {"status": "failed", "error": "Your PC doesn't have this video any more.",
-                                           "stage": ""})
-                    continue
-                changes = self._from_pc(d)
-                if changes["status"] == "done":
-                    changes.update(status="fetching", stage="Bringing the clips to this Mac", frac=0.0)
-                elif changes["status"] == "cancelled":
-                    changes["error"] = ""
-                self._apply(j["key"], changes)
-                if changes["status"] == "fetching":
-                    self._start_fetch(j["key"])
+                    self._apply(key, {"status": "failed", "error": "Your PC doesn't have this video any more.",
+                                      "stage": ""})
+                else:
+                    self._heard(key, d)
 
         def fail(_exc) -> None:
-            self._polling = False
+            if self._polling is session:
+                self._polling = None
 
-        self.link.session.call(lambda cl: cl.get("/api/studio/jobs"), ok, fail)
+        session.call(lambda cl: cl.get("/api/studio/jobs"), ok, fail)
+
+    def _heard(self, key: str, d: dict) -> None:
+        """The PC's word on a video it has. One it finished has its clips brought over."""
+        changes = self._from_pc(d)
+        if changes["status"] == "done":
+            changes.update(status="fetching", stage="Bringing the clips to this Mac", frac=0.0)
+        elif changes["status"] == "cancelled":
+            changes["error"] = ""
+        self._apply(key, changes)
+        if changes["status"] == "fetching":
+            self._start_fetch(key)
 
     def _event(self, e: dict) -> None:
         if e.get("kind") == "studio" and not e.get("old"):
             QTimer.singleShot(200, self.poll)
 
     def _link_changed(self) -> None:
+        if self._polling is not self.link.session:
+            self._polling = None
         if self.link.online:
             QTimer.singleShot(0, self.poll)
         for j in self.ordered():  # rows say which PC a video waits for
@@ -326,6 +390,9 @@ class PCJobs(QObject):
             return f"Waiting for {name} to be linked again"
         if not self.link.online:
             return f"Waiting for {name} to come back"
+        if job.get("status") == "waiting":
+            why = self.can_send()  # (an older ClipMonster on the PC)
+            return f"Waiting: {why}" if why else ""
         return ""
 
     # --- bringing the clips over ------------------------------------------------------------------------------
@@ -335,13 +402,19 @@ class PCJobs(QObject):
         client = self.link.client()
         if job is None or client is None or key in self._threads or not job.get("id"):
             return
-        stop = threading.Event()
-        self._threads[key] = stop
         out_root = Path(self.settings().output_path)
         files = [f for f in job.get("files") or [] if isinstance(f, dict) and f.get("path")]
         total = sum(int(f.get("size") or 0) for f in files) or 1
         job_id, folder_rel = job["id"], job.get("folder") or ""
         source, kind, host_name = job["source"], job["kind"], job.get("host_name") or "your PC"
+        folder = out_root / folder_rel if folder_rel else out_root
+        if folder in self._fetching.values():  # another video's clips are coming into it: after that one
+            return
+        # clips of this video already here (made on this Mac, or on the PC before) make way for these, once
+        clear = bool(folder_rel) and _inside(folder, out_root) and job.get("cleared") != str(folder)
+        stop = threading.Event()
+        self._threads[key] = stop
+        self._fetching[key] = folder
 
         def work() -> None:
             done = 0
@@ -356,6 +429,10 @@ class PCJobs(QObject):
                                            "stage": f"Bringing the clips to this Mac · {c.size(have)} of {c.size(total)}"})
 
             try:
+                if clear:
+                    client.get(f"/api/studio/jobs/{quote(job_id, safe='')}")  # (only if the PC still has these)
+                    _remove_previous(folder)
+                    self._moved.emit(key, {"cleared": str(folder)})
                 for f in files:
                     rel = str(f["path"])
                     dest = out_root / rel
@@ -367,7 +444,6 @@ class PCJobs(QObject):
                         client.download(f"/api/studio/jobs/{quote(job_id, safe='')}/file?{urlencode({'path': rel})}",
                                         dest, fetching, stop.is_set)
                     done += size
-                folder = out_root / folder_rel if folder_rel else out_root
                 _mark_index(folder, source, kind, host_name)
                 try:
                     client.post(f"/api/studio/jobs/{quote(job_id, safe='')}/done", timeout=15.0)
@@ -398,15 +474,24 @@ class PCJobs(QObject):
         job = self.jobs.get(key)
         if job is None:
             return
+        if job["status"] == "waiting":  # it hasn't left this Mac
+            self._apply(key, {"status": "cancelled", "stage": "Stopped", "error": ""})
+            return
         if job["status"] == "sending":
             ev = self._threads.get(key)
             if ev is not None:
                 ev.set()
             return
-        if job["status"] in ("queued", "working") and job.get("id") and self._here(job) and self.link.session:
+        if job["status"] in ON_PC and job.get("id") and self._here(job) and self.link.session:
+            job_id = job["id"]
+
+            def ok(d: dict) -> None:  # (the PC may have just finished it: then its clips come over)
+                j = self.jobs.get(key)
+                if j is not None and j.get("id") == job_id and j.get("status") in ON_PC:
+                    self._heard(key, d)
+
             self._apply(key, {"stage": "Stopping…"})
-            self.link.session.call(lambda cl: cl.post(f"/api/studio/jobs/{quote(job['id'], safe='')}/cancel"),
-                                   lambda d: self._apply(key, {**self._from_pc(d), "error": ""}),
+            self.link.session.call(lambda cl: cl.post(f"/api/studio/jobs/{quote(job_id, safe='')}/cancel"), ok,
                                    lambda exc: self._apply(key, {"stage": getattr(exc, "message", str(exc))}))
 
     def remove(self, key: str) -> None:
@@ -417,6 +502,7 @@ class PCJobs(QObject):
         ev = self._threads.pop(key, None)
         if ev is not None:
             ev.set()
+        self._fetching.pop(key, None)
         session = self.link.session
         if job.get("id") and session is not None and job.get("host") == session.host.id and \
                 job.get("status") in ("queued", "working", "fetching", "failed", "cancelled"):
@@ -437,6 +523,30 @@ class PCJobs(QObject):
         self.timer.stop()
         for ev in self._threads.values():
             ev.set()
+
+
+def _remove_previous(folder: Path) -> None:
+    """Clips of this video that were here before make way for the ones coming from the PC, as when a video is
+    exported again (Engine._remove_previous_export): only the files the folder's clips.json lists."""
+    index = folder / "clips.json"
+    try:
+        meta = json.loads(index.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return
+    gone = [index]
+    for rec in (meta.get("clips") or []) if isinstance(meta, dict) else []:
+        if not isinstance(rec, dict) or not isinstance(rec.get("file"), str) or not rec["file"]:
+            continue
+        clip = folder / rec["file"]
+        gone += [clip, clip.with_suffix(".srt")]
+        if isinstance(rec.get("rank"), int):
+            gone.append(folder / "thumbnails" / f"{rec['rank']:02d}.jpg")
+    for f in gone:
+        try:
+            if _inside(f, folder) and f.is_file():
+                f.unlink()
+        except OSError:
+            pass
 
 
 def _mark_index(folder: Path, source: str, kind: str, made_on: str) -> None:

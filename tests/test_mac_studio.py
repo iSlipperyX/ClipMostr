@@ -942,7 +942,7 @@ def test_a_refused_video_doesnt_break_the_connection(world, tmp_path):  # noqa: 
     with pytest.raises(ApiError) as no:
         c.post("/api/studio/jobs", {"source": "not a link"})
     assert no.value.status == 400
-    assert c.get("/api/studio/jobs") == {"jobs": [], "busy": ""}
+    assert c.get("/api/studio/jobs") == {"jobs": [], "busy": "", "count": 0, "limit": 20}
 
 
 def test_another_mac_cant_see_or_take_my_videos(world):  # noqa: F811
@@ -1178,6 +1178,396 @@ def test_a_video_waits_for_the_pc_it_was_sent_to(app, mac):
     assert words({"status": "failed", "error": "This video is private.", "host_name": "PC"}) == \
         "PC couldn't make it: This video is private."
     assert words({"status": "fetching", "host_name": "PC"}) == "Made on PC: its clips are coming over"
+
+
+# ================================================================== the Mac's list of videos on the PC
+
+
+class PretendPC:
+    """The PC as the Mac's list of videos (pc_jobs.PCJobs) talks to it: its client. It takes videos up to
+    `limit` at once, and `others` are the ones other Macs have waiting there."""
+
+    def __init__(self, limit=20, others=0, says_count=True):
+        self.limit, self.others, self.says_count = limit, others, says_count
+        self.jobs: dict[str, dict] = {}
+        self.uploads, self.refused, self.fetched, self.asked = [], 0, [], []
+        self.at_once = self.most_at_once = 0
+        self.lock = threading.Lock()
+
+    def taken(self) -> int:
+        return self.others + sum(1 for j in self.jobs.values() if j["status"] in ("queued", "working"))
+
+    def get(self, path, **query):
+        self.asked.append(path)
+        if path == "/api/studio/jobs":
+            out = {"jobs": [dict(j) for j in self.jobs.values()], "busy": ""}
+            if self.says_count:
+                out.update(count=self.taken(), limit=self.limit)
+            return out
+        job = self.jobs.get(path.rsplit("/", 1)[-1])
+        if job is None:
+            raise ApiError(404, "That video isn't on your PC any more.")
+        return dict(job)
+
+    def upload(self, path, name="", progress=None, cancelled=None):
+        self.uploads.append(name)
+        return {"upload": "0123456789abcdef", "size": Path(path).stat().st_size}
+
+    def post(self, path, data=None, timeout=None):
+        if path == "/api/studio/jobs":
+            with self.lock:
+                self.at_once += 1
+                self.most_at_once = max(self.most_at_once, self.at_once)
+            time.sleep(0.01)
+            try:
+                with self.lock:
+                    if self.taken() >= self.limit:
+                        self.refused += 1
+                        raise ApiError(429, "Your PC already has 20 videos to make. Wait for some to finish.")
+                    job = {"id": f"{len(self.jobs):016x}", "status": "queued", "stage": "Waiting", "files": [],
+                           "folder": "", "clips": 0}
+                    self.jobs[job["id"]] = job
+                    return dict(job)
+            finally:
+                with self.lock:
+                    self.at_once -= 1
+        job_id, what = path.split("/")[-2:]
+        job = self.jobs.get(job_id)
+        if job is None:
+            raise ApiError(404, "That video isn't on your PC any more.")
+        if what == "cancel" and job["status"] in ("queued", "working"):
+            job.update(status="cancelled", stage="Stopped")
+        if what == "done":
+            del self.jobs[job_id]
+            return {"message": "Done."}
+        return dict(job)
+
+    def made(self, job_id, files, folder=FOLDER):
+        """The PC finished a video: these are its clips ({path under the folder: bytes})."""
+        self.jobs[job_id].update(status="done", stage="Done", folder=folder, clips=len(files), contents=files,
+                                 files=[{"path": f"{folder}/{name}", "size": len(data)}
+                                        for name, data in sorted(files.items())])
+
+    def download(self, path, dest, progress=None, cancelled=None):
+        from urllib.parse import parse_qs, urlsplit
+
+        url = urlsplit(path)
+        job = self.jobs.get(url.path.split("/")[-2])
+        if job is None:
+            raise ApiError(404, "That video isn't on your PC any more.")
+        rel = parse_qs(url.query)["path"][0]
+        self.fetched.append(rel)
+        with self.lock:
+            self.at_once += 1
+            self.most_at_once = max(self.most_at_once, self.at_once)
+        time.sleep(0.02)
+        Path(dest).write_bytes(job["contents"][rel[len(job["folder"]) + 1:]])
+        with self.lock:
+            self.at_once -= 1
+        return dest
+
+
+class PretendSession:
+    def __init__(self, link, client, host_id):
+        self.link, self.client, self.host = link, client, SimpleNamespace(id=host_id)
+        self.held = None  # a list, to keep requests unanswered: (fn, ok, fail)
+
+    def call(self, fn, ok=None, fail=None):
+        if self.held is not None:
+            self.held.append((fn, ok, fail))
+        else:
+            self.link.tasks.run(lambda: fn(self.client), ok, fail)
+
+
+@pytest.fixture
+def pc_list(app, tmp_path):
+    """The Mac's list of videos on the PC, linked to a PretendPC. `jobs.pc` is that PC and `jobs.link` the link."""
+    from PySide6.QtCore import QObject, Signal
+
+    from ytclip.mac import pc_jobs
+    from ytclip.mac.session import Tasks
+
+    class PretendLink(QObject):
+        changed = Signal()
+        event = Signal(dict)
+
+        def __init__(self):
+            super().__init__()
+            self.tasks = Tasks(parent=self)
+            self.state, self.name, self.lend = "online", "JUSTYN-PC", {"studio": True, "room": 0}
+            self.session = None
+
+        linked = property(lambda self: self.session is not None)
+        online = property(lambda self: self.linked and self.state == "online")
+
+        def lends(self):
+            return self.lend if self.online else {}
+
+        def client(self):
+            return self.session.client if self.session is not None else None
+
+        def open(self, pc, host_id="pc1"):
+            self.session = PretendSession(self, pc, host_id)
+            self.changed.emit()
+            return self.session
+
+    link = PretendLink()
+    pc = PretendPC()
+    link.open(pc)
+    s = Settings(output_dir=str(tmp_path / "Mac clips"))
+    jobs = pc_jobs.PCJobs(link, lambda: s, path=tmp_path / "pc_jobs.json")
+    jobs.timer.setInterval(40)
+    jobs.pc, jobs.link, jobs.out = pc, link, tmp_path / "Mac clips"
+    yield jobs
+    jobs.shutdown()
+    wait(app, lambda: not jobs._threads, timeout=5)
+    link.tasks.shutdown()
+
+
+def statuses(jobs) -> list[str]:
+    return [j["status"] for j in jobs.ordered()]
+
+
+def links(n: int) -> list[str]:
+    return [f"https://www.youtube.com/watch?v={i:011d}" for i in range(n)]
+
+
+def test_more_videos_than_the_pc_takes_wait_on_the_mac(app, pc_list):
+    """A playlist of more videos than the PC takes at once: the rest wait on the Mac and go as it makes room.
+    Every one was started at once, so each past the 20th failed and had to be sent again by hand."""
+    keys = pc_list.send(links(23))
+    assert statuses(pc_list)[0] == "sending" and statuses(pc_list)[1:] == ["waiting"] * 22  # one at a time
+    assert wait(app, lambda: statuses(pc_list).count("queued") == 20)
+    assert wait(app, lambda: pc_list.pc.asked.count("/api/studio/jobs") >= 3)  # (polled a few times since)
+    assert statuses(pc_list) == ["queued"] * 20 + ["waiting"] * 3
+    assert pc_list.pc.refused == 0 and pc_list.pc.most_at_once == 1
+    assert pc_list.waiting_for(pc_list.get(keys[-1])) == ""
+
+    pc_list.stop(keys[0])  # the PC has room for one more
+    assert wait(app, lambda: statuses(pc_list) == ["cancelled"] + ["queued"] * 20 + ["waiting"] * 2), statuses(pc_list)
+    pc_list.stop(keys[-1])  # one still on the Mac just stops
+    assert pc_list.get(keys[-1])["status"] == "cancelled" and pc_list.pc.refused == 0
+    pc_list.send_again(keys[-1])
+    assert pc_list.get(keys[-1])["status"] == "waiting"
+
+
+def test_a_full_pc_means_wait_not_failed(app, pc_list, tmp_path, monkeypatch):
+    """The PC is full of another Mac's videos: this Mac's video waits and goes when there's room, and a video
+    file isn't sent over just to be refused."""
+    from ytclip.mac import pc_jobs
+
+    monkeypatch.setattr(pc_jobs, "FULL_WAIT", 0.2)
+    failed = []
+    pc_list.failed.connect(failed.append)
+    video = tmp_path / "Holiday.mov"
+    video.write_bytes(b"abcd" * 100)
+    pc_list.pc.others = 20
+    key, = pc_list.send([str(video)])
+    assert wait(app, lambda: "/api/studio/jobs" in pc_list.pc.asked and pc_list.get(key)["status"] == "waiting")
+    assert wait(app, lambda: pc_list.pc.asked.count("/api/studio/jobs") >= 3)  # asked again after a while
+    assert wait(app, lambda: pc_list.get(key)["stage"] == "Waiting for room on your PC")
+    assert pc_list.get(key)["status"] == "waiting" and not pc_list.get(key)["error"]
+    assert pc_list.pc.uploads == [] and pc_list.pc.refused == 0 and not failed
+    pc_list.pc.others = 19
+    assert wait(app, lambda: pc_list.get(key)["status"] == "queued"), pc_list.get(key)
+    assert pc_list.pc.uploads == ["Holiday.mov"] and not failed
+
+
+def test_a_pc_that_says_its_full_is_asked_again_later(app, pc_list, monkeypatch):
+    """The PC answers 429 (it filled up meanwhile, or it's an older one that doesn't say how many it has)."""
+    from ytclip.mac import pc_jobs
+
+    monkeypatch.setattr(pc_jobs, "FULL_WAIT", 0.2)
+    pc_list.pc.says_count, pc_list.pc.others = False, 20
+    key, = pc_list.send([URL])
+    assert wait(app, lambda: pc_list.pc.refused >= 2)
+    assert pc_list.get(key)["status"] in ("waiting", "sending") and not pc_list.get(key)["error"]
+    pc_list.pc.others = 0
+    assert wait(app, lambda: pc_list.get(key)["status"] == "queued"), pc_list.get(key)
+
+
+def test_a_pc_that_goes_away_isnt_tried_by_each_waiting_video(app, pc_list):
+    class Gone(PretendPC):
+        def post(self, path, data=None, timeout=None):
+            self.refused += 1
+            raise Offline("The PC can't be reached.")
+
+    pc_list.link.open(Gone())
+    keys = pc_list.send(links(3))
+    assert wait(app, lambda: pc_list.get(keys[0])["status"] == "failed")
+    wait(app, lambda: False, timeout=0.3)
+    assert statuses(pc_list) == ["failed", "waiting", "waiting"] and pc_list.link.session.client.refused == 1
+
+
+def test_a_poll_lost_with_its_pc_doesnt_stop_the_next(app, pc_list):
+    """A poll still out when its PC is switched away never comes back. Polling stopped for good then, so no
+    video was followed or fetched until ClipMonster was opened again."""
+    key, = pc_list.send([URL])
+    assert wait(app, lambda: pc_list.get(key)["status"] == "queued")
+    first = pc_list.link.session
+    first.held = []
+    assert wait(app, lambda: len(first.held) == 1)  # a poll is out, and stays unanswered
+    wait(app, lambda: False, timeout=0.2)
+    assert len(first.held) == 1  # (one at a time)
+    pc_list.link.session = None
+    pc_list.link.changed.emit()
+    pc_list.pc.asked.clear()
+    pc_list.link.open(pc_list.pc)  # linked again: the same PC
+    assert wait(app, lambda: "/api/studio/jobs" in pc_list.pc.asked)
+    pc_list.pc.jobs.clear()
+    first.held[0][1]({"jobs": []})  # the old poll answers after all: it's about another link
+    assert pc_list.get(key)["status"] == "queued"
+
+
+def test_a_closed_session_still_says_the_request_failed(app, mac):
+    """A request that fails after its PC was switched away: the one who asked still hears (a poll waiting on it
+    waited for ever)."""
+    session = mac.link.session
+
+    def gone(exc):
+        raise RuntimeError("Signal source has been deleted")
+
+    session._failed = gone
+    heard = []
+
+    def offline(client):
+        raise Offline("The PC can't be reached.")
+
+    session.call(offline, None, heard.append)
+    assert wait(app, lambda: heard) and isinstance(heard[0], Offline)
+    del session._failed
+
+
+def test_stop_as_the_pc_finishes_still_brings_the_clips(app, pc_list):
+    """Stop pressed just as the PC finished: it answers 'done', and the clips come over. The video was marked
+    done with nothing fetched, and the PC let its clips go days later."""
+    landed = []
+    pc_list.landed.connect(landed.append)
+    key, = pc_list.send([URL])
+    assert wait(app, lambda: pc_list.get(key)["status"] == "queued")
+    pc_list.timer.stop()
+    wait(app, lambda: pc_list._polling is None, timeout=2)
+    pc_list.pc.made(pc_list.get(key)["id"], {"01 - clip.mp4": b"one", "clips.json": b'{"clips": []}'})
+    pc_list.stop(key)
+    assert wait(app, lambda: pc_list.get(key)["status"] == "done"), pc_list.get(key)
+    assert (pc_list.out / FOLDER / "01 - clip.mp4").read_bytes() == b"one" and landed == [key]
+    assert pc_list.pc.jobs == {}  # and the PC was told they're here
+
+
+def test_a_video_that_arrives_during_a_poll_isnt_called_gone(app, pc_list):
+    """The PC's answer to a poll was made before a video reached it: that video is judged by the next poll.
+    It was marked 'Your PC doesn't have this video any more' while the PC went on to make it."""
+    first, = pc_list.send([URL])
+    assert wait(app, lambda: pc_list.get(first)["status"] == "queued")
+    session = pc_list.link.session
+    session.held = []
+    assert wait(app, lambda: len(session.held) == 1)
+    fn, ok, _fail = session.held[0]
+    old = fn(pc_list.pc)  # the PC's answer, before the second video
+    session.held = None
+    second, = pc_list.send([URL + "2"])
+    assert wait(app, lambda: pc_list.get(second)["status"] == "queued")
+    ok(old)
+    assert pc_list.get(second)["status"] == "queued" and not pc_list.get(second)["error"]
+    assert pc_list.get(first)["status"] == "queued"
+    pc_list.pc.jobs.pop(pc_list.get(first)["id"])  # one the PC really lost is still said so
+    assert wait(app, lambda: pc_list.get(first)["status"] == "failed")
+    assert pc_list.get(second)["status"] == "queued"
+
+
+def test_fetched_clips_replace_an_earlier_export_of_the_video(app, pc_list):
+    """The Library already has clips of this video: they make way, as when it's exported again on the Mac.
+    They were left on disk unlisted, where neither the Library nor Clean Up could see them."""
+    here = pc_list.out / FOLDER
+    (here / "thumbnails").mkdir(parents=True)
+    for name in ("01 - old.mp4", "01 - old.srt", "02 - older.mp4", "thumbnails/02.jpg", "notes.txt"):
+        (here / name).write_bytes(b"from before")
+    (here / "clips.json").write_text(json.dumps({"clips": [
+        {"file": "01 - old.mp4", "rank": 1}, {"file": "02 - older.mp4", "rank": 2}, {"file": "../../x", "rank": 3},
+        "junk"]}), encoding="utf-8")
+    (pc_list.out / "x").write_bytes(b"not a clip of this video")
+    key, = pc_list.send([URL])
+    assert wait(app, lambda: pc_list.get(key)["status"] == "queued")
+    new = {"01 - clip.mp4": b"new one", "clips.json": json.dumps({"clips": [{"file": "01 - clip.mp4"}]}).encode()}
+    pc_list.pc.made(pc_list.get(key)["id"], new)
+    assert wait(app, lambda: pc_list.get(key)["status"] == "done"), pc_list.get(key)
+    assert sorted(p.name for p in here.iterdir()) == ["01 - clip.mp4", "clips.json", "notes.txt", "thumbnails"]
+    assert list((here / "thumbnails").iterdir()) == [] and (pc_list.out / "x").is_file()
+    assert json.loads((here / "clips.json").read_text(encoding="utf-8"))["clips"] == [{"file": "01 - clip.mp4"}]
+
+
+def test_an_earlier_export_stays_when_the_pc_lost_the_clips(app, pc_list):
+    here = pc_list.out / FOLDER
+    here.mkdir(parents=True)
+    (here / "01 - old.mp4").write_bytes(b"from before")
+    (here / "clips.json").write_text(json.dumps({"clips": [{"file": "01 - old.mp4", "rank": 1}]}), encoding="utf-8")
+    key, = pc_list.send([URL])
+    assert wait(app, lambda: pc_list.get(key)["status"] == "queued")
+    pc_list.timer.stop()
+    wait(app, lambda: pc_list._polling is None, timeout=2)
+    job_id = pc_list.get(key)["id"]
+    pc_list.pc.made(job_id, {"01 - clip.mp4": b"new one"})
+    answer = pc_list.pc.get("/api/studio/jobs")
+    del pc_list.pc.jobs[job_id]  # (the PC let them go just after it said they're made)
+    pc_list._heard(key, answer["jobs"][0])
+    assert wait(app, lambda: pc_list.get(key)["status"] == "failed"), pc_list.get(key)
+    assert "doesn't have these clips" in pc_list.get(key)["error"]
+    assert (here / "01 - old.mp4").read_bytes() == b"from before" and (here / "clips.json").is_file()
+
+
+def test_two_videos_never_come_into_one_folder_at_once(app, pc_list):
+    """The same video made twice, both finished while ClipMonster was closed: one is fetched, then the other."""
+    keys = pc_list.send([URL, URL])
+    assert wait(app, lambda: statuses(pc_list) == ["queued", "queued"])
+    pc_list.pc.most_at_once = 0
+    for n, key in enumerate(keys):
+        files = {f"0{i} - clip.mp4": f"video {n} clip {i}".encode() for i in (1, 2, 3)}
+        files["clips.json"] = json.dumps({"clips": [{"file": name, "rank": i + 1}
+                                                    for i, name in enumerate(sorted(files))]}).encode()
+        pc_list.pc.made(pc_list.get(key)["id"], files)
+    assert wait(app, lambda: statuses(pc_list) == ["done", "done"]), pc_list.ordered()
+    assert pc_list.pc.most_at_once == 1 and len(pc_list.pc.fetched) == 8
+    here = pc_list.out / FOLDER
+    texts = {p.read_bytes().decode()[:7] for p in here.glob("*.mp4")}
+    assert len(texts) == 1 and len(list(here.glob("*.mp4"))) == 3  # one video's clips, whole
+    assert not list(here.glob("*.part"))
+
+
+def test_removing_a_video_whose_clips_are_coming_asks_first(app, mac, monkeypatch):
+    from ytclip.engine import Project
+
+    job = {"key": "k1", "host": mac.link.session.host.id, "host_name": "PC", "kind": "url", "source": URL,
+           "name": URL, "id": "", "status": "fetching", "files": [], "created": 1.0, "updated": 1.0}
+    mac.pc_jobs.jobs["k1"] = job
+    mac.pc_jobs.added.emit("k1")
+    p = mac._pc_projects["k1"]
+    assert isinstance(p, Project)
+    asked = []
+    monkeypatch.setattr(QMessageBox, "exec", lambda box: asked.append(box.text()))  # closed: Cancel
+    mac._remove(p)
+    assert len(asked) == 1 and "deletes" in asked[0] and "your PC" in asked[0]
+    assert mac.pc_jobs.get("k1") is not None and p in mac.projects
+    monkeypatch.setattr(QMessageBox, "exec", lambda box: next(
+        b for b in box.buttons() if box.buttonRole(b) == QMessageBox.DestructiveRole).click())
+    mac._remove(p)
+    assert mac.pc_jobs.get("k1") is None and p not in mac.projects
+
+
+def test_a_folder_dropped_for_the_pc_sends_its_videos(app, mac, tmp_path, monkeypatch):
+    """A folder of videos dropped with Make on: Your PC picked. It was dropped without a word."""
+    from ytclip import download
+
+    folder = tmp_path / "Holiday videos"
+    folder.mkdir()
+    (folder / "one.mov").write_bytes(b"\0" * 10)
+    read, sent = [], []
+    monkeypatch.setattr(download, "expand_sources",
+                        lambda sources, *a, **kw: read.extend(sources) or [str(folder / "one.mov")])
+    monkeypatch.setattr(mac.pc_jobs, "send", lambda sources: sent.extend(sources) or [])
+    mac.on_pc.setChecked(True)
+    mac.add_sources([str(folder), str(tmp_path / "nothing here")])
+    assert wait(app, lambda: sent, timeout=15)
+    assert read == [str(folder)] and sent == [str(folder / "one.mov")]
 
 
 # ================================================================== the Mac's window: menus, keys and the rest
