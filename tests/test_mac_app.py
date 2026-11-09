@@ -284,5 +284,29 @@ def test_self_check(app, capsys):
 
     rc = self_check(app)
     out = capsys.readouterr().out
-    assert "ClipMonster 3." in out and "window ok" in out and "keys in" in out
+    assert "ClipMonster 3." in out and "window ok" in out and "keys in" in out and "HTTPS certificates" in out
     assert rc in (0, 1)  # 1 where a tool it runs isn't installed here
+
+
+def test_the_built_app_trusts_the_certificates_it_brought(monkeypatch, tmp_path):
+    """The built app's TLS library is python.org's, which looks for its certificates in python.org's Python
+    folder on the Mac the app was built on. On a Mac without that folder every HTTPS download (Whisper's and the
+    local AI's models, Gemini, the update check) failed, so the app trusts certifi's, which it brings."""
+    import os
+    import ssl
+    import sys
+
+    certifi = pytest.importorskip("certifi")
+    from ytclip.mac.app import use_the_apps_certificates
+
+    monkeypatch.setenv("SSL_CERT_FILE", "")
+    monkeypatch.delenv("SSL_CERT_FILE")  # (put back as it was afterwards)
+    use_the_apps_certificates()
+    assert "SSL_CERT_FILE" not in os.environ  # from source: Python's own, as before
+    monkeypatch.setattr(sys, "frozen", True, raising=False)
+    use_the_apps_certificates()
+    assert os.environ["SSL_CERT_FILE"] == certifi.where() == ssl.get_default_verify_paths().cafile
+    assert len(ssl.create_default_context().get_ca_certs()) > 100
+    monkeypatch.setenv("SSL_CERT_FILE", str(tmp_path / "mine.pem"))  # one someone set on purpose stays
+    use_the_apps_certificates()
+    assert os.environ["SSL_CERT_FILE"] == str(tmp_path / "mine.pem")

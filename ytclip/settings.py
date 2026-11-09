@@ -1231,12 +1231,15 @@ MAC_WORDING = {
                             "again"),
     "mode": dict(choices=(("auto", "Smart signals"), ("ai", "AI picks (the AI chosen under AI)"),
                           ("chapters", "YouTube chapters"))),
-    "cookies_browser": dict(choices=(("", "None"), ("safari", "Safari"), ("chrome", "Chrome"), ("firefox", "Firefox"),
-                                     ("brave", "Brave"), ("edge", "Edge")),
+    # (not Safari: macOS keeps its logins from other apps unless each is given Full Disk Access by hand, and
+    # without it every download fails)
+    "cookies_browser": dict(choices=(("", "None"), ("chrome", "Chrome"), ("firefox", "Firefox"), ("brave", "Brave"),
+                                     ("edge", "Edge")),
                             help="Signed-in downloads keep YouTube from asking this Mac to confirm it's not a bot, "
                                  "and open age-restricted and members-only videos. Pick the browser you're signed in "
-                                 "to YouTube in (macOS asks once to let ClipMonster read its cookies). A spare "
-                                 "Google account is safest"),
+                                 "to YouTube in (for Chrome, Brave or Edge, macOS asks once to let ClipMonster use "
+                                 "its key in the Keychain). Safari keeps its logins to itself. A spare Google "
+                                 "account is safest"),
     "speed": dict(choices=(("quiet", "Quiet (slowest, the Mac stays free)"), ("balanced", "Balanced"),
                            ("full", "Full power (every core and the graphics)")),
                   help="Quiet keeps the Mac free for other things and works slowest. Balanced uses half the CPU and "

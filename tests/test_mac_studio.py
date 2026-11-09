@@ -8,6 +8,7 @@ import copy
 import io
 import json
 import os
+import shutil
 import sys
 import threading
 import time
@@ -803,6 +804,24 @@ def test_quitting_while_a_video_goes_to_the_pc_asks_first(app, mac, monkeypatch)
     assert asked and "Quitting stops it" in asked[0] and not mac._quitting
 
 
+def test_quitting_from_the_dock_after_the_window_was_closed_stops_and_saves(app, mac, monkeypatch):
+    """Quit from the Dock, logging out or shutting down once the window was closed with its red button: Qt closes
+    only the windows on screen, so the window's own close is run for it. Otherwise what it's making didn't stop and
+    nothing was saved, and an export still going died half-written (macOS: "ClipMonster quit unexpectedly")."""
+    from PySide6.QtCore import QEvent
+
+    monkeypatch.setattr(mac, "_busy", lambda: "")
+    stopped = []
+    monkeypatch.setattr(mac.tasks, "cancel_all", lambda: stopped.append(True))
+    mac.show()
+    assert mac._quit_watch.eventFilter(app, QEvent(QEvent.Quit)) is False  # on screen: Qt closes it itself
+    assert mac._quitting and not getattr(mac, "_closing", False) and not stopped
+    mac._quitting = False
+    mac.hide()  # (what the red button does on a Mac)
+    assert mac._quit_watch.eventFilter(app, QEvent(QEvent.Quit)) is False  # and Qt carries on quitting
+    assert mac._quitting and mac._closing and mac._shut and stopped
+
+
 def test_the_list_is_remembered(app, mac, tmp_path):
     from ytclip.mac import pc_jobs
 
@@ -971,6 +990,8 @@ def test_settings_on_the_mac_speak_of_the_mac():
     assert dict(by["ai_provider"].choices)["pc"].startswith("Your PC's local AI")
     assert dict(by["encoder"].choices) == dict(S.MAC_ENCODERS)
     assert dict(by["local_model"].choices)["auto"] == "Pick for this Mac"
+    # Safari's logins open only to an app given Full Disk Access by hand; picked, every download failed
+    assert "safari" not in dict(by["cookies_browser"].choices) and "chrome" in dict(by["cookies_browser"].choices)
 
 
 def test_the_macs_media_engine(monkeypatch):
@@ -1224,6 +1245,11 @@ def test_the_built_apps_self_check_starts_everything_it_brought(app, tmp_path, m
     program("deno", "deno", "echo deno 2.9.8")
     whisper = program("whisper-cpp", "whisper-cli", 'test "$1" = -h', "whisper.cpp v1.9.5 (Metal)")
     program("llama-cpp", "llama-server", 'test "$1" = --version', "llama.cpp b12194 (Metal)")
+    certifi = pytest.importorskip("certifi")
+    certs = frameworks / "certifi" / "cacert.pem"  # where certifi's hook puts them in the app
+    certs.parent.mkdir(parents=True)
+    shutil.copy(certifi.where(), certs)
+    monkeypatch.setenv("SSL_CERT_FILE", str(certs))  # (as the app's start sets it: mac/app.py)
     monkeypatch.setattr(sys, "frozen", True, raising=False)
     monkeypatch.setattr(bundled, "folders", lambda: [frameworks])
     ffmpeg.ffmpeg_exe.cache_clear()
@@ -1232,11 +1258,15 @@ def test_the_built_apps_self_check_starts_everything_it_brought(app, tmp_path, m
         out = capsys.readouterr().out
         assert "ffmpeg ok (VideoToolbox)" in out and "deno ok" in out, out
         assert "whisper.cpp v1.9.5 (Metal) ok" in out and "llama.cpp b12194 (Metal) ok" in out, out
+        assert "HTTPS certificates of its own" in out, out
         assert rc == 0 or "video MISSING" in out  # (Qt's video can't load on some Linux test machines)
         whisper.write_text("#!/bin/sh\nexit 1\n")  # it doesn't start (a library missing, its signature broken)
         (frameworks / "deno" / "deno").unlink()
+        # certificates that are there only on the Mac it was built on (python.org's Python folder)
+        monkeypatch.setenv("SSL_CERT_FILE", certifi.where())
         rc = self_check(app)
         out = capsys.readouterr().out
         assert rc == 1 and "whisper.cpp MISSING" in out and "deno MISSING" in out, out
+        assert "HTTPS certificates MISSING" in out, out
     finally:
         ffmpeg.ffmpeg_exe.cache_clear()

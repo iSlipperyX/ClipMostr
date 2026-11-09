@@ -456,7 +456,8 @@ def test_a_name_server_that_never_answers_holds_nothing_up(world, monkeypatch):
     def slow(host, *args, **kwargs):
         if host == socket.gethostname():
             asked.append(host)
-            answer.wait(30)  # (until the test ends)
+            answer.wait(30)  # (until the test lets it answer: the real one may take half a minute here too)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.7", 0))]
         return real(host, *args, **kwargs)
 
     def by_address(*_a):
@@ -478,7 +479,7 @@ def test_a_name_server_that_never_answers_holds_nothing_up(world, monkeypatch):
     while srv._own_name.at is None and time.monotonic() < end:  # it comes back, and is remembered
         time.sleep(0.02)
     assert srv._own_name.at is not None
-    srv.local_addresses()
+    assert "192.0.2.7" in srv.local_addresses()  # what it found is used, without asking again
     assert asked == [socket.gethostname()]
 
 
