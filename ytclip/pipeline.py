@@ -65,6 +65,8 @@ _PERMANENT = re.compile(r"video unavailable|private video|has been removed|no lo
 
 
 UPDATE_GAP = 5 * 60  # automation may update itself while it waits at least this long for the next video
+CREATOR_PLAN_EVERY = 3600  # the Video Creator's daily schedule is looked at hourly (planned once a day)
+WEEKLY_EVERY = 15 * 60  # the stats record (daily) and the weekly report (Monday morning) are looked at this often
 
 
 class Stopped(Exception):
@@ -318,7 +320,8 @@ class Runner:
                  scan: Callable | None = None, engine: Callable[..., Engine] = Engine,
                  history: Callable[[], History] | None = None, picks: Callable[[], PickLog] | None = None,
                  priority: Callable[[str], str] | None = None,
-                 fetch: Callable[..., Video] = download, self_update: bool = False, posting: bool = False):
+                 fetch: Callable[..., Video] = download, self_update: bool = False, posting: bool = False,
+                 telegram: bool = False):
         self.db = db or JobDB()
         self.load = load
         self._log = log or (lambda m: None)
@@ -339,6 +342,8 @@ class Runner:
         self.prefetch: Prefetch | None = None  # the next video, downloading while this one is clipped
         self._posting = posting  # run the posting worker alongside (posting/service.py)
         self.poster = None  # its thread while run() runs
+        self._telegram = telegram  # run the Telegram bot alongside (telegram/bot.py)
+        self.telegram = None  # the bot while run() runs
 
     # ------------------------------------------------------------ bookkeeping
     def log(self, msg: str) -> None:
@@ -407,6 +412,8 @@ class Runner:
             said = self._priority(s.speed)
             if said:
                 self.log(f"{said} (Settings → Speed).")
+        if now - self.db.meta_float("weekly_at") >= WEEKLY_EVERY:  # a pause doesn't hold up the report
+            self.weekly(s, now)
         if self.db.meta("paused") == "1":
             self.state("Paused")
             return 30.0
@@ -425,6 +432,8 @@ class Runner:
 
         if s.cleanup_auto and now - self.db.meta_float("last_cleanup") >= DAY:
             self.cleanup(s)
+        if now - self.db.meta_float("creator_plan_at") >= CREATOR_PLAN_EVERY:
+            self.plan_creator(s, now)
 
         self.lift_pause_for_sign_in(s, now)
         self.check_orders()
@@ -553,8 +562,18 @@ class Runner:
             self.prefetch = None
 
     def block(self, error: str, now: float, s: Settings | None = None) -> None:
-        self.log(record_block(self.db, error, now, (s or self.load()).cookies_browser))
+        said = record_block(self.db, error, now, (s or self.load()).cookies_browser)
+        self.log(said)
         self.db.note("blocked", now)
+        self.tell(said)
+
+    def tell(self, text: str) -> None:
+        """Something that needs you, for the Telegram bot (when it's running and set to send problems)."""
+        if self.telegram is not None:
+            try:
+                self.telegram.problem(text)
+            except Exception:  # noqa: BLE001 - the log has it either way
+                pass
 
     # ------------------------------------------------------------ updating itself
     def self_update(self, s: Settings) -> None:
@@ -629,8 +648,10 @@ class Runner:
         if self.db.meta("disk_low") != "1":
             self.db.set_meta("disk_low", "1")
             self.db.note("disk_low", now)
-            self.log(f"⚠ Paused: only {free / GB:.1f} GB free on {drive}, under the {s.disk_min_free_gb} GB to keep "
-                     "free. Make room (Clean up, or delete files) and automation carries on by itself.")
+            said = (f"⚠ Paused: only {free / GB:.1f} GB free on {drive}, under the {s.disk_min_free_gb} GB to keep "
+                    "free. Make room (Clean up, or delete files) and automation carries on by itself.")
+            self.log(said)
+            self.tell(said)
         return (f"Paused: only {free / GB:.1f} GB free on {drive} (keeping {s.disk_min_free_gb} GB free). "
                 "It carries on when there's room")
 
@@ -923,6 +944,44 @@ class Runner:
                                stage="Waiting", category_id=category_id), self.now())
 
     # ------------------------------------------------------------ one video
+    def plan_creator(self, s: Settings, now: float | None = None) -> int:
+        """Today's Video Creator videos for the categories that have some a day (creator/schedule.py), about
+        what's trending in them in Research's last check."""
+        from .creator import schedule
+
+        now = self.now() if now is None else now
+        self.db.set_meta("creator_plan_at", now)
+        if not any(c.creator_daily for c in categories.active(s)):
+            return 0
+        try:
+            videos = []
+            try:
+                history = self._history()
+                videos = history.last_videos()
+                categories.assign_from_settings(videos, s, history)
+            except Exception as exc:  # noqa: BLE001 - no trends to go on: topic lists and names still work
+                self.log(f"Creator schedule: Research's last check couldn't be read ({exc}).")
+            return schedule.plan(s, self.db, videos, now, log=self.log)
+        except Exception as exc:  # noqa: BLE001 - a planning hiccup never stops the clips
+            self.log(f"⚠ Couldn't plan today's Creator videos: {exc}")
+            return 0
+
+    def weekly(self, s: Settings, now: float | None = None):
+        """Today's reading for the stats record, and on Monday morning the weekly report (weekly.py), which
+        also goes to Telegram when the bot's running. Returns the report when one was made."""
+        from . import weekly
+
+        now = self.now() if now is None else now
+        self.db.set_meta("weekly_at", now)
+        try:
+            w = weekly.tick(s, self.db, now, log=self.log)
+        except Exception as exc:  # noqa: BLE001 - a report problem never stops automation
+            self.log(f"⚠ The weekly report couldn't be made: {type(exc).__name__}: {exc}")
+            return None
+        if w is not None and self.telegram is not None:
+            self.telegram.send_week(w)
+        return w
+
     def add_creation(self, request, category_id: str = "") -> str:
         """Queue a video for the Video Creator to make (creator/orchestrator.CreateRequest). Returns the job id."""
         from .creator.orchestrator import queue
@@ -980,6 +1039,8 @@ class Runner:
                            stage="Couldn't be made", progress="")
             self.log(f"✗ {job.title}: {exc}")
             self.db.set_meta("last_error", str(exc))
+            if "telegram" not in job.origins:  # one asked for on Telegram is answered there anyway
+                self.tell(f"✖ The Video Creator couldn't make “{job.title}”: {exc}")
             return
         except Exception as exc:  # noqa: BLE001 - ffmpeg or a model hiccup: the usual retries
             self.failed(job, str(exc) or exc.__class__.__name__, s)
@@ -1220,6 +1281,20 @@ class Runner:
             return None
         return t
 
+    def start_telegram(self):
+        """The Telegram bot on its threads, listening to posting's feed too."""
+        try:
+            from .telegram.bot import Bot
+
+            bot = Bot(self)
+            if self.poster is not None:
+                self.poster.service.listeners.append(bot.on_event)
+            bot.start()
+        except Exception as exc:  # noqa: BLE001 - automation runs without it
+            self.log(f"⚠ The Telegram bot couldn't start: {type(exc).__name__}: {exc}")
+            return None
+        return bot
+
     def run(self, stop: Callable[[], bool] | None = None, sleep: Callable[[float], None] = time.sleep,
             once: bool = False) -> int:
         why = self.claim()
@@ -1233,6 +1308,8 @@ class Runner:
         pulse.start()
         # Finished clips are posted to TikTok alongside, never holding up clipping (posting/service.py).
         self.poster = self.start_posting() if self._posting else None
+        # The Telegram bot, when Settings → Telegram is on (telegram/bot.py): it waits quietly until it is.
+        self.telegram = self.start_telegram() if self._telegram else None
         stop = self._stop = stop or (lambda: False)
         try:
             self.health()
@@ -1260,6 +1337,9 @@ class Runner:
             pass
         finally:
             self.stop_prefetch()
+            if self.telegram is not None:
+                self.telegram.stop()
+                self.telegram = None
             if self.poster is not None:
                 self.poster.stop()  # a post cut off here is marked failed next time (it may be up already)
                 self.poster = None
@@ -1505,7 +1585,7 @@ def run_headless() -> int:
         sweep_work()  # what a crash left in the work folder
     except Exception:
         pass
-    return Runner(log=file_logger(), priority=speed.set_priority, self_update=True, posting=True).run()
+    return Runner(log=file_logger(), priority=speed.set_priority, self_update=True, posting=True, telegram=True).run()
 
 
 def request_scan(db: JobDB, category_id: str = "") -> None:

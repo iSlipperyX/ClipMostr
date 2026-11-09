@@ -23,6 +23,7 @@ def read_folder_index(folder: Path) -> dict[str, dict]:
     video = data.get("video") or {}
     auto = data.get("automation") or {}
     group = video.get("id") or video.get("url") or str(folder)
+    story = creator_story(folder, data)
     out: dict[str, dict] = {}
     for clip in data.get("clips", []):
         file = clip.get("file")
@@ -57,7 +58,7 @@ def read_folder_index(folder: Path) -> dict[str, dict]:
             # Posting's account id for the category (3.0): no name matching needed
             "account_id": str(auto.get("account_id") or ""),
             # Kept with the posting entry for its record, since the clips.json row goes when the clip is deleted
-            "facts": _facts(data, clip),
+            "facts": _facts(data, clip) | ({"creator": story} if story else {}),
             "rejected": qc.get("ok") is False or file.replace("\\", "/").startswith(f"{REJECTED_DIR}/"),
             # ClipMonster 3.3: made by the Video Creator, so it's labelled AI-generated when posted, and comes
             # with its own caption and hashtags
@@ -66,6 +67,46 @@ def read_folder_index(folder: Path) -> dict[str, dict]:
             "hashtags": " ".join(f"#{str(h).lstrip('#')}" for h in clip.get("hashtags") or [] if str(h).strip("# ")),
         }
     return out
+
+
+def creator_story(folder: Path, data: dict | None = None) -> dict:
+    """How a Video Creator video was made, for its posted record: the prompt, the script, the voice, the look,
+    the pictures, the sources and the fact check, from the folder's clips.json and storyboard.json. Clean up
+    deletes those with the video once it's posted, so posting keeps this copy. {} for a clip of a video."""
+    if data is None:
+        try:
+            data = json.loads((folder / "clips.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+    made = data.get("creator") if isinstance(data, dict) else None
+    if not isinstance(made, dict) or not made:
+        return {}
+    script, scenes = str(made.get("script") or ""), None
+    try:
+        board = json.loads((folder / "storyboard.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        board = None
+    if isinstance(board, dict) and isinstance(board.get("scenes"), list):
+        said = [str(sc.get("speech_text") or "").strip() for sc in board["scenes"] if isinstance(sc, dict)]
+        script = script or "\n".join(line for line in said if line)
+        scenes = len(said)
+    check = made.get("factcheck") if isinstance(made.get("factcheck"), dict) else {}
+    out = {
+        "prompt": str(made.get("prompt") or ""),
+        "written_by": str(made.get("written_by") or ""),
+        "voice": str(made.get("voice") or ""),
+        "voice_engine": str(made.get("voice_engine") or ""),
+        "look": str(made.get("style") or ""),
+        "music": str(made.get("music_mood") or ""),
+        "pictures": [str(p) for p in made.get("pictures") or [] if p],
+        "sources": [{k: str(v) for k, v in src.items() if k in ("title", "url", "publisher", "date") and v}
+                    for src in (made.get("sources") or [])[:12] if isinstance(src, dict)],
+        "factcheck": {k: v for k, v in check.items() if k in ("model", "checked", "skipped", "fixed", "to_check")
+                      and isinstance(v, (str, int))},
+        "scenes": scenes,
+        "script": script[:12000],
+    }
+    return {k: v for k, v in out.items() if v not in ("", None, [], {})}
 
 
 def needs_credit(meta: dict) -> bool:

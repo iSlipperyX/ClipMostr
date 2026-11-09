@@ -43,7 +43,8 @@ def build_parser() -> argparse.ArgumentParser:
            "Automation: ytclip auto --help\n"
            "Quality check: ytclip qc --help\nWhat's working: ytclip results --help\n"
            "Local AI (no key, offline): ytclip local-ai --help\n"
-           "TikTok posting: ytclip posting --help\nClear out space: ytclip clean --help",
+           "TikTok posting: ytclip posting --help\nClear out space: ytclip clean --help\n"
+           "Check this install's libraries: ytclip self-test",
     formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     p.add_argument("sources", nargs="*", help="video/playlist/channel URLs, video files or folders")
@@ -730,7 +731,8 @@ def run_auto(argv: list[str]) -> int:
     log = pipeline.file_logger(lambda line: console.print(escape(line), highlight=False))
     from . import speed
 
-    return pipeline.Runner(db, log=log, priority=speed.set_priority, posting=not args.once).run(once=args.once)
+    return pipeline.Runner(db, log=log, priority=speed.set_priority, posting=not args.once,
+                           telegram=not args.once).run(once=args.once)
 
 
 def run_qc(argv: list[str]) -> int:
@@ -1000,6 +1002,30 @@ def run_request(argv: list[str]) -> int:
         db.close()
 
 
+def _weekly_report(as_json: bool) -> int:
+    from . import weekly
+    from .jobs import JobDB
+    from .posting.accounts import Accounts
+    from .posting.store import Store
+
+    db = JobDB()
+    try:
+        w = weekly.build(Store(), Accounts.load(), db)
+    finally:
+        db.close()
+    if as_json:
+        import json
+
+        print(json.dumps(w.to_json(), indent=1, ensure_ascii=False))
+        return 0
+    console.print(f"[bold]{escape(w.headline())}[/]  [dim]({escape(w.span())})[/]")
+    for heading, rows in w.sections():
+        console.print(f"\n[bold]{escape(heading)}[/]")
+        for text, link in rows:
+            console.print(f"  {escape(text)}" + (f"  [dim]{escape(link)}[/]" if link else ""))
+    return 0
+
+
 def run_report(argv: list[str]) -> int:
     from . import report
     from .jobs import JobDB
@@ -1007,8 +1033,12 @@ def run_report(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="ytclip report", description="What automation did while you were away: "
                                 "clips per category and request, rejected clips and why, failures, pauses.")
     p.add_argument("--hours", type=float, default=12.0, help="how far back to look (default 12)")
+    p.add_argument("--week", action="store_true", help="the weekly report instead: each TikTok account's views, "
+                   "followers, best and weakest post for the past 7 days (what Monday's notification sums up)")
     p.add_argument("--json", action="store_true", help="print it as JSON")
     args = p.parse_args(argv)
+    if args.week:
+        return _weekly_report(args.json)
     db = JobDB()
     try:
         r = report.build(db, Settings.load(), hours=args.hours)
@@ -1493,6 +1523,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_posting(argv[1:])
     if argv[:1] == ["doctor"]:
         return run_doctor(argv[1:])
+    if argv[:1] == ["self-test"]:
+        from .selftest import main as self_test
+
+        return self_test(argv[1:])
     if argv[:1] == ["results"]:
         return run_results(argv[1:])
     if argv[:1] == ["research"]:

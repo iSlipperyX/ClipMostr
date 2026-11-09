@@ -25,7 +25,7 @@ from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, 
 
 from .. import categories
 from ..jobs import JobDB
-from ..categories import MAX_CLIPS, MAX_DAILY, MAX_LEN, Category
+from ..categories import MAX_CLIPS, MAX_CREATOR_DAILY, MAX_DAILY, MAX_LEN, Category
 from ..policy import PickLog, picks_path
 from ..research import youtube_key
 from ..settings import PRESETS, Settings, all_layouts, all_presets
@@ -289,6 +289,28 @@ class Categories(QWidget):
         form.addRow("Special requests", self.instructions)
         note("A recipe in Settings → Automation for a channel or category still wins over the category's style.")
 
+        section("Video Creator")
+        self.creator_daily = QSpinBox()
+        self.creator_daily.setRange(0, MAX_CREATOR_DAILY)
+        self.creator_daily.setSpecialValueText("None")
+        self.creator_daily.setSuffix(" a day")
+        self.creator_daily.setToolTip("Original videos the Video Creator makes for this category every day, planned "
+                                      "by automation and made overnight (Settings → Creator), then queued for its "
+                                      "account like the clips, labelled AI-generated")
+        self.creator_daily.valueChanged.connect(lambda v: self._set("creator_daily", int(v)))
+        form.addRow("Creator videos", self.creator_daily)
+        self.creator_topics = QPlainTextEdit()
+        self.creator_topics.setFixedHeight(90)
+        self.creator_topics.setPlaceholderText("3 stoic habits that will change your life\nThe psychology of "
+                                               "first impressions\n# one idea per line")
+        self.creator_topics.setToolTip("Ideas for this category's Creator videos, one per line; each is used at most "
+                                       "once a month. They take turns with what's trending in the category on "
+                                       "YouTube; with neither, the title words and the name are used")
+        self.creator_topics.textChanged.connect(lambda: self._set("creator_topics",
+                                                                  self.creator_topics.toPlainText()))
+        form.addRow("Topics", self.creator_topics)
+        self.creator_note = note("")
+
         buttons = QHBoxLayout()
         self.folder_btn = QPushButton("Open its folder")
         self.folder_btn.clicked.connect(lambda: self._open_dir(self._folder_of(self._category())))
@@ -425,8 +447,28 @@ class Categories(QWidget):
             self.min_len.setValue(n.min_len)
             self.max_len.setValue(n.max_len)
             self.instructions.setPlainText(n.instructions)
+            self.creator_daily.setValue(n.creator_daily)
+            self.creator_topics.setPlainText(n.creator_topics)
+            self._creator_note(n)
         finally:
             self._filling = False
+
+    def _creator_note(self, n) -> None:
+        from ..creator import schedule
+
+        if not n.creator_daily:
+            self.creator_note.setText("Set a number of Creator videos a day and automation makes them for this "
+                                      "category from its topics and what's trending in it.")
+            return
+        ideas = schedule.topic_lines(n.creator_topics)
+        when = "overnight" if getattr(self._settings(), "creator_schedule_when", "night") == "night" else \
+            "as soon as they're planned"
+        self.creator_note.setText(
+            f"{n.creator_daily} a day, made {when}"
+            + (f", from your {len(ideas)} topic{'s' if len(ideas) != 1 else ''} and what's trending" if ideas else
+               ", from what's trending in it, then its title words")
+            + (". It has no account yet, so nothing is planned." if n.needs_account else ".")
+            + " Each one waits for your OK in the Queue tab at first (Settings → Creator).")
 
     def _checked_yt_categories(self) -> str:
         return ", ".join(str(self.yt_categories.item(i).data(Qt.UserRole)) for i in range(self.yt_categories.count())
@@ -434,6 +476,8 @@ class Categories(QWidget):
 
     def _update_notes(self) -> None:
         """Problems worth fixing (in the warning colour), and the line under the list."""
+        if self._category() is not None and hasattr(self, "creator_note"):
+            self._creator_note(self._category())
         s = self._settings()
         on = [n for n in self._categories if n.enabled]
         lines: list[str] = []

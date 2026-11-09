@@ -9,6 +9,7 @@ always points at the copy you're running.
 
 Links:
     clipmonster://sign-in/<account id>   the Accounts tab, signing that account in again
+    clipmonster://report/week            the weekly report (Performance tab)
 """
 
 from __future__ import annotations
@@ -32,8 +33,12 @@ def sign_in_link(account_id: str) -> str:
     return f"{SCHEME}://sign-in/{quote(account_id, safe='')}"
 
 
+def report_link() -> str:
+    return f"{SCHEME}://report/week"
+
+
 def parse_link(text: str) -> tuple[str, str] | None:
-    """('sign-in', account id) for a clipmonster:// link, None for anything else."""
+    """('sign-in', account id) or ('report', 'week') for a clipmonster:// link, None for anything else."""
     try:
         u = urlparse(text.strip())
     except ValueError:
@@ -43,6 +48,8 @@ def parse_link(text: str) -> tuple[str, str] | None:
     action = (u.netloc or "").lower()
     arg = unquote(u.path.strip("/"))
     if action == "sign-in" and arg and all(c.isalnum() or c in "-_" for c in arg):
+        return action, arg
+    if action == "report" and arg == "week":
         return action, arg
     return None
 

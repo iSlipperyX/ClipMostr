@@ -54,11 +54,13 @@ def post(item: VideoItem, s: Settings, account: Account, log: Callable[[str], No
         raise FileNotFoundError(f"The video file is missing: {path}")
     caption = compose_caption(item, s)
     privacy = item.privacy or s.default_privacy
+    cover = Path(item.cover) if getattr(s, "cover", "auto") != "off" and getattr(item, "cover", "") else None
     with TikTokBrowser(s, account.browser_dir(), log, cancelled=cancelled) as b:
         b.upload(path, caption, privacy, s.allow_comments, s.allow_duet, s.allow_stitch,
                  s.ai_generated_label or getattr(item, "ai_generated", False), progress=progress,
-                 expected_user=account.username)
-    return {"via": "browser"}
+                 expected_user=account.username, cover=cover if cover and cover.is_file() else None)
+        covered = b.cover_set
+    return {"via": "browser", "cover_set": covered}
 
 
 def refresh_account(s: Settings, account: Account, log: Callable[[str], None], cancelled: Callable[[], bool],

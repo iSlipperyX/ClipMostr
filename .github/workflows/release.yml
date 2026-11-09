@@ -151,6 +151,14 @@ jobs:
           echo "$said"
           [[ "$said" == *"${{ steps.version.outputs.version }}"* ]] || { echo "::error::ytclip.exe says '$said'"; exit 1; }
 
+      # Every library loads the way the app uses it: the window, video preview, secure connections, OpenCV,
+      # Whisper, both voices' eSpeak (American and British) and Playwright. Catches a file the build left
+      # out (packaging/slim.py) that something needs, before anyone downloads it.
+      - name: Check the build's libraries load
+        if: steps.version.outputs.kind != 'none'
+        shell: bash
+        run: dist/ClipMonster/ytclip.exe self-test
+
       - name: Checksums
         if: steps.version.outputs.kind != 'none'
         shell: bash

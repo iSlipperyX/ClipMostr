@@ -5,7 +5,10 @@ Three steps, each its own ffmpeg run so a long video shows real progress and a f
 1. render_scene: each scene's picture becomes a short clip with its camera move (motion.py), drawn frame
    by frame with OpenCV's sub-pixel warp and piped into ffmpeg (or ffmpeg's zoompan without OpenCV). A
    B-roll clip is scaled to cover 9:16 and looped or trimmed. Each clip runs half a transition past its
-   scene at both ends, so neighbours overlap for the cross-fade.
+   scene at both ends, so neighbours overlap for the cross-fade. render_scenes does several at once
+   (scene_workers: none in parallel when Settings → Speed is Quiet, a few when it's Balanced or Full
+   power) and encodes them on the graphics card when there's an encoder for it (h264_amf on a Radeon),
+   near-lossless; a graphics card encoder that fails is dropped for the processor's, and the scene redone.
 2. mix_audio: the sound, in two passes:
        voice   → 70 Hz high-pass, speech compressor, gain to -14 LUFS (measured first)
        music   → looped to length, level, fades, sidechain-ducked about 16 dB under the voice
@@ -22,12 +25,16 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
 import subprocess
+import threading
+from concurrent.futures import FIRST_EXCEPTION, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
 
+from .. import speed
 from ..audio import ducking, mastering
 from ..ffmpeg import NO_WINDOW, encoder_args, ffmpeg_exe, pick_encoder, run, run_with_progress
 from . import motion
@@ -85,35 +92,177 @@ def scene_filter(kind: str, seconds: float, move: motion.Move | None = None) -> 
     return motion.zoompan(move or motion.get("slow_push_in"), frames, FPS, WIDTH, HEIGHT) + ",setsar=1,format=yuv420p"
 
 
-def _intermediate(dest: Path) -> list[str]:
+SCENE_QP = 16  # scene clips on a graphics card encoder: near-lossless (they're encoded again once, at the end)
+
+
+def intermediate_args(encoder: str = "libx264") -> list[str]:
+    """A scene clip's encoder settings: near-lossless and fast, on the graphics card when `encoder` is one."""
+    q = str(SCENE_QP)
+    if encoder == "h264_amf":
+        return ["-c:v", "h264_amf", "-usage", "transcoding", "-quality", "speed", "-rc", "cqp",
+                "-qp_i", q, "-qp_p", q, "-bf", "0"]
+    if encoder == "h264_nvenc":
+        return ["-c:v", "h264_nvenc", "-preset", "p2", "-rc", "constqp", "-qp", q, "-bf", "0"]
+    if encoder == "h264_qsv":
+        return ["-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", q]
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "14"]
+
+
+def _intermediate(dest: Path, encoder: str = "libx264") -> list[str]:
     """Scene clips are kept near-lossless: they're encoded again once, at the end."""
-    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "14", "-pix_fmt", "yuv420p", "-an", str(dest)]
+    return [*intermediate_args(encoder), "-pix_fmt", "yuv420p", "-an", str(dest)]
+
+
+def scene_workers(s, scenes: int, logical: int | None = None) -> int:
+    """How many scenes are animated at once (Settings → Speed): one when Quiet; with Balanced about a sixth of
+    the processor's threads (2 on 16), with Full power a quarter (4 on 16). Each takes its warp and encoder."""
+    n = logical or os.cpu_count() or 4
+    want = {"quiet": 1, "balanced": max(1, min(3, n // 6)), "full": max(2, min(6, n // 4))}[
+        speed.level(getattr(s, "speed", "balanced"))]
+    return max(1, min(want, scenes))
+
+
+def scene_encoder(s) -> str:
+    """The encoder for scene clips: Settings → Export → Encoder ("auto" picks the graphics card's when ffmpeg
+    can use it)."""
+    return pick_encoder(getattr(s, "encoder", "auto") or "auto")
 
 
 def render_scene(source: Path, kind: str, seconds: float, dest: Path, move: motion.Move,
                  progress: Callable[[float], None] | None = None, check: Callable[[], None] | None = None,
-                 use_cv2: bool = True) -> Path:
+                 use_cv2: bool = True, encoder: str = "libx264") -> Path:
     """One scene's clip, `seconds` long, at 1080x1920 and 30 fps."""
     seconds = max(1.0 / FPS, seconds)
     if kind == "video":
         run([ffmpeg_exe(), "-y", "-v", "error", "-stream_loop", "-1", "-i", str(source), "-t", f"{seconds:.3f}",
-             "-vf", scene_filter("video", seconds), *_intermediate(dest)])
+             "-vf", scene_filter("video", seconds), *_intermediate(dest, encoder)])
         if progress:
             progress(1.0)
         return dest
     if use_cv2:
         try:
-            return _render_cv2(source, seconds, dest, move, progress, check)
+            return _render_cv2(source, seconds, dest, move, progress, check, encoder)
         except ImportError:
             pass
     run([ffmpeg_exe(), "-y", "-v", "error", "-i", str(source), "-vf", scene_filter("image", seconds, move),
-         "-frames:v", str(max(1, round(seconds * FPS))), *_intermediate(dest)])
+         "-frames:v", str(max(1, round(seconds * FPS))), *_intermediate(dest, encoder)])
     if progress:
         progress(1.0)
     return dest
 
 
-def _render_cv2(source: Path, seconds: float, dest: Path, move: motion.Move, progress, check) -> Path:
+@dataclass
+class SceneJob:
+    source: Path
+    kind: str  # image | video
+    seconds: float
+    dest: Path
+    move: motion.Move
+
+
+class _Halted(Exception):
+    """Another scene failed, or the video was cancelled: this one stops too."""
+
+
+def render_scenes(jobs: list[SceneJob], *, workers: int = 1, encoder: str = "libx264",
+                  progress: Progress | None = None, check: Callable[[], None] | None = None,
+                  log: Callable[[str], None] | None = None, render: Callable | None = None) -> tuple[list[Path], str]:
+    """Every scene's clip, `workers` at a time: (the clips in order, the encoder they ended up on). A graphics
+    card encoder that fails on a scene is dropped for the processor's (x264) and that scene made again; any
+    other failure, or `check` raising (a cancel), stops the lot. Progress and `check` only run on the calling
+    thread."""
+    render = render or render_scene
+    n = len(jobs)
+    done = [0.0] * n
+    lock = threading.Lock()
+    stop = threading.Event()
+    state = {"encoder": encoder}
+    parallel = workers > 1 and n > 1
+
+    def halt() -> None:
+        if stop.is_set():
+            raise _Halted()
+        if not parallel and check:
+            check()
+
+    def one(i: int) -> Path:
+        job = jobs[i]
+
+        def step(f: float) -> None:
+            with lock:
+                done[i] = max(done[i], min(1.0, f))
+            if not parallel and progress:
+                progress(f"Animating scene {i + 1} of {n}", (i + min(1.0, f)) / n)
+
+        enc = state["encoder"]
+        try:
+            render(job.source, job.kind, job.seconds, job.dest, job.move, progress=step, check=halt, encoder=enc)
+        except _Halted:
+            raise
+        except Exception as exc:
+            if enc == "libx264":
+                raise
+            with lock:
+                if state["encoder"] == enc:
+                    state["encoder"] = "libx264"
+                    if log:
+                        why = " ".join(str(exc).split())[:160] or type(exc).__name__
+                        log(f"The graphics card's encoder ({enc}) failed on a scene ({why}), so the scenes are "
+                            "encoded on the processor instead.")
+            render(job.source, job.kind, job.seconds, job.dest, job.move, progress=step, check=halt,
+                   encoder="libx264")
+        step(1.0)
+        return job.dest
+
+    if not parallel:
+        for i in range(n):
+            if check:
+                check()
+            one(i)
+        return [j.dest for j in jobs], state["encoder"]
+
+    threads = _cv2_threads(max(1, (os.cpu_count() or 4) // workers))
+    try:
+        with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="scene") as pool:
+            futures = [pool.submit(one, i) for i in range(n)]
+            pending = set(futures)
+            try:
+                while pending:
+                    finished, pending = wait(pending, timeout=0.4, return_when=FIRST_EXCEPTION)
+                    for f in finished:
+                        f.result()
+                    if check:
+                        check()
+                    if progress:
+                        with lock:
+                            total, ready = sum(done) / n, sum(1 for d in done if d >= 1.0)
+                        progress(f"Animating scenes, {workers} at a time: {ready} of {n} done", total)
+            except BaseException:
+                stop.set()
+                for f in futures:
+                    f.cancel()
+                raise
+    finally:
+        _cv2_threads(threads)
+    return [j.dest for j in jobs], state["encoder"]
+
+
+def _cv2_threads(n: int | None) -> int | None:
+    """Set OpenCV's own thread count (so parallel scenes share the processor rather than fight over it);
+    returns what it was. None: OpenCV isn't there, or leave it."""
+    if n is None:
+        return None
+    try:
+        import cv2
+    except ImportError:
+        return None
+    before = cv2.getNumThreads()
+    cv2.setNumThreads(int(n))
+    return before
+
+
+def _render_cv2(source: Path, seconds: float, dest: Path, move: motion.Move, progress, check,
+                encoder: str = "libx264") -> Path:
     import cv2
     import numpy as np
 
@@ -134,7 +283,7 @@ def _render_cv2(source: Path, seconds: float, dest: Path, move: motion.Move, pro
     h, w = img.shape[:2]
     frames = max(1, round(seconds * FPS))
     cmd = [ffmpeg_exe(), "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{WIDTH}x{HEIGHT}",
-           "-r", str(FPS), "-i", "-", *_intermediate(dest)]
+           "-r", str(FPS), "-i", "-", *_intermediate(dest, encoder)]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=NO_WINDOW)
     try:
         for f in range(frames):

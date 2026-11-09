@@ -227,12 +227,19 @@ class KokoroEngine(Engine):
 
     def speak(self, text: str, voice: VoiceProfile, speed: float) -> tuple[np.ndarray, int]:
         k = self._model()
+        lang = kokoro_lang(voice.kokoro)
         try:
-            audio, rate = k.create(text, voice=voice.kokoro, speed=float(speed), lang="en-us",
+            audio, rate = k.create(text, voice=voice.kokoro, speed=float(speed), lang=lang,
                                    sentence_pause=SENTENCE_PAUSE, clause_pause=CLAUSE_PAUSE)
         except TypeError:  # kokoro-onnx before 0.5 has no pause options
-            audio, rate = k.create(text, voice=voice.kokoro, speed=float(speed), lang="en-us")
+            audio, rate = k.create(text, voice=voice.kokoro, speed=float(speed), lang=lang)
         return np.asarray(audio, np.float32).ravel(), int(rate)
+
+
+def kokoro_lang(voice_id: str) -> str:
+    """The English a Kokoro voice speaks, from its id's first letter: a (American) or b (British). A British
+    voice reading American phonemes keeps the voice but loses the accent ("stjuːdənts" becomes "stuːdənts")."""
+    return "en-gb" if voice_id[:1].lower() == "b" else "en-us"
 
 
 class PiperEngine(Engine):

@@ -18,6 +18,9 @@ from __future__ import annotations
 from .. import fonts, layout, textlayout
 
 INTRO_FADE_MS = 260
+WORD_MS = 70  # each headline word punches in this long after the one before
+PUNCH_MS = 140  # ...settling to its size over this long
+RULE_MS = 380  # the accent rule under it has grown by then
 LOWER_START = 2.2
 LOWER_LENGTH = 4.8
 
@@ -43,6 +46,21 @@ def headline(clip, s) -> str:
     return text.upper() if getattr(s, "caption_uppercase", True) else text
 
 
+def intro_length(s) -> float:
+    return max(0.8, min(4.0, float(getattr(s, "intro_seconds", 1.8) or 1.8)))
+
+
+def complete_at(clip, s) -> dict | None:
+    """When the hook card is fully up, and until when it shows (seconds into the clip): {"at", "until"}, for
+    choosing the TikTok cover (posting/cover.py). None without a headline."""
+    text = headline(clip, s)
+    if not text:
+        return None
+    until = intro_length(s)
+    up = max(RULE_MS, WORD_MS * (len(text.split()) - 1) + PUNCH_MS) / 1000 + 0.12
+    return {"at": round(min(up, until - INTRO_FADE_MS / 1000 - 0.08), 2), "until": round(until, 2)}
+
+
 def context_lines(s, clip, channel: str, topic: str) -> tuple[str, str]:
     """(topic, credit) for the lower-third. `lower_third_text` may use {topic}, {channel} and {title}."""
     template = (getattr(s, "lower_third_text", "") or "{topic}").strip()
@@ -65,7 +83,7 @@ def build(width: int, height: int, s, clip, *, intro: bool, lower: bool, channel
     credit_size = fonts.ass_size(font, 30 * scale)
     accent = getattr(s, "caption_highlight", "#FFD400")
     events: list[str] = []
-    intro_len = max(0.8, min(4.0, float(getattr(s, "intro_seconds", 1.8) or 1.8)))
+    intro_len = intro_length(s)
     text = headline(clip, s)
     if intro and text and intro_len > offset:
         a, b = 0.0 - offset, intro_len - offset
@@ -83,8 +101,8 @@ def build(width: int, height: int, s, clip, *, intro: bool, lower: bool, channel
             for w in ln:
                 # Each word punches in a beat after the last, then the whole card settles.
                 words.append(f"{{\\alpha&HFF&\\fscx130\\fscy130\\t({delay},{delay + 1},\\alpha&H00&)"
-                             f"\\t({delay},{delay + 140},\\fscx100\\fscy100)}}{_escape(w)}")
-                delay += 70
+                             f"\\t({delay},{delay + PUNCH_MS},\\fscx100\\fscy100)}}{_escape(w)}")
+                delay += WORD_MS
             events.append(f"Dialogue: 3,{_ts(a)},{_ts(b)},Headline,,0,0,0,,"
                           f"{{\\an2\\pos({width // 2},{y})\\fad(0,{INTRO_FADE_MS})}}" + " ".join(words))
             y += head_size
@@ -92,7 +110,7 @@ def build(width: int, height: int, s, clip, *, intro: bool, lower: bool, channel
         rule_w = int(safe.w * 0.22)
         events.append(f"Dialogue: 3,{_ts(a)},{_ts(b)},Card,,0,0,0,,"
                       f"{{\\an8\\pos({width // 2},{y + int(14 * scale)})\\bord0\\shad0\\1c{_colour(accent)}"
-                      f"\\fscx0\\t(80,380,\\fscx100)\\fad(0,{INTRO_FADE_MS})\\p1}}"
+                      f"\\fscx0\\t(80,{RULE_MS},\\fscx100)\\fad(0,{INTRO_FADE_MS})\\p1}}"
                       f"m 0 0 l {rule_w} 0 {rule_w} {int(10 * scale)} 0 {int(10 * scale)}{{\\p0}}")
     top_line, credit = context_lines(s, clip, channel, topic)
     start = max(LOWER_START, (intro_len + 0.3) if intro else LOWER_START)

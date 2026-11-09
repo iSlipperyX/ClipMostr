@@ -1,7 +1,12 @@
 # PyInstaller spec: builds dist/ClipMonster/ with ClipMonster.exe (desktop app)
 # and ytclip.exe (command line) sharing one set of libraries.
 # Build with:  python build.py
+#
+# Both exes share one copy of the Python code too: it's collected as files in _internal (noarchive)
+# instead of an archive inside each exe, which carried the same 30 MB twice. Files the libraries bring
+# that ClipMonster never loads are left out (packaging/slim.py).
 import os
+import sys
 
 from PyInstaller.utils.hooks import collect_data_files, collect_dynamic_libs, collect_submodules
 
@@ -57,20 +62,30 @@ excludes = [
 ]
 
 
+sys.path.insert(0, SPECPATH)
+import slim  # noqa: E402
+
+left_out = {}
+
+
 def analysis(script):
-    return Analysis(
+    a = Analysis(
         [os.path.join(SPECPATH, script)],
         pathex=[ROOT],
         binaries=binaries,
         datas=datas,
         hiddenimports=hiddenimports,
         excludes=excludes,
-        noarchive=False,
+        noarchive=True,  # the code as files in _internal, shared by both exes (one copy instead of two)
     )
+    a.binaries = slim.slim(a.binaries, left_out)
+    a.datas = slim.slim(a.datas, left_out)
+    return a
 
 
 gui = analysis("launch_gui.py")
 cli = analysis("launch_cli.py")
+print(slim.summary(left_out))
 
 gui_exe = EXE(
     PYZ(gui.pure), gui.scripts, [],

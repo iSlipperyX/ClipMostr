@@ -39,6 +39,18 @@ WEBDRIVER_SCRIPT = ("Object.defineProperty(Navigator.prototype, 'webdriver', "
                     "{get: () => false, configurable: true, enumerable: true});")
 
 CAPTCHA = "#captcha-verify-image, div[class*='captcha_verify'], #captcha_container"
+# TikTok Studio's cover editor (posting/cover.py), most specific first; any one of each may match
+EDIT_COVER = ["button:has-text('Edit cover')", "div:text-is('Edit cover')", "text=/^\\s*edit cover\\s*$/i",
+              "[class*='cover'] div[class*='edit-container']", "div[class*='edit-container']"]
+COVER_EDITOR = ["div[class*='cover-edit-container']", "div[class*='cover-edit-panel']", "[role='dialog']:has-text('cover')"]
+UPLOAD_COVER_TAB = ["div:text-is('Upload cover')", "[role='tab']:has-text('Upload')", "text=/^\\s*upload cover\\s*$/i"]
+COVER_INPUT = "input[type='file'][accept*='image']"
+COVER_FIND = 10.0  # seconds to look for Edit cover once the video's in
+COVER_CONFIRM = ["div[class*='cover-edit-footer'] button[class*='primary']", "div[class*='cover-edit-footer'] button:has-text('Confirm')",
+                 "[role='dialog'] button:has-text('Confirm')", "[role='dialog'] button:has-text('Save')",
+                 "[role='dialog'] button:has-text('Done')"]
+COVER_CLOSE = ["div[class*='cover-edit-footer'] button:has-text('Cancel')", "[role='dialog'] button:has-text('Cancel')",
+               "[role='dialog'] [aria-label='Close']", "div[class*='cover-edit-container'] [class*='close']"]
 
 PRIVACY_LABELS = {
     "public": ("Everyone", "Public"),
@@ -70,6 +82,7 @@ class TikTokBrowser:
         self._pw = None
         self.ctx = None
         self.page = None
+        self.cover_set: bool | None = None  # the last upload's cover: True = TikTok took ours, False = its own pick
 
     # --- lifecycle --------------------------------------------------------------
 
@@ -611,8 +624,10 @@ class TikTokBrowser:
 
     def upload(self, video: Path, caption: str, privacy: str, allow_comments: bool = True,
                allow_duet: bool = True, allow_stitch: bool = True, ai_label: bool = False,
-               progress: Callable[[str], None] | None = None, expected_user: str = "") -> None:
+               progress: Callable[[str], None] | None = None, expected_user: str = "",
+               cover: Path | None = None) -> None:
         step = progress or self.log
+        self.cover_set = None
         self.require_login()
         if expected_user:
             step("Checking which TikTok account is logged in…")
@@ -634,6 +649,13 @@ class TikTokBrowser:
 
         step("Waiting for TikTok to finish processing…")
         post = self._wait_until_postable(video, step)
+        if cover is not None:
+            step("Setting the cover…")
+            self.cover_set, why = self.set_cover(cover)
+            if not self.cover_set:
+                step(f"Couldn't set the cover ({why}), so TikTok's own pick stays.")
+                self.log(f"⚠ The cover wasn't set: {why}. The post goes up with TikTok's own pick.")
+            post = self._post_button().first  # the editor re-renders the form
 
         self._dismiss_popups()
         step("Posting…")
@@ -683,6 +705,76 @@ class TikTokBrowser:
             if watch.ready():
                 return btn.first
             self._sleep(watch.delay)
+
+    # --- the cover (posting/cover.py) ----------------------------------------------
+
+    def _cover_editor(self):
+        """The open cover editor, if it's showing."""
+        return self._first_visible(COVER_EDITOR, timeout=0.6)
+
+    def set_cover(self, picture: Path, timeout: float = 20.0) -> tuple[bool, str]:
+        """Put `picture` in as the post's cover: Edit cover → Upload cover → the picture → Confirm. (done, why
+        not). Anything missing closes the editor again and leaves TikTok's own pick; it never raises, except
+        when the post is being cancelled."""
+        try:
+            edit = self._first_visible(EDIT_COVER, timeout=COVER_FIND)
+            if edit is None:
+                return False, "TikTok Studio showed no Edit cover button"
+            edit.click()
+            if self._first_visible(COVER_EDITOR, timeout=8) is None:
+                return False, "the cover editor didn't open"
+            tab = self._first_visible(UPLOAD_COVER_TAB, timeout=6)
+            if tab is None:
+                self._close_cover_editor()
+                return False, "the cover editor has no Upload cover"
+            tab.click()
+            box = self.page.locator(COVER_INPUT)
+            try:
+                box.first.wait_for(state="attached", timeout=8000)
+            except Exception:  # noqa: BLE001
+                self._close_cover_editor()
+                return False, "the cover editor has no place to upload a picture"
+            box.first.set_input_files(str(picture))
+            confirm = self._first_visible(COVER_CONFIRM, timeout=15)
+            if confirm is None:
+                self._close_cover_editor()
+                return False, "the cover editor has no Confirm button"
+            end = time.time() + timeout
+            while time.time() < end:  # the picture loads into the editor before Confirm takes it
+                self._check()
+                if not (confirm.get_attribute("disabled") is not None
+                        or confirm.get_attribute("aria-disabled") == "true"):
+                    break
+                self._sleep(0.5)
+            confirm.click()
+            end = max(end, time.time() + 8)
+            while time.time() < end:  # the editor closing is the sign it took the picture
+                self._check()
+                if self._cover_editor() is None:
+                    return True, ""
+                self._sleep(0.5)
+            self._close_cover_editor()
+            return False, "the cover editor didn't close after Confirm"
+        except BrowserError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - a changed page: TikTok's own pick
+            self._close_cover_editor()
+            return False, f"the cover editor changed ({type(exc).__name__})"
+
+    def _close_cover_editor(self) -> None:
+        try:
+            if self._cover_editor() is None:
+                return
+            for sel in COVER_CLOSE:
+                loc = self.page.locator(sel)
+                if loc.count() and loc.first.is_visible():
+                    loc.first.click(timeout=2000)
+                    self.page.wait_for_timeout(500)
+                    if self._cover_editor() is None:
+                        return
+            self.page.keyboard.press("Escape")
+        except Exception:  # noqa: BLE001
+            pass
 
     def _upload_state(self) -> dict:
         """The upload's progress as the page shows it: {"pct": 0-100 or None, "done": bool}."""
@@ -771,6 +863,10 @@ class TikTokBrowser:
             if not self._post_button().count():
                 return fail("Post button", "The Post button wasn't found.")
             ok("Post button", "found; not clicked")
+            if self._first_visible(EDIT_COVER, timeout=min(6.0, COVER_FIND)) is not None:
+                ok("Cover editor", "found, so covers can be set")
+            else:  # posts still go up, with TikTok's own cover
+                results.append(("Cover editor", "warn", "Not found, so posts would keep TikTok's own cover."))
         finally:
             self._discard_upload()
         return results
