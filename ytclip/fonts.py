@@ -12,6 +12,7 @@ import os
 import shutil
 import struct
 import subprocess
+import sys
 from dataclasses import dataclass, field
 from functools import lru_cache
 from pathlib import Path
@@ -180,6 +181,8 @@ def _system_font_file(name: str) -> Path | None:
             if key in candidates and candidates[key].is_file():
                 return candidates[key]
         return None
+    if sys.platform == "darwin":
+        return _mac_font_file(want)
     try:
         out = subprocess.run(["fc-match", "-f", "%{family}\n%{file}", f"{name}:bold"], capture_output=True,
                              text=True, timeout=5).stdout.splitlines()
@@ -187,6 +190,32 @@ def _system_font_file(name: str) -> Path | None:
         return None
     if len(out) == 2 and want in out[0].lower().split(","):
         return Path(out[1])
+    return None
+
+
+MAC_FONT_DIRS = (Path.home() / "Library" / "Fonts", Path("/Library/Fonts"), Path("/System/Library/Fonts"),
+                 Path("/System/Library/Fonts/Supplemental"))
+
+
+def _squash(text: str) -> str:
+    return "".join(ch for ch in text.lower() if ch.isalnum())
+
+
+def _mac_font_file(want: str, dirs=MAC_FONT_DIRS) -> Path | None:
+    """A Mac keeps fonts as files named after them ("Arial Bold.ttf", "Futura.ttc"): the bold face first, as
+    libass asks for it, then the font itself."""
+    files: dict[str, Path] = {}
+    for d in dirs:
+        try:
+            for f in d.iterdir():
+                if f.suffix.lower() in (".ttf", ".otf", ".ttc"):
+                    files.setdefault(_squash(f.stem), f)
+        except OSError:
+            continue
+    key = _squash(want)
+    for k in (key + "bold", key + "bd", key):
+        if k in files:
+            return files[k]
     return None
 
 

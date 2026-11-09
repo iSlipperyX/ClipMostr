@@ -1,517 +1,639 @@
-"""The Mac app's window: Connect until a PC is connected, then the sidebar and its pages, a top bar with the
-PC's name and Pause, and a line at the bottom for what just happened. A menu bar icon shows how many videos wait
-for your OK, and macOS notifications say when one does and when something needs you."""
+"""ClipMonster for Mac's window: the Studio and the Library (ytclip/gui/main_window.py with only its Create
+pages: MAC), and under Your PC in the sidebar the PC it's linked to (pc.py).
+
+What the Mac adds to the PC app's window:
+* "Make on: This Mac | Your PC" beside the paste box, once a PC is linked: videos added with Your PC picked go to
+  the PC to be made start to finish (pc_jobs.py), and show in the Studio's list as they get on there, until their
+  clips land in this Mac's Library.
+* Your PC's local AI as one of the AIs (pc_ai.py, provider "pc" in ai.py).
+* The Mac's menus (the Studio's ⌘E, ⌘O, ⌘V and ⌘, are in them), a menu bar icon, notifications, and closing like
+  a Mac app: the window goes, ClipMonster carries on (clips still export, the PC's news still comes) until Quit.
+* A check for a newer ClipMonster for Mac (.dmg), instead of the PC's own updater.
+"""
 
 from __future__ import annotations
 
 import json
+import re
 import sys
-import threading
-import time
 import urllib.request
+from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QUrl
-from PySide6.QtGui import QAction, QDesktopServices, QKeySequence
-from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel, QMainWindow, QMenu, QMessageBox,
-                               QPushButton, QStackedWidget, QSystemTrayIcon, QVBoxLayout, QWidget)
+from PySide6.QtCore import QEvent, QObject, Qt, QUrl
+from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence, QShortcut
+from PySide6.QtWidgets import (QApplication, QButtonGroup, QFrame, QHBoxLayout, QLabel, QMenu, QMessageBox,
+                               QPushButton, QWidget)
 
-from .. import __version__
+from .. import __version__, ai
+from ..download import is_url, needs_expansion
 from ..gui import theme
-from ..gui.navigation import NavTabs
+from ..gui.main_window import MainWindow as StudioWindow
+from ..gui.main_window import _label
+from ..gui.tasks import Task
 from . import APP_NAME, common as c
 from . import hosts, prefs
-from .connect import ConnectPage
-from .dashboard import Dashboard
-from .inbox import InboxPage
-from .pages import AskPage, CategoriesPage, LogPage, PostedPage, RequestsPage, WeekPage
-from .proxy import MediaProxy
-from .session import Session, Tasks
-from .videos import VideosPage
+from .pc import PCLink
+from .pc_ai import PCAI
+from .pc_jobs import ACTIVE, FINISHED, PCJobs
 
-RELEASES = "https://github.com/iSlipperyX/ClipMostr/releases/latest"
-LATEST_API = "https://api.github.com/repos/iSlipperyX/ClipMostr/releases/latest"
+REPO = "iSlipperyX/ClipMostr"
+RELEASES = f"https://github.com/{REPO}/releases/latest"
+MENU_KEYS = ("Ctrl+E", "Ctrl+O", "Ctrl+V", "Ctrl+,")  # the Studio's own shortcuts that move into the menus
+MAC_SHORTCUTS = [
+    ("Space", "Play / pause"), ("← / →", "Seek 5 s (⇧: 1 s)"), ("J / L", "Previous / next clip"),
+    ("P", "Play selected clip"), ("I / O", "Set clip start / end at playhead"), ("N", "New clip at playhead"),
+    ("⌫", "Delete selected clip"), ("V", "Show the export view"), ("⌘E", "Export clips"),
+    ("⌘O", "Open video files"), ("⌘V", "Add links from the clipboard"), ("⌘1 – ⌘9", "Go to a page"),
+    ("⌘R", "Refresh your PC's pages"), ("⌘,", "Settings"), ("Scroll on timeline", "Zoom (⇧: pan)"),
+]
+PC_TIP = ("Your PC downloads the video (or gets it from this Mac), finds the clips and exports them with this Mac's "
+          "settings, on its graphics card and with its local AI. The clips come back to this Mac's Library.")
 
 
 def _version_key(v: str) -> tuple:
-    import re
-
     nums = [int(x) for x in re.findall(r"\d+", (v or "").split("+")[0].split("-")[0])[:3]]
     return tuple(nums + [0] * (3 - len(nums)))
 
 
-class MainWindow(QMainWindow):
+def dmg_name() -> str:
+    """The download for this Mac: Apple silicon or Intel."""
+    import platform
+
+    return "ClipMonster-mac-intel.dmg" if platform.machine() == "x86_64" else "ClipMonster-mac.dmg"
+
+
+class _QuitWatch(QObject):
+    """What macOS asks of the app as a whole. ⌘Q from the Dock, logging out or shutting down: ClipMonster really
+    quits (the window would otherwise only hide), after asking if it's still making something. A video dropped
+    on the Dock icon, or opened with ClipMonster in Finder: it's added, as if dropped on the window."""
+
+    def __init__(self, win):
+        super().__init__(win)
+        self.win = win
+
+    def eventFilter(self, obj, ev):  # noqa: N802
+        if ev.type() == QEvent.Quit and not self.win._quitting:
+            if not self.win._may_quit():
+                ev.ignore()
+                return True
+            self.win._quitting = True
+        elif ev.type() == QEvent.FileOpen:
+            path = ev.file() or ev.url().toLocalFile()
+            if path:
+                self.win.bring_up()
+                self.win.add_sources([path])
+            return True
+        return False
+
+
+class MacWindow(StudioWindow):
+    MAC = True
+
     def __init__(self, auto_connect: bool = True):
+        self._quitting = False
+        self._update_note = ""
+        self._pc_projects: dict = {}  # a PC video's key -> its row's Project
         super().__init__()
         self.setWindowTitle(APP_NAME)
-        self.setWindowIcon(theme.app_icon())
-        self.resize(1280, 820)
-        self.setMinimumSize(980, 640)
-        self.tasks = Tasks(parent=self)
-        self.session: Session | None = None
-        self.proxy: MediaProxy | None = None
-        self._review_seen: set[str] | None = None
-        self._paused = False
-        self._quitting = False
+        self.setMinimumSize(1080, 700)
+        self.banner.timer.stop()  # the PC app's own updater: a Mac checks for a newer .dmg instead
+        self.library.reopen.disconnect()
+        self.library.reopen.connect(lambda src: (self.add_sources([src], here=True), self.tabs.setCurrentIndex(0)))
 
-        self.stack = QStackedWidget()
-        self.setCentralWidget(self.stack)
-        self.connect_page = ConnectPage(self.tasks)
-        self.connect_page.connect_to.connect(self.open_host)
-        self.stack.addWidget(self.connect_page)
+        self.pc_ai = PCAI(self.link)
+        ai.use_remote(self.pc_ai)
+        self.pc_jobs = PCJobs(self.link, lambda: self.settings, parent=self)
+        self.pc_jobs.added.connect(self._pc_add_row)
+        self.pc_jobs.changed.connect(self._pc_changed)
+        self.pc_jobs.removed.connect(self._pc_removed)
+        self.pc_jobs.landed.connect(self._pc_landed)
+        self.pc_jobs.failed.connect(self._pc_failed)
+        for job in self.pc_jobs.ordered():
+            self._pc_add_row(job["key"])
 
-        main = QWidget()
-        main.setObjectName("page")
-        mh = QHBoxLayout(main)
-        mh.setContentsMargins(0, 0, 0, 0)
-        mh.setSpacing(0)
-        self.nav = NavTabs()
-        side = self.nav.sidebar
-        brand = QHBoxLayout()
-        logo = QLabel()
-        logo.setPixmap(theme.app_icon_pixmap(64).scaled(26, 26, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        name = QLabel("ClipMonster")
-        name.setObjectName("brand")
-        brand.addWidget(logo)
-        brand.addWidget(name)
-        brand.addStretch(1)
-        side.top.addLayout(brand)
-        self.footer = QLabel(f"Remote {__version__}")
-        self.footer.setObjectName("version")
-        self.footer.setWordWrap(True)
-        self.footer.setOpenExternalLinks(True)
-        side.bottom.addWidget(self.footer)
-        mh.addWidget(side)
-
-        right = QVBoxLayout()
-        right.setContentsMargins(0, 0, 0, 0)
-        right.setSpacing(0)
-        bar = QWidget()
-        bar.setObjectName("toolbar")
-        bh = QHBoxLayout(bar)
-        bh.setContentsMargins(20, 10, 16, 10)
-        bh.setSpacing(10)
-        self.dot = c.Dot()
-        self.pc_label = QLabel("")
-        self.pc_label.setStyleSheet("font-weight: 600;")
-        self.pc_state = QLabel("")
-        self.pc_state.setProperty("muted", True)
-        bh.addWidget(self.dot)
-        bh.addWidget(self.pc_label)
-        bh.addWidget(self.pc_state, 1)
-        self.pause_btn = QPushButton("❚❚  Pause")
-        self.pause_btn.setToolTip("Nothing new is clipped or made until you resume; posting carries on")
-        self.pause_btn.clicked.connect(self.toggle_pause)
-        self.refresh_btn = QPushButton("↻")
-        self.refresh_btn.setObjectName("icon")
-        self.refresh_btn.setToolTip("Refresh (⌘R)")
-        self.refresh_btn.clicked.connect(self.refresh)
-        self.pc_btn = QPushButton("PC")
-        pc_menu = QMenu(self)
-        pc_menu.addAction("Switch to another PC…", self.switch_pc)
-        pc_menu.addAction("Unlink this Mac…", self.unlink)
-        self.pc_btn.setMenu(pc_menu)
-        bh.addWidget(self.pause_btn)
-        bh.addWidget(self.refresh_btn)
-        bh.addWidget(self.pc_btn)
-        right.addWidget(bar)
-        hair = QFrame()
-        hair.setObjectName("hairline")
-        right.addWidget(hair)
-
-        self.offline = QFrame()
-        self.offline.setObjectName("banner")
-        oh = QHBoxLayout(self.offline)
-        oh.setContentsMargins(14, 8, 10, 8)
-        self.offline_text = c.WrapLabel("")
-        retry = QPushButton("Try again")
-        retry.clicked.connect(self.refresh)
-        other = QPushButton("Another PC…")
-        other.clicked.connect(self.switch_pc)
-        oh.addWidget(self.offline_text, 1)
-        oh.addWidget(retry)
-        oh.addWidget(other)
-        self.offline.hide()
-        wrap = QVBoxLayout()
-        wrap.setContentsMargins(16, 10, 16, 0)
-        wrap.addWidget(self.offline)
-        right.addLayout(wrap)
-        right.addWidget(self.nav, 1)
-
-        sb = QWidget()
-        sb.setObjectName("statusbar")
-        sh = QHBoxLayout(sb)
-        sh.setContentsMargins(20, 6, 20, 8)
-        self.notice_label = QLabel("")
-        self.notice_label.setTextFormat(Qt.RichText)
-        sh.addWidget(self.notice_label, 1)
-        right.addWidget(sb)
-        mh.addLayout(right, 1)
-        self.stack.addWidget(main)
-        self.main = main
-        self._notice_timer = QTimer(self)
-        self._notice_timer.setSingleShot(True)
-        self._notice_timer.timeout.connect(lambda: self.notice_label.setText(""))
-
-        # pages
-        self.dashboard = Dashboard()
-        self.videos = VideosPage(self)
-        self.ask = AskPage(self)
-        self.requests = RequestsPage(self)
-        self.posted = PostedPage(self)
-        self.inbox = InboxPage(self)
-        self.categories = CategoriesPage(self)
-        self.week = WeekPage(self)
-        self.log = LogPage(self)
-        self.nav.section("Overview")
-        self.i_dash = self.nav.addTab(self.dashboard, "Overview", "automation")
-        self.nav.section("Videos")
-        self.i_videos = self.nav.addTab(self.videos, "Waiting to post", "queue")
-        self.i_posted = self.nav.addTab(self.posted, "Posted", "performance")
-        self.i_inbox = self.nav.addTab(self.inbox, "Sports clips", "library")
-        self.nav.section("Ask")
-        self.i_ask = self.nav.addTab(self.ask, "New video", "creator")
-        self.i_requests = self.nav.addTab(self.requests, "Requests", "library")
-        self.nav.section("Automation")
-        self.i_categories = self.nav.addTab(self.categories, "Categories", "categories")
-        self.i_week = self.nav.addTab(self.week, "This week", "research")
-        self.i_log = self.nav.addTab(self.log, "Log", "studio")
-        self.nav.currentChanged.connect(self._page_changed)
-        self.dashboard.open_videos.connect(self._open_videos)
-        self.dashboard.open_page.connect(lambda name: self.nav.setCurrentIndex(
-            {"posted": self.i_posted, "requests": self.i_requests, "categories": self.i_categories}[name]))
-        self.videos.counts.connect(self._review_count)
-        self.inbox.counts.connect(self._inbox_count)
-
+        self.link.changed.connect(self._link_changed)
+        self.tabs.currentChanged.connect(self._page_changed)
         self._menus()
-        self._tray()
-        self._check_update()
+        self._quit_watch = _QuitWatch(self)
+        QApplication.instance().installEventFilter(self._quit_watch)
+        if prefs.load().get("make_on") == "pc":
+            self.on_pc.setChecked(True)
+        self._page_changed(self.tabs.currentIndex())
         last = hosts.last() if auto_connect else None
         if last is not None:
-            self.open_host(last)
-        else:
-            self.stack.setCurrentWidget(self.connect_page)
+            self.link.open_host(last)
+        self._link_changed()
 
-    # --- menus and the menu bar icon -------------------------------------------------------------------------
+    # ================================================================== building on the PC app's window
+
+    def _build_sidebar(self, sidebar) -> QWidget:
+        brand_row = QHBoxLayout()
+        brand_row.setSpacing(9)
+        logo = QLabel()
+        logo.setPixmap(theme.app_icon_pixmap(56).scaled(28, 28, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        brand_row.addWidget(logo)
+        brand_row.addWidget(_label(APP_NAME, "brand"))
+        brand_row.addStretch(1)
+        sidebar.top.addLayout(brand_row)
+        self.version_label = _label(f"Version {__version__}", "version")
+        self.version_label.setWordWrap(True)
+        self.version_label.setOpenExternalLinks(True)
+        sidebar.bottom.addWidget(self.version_label)
+        return sidebar
+
+    def _build_more(self, tabs) -> None:
+        """Your PC's pages under the Studio and Library, its bar over them, and Make on beside the paste box."""
+        self.link = PCLink(self)
+        self.link.add_pages(tabs)
+        self.link.bar.hide()
+        self.outer.addWidget(self.link.bar)
+
+        box = QWidget()
+        h = QHBoxLayout(box)
+        h.setContentsMargins(0, 0, 0, 0)
+        h.setSpacing(6)
+        lab = QLabel("Make on")
+        lab.setProperty("muted", True)
+        seg = QFrame()
+        seg.setObjectName("segbar")
+        sh = QHBoxLayout(seg)
+        sh.setContentsMargins(3, 3, 3, 3)
+        sh.setSpacing(2)
+        self.on_mac = QPushButton("This Mac")
+        self.on_pc = QPushButton("Your PC")
+        self.on_mac.setToolTip("This Mac downloads the video, finds the clips and exports them")
+        group = QButtonGroup(box)
+        for b in (self.on_mac, self.on_pc):
+            b.setObjectName("seg")
+            b.setCheckable(True)
+            group.addButton(b)
+            sh.addWidget(b)
+        self.on_mac.setChecked(True)
+        self.on_pc.toggled.connect(self._make_on_changed)
+        h.addWidget(lab)
+        h.addWidget(seg)
+        self.make_on = box
+        box.hide()
+        head = self.header.layout()
+        head.insertSpacing(3, 10)
+        head.insertWidget(4, box)
+
+    def _shortcuts(self) -> None:
+        super()._shortcuts()
+        self._studio_keys = []
+        for sc in self.findChildren(QShortcut):
+            if sc.key().toString() in MENU_KEYS:  # in the menus instead (a key in both would do neither)
+                sc.setEnabled(False)
+                sc.setParent(None)
+                sc.deleteLater()
+            else:
+                self._studio_keys.append(sc)
 
     def _menus(self) -> None:
         mb = self.menuBar()
-        pc = mb.addMenu("PC")
-        a = QAction("Refresh", self)
-        a.setShortcut(QKeySequence.Refresh if sys.platform != "darwin" else QKeySequence("Ctrl+R"))
-        a.triggered.connect(self.refresh)
-        pc.addAction(a)
-        self.pause_action = QAction("Pause automation", self)
-        self.pause_action.setShortcut(QKeySequence("Ctrl+Shift+P"))
-        self.pause_action.triggered.connect(self.toggle_pause)
-        pc.addAction(self.pause_action)
-        pc.addSeparator()
-        pc.addAction("Switch to another PC…", self.switch_pc)
-        pc.addAction("Unlink this Mac…", self.unlink)
-        go = mb.addMenu("Go")
-        for i, (label, key) in enumerate((("Overview", "1"), ("Waiting to post", "2"), ("Posted", "3"),
-                                          ("Sports clips", "4"), ("New video", "5"), ("Requests", "6"),
-                                          ("Categories", "7"), ("This week", "8"), ("Log", "9"))):
-            act = QAction(label, self)
-            act.setShortcut(QKeySequence(f"Ctrl+{key}"))
-            act.triggered.connect(lambda _=False, i=i: self._go(i))
-            go.addAction(act)
+
+        def act(menu, text, keys, fn, role=None):
+            a = QAction(text, self)
+            if keys:
+                a.setShortcut(QKeySequence(keys))
+            a.triggered.connect(lambda _=False: fn())
+            if role is not None:
+                a.setMenuRole(role)
+            menu.addAction(a)
+            return a
+
+        file = mb.addMenu("File")
+        act(file, "Open Videos…", "Ctrl+O", self._open_files)
+        act(file, "Add Links from the Clipboard", "Ctrl+V", self._paste)
+        file.addSeparator()
+        act(file, "Export Clips", "Ctrl+E", self.export_current)
+        act(file, "Export All Ready Videos", "Ctrl+Shift+E", self.export_all)
+        act(file, "Open Output Folder", "Ctrl+Shift+O", self._open_output)
+        file.addSeparator()
+        act(file, "Clean Up…", "", self._clean_up)
+        act(file, "Settings…", "Ctrl+,", self._open_settings, QAction.PreferencesRole)
+        act(file, f"About {APP_NAME}", "", self._show_help, QAction.AboutRole)
+        act(file, f"Quit {APP_NAME}", "Ctrl+Q", self.quit, QAction.QuitRole)
+
         view = mb.addMenu("View")
         look = view.addMenu("Appearance")
-        cur = prefs.load().get("appearance", "system")
+        group = QActionGroup(self)
         for key, label in (("system", "Match the Mac"), ("dark", "Dark"), ("light", "Light")):
-            act = QAction(label, self)
-            act.setCheckable(True)
-            act.setChecked(cur == key)
-            act.triggered.connect(lambda _=False, k=key: self._appearance(k))
-            look.addAction(act)
+            a = QAction(label, self)
+            a.setCheckable(True)
+            a.setChecked(self.settings.appearance == key)
+            a.triggered.connect(lambda _=False, k=key: self._appearance(k))
+            group.addAction(a)
+            look.addAction(a)
         self.notify_action = QAction("Notifications", self)
         self.notify_action.setCheckable(True)
         self.notify_action.setChecked(bool(prefs.load().get("notify", True)))
         self.notify_action.toggled.connect(lambda on: prefs.set("notify", on))
         view.addAction(self.notify_action)
-        help_ = mb.addMenu("Help")
-        help_.addAction("ClipMonster on GitHub", lambda: QDesktopServices.openUrl(QUrl(RELEASES)))
 
-    def _go(self, i: int) -> None:
-        if self.session is not None:
-            self.nav.setCurrentIndex(i)
+        go = mb.addMenu("Go")
+        pages = [("Studio", 0), ("Library", 1)] + [(self.tabs.tabText(i), i) for i in self.link.pc_rows]
+        for n, (label, index) in enumerate(pages):
+            act(go, label, f"Ctrl+{n + 1}" if n < 9 else "", lambda i=index: self._go(i))
+
+        pc = mb.addMenu("Your PC")
+        act(pc, "Link Your PC…", "", lambda: self._go(self.link.i_link))
+        act(pc, "Refresh", "Ctrl+R", self.link.refresh)
+        self.pause_action = act(pc, "Pause Automation", "Ctrl+Shift+P", self.link.toggle_pause)
+        pc.addSeparator()
+        act(pc, "Switch to Another PC…", "", self.link.switch_pc)
+        act(pc, "Unlink This Mac…", "", self.link.unlink)
+        self.pc_menu = pc
+
+        help_ = mb.addMenu("Help")
+        act(help_, "Keyboard Shortcuts", "", self._show_help)
+        act(help_, "Check for Updates…", "", lambda: self._check_mac_update(manual=True))
+        act(help_, "ClipMonster on GitHub", "", lambda: QDesktopServices.openUrl(QUrl(f"https://github.com/{REPO}")))
+
+    def _go(self, index: int) -> None:
+        if self.link.owns(index) and self.tabs.is_hidden(index):  # a PC page before a PC is linked
+            index = self.link.i_link
+        self.tabs.setCurrentIndex(index)
 
     def _appearance(self, key: str) -> None:
-        prefs.set("appearance", key)
-        QMessageBox.information(self, "Appearance", "The new look shows the next time ClipMonster Remote opens.")
+        self._apply_settings(self.settings.copy(appearance=key))
+        QMessageBox.information(self, "Appearance", f"The new look shows the next time {APP_NAME} opens.")
 
-    def _tray(self) -> None:
-        self.tray = None
-        if not QSystemTrayIcon.isSystemTrayAvailable():
-            return
-        self.tray = QSystemTrayIcon(theme.app_icon(), self)
-        menu = QMenu()
-        self.tray_status = menu.addAction("Not connected")
-        self.tray_status.setEnabled(False)
-        self.tray_review = menu.addAction("")
-        self.tray_review.triggered.connect(lambda: (self._raise(), self._open_videos("review")))
-        self.tray_review.setVisible(False)
-        self.tray_inbox = menu.addAction("")
-        self.tray_inbox.triggered.connect(lambda: (self._raise(), self.nav.setCurrentIndex(self.i_inbox)))
-        self.tray_inbox.setVisible(False)
-        menu.addSeparator()
-        self.tray_pause = menu.addAction("Pause automation", self.toggle_pause)
-        menu.addAction(f"Open {APP_NAME}", self._raise)
-        menu.addSeparator()
-        menu.addAction("Quit", self.quit)
-        self.tray.setContextMenu(menu)
-        self.tray.setToolTip(APP_NAME)
-        self.tray.activated.connect(lambda reason: self._raise() if reason == QSystemTrayIcon.Trigger
-                                    and sys.platform != "darwin" else None)
-        self.tray.show()
+    def _page_changed(self, index: int) -> None:
+        on_pc = self.link.owns(index)
+        self.header.setVisible(not on_pc)  # the paste box and presets go with the Studio and Library
+        self.link.page_changed(index)
+        for sc in getattr(self, "_studio_keys", []):  # Space, J, L… belong to the Studio's player
+            sc.setEnabled(index == 0)
 
-    def _raise(self) -> None:
+    # ================================================================== the window the PC's pages talk to
+
+    def say(self, text: str, good: bool = False, bad: bool = False) -> None:
+        colour = theme.GOOD if good else theme.BAD if bad else theme.MUTED
+        mark = "✓ " if good else "✗ " if bad else ""
+        if bad:
+            self._log(f"✗ {text}")
+        self._notice(f"<span style='color:{colour}'>{c.esc(mark + text)}</span>")
+
+    def bring_up(self) -> None:
         self.showNormal()
         self.raise_()
         self.activateWindow()
 
-    def notify(self, title: str, text: str) -> None:
-        if self.tray is not None and self.notify_action.isChecked():
-            self.tray.showMessage(title, text, theme.app_icon(), 8000)
-
-    # --- connecting ---------------------------------------------------------------------------------------------
-
-    def open_host(self, host: hosts.Host) -> None:
-        self.close_session()
-        if not host.token():
-            self.connect_page.say(f"This Mac's key for {c.esc(host.name)} is gone: link it again.")
-            hosts.forget(host.id)
-            self.stack.setCurrentWidget(self.connect_page)
-            return
-        self.session = Session(host, self.tasks, self)
-        self.session.status.connect(self._status)
-        self.session.videos.connect(self._videos)
-        self.session.deliveries.connect(self.inbox.show_deliveries)
-        self.session.event.connect(self._event)
-        self.session.connection.connect(self._connection)
-        self.proxy = MediaProxy(lambda: self.session.client if self.session is not None else None)
-        self.pc_label.setText(host.name)
-        self.pc_state.setText("Connecting…")
-        self.dot.set(theme.MUTED)
-        self.stack.setCurrentWidget(self.main)
-        self.nav.setCurrentIndex(self.i_dash)
-        self._review_seen = None
-        self.inbox.connected()
-        self.session.start()
-
-    def close_session(self) -> None:
-        self.videos.stop()
-        self.inbox.disconnect_()
-        if self.session is not None:
-            self.session.stop()
-            self.session.deleteLater()
-            self.session = None
-        if self.proxy is not None:
-            self.proxy.close()
-            self.proxy = None
-
-    def switch_pc(self) -> None:
-        self.close_session()
-        self.connect_page.say("")
-        self.stack.setCurrentWidget(self.connect_page)
-
-    def unlink(self) -> None:
-        s = self.session
-        if s is None:
-            return
-        ask = QMessageBox(QMessageBox.Warning, "Unlink this Mac?",
-                          f"This Mac won't be able to use ClipMonster on {s.host.name} until you link it again with a "
-                          "new code.", QMessageBox.Cancel, self)
-        go = ask.addButton("Unlink", QMessageBox.DestructiveRole)
-        ask.exec()
-        if ask.clickedButton() is not go:
-            return
-        host = s.host
-
-        def done(*_a):
-            hosts.forget(host.id)
-            self.switch_pc()
-            self.connect_page.say(f"Unlinked from {c.esc(host.name)}.", theme.MUTED)
-
-        s.call(lambda cl: cl.post("/api/unlink"), done, done)
-
-    def _connection(self, state: str, text: str) -> None:
-        name = self.session.host.name if self.session else "the PC"
-        if state == "online":
-            self.offline.hide()
-            self.dot.set(theme.WARN if self._paused else theme.GOOD)
-            return
-        if state in ("unlinked", "wrong_pc"):
-            host = self.session.host if self.session else None
-            self.close_session()
-            if host is not None and state == "unlinked":
-                hosts.forget(host.id)
-            self.connect_page.say(c.esc(text))
-            self.stack.setCurrentWidget(self.connect_page)
-            return
-        self.dot.set(theme.BAD)
-        self.pc_state.setText("Not reachable")
-        self.offline_text.setText(f"<b>Can't reach {c.esc(name)}.</b> {c.esc(text)} Trying again by itself.")
-        self.offline.show()
-        if self.tray is not None:
-            self.tray_status.setText(f"{name}: not reachable")
-
-    # --- what the PC says ----------------------------------------------------------------------------------------
-
-    def _status(self, st: dict) -> None:
-        auto = st.get("automation") or {}
-        self._paused = bool(auto.get("paused"))
+    def pc_status(self, st: dict) -> None:
         host = st.get("host") or {}
-        name = host.get("name") or (self.session.host.name if self.session else "")
-        self.pc_label.setText(name)
-        job = st.get("job")
-        if self._paused:
-            text = "Automation paused · posting carries on"
-        elif job:
-            text = ("Making " if job.get("making") else "Clipping ") + f"“{c.trim(job.get('title'), 60)}”"
-        else:
-            text = c.trim(auto.get("state") or "Running", 80)
-        self.pc_state.setText(text)
-        self.dot.set(theme.WARN if self._paused else theme.GOOD)
-        self.pause_btn.setText("▶  Resume" if self._paused else "❚❚  Pause")
-        self.pause_action.setText("Resume automation" if self._paused else "Pause automation")
-        self.dashboard.show_status(st)
-        remote_v, mine = host.get("version", ""), __version__
-        note = f"Remote {mine}"
-        if remote_v and _version_key(remote_v)[:2] != _version_key(mine)[:2]:
-            note += f"<br><span style='color:{theme.WARN}'>The PC runs {c.esc(remote_v)}: update the older one</span>"
-        if getattr(self, "_update_note", ""):
+        self.pause_action.setText("Resume Automation" if self.link._paused else "Pause Automation")
+        self._footer(str(host.get("version") or ""))
+        self._update_make_on()
+
+    def _footer(self, pc_version: str = "") -> None:
+        note = f"Version {__version__}"
+        if pc_version and _version_key(pc_version)[:2] != _version_key(__version__)[:2]:
+            note += (f"<br><span style='color:{theme.WARN}'>Your PC runs {c.esc(pc_version)}: update the older "
+                     "one</span>")
+        if self._update_note:
             note += "<br>" + self._update_note
-        self.footer.setText(note)
-        if self.tray is not None:
-            self.tray_status.setText(f"{name}: {text}")
-            self.tray_pause.setText("Resume automation" if self._paused else "Pause automation")
+        self.version_label.setText(note)
 
-    def _videos(self, items: list) -> None:
-        self.videos.show_videos(items)
-        review = {i["id"]: i for i in items if i.get("state") == "review"}
-        if self._review_seen is not None:
-            new = [review[k] for k in review if k not in self._review_seen]
-            if len(new) == 1:
-                self.notify("A video waits for your OK", c.trim(new[0].get("headline"), 120))
-            elif new:
-                self.notify(f"{len(new)} videos wait for your OK", "Open ClipMonster Remote to watch them.")
-        self._review_seen = set(review)
+    def _link_changed(self) -> None:
+        self._update_make_on()
+        if not self.link.linked:
+            self._footer()
 
-    def _review_count(self, n: int) -> None:
-        self.nav.set_badge(self.i_videos, n)
-        if self.tray is not None:
-            self.tray_review.setText(f"⏸ {c.plural(n, 'video waits', 'videos wait')} for your OK")
-            self.tray_review.setVisible(bool(n))
-        try:
-            from PySide6.QtGui import QGuiApplication
+    # ================================================================== Make on: This Mac | Your PC
 
-            if hasattr(QGuiApplication, "setBadgeNumber"):
-                QGuiApplication.setBadgeNumber(n)  # the Dock icon's badge (Qt 6.5+)
-        except Exception:  # noqa: BLE001
-            pass
+    def _on_pc(self) -> bool:
+        return self.on_pc.isChecked() and self.link.linked
 
-    def _inbox_count(self, n: int) -> None:
-        self.nav.set_badge(self.i_inbox, n)
-        if self.tray is not None:
-            self.tray_inbox.setText(f"🏆 {c.plural(n, 'new sports clip')}")
-            self.tray_inbox.setVisible(bool(n))
+    def _make_on_changed(self, on_pc: bool) -> None:
+        prefs.set("make_on", "pc" if on_pc else "mac")
+        self._update_make_on()
 
-    def _event(self, e: dict) -> None:
-        self.dashboard.add_event(e)
-        if e.get("old"):
+    def _update_make_on(self) -> None:
+        linked = self.link.linked
+        self.make_on.setVisible(linked)
+        why = self.pc_jobs.can_send() if linked else ""
+        self.on_pc.setToolTip(PC_TIP + (f"\n\nNow: {why}" if why else ""))
+        on_pc = self._on_pc()
+        self.input.setPlaceholderText(
+            "Paste YouTube links, playlists or channels, or drop videos: your PC makes them" if on_pc else
+            "Paste YouTube links, playlists or channels (several at once is fine) — or drop video files anywhere")
+
+    def add_sources(self, sources: list[str], here: bool = False) -> None:
+        """Videos to make: on this Mac (the Studio, as on the PC), or with Your PC picked, on the PC."""
+        if here or not self._on_pc():
+            return super().add_sources(sources)
+        sources = [s.strip().strip('"') for s in sources if s.strip()]
+        sources = [s for s in sources if is_url(s) or Path(s).is_file()]
+        if not sources:
             return
-        kind = e.get("kind")
-        if kind == "delivery":  # the inbox says it (once it has the clip), not the news
-            if self.session is not None:
-                self.session.refresh_deliveries()
+        why = self.pc_jobs.can_send()
+        if why:
+            which = "this video" if len(sources) == 1 else "these videos"
+            box = QMessageBox(QMessageBox.Question, APP_NAME, f"{why}\n\nMake {which} on this Mac instead?",
+                              QMessageBox.Cancel, self)
+            mac = box.addButton("Make on this Mac", QMessageBox.AcceptRole)
+            box.setDefaultButton(mac)
+            box.exec()
+            if box.clickedButton() is mac:
+                super().add_sources(sources)
             return
-        if e.get("alert") or kind in ("error", "problem", "login_needed"):
-            self.notify("ClipMonster needs you", e.get("text") or "")
-        elif kind in ("posted", "milestone", "hot"):
-            self.notify({"posted": "Posted", "milestone": "Milestone", "hot": "Taking off"}[kind], e.get("text") or "")
-        if self.session is not None:
-            self.session.refresh_videos()
+        expand = [s for s in sources if needs_expansion(s)]
+        direct = [s for s in sources if s not in expand]
+        if direct:
+            self._send_to_pc(direct)
+        if expand:
+            from ..download import expand_sources
 
-    # --- doing things ---------------------------------------------------------------------------------------------
+            s = self.settings.copy()
+            task = Task("Reading playlists", lambda t: expand_sources(expand, s.playlist_limit or None,
+                                                                      s.cookies_browser or None, t.log.emit))
+            task.succeeded.connect(self._send_to_pc)
+            self._wire(task)
+            self.tasks.add(task)
 
-    def refresh(self) -> None:
-        if self.session is None:
+    def _send_to_pc(self, sources: list[str]) -> None:
+        keys = self.pc_jobs.send(list(sources))
+        if keys:
+            self._notice(f"Sent {c.plural(len(keys), 'video')} to {c.esc(self.link.name or 'your PC')} to make. "
+                         "The clips come back to your Library.")
+            self.queue.setCurrentRow(self.projects.index(self._pc_projects[keys[0]]))
+
+    # ================================================================== the PC's videos in the Studio's list
+
+    def _row_job(self, key: str) -> dict:
+        job = dict(self.pc_jobs.get(key) or {})
+        note = self.pc_jobs.waiting_for(job)
+        if note:
+            job["note"] = note
+        return job
+
+    def _pc_add_row(self, key: str) -> None:
+        from ..engine import Project
+
+        job = self.pc_jobs.get(key)
+        if job is None or key in self._pc_projects:
             return
-        self.session.refresh_status()
-        self.session.refresh_videos()
-        page = self.nav.currentWidget()
-        if hasattr(page, "load"):
-            page.load()
+        p = Project(job["source"])
+        p.status = "remote"
+        p.remote = self._row_job(key)  # type: ignore[attr-defined]
+        p.pc_key = key  # type: ignore[attr-defined]
+        self._pc_projects[key] = p
+        self._list_project(p)
 
-    def toggle_pause(self) -> None:
-        s = self.session
-        if s is None:
+    def _pc_changed(self, key: str) -> None:
+        p = self._pc_projects.get(key)
+        if p is None:
             return
-        want = not self._paused
-        self.notice("Pausing…" if want else "Resuming…")
-        s.call(lambda cl: cl.post("/api/automation", {"paused": want}),
-               lambda out: (self.notice(out.get("message", ""), good=True), s.refresh_status()),
-               lambda e: self.notice(getattr(e, "message", str(e)), bad=True))
+        p.remote = self._row_job(key)  # type: ignore[attr-defined]
+        self._refresh_item(p)
+        row = self.queue.currentRow()
+        if 0 <= row < len(self.projects) and self.projects[row] is p:
+            self._show_pc_video(p)
 
-    def notice(self, text: str, good: bool = False, bad: bool = False) -> None:
-        colour = theme.GOOD if good else theme.BAD if bad else theme.MUTED
-        mark = "✓ " if good else "✗ " if bad else ""
-        self.notice_label.setText(f"<span style='color:{colour}'>{c.esc(mark + text)}</span>")
-        self._notice_timer.start(12000 if bad else 8000)
+    def _pc_removed(self, key: str) -> None:
+        p = self._pc_projects.pop(key, None)
+        if p is not None and p in self.projects:
+            StudioWindow._remove(self, p)
 
-    def _open_videos(self, filt: str) -> None:
-        self.nav.setCurrentIndex(self.i_videos)
-        self.videos.set_filter(filt)
+    def _pc_landed(self, key: str) -> None:
+        job = self.pc_jobs.get(key) or {}
+        self.library.refresh()
+        n, title = int(job.get("clips") or 0), job.get("title") or job.get("name") or "your video"
+        url = QUrl.fromLocalFile(job.get("here") or str(self.settings.output_path)).toString()
+        self._log(f"✓ {title}: {n} clips made on your PC are in your Library")
+        self._notice(f"✓ {c.plural(n, 'clip')} from “{c.esc(c.trim(title, 50))}” came over from your PC — "
+                     f"<a style='color:{theme.ACCENT_2}' href='{url}'>open folder</a>")
+        if not self.isActiveWindow():
+            self.link.notify("Clips ready", f"{c.plural(n, 'clip')} from “{c.trim(title, 80)}”, made on your PC")
 
-    def _page_changed(self, i: int) -> None:
-        page = self.nav.widget(i)
-        if page is not self.videos:
-            self.videos.stop()
-        if page is not self.inbox:
-            self.inbox.stop()
-        if self.session is not None and hasattr(page, "load"):
-            page.load()
+    def _pc_failed(self, key: str) -> None:
+        job = self.pc_jobs.get(key) or {}
+        title = job.get("title") or job.get("name") or "a video"
+        self._warn(f"Your PC couldn't make “{c.trim(title, 50)}”: {job.get('error') or 'it stopped'}")
 
-    def _check_update(self) -> None:
-        self._update_note = ""
+    @staticmethod
+    def _pc_words(job: dict) -> str:
+        """What a PC video's row says when it's opened."""
+        st = job.get("status")
+        where = job.get("host_name") or "your PC"
+        if job.get("note"):
+            return job["note"]
+        if st == "sending":
+            return f"Going to {where}"
+        if st == "queued":
+            n = int(job.get("waiting") or 0)
+            return f"Waiting its turn on {where}" + (f" ({n} ahead)" if n else "")
+        if st == "working":
+            return f"Being made on {where} · {job.get('stage') or 'starting'}"
+        if st == "fetching":
+            return f"Made on {where}: its clips are coming over"
+        if st == "done":
+            return (f"Made on {where}: {c.plural(int(job.get('clips') or 0), 'clip')}, in your Library "
+                    "(right-click for its folder)")
+        if st == "failed":
+            return f"{where} couldn't make it: {job.get('error') or 'it stopped'}"
+        return "Stopped"
+
+    def _show_pc_video(self, p) -> None:
+        job = p.remote
+        name = job.get("title") or job.get("name") or p.source
+        self.video_title.setText(self.video_title.fontMetrics().elidedText(name, Qt.ElideRight, 520))
+        self.video_meta.setText("   " + self._pc_words(job))
+        self.video_meta.setToolTip(job.get("error") or "")
+
+    def load_project(self, p) -> None:
+        if p is not None and getattr(p, "remote", None) is not None:
+            super().load_project(None)  # nothing to edit here: it's made on the PC
+            self._show_pc_video(p)
+            return
+        super().load_project(p)
+
+    def _queue_menu(self, pos) -> None:
+        item = self.queue.itemAt(pos)
+        if not item:
+            return
+        p = self.projects[self.queue.row(item)]
+        key = getattr(p, "pc_key", "")
+        job = self.pc_jobs.get(key) if key else None
+        if job is None:
+            return super()._queue_menu(pos)
+        st = job["status"]
+        menu = QMenu(self)
+        if st == "done" and job.get("here"):
+            menu.addAction("Open clips folder", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(job["here"])))
+            menu.addAction("Show in Library", lambda: self.tabs.setCurrentWidget(self.library))
+        if st in ("sending", "queued", "working"):
+            menu.addAction("Stop", lambda: self.pc_jobs.stop(key))
+        if st in ("failed", "cancelled"):
+            again = menu.addAction("Send to your PC again", lambda: self.pc_jobs.send_again(key))
+            again.setEnabled(not self.pc_jobs.can_send())
+        source = job["source"]
+        if st in FINISHED and (is_url(source) or Path(source).is_file()):
+            menu.addAction("Open in the Studio on this Mac" if st == "done" else "Make it on this Mac instead",
+                           lambda: self.add_sources([source], here=True))
+        if is_url(source):
+            menu.addAction("Open on YouTube", lambda: QDesktopServices.openUrl(QUrl(source)))
+        elif Path(source).is_file():
+            from ..gui.library import reveal
+
+            menu.addAction("Show source video", lambda: reveal(Path(source)))
+        menu.addSeparator()
+        menu.addAction("Remove", lambda: self._remove(p))
+        menu.exec(self.queue.mapToGlobal(pos))
+
+    def _remove(self, p) -> None:
+        key = getattr(p, "pc_key", "")
+        job = self.pc_jobs.get(key) if key else None
+        if job is None:
+            return super()._remove(p)
+        if job["status"] in ("sending", "queued", "working"):
+            box = QMessageBox(QMessageBox.Question, APP_NAME, "Stop making this video on your PC and take it off "
+                              "the list?", QMessageBox.Cancel, self)
+            stop = box.addButton("Stop and remove", QMessageBox.DestructiveRole)
+            box.exec()
+            if box.clickedButton() is not stop:
+                return
+        self.pc_jobs.remove(key)  # (its row goes with removed)
+
+    def _clear_finished(self) -> None:
+        for key in list(self._pc_projects):
+            job = self.pc_jobs.get(key)
+            if job is not None and job["status"] in FINISHED:
+                self.pc_jobs.remove(key)
+        super()._clear_finished()
+
+    def _project_ready(self, p) -> None:
+        super()._project_ready(p)
+        if p.status == "done" and not self.isActiveWindow():
+            self.link.notify("Clips ready", f"{c.plural(len(p.clips), 'clip')} from “{c.trim(p.name, 80)}”")
+
+    # ================================================================== first start, help and updates
+
+    def _startup_updates(self) -> None:
+        if not self.settings.setup_done:
+            self._open_setup()
+        if prefs.load().get("check_updates", True):
+            self._check_mac_update(manual=False)
+
+    def _open_setup(self) -> None:
+        from .welcome import Welcome
+
+        dlg = Welcome(self.settings, self.link, self)
+        if dlg.exec():
+            self._apply_settings(dlg.result_settings)
+            if dlg.link_pc:
+                self._go(self.link.i_link)
+        else:
+            self._apply_settings(self.settings.copy(setup_done=True))
+
+    def _show_help(self) -> None:
+        from ..settings import app_dir
+
+        rows = "".join(f"<tr><td style='padding:3px 14px 3px 0'><b>{k}</b></td><td>{v}</td></tr>"
+                       for k, v in MAC_SHORTCUTS)
+        box = QMessageBox(self)
+        box.setWindowTitle(f"About {APP_NAME}")
+        box.setText(f"""
+            <h3>{APP_NAME} {__version__} for Mac</h3>
+            <p>Paste links or drop videos, let the analysis find the best moments, fine-tune them on the
+            timeline, then export clips with captions in any format. Link your PC to use its AI and graphics
+            card, and to run its automation from here.</p>
+            <p><b>Clip colours:</b> purple = signals, cyan = AI, green = edited by you.</p>
+            <table>{rows}</table>
+            <p style='color:{theme.MUTED}'>Settings, presets and your session live in {app_dir()}</p>""")
+        check = box.addButton("Check for Updates", QMessageBox.ActionRole)
+        box.addButton(QMessageBox.Close)
+        box.exec()
+        if box.clickedButton() is check:
+            self._check_mac_update(manual=True)
+
+    def _check_updates_now(self) -> None:
+        self._check_mac_update(manual=True)
+
+    def _check_mac_update(self, manual: bool = False) -> None:
+        """A newer ClipMonster for Mac on GitHub (its .dmg for this Mac): a link under the version, or a box."""
+        want = dmg_name()
 
         def work():
-            try:
-                req = urllib.request.Request(LATEST_API, headers={"User-Agent": "ClipMonsterRemote",
-                                                                  "Accept": "application/vnd.github+json"})
-                with urllib.request.urlopen(req, timeout=10) as r:
-                    data = json.load(r)
-            except Exception:  # noqa: BLE001 - offline: no note
-                return None
+            req = urllib.request.Request(f"https://api.github.com/repos/{REPO}/releases/latest",
+                                         headers={"User-Agent": "ClipMonster-Mac", "Accept": "application/vnd.github+json"})
+            with urllib.request.urlopen(req, timeout=10) as r:
+                data = json.load(r)
             tag = str(data.get("tag_name") or "").lstrip("v")
-            has_mac = any("mac" in str(a.get("name", "")).lower() for a in data.get("assets") or [])
-            return tag if has_mac and _version_key(tag) > _version_key(__version__) else None
+            url = next((a.get("browser_download_url") for a in data.get("assets") or [] if a.get("name") == want), "")
+            return tag, url
 
-        def ok(tag):
-            if tag:
-                self._update_note = (f"<a href='{RELEASES}' style='color:{theme.ACCENT_2}'>Remote {c.esc(tag)} is out: "
+        def ok(found):
+            tag, url = found
+            if url and _version_key(tag) > _version_key(__version__):
+                self._update_note = (f"<a href='{url}' style='color:{theme.ACCENT_2}'>{APP_NAME} {c.esc(tag)} is out: "
                                      "download</a>")
-                self.footer.setText(f"Remote {__version__}<br>{self._update_note}")
+                self._footer(str(((self.link.status or {}).get("host") or {}).get("version") or ""))
+                if manual:
+                    box = QMessageBox(QMessageBox.Information, APP_NAME,
+                                      f"{APP_NAME} {tag} is out (you have {__version__}). Download it, open it and "
+                                      f"drag {APP_NAME} to Applications to replace this one: your settings, linked "
+                                      "PC and clips stay.", QMessageBox.Close, self)
+                    get = box.addButton("Download", QMessageBox.AcceptRole)
+                    box.exec()
+                    if box.clickedButton() is get:
+                        QDesktopServices.openUrl(QUrl(url))
+            elif manual:
+                QMessageBox.information(self, APP_NAME, f"You have the newest {APP_NAME} for Mac ({__version__}).")
 
-        if prefs.load().get("check_updates", True):
-            self.tasks.run(work, ok, lambda e: None)
+        def fail(exc):
+            if manual:
+                QMessageBox.warning(self, APP_NAME, f"Couldn't check for updates ({exc}).")
 
-    # --- closing ---------------------------------------------------------------------------------------------------
+        self.link.tasks.run(work, ok, fail)
+
+    # ================================================================== closing
+
+    def _busy(self) -> str:
+        """What quitting would stop, in words ("" when nothing)."""
+        if self.tasks.current is not None or self.tasks.pending:
+            return "ClipMonster is still making clips on this Mac."
+        if any(j["status"] == "sending" for j in self.pc_jobs.active()):
+            return "A video is still going to your PC."
+        return ""
+
+    def _may_quit(self) -> bool:
+        why = self._busy()
+        if not why:
+            return True
+        box = QMessageBox(QMessageBox.Question, f"Quit {APP_NAME}?", f"{why} Quitting stops it.",
+                          QMessageBox.Cancel, self)
+        go = box.addButton("Quit", QMessageBox.DestructiveRole)
+        box.exec()
+        return box.clickedButton() is go
 
     def quit(self) -> None:
+        if not self._quitting and not self._may_quit():
+            return
         self._quitting = True
         self.close()
 
-    def closeEvent(self, e):  # noqa: N802
-        if self.tray is not None and not self._quitting and sys.platform == "darwin" and self.session is not None:
-            # like other Mac apps with a menu bar icon: closing the window keeps the notifications coming
+    def shutdown(self) -> None:
+        if getattr(self, "_shut", False):
+            return
+        self._shut = True
+        self.pc_jobs.shutdown()
+        self.link.shutdown()
+        if ai.remote() is self.pc_ai:
+            ai.use_remote(None)
+        QApplication.instance().removeEventFilter(self._quit_watch)
+
+    def closeEvent(self, e) -> None:  # noqa: N802
+        if sys.platform == "darwin" and not self._quitting:
+            # like other Mac apps: the window goes, ClipMonster carries on (clips still export, the PC's news still
+            # comes) until Quit; the Dock icon or the menu bar icon brings it back
             self.hide()
             e.ignore()
             return
-        self.close_session()
-        self.tasks.shutdown()
-        if self.tray is not None:
-            self.tray.hide()
+        self.shutdown()
         super().closeEvent(e)
         QApplication.instance().quit()
+
+
+MainWindow = MacWindow  # (the name the Mac app's tests and self-check know it by)

@@ -1,4 +1,4 @@
-"""ClipMonster Remote's Sports clips inbox (ytclip/mac/inbox.py), against a real host server: clips a sports category
+"""ClipMonster for Mac's Sports clips inbox (ytclip/mac/inbox.py), against a real host server: clips a sports category
 sends show up with a notification, save to the Mac by themselves, and the PC hears which Mac has which."""
 
 import urllib.request
@@ -35,18 +35,21 @@ def sent(world, tmp_path, monkeypatch):  # noqa: F811
 
 @pytest.fixture
 def mac(app, world, sent, tmp_path, monkeypatch):  # noqa: F811
-    from ytclip.mac.window import MainWindow
+    """make() opens ClipMonster for Mac and gives its link to the PC (pc.PCLink), which holds the inbox."""
+    from ytclip.mac.window import MacWindow
 
     prefs.set("inbox_folder", str(tmp_path / "Movies"))
     linked_host(world)
 
     def make(auto=True):
         prefs.set("inbox_auto_save", auto)
-        win = MainWindow()
-        win.notify_calls = []
-        win.notify = lambda title, text: win.notify_calls.append((title, text))
+        win = MacWindow()
+        link = win.link
+        link.win_ = win
+        link.notify_calls = []
+        link.notify = lambda title, text: link.notify_calls.append((title, text))
         made.append(win)
-        return win
+        return link
 
     made = []
     yield make
@@ -93,7 +96,7 @@ def test_a_new_clip_while_connected_rings_and_waits(app, world, sent, mac):  # n
     assert win.nav.sidebar.item_for(win.i_inbox).data(_badge()) == 1
     assert not deliveries.for_device(device_id(win))[0]["got"]  # not saved: auto-save is off
     assert win.inbox.chip_for(win.inbox.items[0])[0] == "New"
-    win.show()
+    win.win_.show()
     win.nav.setCurrentIndex(win.i_inbox)  # seeing it is enough to make it not new
     assert wait(app, lambda: deliveries.for_device(device_id(win))[0]["seen"])
     assert wait(app, lambda: win.nav.sidebar.item_for(win.i_inbox).data(_badge()) == 0)

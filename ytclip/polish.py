@@ -236,7 +236,7 @@ def ask(title: str, clips: list[Clip], words: list[Word], src: Path, s,
         raise PolishError(str(exc)) from exc
     result = parse_data(answer.data, len(clips))
     result.model = answer.model
-    if answer.provider == "local":  # a local text model never saw the frames: its guesses about them are noise
+    if answer.provider in ai.LOCALS:  # a local text model never saw the frames: its guesses about them are noise
         result.burned_in_subtitles = False
         for cp in result.clips.values():
             cp.subject_x = None

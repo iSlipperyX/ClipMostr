@@ -42,6 +42,11 @@ def mac_home(tmp_path, monkeypatch):
     monkeypatch.setenv("CLIPMONSTER_REMOTE_HOME", str(tmp_path / "mac"))
     monkeypatch.setattr(protocol, "ITERATIONS", 1000)  # fast tests; the real count is checked below
     monkeypatch.setattr(protocol, "MIN_ITERATIONS", 1000)
+    # ClipMonster for Mac opened in a test: no welcome window (it would wait for an answer) or update check
+    from ytclip.mac import prefs
+
+    prefs.set("check_updates", False)
+    Settings(setup_done=True).save()
 
 
 @pytest.fixture

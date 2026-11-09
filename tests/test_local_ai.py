@@ -97,6 +97,9 @@ def test_settings_offer_every_model_with_its_tier_and_licence():
     from ytclip import settings
 
     assert settings.LOCAL_MODELS == models.CHOICES  # the Settings list is written out; this keeps it the same
+    assert settings.MAC_LOCAL_MODELS == models.MAC_CHOICES  # (and ClipMonster for Mac's, in a Mac's words)
+    assert [k for k, _ in models.MAC_CHOICES] == [k for k, _ in models.CHOICES]
+    assert dict(models.MAC_CHOICES)["qwen2.5-32b"].endswith("36 GB+ Mac")
     labels = dict(models.CHOICES)
     assert labels["qwen2.5-7b"] == "Qwen2.5 7B · Standard · 4.7 GB · 8 GB+ graphics card"
     assert labels["mistral-nemo-12b"] == "Mistral Nemo 12B · High-capacity · 7.5 GB · 12 GB+ graphics card"

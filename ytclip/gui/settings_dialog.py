@@ -19,6 +19,9 @@ from .sign_in_dialog import SignInDialog
 ANTHROPIC_KEY_URL = "https://console.anthropic.com/settings/keys"
 GROUPS = ("General", "Download", "Clip finding", "Transcription", "Speed", "AI", "Export", "Captions", "Editing", "Creator", "Layout",
           "Research", "Picking", "Automation", "Posting", "Telegram", "Mac app", "Updates")
+# ClipMonster for Mac makes clips itself; automation, posting and the rest stay on the PC it links to.
+MAC_GROUPS = ("General", "Download", "Clip finding", "Transcription", "Speed", "AI", "Export", "Captions", "Editing",
+              "Layout")
 
 
 
@@ -38,9 +41,11 @@ def _scrolling(page: QWidget) -> QScrollArea:
     return scroll
 
 class SettingsDialog(QDialog):
-    def __init__(self, settings: Settings, parent=None, tab: str = ""):
+    def __init__(self, settings: Settings, parent=None, tab: str = "", groups: tuple = GROUPS):
         super().__init__(parent)
         self.setWindowTitle("Settings")
+        self.groups = groups
+        mac = groups == MAC_GROUPS
         self.resize(880, 640)
         self.result_settings = settings.copy()
         self._editors: dict[str, forms.Editor] = {}
@@ -73,7 +78,7 @@ class SettingsDialog(QDialog):
         tabs.currentChanged.connect(lambda i: heading.setText(tabs.tabText(i)))
         # With categories, each category has its own channels and searches (Categories tab).
         per_category = {"pick_channels", "pick_searches", "pick_finds"} if categories.load(settings) else set()
-        for group in GROUPS:
+        for group in groups:
             if group == "Posting":
                 page, self._posting_editors = forms.build_form(posting_config.SCHEMA, self.posting_settings,
                                                                self._posting_changed)
@@ -90,10 +95,14 @@ class SettingsDialog(QDialog):
             page, editors = forms.build_form(fields, self.result_settings, self._changed)
             self._editors |= editors
             if group == "AI":
+                here = "this Mac" if mac else "this PC"
                 note = QLabel("The AI clip finder gives the video's transcript to the AI you choose and asks it "
-                              "to pick self-contained moments. Local AI runs a model on this PC: free, private, "
-                              "no key (the model that suits this PC downloads once, 2 to 20 GB; Test keys says "
-                              "how it would run here). Claude and Gemini run online and "
+                              f"to pick self-contained moments. Local AI runs a model on {here}: free, private, "
+                              f"no key (the model that suits {here} downloads once, 2 to 20 GB; Test keys says "
+                              "how it would run here). "
+                              + ("Your PC's local AI asks the model on the PC this Mac is linked to instead, so the "
+                                 "Mac needn't hold one; your keys stay in the Mac's Keychain. " if mac else "")
+                              + "Claude and Gemini run online and "
                               "need a key; AI polish sends them each clip's words and one frame, and gets back "
                               "hooks, caption fixes and where the speaker is. "
                               f"Get a Claude key at <a href='{ANTHROPIC_KEY_URL}' style='color:{theme.ACCENT_2}'>"
@@ -115,7 +124,7 @@ class SettingsDialog(QDialog):
                 row.addWidget(test)
                 row.addWidget(self._key_result, 1)
                 page.layout().addRow("", row)
-            if group == "Download":
+            if group == "Download" and not mac:  # (a Mac uses the browser it's signed in to YouTube in)
                 row = QHBoxLayout()
                 sign_in = QPushButton("🔑  Sign in to YouTube…")
                 sign_in.setToolTip("Opens Firefox, just for ClipMonster, to sign in to YouTube once. Downloads then "
@@ -127,7 +136,10 @@ class SettingsDialog(QDialog):
             if group == "Speed":
                 from .. import whisper_cpp
 
-                note = QLabel(f"This PC has {os.cpu_count() or '?'} CPU threads. Quiet and Balanced let automation "
+                note = QLabel(f"This Mac has {os.cpu_count() or '?'} CPU cores. Quiet keeps it free for other things; "
+                              "Balanced and Full power use its graphics (Metal) for Whisper too, which is quicker and "
+                              "cooler on Apple silicon." if mac else
+                              f"This PC has {os.cpu_count() or '?'} CPU threads. Quiet and Balanced let automation "
                               "step aside for whatever else you're doing; Full power doesn't. The Automation log "
                               "says how long each step of each video took, so you can see the difference.")
                 note.setWordWrap(True)
@@ -135,7 +147,7 @@ class SettingsDialog(QDialog):
                 page.layout().insertRow(0, note)
                 why = whisper_cpp.unavailable()
                 rest = "" if why else whisper_cpp.rest_note()
-                self._gpu_state = forms.WrapLabel("Graphics card: " + (
+                self._gpu_state = forms.WrapLabel(("Graphics: " if mac else "Graphics card: ") + (
                     f"not used: {why}" if why else f"{rest}. Whisper uses the CPU until then." if rest else
                     "ready (it's tried on the next video)"))  # on a row of its own, so a long reason wraps in full
                 page.layout().addRow("", self._gpu_state)
@@ -148,7 +160,7 @@ class SettingsDialog(QDialog):
                     row.addWidget(again)
                     row.addStretch(1)
                     page.layout().addRow("", row)
-            if group == "General":
+            if group == "General" and not mac:  # (the PC's setup: TikTok accounts, categories, posting)
                 row = QHBoxLayout()
                 again = QPushButton("Set up again…")
                 again.setToolTip("The first-run setup: tools, keys, YouTube sign-in, TikTok accounts, a category, the "
@@ -228,10 +240,12 @@ class SettingsDialog(QDialog):
             if group == "Mac app":
                 from .mac_page import MacLink
 
-                note = QLabel("ClipMonster Remote runs ClipMonster from your Mac while this PC does the work: see what "
-                              "automation is doing, watch the videos waiting to post and OK, post or delete them, ask "
-                              "for Creator videos, clips and requests, pause automation or a category, and read the "
-                              "week's report and the log. Only Macs you link here can use it.")
+                note = QLabel("ClipMonster for Mac makes clips on a Mac by itself. Linked to this PC, it can also use "
+                              "this PC's local AI, have this PC make whole videos for it (on its graphics card, the "
+                              "clips going back to the Mac), and run this PC from the Mac: see what automation is "
+                              "doing, watch the videos waiting to post and OK, post or delete them, ask for Creator "
+                              "videos, clips and requests, pause automation or a category, and read the week's "
+                              "report and the log. Only Macs you link here can use it.")
                 note.setWordWrap(True)
                 note.setProperty("muted", True)
                 page.layout().insertRow(0, note)
@@ -245,8 +259,8 @@ class SettingsDialog(QDialog):
                 note.setProperty("muted", True)
                 page.layout().insertRow(0, note)
             tabs.addTab(_scrolling(page), group)
-        if tab in GROUPS:
-            tabs.setCurrentIndex(GROUPS.index(tab))
+        if tab in groups:
+            tabs.setCurrentIndex(groups.index(tab))
         heading.setText(tabs.tabText(tabs.currentIndex()))
         self.tabs = tabs
         layout.addWidget(tabs, 1)
@@ -311,10 +325,11 @@ class SettingsDialog(QDialog):
         setattr(self.posting_settings, name, value)
 
     def accept(self) -> None:
-        try:
-            self.posting_settings.save()
-        except OSError:
-            pass
+        if "Posting" in self.groups:
+            try:
+                self.posting_settings.save()
+            except OSError:
+                pass
         super().accept()
 
     def done(self, result: int) -> None:

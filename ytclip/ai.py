@@ -1,5 +1,10 @@
 """AI clip finder: the AI (Claude or Gemini, Settings → AI) reads the timestamped transcript and picks the
-best moments. Also the one place both AIs are called from: ask_json, check_key, has_key."""
+best moments. Also the one place every AI is called from: ask_json, check_key, has_key.
+
+The AIs: Claude and Gemini (an API key each), the local AI (a model run by llama.cpp on this computer,
+intelligence/), and in ClipMonster for Mac a fourth, "pc": the local AI of the PC the Mac is linked to,
+asked over the link (use_remote(); ytclip/mac/pc_ai.py does the asking, remote/studio.py the answering).
+"""
 
 from __future__ import annotations
 
@@ -62,8 +67,9 @@ STREAM_TIMEOUT = 120.0
 # Settings → AI chooses which AI answers; each has its own key and models.
 PROVIDERS = (("claude", "Claude (Anthropic)"), ("gemini", "Gemini (Google)"),
              ("local", "Local AI on this PC (free, private)"))
-NAMES = {"claude": "Claude", "gemini": "Gemini", "local": "Local AI"}
+NAMES = {"claude": "Claude", "gemini": "Gemini", "local": "Local AI", "pc": "Your PC's local AI"}
 CLOUD = ("claude", "gemini")  # the AIs that need a key; "local" runs on this PC (intelligence/llama_engine.py)
+LOCALS = ("local", "pc")  # local models: text only, and they read a long transcript in parts (transcript_parser)
 ENV_KEYS = {"claude": ("ANTHROPIC_API_KEY",), "gemini": ("GEMINI_API_KEY", "GOOGLE_API_KEY")}
 KEY_FIELDS = {"claude": "ai_api_key", "gemini": "gemini_api_key"}
 # task -> the setting holding each AI's model for it: "find" wants the best model, "polish" a quicker one
@@ -86,6 +92,24 @@ class Answer:
     provider: str  # "claude" | "gemini"
 
 
+# The linked PC lending its local AI ("pc"), set by ClipMonster for Mac while a PC is linked. It has:
+#   ready() -> bool, why() -> str (what's missing when not ready), model() -> str,
+#   ask(task, system, content, schema, effort, max_tokens, log, check, progress) -> (data: dict, model: str),
+#   find(title, duration, sents, score, count, min_len, max_len, instructions, log, check) -> (clips, model),
+#   check() -> str (a line saying it works), each raising AIError.
+_remote = None
+
+
+def use_remote(remote) -> None:
+    """Let "pc" ask `remote` (None: no PC linked)."""
+    global _remote
+    _remote = remote
+
+
+def remote():
+    return _remote
+
+
 def chosen(s) -> str:
     """The AI Settings → AI picked."""
     p = str(getattr(s, "ai_provider", "claude") or "claude").lower()
@@ -106,6 +130,11 @@ def key_for(s, provider: str = "") -> str:
         from .intelligence import llama_engine
 
         return "local" if llama_engine.backend_name() else ""
+    if provider == "pc":
+        try:
+            return "pc" if _remote is not None and _remote.ready() else ""
+        except Exception:  # noqa: BLE001 - a PC that can't say is a PC that can't answer
+            return ""
     own = str(getattr(s, KEY_FIELDS[provider], "") or "").strip()
     return own or next((os.environ[v].strip() for v in ENV_KEYS[provider] if os.environ.get(v, "").strip()), "")
 
@@ -114,6 +143,11 @@ def model_for(s, task: str = "find", provider: str = "") -> str:
     provider = provider or chosen(s)
     if provider == "local":
         return local_model_name(s)
+    if provider == "pc":
+        try:
+            return (_remote.model() if _remote is not None else "") or "your PC's local AI"
+        except Exception:  # noqa: BLE001
+            return "your PC's local AI"
     return str(getattr(s, MODEL_FIELDS[task][provider]))
 
 
@@ -142,6 +176,8 @@ def order(s) -> list[str]:
     out = [first] if key_for(s, first) else []
     if getattr(s, "ai_fallback", True):
         out += [p for p in CLOUD if p != first and key_for(s, p)]
+        if first != "pc" and key_for(s, "pc"):  # a linked PC's local AI before this Mac's own
+            out.append("pc")
         if first != "local" and local_ready(s):
             out.append("local")
     return out
@@ -158,6 +194,13 @@ def missing_key(s) -> str:
         from .intelligence import llama_engine
 
         return llama_engine.missing_backend()
+    if chosen(s) == "pc":
+        if _remote is None:
+            return "No PC is linked. Link yours under Your PC in the sidebar, or pick another AI in Settings → AI."
+        try:
+            return _remote.why() or "Your PC isn't answering right now."
+        except Exception as exc:  # noqa: BLE001
+            return f"Your PC isn't answering right now ({exc})."
     return f"No {name(s)} API key set. Add one in Settings → AI."
 
 
@@ -186,6 +229,9 @@ def ask_json(s, task: str, system: str, content: str | list[dict], schema: dict,
         if log and what:
             log(f"Asking {model} to {what}…")
         try:
+            if provider == "pc":
+                data, used = _ask_pc(task, system, content, schema, effort, max_tokens, log, check, progress)
+                return Answer(data, used or model, provider)
             if provider == "local":
                 text, used = _ask_local(s, system, content, schema, max_tokens, log, check, progress)
             elif provider == "gemini":
@@ -274,6 +320,23 @@ def _ask_local(s, system: str, content, schema: dict, max_tokens: int, log, chec
     return reply.text, reply.model
 
 
+def text_only(content) -> str | list[dict]:
+    """The words of `content`, for a model that can't see pictures (a local one): images left out."""
+    if isinstance(content, str):
+        return content
+    return [b for b in content if isinstance(b, dict) and b.get("type") == "text"]
+
+
+def _ask_pc(task: str, system: str, content, schema: dict, effort: str, max_tokens: int, log, check,
+            progress) -> tuple[dict, str]:
+    if _remote is None:
+        raise AIError("No PC is linked.")
+    data, used = _remote.ask(task, system, text_only(content), schema, effort, max_tokens, log, check, progress)
+    if not isinstance(data, dict):
+        raise AIError("Your PC's answer couldn't be read. Try again.")
+    return data, used
+
+
 def _client(api_key: str, **kwargs):
     import anthropic
 
@@ -316,6 +379,10 @@ def check_key(s, provider: str = "") -> str:
         if not key:
             raise AIError(llama_engine.missing_backend())
         return f"Local AI: {llama_engine.status(s)}"
+    if provider == "pc":
+        if _remote is None:
+            raise AIError("No PC is linked.")
+        return _remote.check()
     if not key:
         raise AIError(f"No {name(provider)} API key set.")
     models = list(dict.fromkeys(model_for(s, task, provider) for task in MODEL_FIELDS))
@@ -371,25 +438,39 @@ def find_clips_ai(title: str, duration: float, sents: list[Cue], score: np.ndarr
     providers = order(s)
     if not providers:
         raise AIError(missing_key(s))
-    cloud = [p for p in providers if p != "local"]
-    if providers[0] == "local":
+    # Each local model is asked on its own (it reads the transcript in parts); the cloud AIs are one try,
+    # which falls from one to the other itself (ask_json). In the order Settings → AI gives them.
+    groups: list[str] = []
+    for p in providers:
+        g = p if p in LOCALS else "cloud"
+        if g not in groups:
+            groups.append(g)
+    cloud = [p for p in providers if p in CLOUD]
+    for i, g in enumerate(groups):
         try:
+            if g == "cloud":
+                return _find_cloud(title, duration, sents, score, count, min_len, max_len, instructions, s, log,
+                                   check, cloud)
+            if g == "pc":
+                return _find_pc(title, duration, sents, score, count, min_len, max_len, instructions, log, check)
             return _find_local(title, duration, sents, score, count, min_len, max_len, instructions, s, log, check)
         except AIError as exc:
-            if not cloud:
+            if i == len(groups) - 1:
                 raise
             if log:
-                log(f"Local AI didn't work: {exc} Trying {name(cloud[0])} instead.")
-    if not cloud:  # only the local AI is left
-        return _find_local(title, duration, sents, score, count, min_len, max_len, instructions, s, log, check)
-    try:
-        return _find_cloud(title, duration, sents, score, count, min_len, max_len, instructions, s, log, check, cloud)
-    except AIError as exc:
-        if "local" not in providers[1:]:
-            raise
-        if log:
-            log(f"{exc} Trying the local AI instead.")
-        return _find_local(title, duration, sents, score, count, min_len, max_len, instructions, s, log, check)
+                nxt = groups[i + 1]
+                then = name(cloud[0]) if nxt == "cloud" else "the local AI" if nxt == "local" else "your PC's local AI"
+                log(f"{exc} Trying {then} instead." if g == "cloud" else
+                    f"{name(g)} didn't work: {exc} Trying {then} instead.")
+    raise AIError(missing_key(s))  # not reached: the last group raises
+
+
+def _find_pc(title, duration, sents, score, count, min_len, max_len, instructions, log, check):
+    if _remote is None:
+        raise AIError("No PC is linked.")
+    if log:
+        log(f"Asking your PC's local AI ({model_for(None, 'find', 'pc')}) to pick clips…")
+    return _remote.find(title, duration, sents, score, count, min_len, max_len, instructions, log, check)
 
 
 def _find_local(title, duration, sents, score, count, min_len, max_len, instructions, s, log, check):

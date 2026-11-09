@@ -350,7 +350,7 @@ Give a category a **Sport** (Categories tab → *The category* → Sport: soccer
 - **Each clip is one whole play.** A few seconds of build-up before the crowd starts to rise (12 s for soccer, 8 s for basketball…), the moment, and the reaction until the roar dies down, ending before the replay starts. Clip edges never get pulled in to the commentary (*Trim dead air* is skipped), and only move outwards to finish the commentator's sentence.
 - **Lengths.** Each sport has its own clip length (soccer 15–40 s, basketball 10–30 s…) unless the category sets **Clip length**. With Creator Rewards on, clips are still made over a minute.
 - **The AI.** In AI mode the AI is told to pick whole plays of that sport (goals, saves, buzzer-beaters, knockouts…), and the AI polish writes hooks that build suspense without giving the ending away.
-- **Sent to your Macs.** Choosing a sport also ticks **Send new clips to my Macs** (and YouTube's *Sports* category, if the category had none): every new clip lands in ClipMonster Remote's **Sports clips** inbox on each linked Mac, with a notification (see [Your Mac](#your-mac-clipmonster-remote)). Any category can have it ticked.
+- **Sent to your Macs.** Choosing a sport also ticks **Send new clips to my Macs** (and YouTube's *Sports* category, if the category had none): every new clip lands in the **Sports clips** inbox of ClipMonster for Mac on each linked Mac, with a notification (see [ClipMonster for Mac](#clipmonster-for-mac)). Any category can have it ticked.
 - **Copyright.** League and broadcaster footage is usually claimed on TikTok and can be muted or taken down. Channels that allow reuse, or your own footage, are safest.
 
 ### Learning from results
@@ -455,17 +455,37 @@ Anything else you type gets two buttons: make a video about it, or ask for clips
 
 **Videos on the phone.** A bot can send videos up to 50 MB. A bigger one goes as a smaller copy (720p or less, made on the PC and kept for 3 days), marked as such: what posts to TikTok is always the full-quality file. Videos go one at a time in the background, so the bot keeps answering while one uploads. When a video is OK'd, posted or deleted somewhere else (the Queue tab, or another phone), its message in the chat changes to match.
 
-## Your Mac (ClipMonster Remote)
+## ClipMonster for Mac
 
-**ClipMonster Remote** is a Mac app that runs ClipMonster on your PC. The PC keeps doing the work: finding and clipping videos, making Creator videos, the local AI and posting to TikTok. From the Mac you can see everything and steer it. It looks like ClipMonster: the same sidebar, colours and dark or light mode.
+**ClipMonster for Mac** is ClipMonster on a Mac. It makes clips by itself, start to finish: the **Studio** (paste YouTube links, playlists or channels, or drop videos; see the clips it found on the timeline, fix them, and export them with captions) and the **Library**, as on the PC, with Mac menus, shortcuts and notifications. Link your PC whenever you like, and the Mac can also use the PC's local AI, have the PC make whole videos on its graphics card, and run the PC: everything under **Your PC** in the sidebar. It looks like ClipMonster: the same sidebar, colours and dark or light mode.
 
-**Setting it up** (once):
+**Installing.** Download `ClipMonster-mac.dmg` (Apple silicon: M1 and newer) or `ClipMonster-mac-intel.dmg` (Intel) from the [latest release](https://github.com/iSlipperyX/ClipMostr/releases/latest), open it and drag **ClipMonster** to Applications. It needs macOS 12 or newer. The app isn't signed with an Apple developer ID, so the first time macOS won't open it: open **System Settings → Privacy & Security** and press **Open Anyway** (on macOS 14 and older, right-click the app → **Open**). Everything it runs is inside the app: ffmpeg with the Mac's media engine (VideoToolbox) and caption burning, Deno (YouTube downloads need it), Whisper and the local AI. On Apple silicon, Whisper and the local AI run on the Mac's graphics (Metal).
+
+**The first start** asks which AI picks your clips, and where they're saved (`~/Movies/ClipMonster` to start with). Both are in Settings later.
+
+| | |
+|---|---|
+| **Claude** | The best at picking clips and writing their titles. Paid per use (about a cent a video), with an API key from [console.anthropic.com](https://console.anthropic.com). |
+| **Gemini** | Google's AI, with a free allowance. An API key from [aistudio.google.com](https://aistudio.google.com). |
+| **Local AI on this Mac** | Free, private and offline. It picks a model for the Mac's memory: Llama 3.2 3B on an 8 GB Mac, Mistral Nemo 12B on 16 to 32 GB, Qwen2.5 32B on 36 GB or more (**Settings → AI → Local model** lists each one with the Mac it needs). The model downloads once, the first time it's needed. An Intel Mac runs it on its processor, which is slow: pick a small model there. |
+| **Your PC's local AI** | The PC's own model, on its graphics card. Link your PC next (below). Only the PC's local AI answers the Mac, never its Claude or Gemini key. |
+| **No AI for now** | Clips are picked from the video itself: its most-replayed moments, loud parts, laughter and scene changes. |
+
+API keys are kept in the macOS Keychain, never in the settings file. Settings on the Mac speak of the Mac: the media engine (VideoToolbox) instead of a graphics card, Whisper on the Mac's graphics, and the local models that fit a Mac. Closing the window keeps ClipMonster running (an export finishes, the PC's news still comes); **Quit** (⌘Q) ends it, and asks first while something is being made. Drop a video on the Dock icon, or **Open With → ClipMonster** in Finder, to add it.
+
+**Linking your PC** (once, whenever you like):
 
 1. On the PC: **Settings → Mac app**, tick **Let my Mac run ClipMonster** and **Save**, and keep automation running (Automation → Start, or Start with Windows). The server runs inside automation, the way the Telegram bot does. The first time, Windows asks whether ClipMonster may use the network: allow it on **private** networks.
-2. On the Mac: download `ClipMonster-Remote-mac.dmg` (Apple silicon) or `ClipMonster-Remote-mac-intel.dmg` (Intel) from the [latest release](https://github.com/iSlipperyX/ClipMostr/releases/latest), open it and drag **ClipMonster Remote** to Applications. The app isn't signed with an Apple developer ID, so the first time macOS won't open it: open **System Settings → Privacy & Security** and press **Open Anyway** (on macOS 14 and older, right-click the app → **Open**). Allow it to find devices on your local network when the Mac asks.
-3. On the PC, press **Link a Mac**. It shows the PC's **IP address**, its **port** (47320 unless you change it in Settings → Mac app) and an eight-character **authorization code** that works for 10 minutes. Type all three in the Mac app and press **Link**. (PCs on the same network also show up in a list under the form; picking one fills in its address and port, so only the code is left to type.) The PC lists the Mac under *Linked Macs*, and from then on the Mac connects by itself.
+2. On the PC, press **Link a Mac**. It shows the PC's **IP address**, its **port** (47320 unless you change it in Settings → Mac app) and an eight-character **authorization code** that works for 10 minutes.
+3. On the Mac: **Your PC → Link your PC** in the sidebar (or the **Your PC** menu → **Link Your PC…**). Type all three and press **Link**. PCs on the same network also show up in a list under the form; picking one fills in its address and port, so only the code is left to type. Allow ClipMonster to find devices on your local network when the Mac asks. The PC lists the Mac under *Linked Macs*, and from then on the Mac connects by itself.
 
-**What you can do from the Mac:**
+**What the PC adds:**
+
+- **Make on: This Mac | Your PC**, beside the paste box. With **Your PC** picked, each video goes to the PC (a link, or the video file itself, sent over first), which downloads it, finds the clips and exports them **with the Mac's settings** (the preset, captions, length, format), on its graphics card and with its local AI. The video shows in the Studio's list as it gets on there (*Waiting its turn on your PC*, *Being made on your PC*, *Made on your PC: its clips are coming over*), and its clips land in the Mac's Library and output folder, as if made on the Mac; the PC lets go of them once they're back. **Stop** or **Remove** works there too. If the PC can't be reached, the Mac offers to make the video itself instead. Videos sent before quitting carry on when the Mac opens again.
+- **Your PC's local AI** as one of the AIs (Settings → AI, or the first start): the Mac transcribes on its own Whisper, and the PC's model picks the clips and writes their titles, so a big model works from a small Mac.
+- **Your PC's pages**, below:
+
+**Your PC's pages** in the sidebar:
 
 | | |
 |---|---|
@@ -478,15 +498,15 @@ Anything else you type gets two buttons: make a video about it, or ask for clips
 | **Categories** | Each category's state and what's waiting for it. **Pause** or **Resume** one, or **Find videos now**. |
 | **This week**, **Log** | The [weekly report](#the-overnight-report-and-the-health-check), and automation's log as it's written. |
 
-**Pause** in the top bar pauses clipping and making videos (posting carries on). The Dock icon and the menu bar icon show how many videos wait for your OK. Mac notifications tell you when a video waits for your OK, when a sports clip arrives, when a post goes up and when something needs you. Closing the window keeps the menu bar icon and the notifications; **Quit** from the menu bar icon ends the app.
+**Pause** in the bar over the PC's pages (or **Your PC → Pause Automation**, ⇧⌘P) pauses clipping and making videos on the PC (posting carries on). The Dock icon and the menu bar icon show how many videos wait for your OK. Mac notifications tell you when a video waits for your OK, when a sports clip arrives, when a post goes up and when something needs you. **Your PC → Switch to Another PC…** moves between linked PCs.
 
 **Away from home.** The PC isn't opened to the internet. Install [Tailscale](https://tailscale.com/download) on the PC and the Mac, signed in to the same account, and type the PC's Tailscale address (like `100.101.7.42`, or its name `justyn-pc.tail1234.ts.net`) as the IP address in the Mac app. The Mac recognises it as the same PC and connects as usual.
 
-**Security.** Every connection is encrypted with the PC's own certificate, which the Mac checks by fingerprint. Linking proves the Mac and the PC see the same certificate, so another computer on the network can't pose as either one. The code is checked through 200,000 rounds of PBKDF2 and stops working after five wrong tries. After linking, the Mac keeps its key in the macOS Keychain, and the PC keeps only a hash of it in `%APPDATA%\ClipMonster\remote.json`. **Unlink** on the PC, or **PC → Unlink this Mac** on the Mac, removes a Mac. Settings → Mac app shows *This PC's ID*, and the Mac shows the same ID under the address as you type it, so you can check they match. If you reinstall ClipMonster on the PC from scratch, it gets a new ID and each Mac has to be linked again.
+**Security.** Every connection is encrypted with the PC's own certificate, which the Mac checks by fingerprint. Linking proves the Mac and the PC see the same certificate, so another computer on the network can't pose as either one. The code is checked through 200,000 rounds of PBKDF2 and stops working after five wrong tries. After linking, the Mac keeps its key in the macOS Keychain, and the PC keeps only a hash of it in `%APPDATA%\ClipMonster\remote.json`. **Unlink** on the PC, or **Your PC → Unlink This Mac…** on the Mac, removes a Mac. Settings → Mac app shows *This PC's ID*, and the Mac shows the same ID under the address as you type it, so you can check they match. If you reinstall ClipMonster on the PC from scratch, it gets a new ID and each Mac has to be linked again.
 
 ## Linux host (Google Cloud)
 
-ClipMonster can also run on a Linux server, such as a Google Cloud VM, with nobody at it. It does everything the PC does: finds and clips videos, makes Creator videos and posts them. You run it from your Mac with [ClipMonster Remote](#your-mac-clipmonster-remote), and from your phone with the [Telegram bot](#your-phone-telegram).
+ClipMonster can also run on a Linux server, such as a Google Cloud VM, with nobody at it. It does everything the PC does: finds and clips videos, makes Creator videos and posts them. You run it from your Mac with [ClipMonster for Mac](#clipmonster-for-mac), and from your phone with the [Telegram bot](#your-phone-telegram).
 
 **Making the VM.** In the Google Cloud console, **Compute Engine → VM instances → Create instance**:
 
@@ -525,7 +545,7 @@ Then open `http://localhost:6080/vnc.html?autoconnect=1&resize=scale` in your br
 
 `sudo clipmonster desktop off` closes the desktop when you're done. Automation keeps running either way.
 
-**Linking your Mac: `sudo clipmonster link-mac`.** It shows the **IP address**, **port** and **authorization code** to type in ClipMonster Remote, and waits until the Mac is linked. The address is the VM's external IP, or its Tailscale address when Tailscale is installed.
+**Linking your Mac: `sudo clipmonster link-mac`.** It shows the **IP address**, **port** and **authorization code** to type in ClipMonster for Mac (Your PC → Link your PC), and waits until the Mac is linked. The address is the VM's external IP, or its Tailscale address when Tailscale is installed.
 
 Google Cloud blocks the Mac app's port until a firewall rule allows it. `sudo clipmonster firewall` prints the two `gcloud` commands for your VM. They allow only your home internet address, which [ifconfig.me](https://ifconfig.me) shows you. If your home address changes often, use Tailscale instead: `--tailscale` installs it, then run `sudo tailscale up` on the VM, install Tailscale on the Mac, and type the VM's Tailscale address in the Mac app. That way no port is opened at all.
 
@@ -680,7 +700,7 @@ python build.py
 
 This produces `dist/ClipMonster/` and `dist/ClipMonster-windows.zip`, and `dist/ClipMonster-Setup.exe` when [Inno Setup 6](https://jrsoftware.org/isinfo.php) is installed (`winget install JRSoftware.InnoSetup`; `python build.py --installer` fails without it). To include Whisper for the graphics card, first install the Vulkan SDK and run `python packaging/build_whisper_cpp.py build/whisper-cpp --vulkan`; `build.py` then copies it in. The local AI's `llama-server` is built the same way: `python packaging/build_llama_cpp.py build/llama-cpp --vulkan`. The release workflow does all of it. From source without that build, `pip install -e .[local]` installs llama-cpp-python, which the local AI uses instead. During development, run the app with `python -m ytclip.gui.app` and the command line with `python -m ytclip`.
 
-To build ClipMonster Remote on a Mac: `pip install -e .[mac,build]`, then `python packaging/build_mac.py`. It writes `dist/ClipMonster Remote.app` and `dist/ClipMonster-Remote-mac.dmg`. Run it from source with `python -m ytclip.mac`.
+To build ClipMonster for Mac on a Mac (with Xcode's command line tools and CMake): `pip install -e .[mac,build]`, then `python packaging/build_mac.py`. It gathers ffmpeg and Deno from their packages and builds whisper.cpp and llama.cpp (for Metal on Apple silicon) into `build/mac-tools`, then writes `dist/ClipMonster.app` and `dist/ClipMonster-mac.dmg` (`--name ClipMonster-mac-intel.dmg` on an Intel Mac). `dist/ClipMonster.app/Contents/MacOS/ClipMonster --self-check` starts everything the app brought. Run it from source with `python -m ytclip.mac`.
 
 Run the tests with `pip install -e .[test]` and then `pytest`. They need no network or API key.
 
@@ -697,7 +717,7 @@ Run the tests with `pip install -e .[test]` and then `pytest`. They need no netw
 | `ytclip/compliance/duration_guard.py`, `ytclip/posting/tracker.py` | Creator Rewards: clips over a minute, and progress to the program's goals |
 | `packaging/linux/` | The Linux host: `install.sh` (attached to releases as `install-linux.sh`), the `clipmonster` admin command, the virtual screen and desktop, and their systemd services. `ytclip/linux_host.py` sets a host's settings the first time |
 | `ytclip/remote/` | The Mac app's server inside automation: linking (`protocol.py`, shared with the Mac), the PC's certificate, the linked Macs (`state.py`), what the Mac can see and do (`host.py`), clips sent to the Macs (`deliveries.py`), HTTPS and discovery (`server.py`) |
-| `ytclip/mac/` | ClipMonster Remote, the Mac app: the pinned connection and Keychain, finding PCs, the loopback video proxy, and its window and pages (the Sports clips inbox: `inbox.py`) |
+| `ytclip/mac/` | ClipMonster for Mac: its window (the Studio and Library with Mac menus, `window.py`), the first start (`welcome.py`), the PC's local AI (`pc_ai.py`) and videos made on the PC (`pc_jobs.py`), and the Your PC pages: the pinned connection and Keychain, finding PCs, the loopback video proxy (the Sports clips inbox: `inbox.py`) |
 | `ytclip/gemini.py` | Google's Gemini API over plain HTTPS: streamed JSON answers, key checks |
 | `ytclip/polish.py` | AI polish: hooks, caption fixes, speaker crops, burned-in subtitle check |
 | `ytclip/qc.py` | Quality check: silence, black/frozen picture, length/size, mid-sentence edges, AI ratings |

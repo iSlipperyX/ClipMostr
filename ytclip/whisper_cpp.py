@@ -53,6 +53,7 @@ MODELS = {
 }
 NOT_WORDS = re.compile(r"^\s*(\[[^\]]*\]|\([^)]*\)|\*[^*]*\*)\s*$")  # [BLANK_AUDIO], (music), *laughs*
 SENTENCE_END = (".", "!", "?", "…")
+GPU_API = "Metal" if sys.platform == "darwin" else "Vulkan"  # what whisper.cpp is built with here
 GPU_FOUND = re.compile(r"ggml_vulkan: Found [1-9]|using (Vulkan|CUDA|Metal)\d* backend", re.I)
 NO_GPU = re.compile(r"no GPU found|ggml_vulkan: Found 0|ggml_vulkan: No devices", re.I)
 PROGRESS = re.compile(r"progress\s*=\s*(\d+)%")
@@ -74,8 +75,12 @@ def binary() -> Path | None:
         return Path(env) if Path(env).is_file() else None
     name = "whisper-cli.exe" if sys.platform == "win32" else "whisper-cli"
     if getattr(sys, "frozen", False):
-        found = Path(sys.executable).resolve().parent / "whisper-cpp" / name
-        return found if found.is_file() else None
+        from . import bundled
+
+        return bundled.find("whisper-cpp", name)
+    here = Path(__file__).resolve().parents[1] / "build" / "mac-tools" / "whisper-cpp" / name  # build_mac.py's
+    if here.is_file():
+        return here
     found = shutil.which("whisper-cli")
     return Path(found) if found else None
 
@@ -381,14 +386,15 @@ def _on_card(exe: Path, model: Path, wav: Path, out: Path, language: str, thread
     if data is not None:
         text = "\n".join(said)
         if not GPU_FOUND.search(text) or NO_GPU.search(text):
-            _remember(exe, False, "no graphics card that supports Vulkan was found")
+            _remember(exe, False, f"no graphics card that supports {GPU_API} was found")
             log("Whisper found no graphics card it can use, so it uses the CPU from now on. (Settings → Speed)")
         else:
             known = _remembered(exe)
             if not known.get("ok") or known.get("fails"):  # the first time, or back after failing
                 _remember(exe, True)
-                found = re.search(r"ggml_vulkan: \d+ = ([^|(]+)", text)
-                log("Whisper is using the graphics card" + (f" ({found[1].strip()})" if found else "") + ".")
+                found = re.search(r"ggml_vulkan: \d+ = ([^|(]+)|ggml_metal\w*: (?:found device|GPU name):\s*([^\n]+)", text)
+                card = (found[1] or found[2] or "").strip() if found else ""
+                log("Whisper is using the graphics card" + (f" ({card})" if card else "") + ".")
         return data
 
     # It failed on the card: the same run again on the CPU, so the video is still typed out.
@@ -412,7 +418,10 @@ def _on_card(exe: Path, model: Path, wav: Path, out: Path, language: str, thread
 
 
 def transcribe(audio: np.ndarray, model_name: str, language: str, spans: list[tuple[float, float]] | None,
-               threads: int, progress: Progress, log: Log, opener=urllib.request.urlopen) -> tuple[list[Cue], list[Word]]:
+               threads: int, progress: Progress, log: Log, opener=urllib.request.urlopen,
+               cpu: bool = False) -> tuple[list[Cue], list[Word]]:
+    """Type out `audio` (or its `spans`) on the graphics card, else (`cpu`, or the card resting) the CPU.
+    The Mac app has no faster-whisper: there, whisper.cpp is Whisper on the CPU too."""
     from .transcribe import merge_spans
 
     exe = binary()
@@ -431,7 +440,12 @@ def transcribe(audio: np.ndarray, model_name: str, language: str, spans: list[tu
         wav, out = Path(tmp) / "audio.wav", Path(tmp) / "words"
         write_wav(wav, audio)
         until = resting(exe)
-        if until:  # the card failed lately: the CPU until it has rested
+        if cpu:
+            data, code, said = _attempt(exe, model, wav, out, language, threads, progress,
+                                        f"Transcribing {what}", False)
+            if data is None:
+                raise _failed(exe, code, said)
+        elif until:  # the card failed lately: the CPU until it has rested
             log(f"Whisper is using the CPU until {time.strftime('%H:%M', time.localtime(until))}: the graphics card "
                 "failed a little while ago (details in automation.log).")
             data, code, said = _attempt(exe, model, wav, out, language, threads, progress,

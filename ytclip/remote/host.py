@@ -70,6 +70,12 @@ class Host:
         self.events: collections.deque = collections.deque(maxlen=EVENTS_KEPT)
         self.seq = 0
         self._ev_lock = threading.Lock()
+        # What a Mac can hand this PC (studio.py): questions for the local AI, and whole videos to make
+        from .studio import AITasks, MacJobs
+
+        self.ai_tasks = AITasks(self.settings, self.log, now)
+        self.studio = MacJobs(self.settings, self.log, lambda kind, text, item="": self.add_event(kind, text, item=item),
+                              now=now)
 
     # --- what the posting worker and automation say -------------------------------------------------------
 
@@ -159,7 +165,8 @@ class Host:
     def hello(self) -> dict:
         from . import protocol
 
-        return {"app": protocol.APP, "api": protocol.API_VERSION, "name": pc_name(), "version": __version__}
+        return {"app": protocol.APP, "api": protocol.API_VERSION, "name": pc_name(), "version": __version__,
+                "lends": ["ai", "studio"]}  # what a Mac may hand it (studio.py)
 
     # --- status -----------------------------------------------------------------------------------------------
 
@@ -245,6 +252,11 @@ class Host:
         if out["automation"]["youtube_blocked_until"]:
             out["problems"].append("YouTube asked this PC to sign in, so downloads wait (Automation tab on the PC).")
         out["videos_rev"] = self._videos_rev()
+        try:  # what a Mac can hand this PC, and what it's making for Macs now
+            out["lend"] = {"ai": self.ai_tasks.status(), "studio": True, "making": self.studio.working,
+                           "ai_busy": self.ai_tasks.busy(), "room": self.studio.room()}
+        except Exception as exc:  # noqa: BLE001
+            out["lend"] = {"ai": {"ready": False, "model": "", "why": str(exc)}, "studio": True, "making": ""}
         return out
 
     # --- videos -------------------------------------------------------------------------------------------

@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import shutil
+import sys
 import time
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -96,6 +97,37 @@ def is_blocked(error: str) -> bool:
     return bool(BLOCKED.search(error or ""))
 
 
+def own_deno() -> Path | None:
+    """The Deno ClipMonster brings with it: in ClipMonster for Mac's app, or the deno package's (pip install
+    deno: what the Mac app is built with)."""
+    from . import bundled
+
+    found = bundled.find("deno", "deno")
+    if found is not None:
+        return found
+    try:
+        import deno
+
+        path = Path(deno.find_deno_bin())
+        return path if path.is_file() else None
+    except Exception:  # noqa: BLE001 - not installed
+        return None
+
+
+def js_runtimes() -> dict:
+    """The JavaScript runtimes yt-dlp may use to solve YouTube's player challenges, which it needs to download
+    from YouTube: the app's own Deno first (a known one, and a Mac app sees little of the PATH), then Deno,
+    Node or Bun if installed (yt-dlp only tries Deno by itself)."""
+    own = own_deno() if getattr(sys, "frozen", False) else None
+    if own is not None:
+        return {"deno": {"path": str(own)}}
+    found = {name: {} for name in ("deno", "node", "bun") if shutil.which(name)}
+    if found:
+        return found
+    own = own_deno()
+    return {"deno": {"path": str(own)}} if own is not None else {}
+
+
 def _base_opts(log: Log | None, cookies_from_browser: str | None) -> dict:
     opts: dict = {
         "logger": _Logger(log),
@@ -107,9 +139,7 @@ def _base_opts(log: Log | None, cookies_from_browser: str | None) -> dict:
         # them: bursts of requests are what gets a PC asked to sign in.
         "sleep_interval_requests": 1,
     }
-    # YouTube needs a JavaScript runtime to solve its player challenges.
-    # yt-dlp only enables Deno by default, so also allow Node/Bun if installed.
-    runtimes = {name: {} for name in ("deno", "node", "bun") if shutil.which(name)}
+    runtimes = js_runtimes()
     if runtimes:
         opts["js_runtimes"] = runtimes
     cookies = cookie_option(cookies_from_browser)
