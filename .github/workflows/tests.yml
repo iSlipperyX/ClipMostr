@@ -65,6 +65,51 @@ jobs:
           path: dist/ClipMonster-Remote-mac.dmg
           retention-days: 7
 
+  # The Linux host installer (packaging/linux/), for real on Ubuntu with systemd: install from this checkout,
+  # check the services, link a Mac the way the app does (IP address, port, authorization code) and use it,
+  # open the desktop, update in place, and uninstall. The local AI's build is tested by llama-cpp above.
+  linux-host:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install
+        run: sudo bash packaging/linux/install.sh --source "$GITHUB_WORKSPACE" --no-ai-build --no-swap --yes
+      - name: The services
+        run: |
+          systemctl is-active clipmonster-display.service clipmonster.service
+          sudo clipmonster status
+      - name: Link a Mac and use it
+        run: |
+          sudo clipmonster link-mac --json | tee link.json
+          /opt/clipmonster/venv/bin/python tests/linux/link_check.py link.json
+          sudo clipmonster status | tee status.txt
+          grep -q "CI Mac" status.txt
+          sudo clipmonster unlink "CI Mac"
+      - name: The desktop (ClipMonster's window in a web browser)
+        run: |
+          sudo apt-get install -y -qq x11-utils >/dev/null
+          sudo clipmonster desktop on
+          curl -fsS http://127.0.0.1:6080/vnc.html | grep -qi novnc
+          for i in $(seq 60); do
+            if sudo -u clipmonster env DISPLAY=:7 xwininfo -root -tree | grep -qi '"[^"]*clipmonster'; then break; fi
+            sleep 1
+          done
+          sudo -u clipmonster env DISPLAY=:7 xwininfo -root -tree | grep -i '"[^"]*clipmonster'
+          sudo clipmonster desktop off
+      - name: Update in place, then uninstall
+        run: |
+          sudo bash /opt/clipmonster/install.sh --source "$GITHUB_WORKSPACE" --no-ai-build --no-swap --yes
+          systemctl is-active clipmonster.service
+          sudo clipmonster uninstall
+          test ! -e /opt/clipmonster && test ! -e /etc/systemd/system/clipmonster.service
+          test -d /var/lib/clipmonster
+      - name: Logs
+        if: failure()
+        run: |
+          sudo journalctl -u clipmonster.service -u clipmonster-display.service -u clipmonster-desktop.service \
+            --no-pager -n 300 || true
+          sudo cat /var/lib/clipmonster/.config/ClipMonster/automation.log 2>/dev/null | tail -100 || true
+
   # Whisper through whisper.cpp, for real: a CPU build typing out its own sample, through ClipMonster's
   # wrapper (whisper_cpp.py), plus a check that every model it may download exists.
   whisper-cpp:

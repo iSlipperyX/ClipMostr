@@ -65,6 +65,7 @@ def test_profile_already_open_is_refused(tmp_path):
 
 
 def test_finds_edge_and_chrome_in_program_files(tmp_path, monkeypatch):
+    monkeypatch.setattr(login, "_ELSEWHERE", {"msedge": (), "chrome": ()})  # not a Chrome this machine has
     for var in ("PROGRAMFILES(X86)", "PROGRAMFILES", "LOCALAPPDATA"):
         monkeypatch.setenv(var, str(tmp_path / var))
     edge = tmp_path / "PROGRAMFILES(X86)" / "Microsoft/Edge/Application/msedge.exe"

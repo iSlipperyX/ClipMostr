@@ -70,7 +70,7 @@ def cookie_option(browser: str | None) -> tuple | None:
 
 def find_firefox() -> Path | None:
     """Firefox's program, wherever it was installed (for everyone, just for you, or on PATH)."""
-    found = shutil.which("firefox")
+    found = shutil.which("firefox") or shutil.which("firefox-esr")  # Debian (a Linux host) ships the ESR
     if found:
         return Path(found)
     if sys.platform != "win32":

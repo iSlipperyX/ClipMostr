@@ -210,9 +210,9 @@ class MacLink(QWidget):
         now = time.monotonic()
         if self._addr_cache is None or now - self._addr_cache[0] > 60:
             try:
-                from ..remote.server import local_addresses
+                from ..remote.server import mac_addresses
 
-                self._addr_cache = (now, local_addresses())
+                self._addr_cache = (now, mac_addresses())
             except Exception:  # noqa: BLE001 - only a hint on screen
                 self._addr_cache = (now, [])
         return self._addr_cache[1]

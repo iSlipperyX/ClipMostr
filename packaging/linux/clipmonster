@@ -1,0 +1,211 @@
+#!/usr/bin/env bash
+# ClipMonster on a Linux host: `sudo clipmonster` (packaging/linux/install.sh puts this in /usr/local/bin).
+set -Eeuo pipefail
+
+PREFIX="/opt/clipmonster"
+APP_USER="clipmonster"
+APP_HOME="/var/lib/clipmonster"
+ETC="/etc/clipmonster"
+REPO="iSlipperyX/ClipMostr"
+NOVNC_PORT="6080"
+
+say()  { printf '\033[1m%s\033[0m\n' "$*"; }
+ok()   { printf '\033[32m ✓\033[0m %s\n' "$*"; }
+warn() { printf '\033[33m ⚠\033[0m %s\n' "$*" >&2; }
+die()  { printf '\033[31m ✗ %s\033[0m\n' "$*" >&2; exit 1; }
+
+usage() {
+  cat <<'EOF'
+ClipMonster on this Linux host. Run with sudo.
+
+  clipmonster status            automation, the Mac app's server, the linked Macs
+  clipmonster link-mac          the IP address, port and authorization code to type on your Mac
+  clipmonster unlink NAME       a linked Mac can't use ClipMonster any more
+  clipmonster desktop [on|off]  ClipMonster's own window and the browsers, in your web browser:
+                                Settings, TikTok accounts and their sign-ins, the YouTube sign-in
+  clipmonster start | stop | restart
+  clipmonster logs [-f]         automation's log (-f: keep following it)
+  clipmonster firewall          the Google Cloud firewall rule the Mac app needs
+  clipmonster update [--dev | --version X.Y.Z]
+  clipmonster uninstall [--purge]   --purge also deletes its settings, sign-ins and clips
+  clipmonster ytclip ARGS...    any ytclip command, as ClipMonster's user (ytclip --help)
+EOF
+}
+
+need_root() { [ "$(id -u)" = 0 ] || exec sudo -- "$0" "$@"; }
+
+as_app() {  # run a command as ClipMonster's user, with the services' settings
+  [ -r "$ETC/env" ] || die "ClipMonster isn't installed here ($ETC/env is missing)."
+  local vars=()
+  while IFS= read -r line; do
+    case "$line" in ''|'#'*) ;; *) vars+=("$line") ;; esac
+  done < "$ETC/env"
+  (cd "$APP_HOME" && runuser -u "$APP_USER" -- env "${vars[@]}" "$@")
+}
+
+ytclip() { as_app "$PREFIX/venv/bin/ytclip" "$@"; }
+
+meta() {  # Google Cloud's metadata server ('' off Google Cloud)
+  grep -qs Google /sys/class/dmi/id/product_name || return 0
+  curl -fsS --max-time 1 --noproxy '*' -H "Metadata-Flavor: Google" \
+    "http://169.254.169.254/computeMetadata/v1/$1" 2>/dev/null || true
+}
+
+port() { as_app "$PREFIX/venv/bin/python" -c 'from ytclip.settings import Settings; print(Settings.load().remote_port)' 2>/dev/null || echo 47320; }
+
+service_line() {  # name description
+  local st; st="$(systemctl is-active "$1" 2>/dev/null || true)"
+  case "$st" in
+    active) printf '  \033[32m●\033[0m %-22s %s\n' "$2" "running" ;;
+    *) printf '  \033[33m○\033[0m %-22s %s\n' "$2" "${st:-not installed}" ;;
+  esac
+}
+
+cmd_status() {
+  say "ClipMonster $(as_app "$PREFIX/venv/bin/python" -c 'import ytclip; print(ytclip.__version__)' 2>/dev/null || echo '?')"
+  service_line clipmonster.service "Automation"
+  service_line clipmonster-display.service "Virtual screen"
+  service_line clipmonster-desktop.service "Desktop (sign-ins)"
+  echo
+  ytclip remote status || true
+  echo
+  ytclip auto --status || true
+}
+
+cmd_desktop() {
+  case "${1:-on}" in
+    off|stop)
+      systemctl stop clipmonster-desktop.service
+      ok "The desktop is off."
+      return 0 ;;
+    status)
+      service_line clipmonster-desktop.service "Desktop (sign-ins)"
+      return 0 ;;
+    on|start) ;;
+    *) die "clipmonster desktop on|off|status" ;;
+  esac
+  systemctl start clipmonster-display.service clipmonster-desktop.service
+  for _ in $(seq 20); do
+    curl -fsS --max-time 1 --noproxy '*' "http://127.0.0.1:$NOVNC_PORT/vnc.html" >/dev/null 2>&1 && break
+    sleep 0.5
+  done
+  local name zone project
+  name="$(meta instance/name)"; zone="$(meta instance/zone)"; zone="${zone##*/}"; project="$(meta project/project-id)"
+  ok "The desktop is on, with ClipMonster's window open. It's only reachable through an SSH tunnel."
+  echo
+  echo "1. On your Mac, in Terminal:"
+  if [ -n "$name" ]; then
+    echo "     gcloud compute ssh $name --zone $zone --project $project -- -N -L $NOVNC_PORT:localhost:$NOVNC_PORT"
+  else
+    echo "     ssh -N -L $NOVNC_PORT:localhost:$NOVNC_PORT ${SUDO_USER:-you}@$(hostname -f 2>/dev/null || hostname)"
+  fi
+  echo "2. Open  http://localhost:$NOVNC_PORT/vnc.html?autoconnect=1&resize=remote"
+  echo
+  echo "There: Settings (categories, AI, posting), Accounts → add each TikTok account and sign in, and"
+  echo "Settings → Download → Sign in to YouTube. Closing ClipMonster's window there opens it again."
+  echo "When you're done: sudo clipmonster desktop off   (automation keeps running either way)"
+}
+
+cmd_firewall() {
+  local p name zone project network
+  p="$(port)"
+  name="$(meta instance/name)"; zone="$(meta instance/zone)"; zone="${zone##*/}"
+  project="$(meta project/project-id)"; network="$(meta instance/network-interfaces/0/network)"; network="${network##*/}"
+  if [ -z "$name" ]; then
+    echo "This isn't a Google Cloud VM. Open TCP port $p to your Mac's address in your cloud's firewall, or use Tailscale."
+    return 0
+  fi
+  cat <<EOF
+The Mac app connects to this VM on TCP port $p. Google Cloud blocks it until a firewall rule allows it.
+Allow only your own internet address: on your Mac, https://ifconfig.me shows it. Then, in Google Cloud
+Shell or a Terminal with gcloud:
+
+  gcloud compute firewall-rules create clipmonster-mac --project $project --network ${network:-default} \\
+    --direction INGRESS --allow tcp:$p --source-ranges YOUR.HOME.IP.ADDRESS/32 --target-tags clipmonster
+  gcloud compute instances add-tags $name --zone $zone --project $project --tags clipmonster
+
+When your home address changes: gcloud compute firewall-rules update clipmonster-mac --project $project \\
+    --source-ranges NEW.ADDRESS/32
+With Tailscale on the VM and the Mac (sudo tailscale up), skip all this: type the VM's Tailscale address.
+EOF
+}
+
+cmd_next_steps() {
+  local p ext ts
+  p="$(port)"; ext="$(meta instance/network-interfaces/0/access-configs/0/external-ip)"
+  ts="$(command -v tailscale >/dev/null && tailscale ip -4 2>/dev/null | head -n1 || true)"
+  cat <<EOF
+Next:
+  1. Sign in and set it up, in ClipMonster's own window:  sudo clipmonster desktop
+  2. Link your Mac:                                        sudo clipmonster link-mac
+     (ClipMonster Remote: https://github.com/$REPO/releases/latest)
+EOF
+  if [ -n "$ts" ]; then
+    echo "     The Mac reaches this VM at its Tailscale address $ts, port $p."
+  elif [ -n "$ext" ]; then
+    echo "     The Mac reaches this VM at $ext, port $p, once Google Cloud's firewall allows it: sudo clipmonster firewall"
+  fi
+  echo "  Everything else: sudo clipmonster help"
+}
+
+cmd_update() {
+  local url="https://github.com/$REPO/releases/latest/download/install-linux.sh" tmp
+  tmp="$(mktemp)"
+  if [ "${1:-}" = --dev ]; then url="https://raw.githubusercontent.com/$REPO/main/packaging/linux/install.sh"; fi
+  if curl -fsSL -o "$tmp" "$url"; then
+    exec bash "$tmp" --yes "$@"
+  fi
+  warn "Couldn't download the newest installer; updating with the one installed here."
+  exec bash "$PREFIX/install.sh" --yes "$@"
+}
+
+cmd_uninstall() {
+  local purge=0
+  [ "${1:-}" = --purge ] && purge=1
+  if [ "$purge" = 1 ] && [ -t 0 ]; then
+    read -r -p "Delete ClipMonster's settings, sign-ins, linked Macs and every clip in $APP_HOME too? [y/N] " a
+    [[ "$a" =~ ^[Yy] ]] || die "Nothing was removed."
+  fi
+  systemctl disable --now clipmonster-desktop.service clipmonster.service clipmonster-display.service >/dev/null 2>&1 || true
+  rm -f /etc/systemd/system/clipmonster{,-display,-desktop}.service
+  systemctl daemon-reload
+  rm -rf "$PREFIX" "$ETC" /usr/local/bin/clipmonster
+  if [ "$purge" = 1 ]; then
+    userdel "$APP_USER" >/dev/null 2>&1 || true
+    rm -rf "$APP_HOME"
+    ok "ClipMonster and everything it kept are gone."
+  else
+    ok "ClipMonster is uninstalled. Its settings, sign-ins and clips are still in $APP_HOME (installing again picks them up)."
+  fi
+  if [ -e /swapfile-clipmonster ]; then
+    echo "Its swap file stays (/swapfile-clipmonster); to remove it: sudo swapoff /swapfile-clipmonster, delete it and its /etc/fstab line."
+  fi
+}
+
+main() {
+  local cmd="${1:-help}"
+  [ $# -gt 0 ] && shift
+  case "$cmd" in
+    help|-h|--help) usage; return 0 ;;
+  esac
+  need_root "$cmd" "$@"
+  case "$cmd" in
+    status) cmd_status ;;
+    link-mac|link) ytclip remote link "$@" ;;
+    macs) ytclip remote status ;;
+    unlink) [ $# -ge 1 ] || die "clipmonster unlink NAME (sudo clipmonster status lists them)"; ytclip remote unlink "$*" ;;
+    desktop) cmd_desktop "$@" ;;
+    start) systemctl start clipmonster-display.service clipmonster.service; ok "Automation started." ;;
+    stop) systemctl stop clipmonster.service; ok "Automation stopped (a video in progress went back in the queue)." ;;
+    restart) systemctl restart clipmonster.service; ok "Automation restarted." ;;
+    logs) journalctl -u clipmonster.service -n 200 --no-pager "$@" ;;
+    firewall) cmd_firewall ;;
+    next-steps) cmd_next_steps ;;
+    update) cmd_update "$@" ;;
+    uninstall) cmd_uninstall "$@" ;;
+    ytclip) ytclip "$@" ;;
+    *) usage; die "Unknown command: $cmd" ;;
+  esac
+}
+
+main "$@"

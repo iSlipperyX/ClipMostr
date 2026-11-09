@@ -1,0 +1,26 @@
+[Unit]
+Description=ClipMonster automation: clipping, the Video Creator, posting and the Mac app's server
+Documentation=https://github.com/iSlipperyX/ClipMostr#linux-host-google-cloud
+Wants=network-online.target
+After=network-online.target clipmonster-display.service
+Requires=clipmonster-display.service
+
+[Service]
+Type=simple
+User=clipmonster
+Group=clipmonster
+EnvironmentFile=/etc/clipmonster/env
+WorkingDirectory=/var/lib/clipmonster
+ExecStart=/opt/clipmonster/venv/bin/ytclip auto
+# Stop the way the app does: a video in progress goes back in the queue (it waits up to 90 s)
+ExecStop=-/opt/clipmonster/venv/bin/ytclip auto --stop --wait
+KillSignal=SIGINT
+TimeoutStopSec=120
+# Stopped from the app, the Mac or Telegram on purpose: it stays stopped (sudo clipmonster start).
+Restart=on-failure
+RestartSec=15
+Nice=5
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target

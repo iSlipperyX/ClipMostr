@@ -7,6 +7,7 @@ models are ClipMonster's own (Settings → AI); nothing here holds a key.
 
 from __future__ import annotations
 
+import os
 from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
@@ -60,7 +61,8 @@ class Settings:
     ai_hashtags: bool = True  # each new clip gets hashtags from the AI (one quick text-only call)
     # Posting. default_privacy, default_hashtags, ai_audience, the schedule and autopilot are per account
     # (accounts.Account); Account.apply() lays them over a copy of these.
-    browser_channel: str = "msedge"  # msedge | chrome
+    # msedge | chrome. Off Windows (a Linux host) Chrome: Google's .deb is what the Linux installer puts in
+    browser_channel: str = "msedge" if os.name == "nt" else "chrome"
     show_browser: bool = True  # TikTok is less likely to block a browser you can see
     default_privacy: str = "public"  # public | friends | private
     allow_comments: bool = True

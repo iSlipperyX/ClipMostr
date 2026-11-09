@@ -194,8 +194,9 @@ jobs:
           if [ -f "release-notes/$TAG.md" ]; then notes=(--notes-file "release-notes/$TAG.md"); fi
           # --target makes the tag on this commit when a manual run publishes (a tag push already has it).
           # A tag made with the workflow's own token doesn't start this workflow again.
+          cp packaging/linux/install.sh dist/install-linux.sh  # the Linux host's installer (packaging/linux/)
           gh release create "$TAG" dist/ClipMonster-Setup.exe dist/ClipMonster-windows.zip dist/SHA256SUMS.txt \
-            --title "ClipMonster ${TAG#v}" "${notes[@]}" --generate-notes --target "$GITHUB_SHA" $prerelease
+            dist/install-linux.sh --title "ClipMonster ${TAG#v}" "${notes[@]}" --generate-notes --target "$GITHUB_SHA" $prerelease
 
       - name: Publish the dev build
         if: steps.version.outputs.kind == 'dev'
@@ -213,8 +214,9 @@ jobs:
             git log --no-merges --format='- %s (%h)' "$SINCE..HEAD" | head -60
           } > dev-notes.md
           gh release delete dev --cleanup-tag --yes || true
+          cp packaging/linux/install.sh dist/install-linux.sh
           gh release create dev dist/ClipMonster-Setup.exe dist/ClipMonster-windows.zip dist/SHA256SUMS.txt \
-            --title "ClipMonster $VERSION" --notes-file dev-notes.md --target "$GITHUB_SHA" --prerelease --latest=false
+            dist/install-linux.sh --title "ClipMonster $VERSION" --notes-file dev-notes.md --target "$GITHUB_SHA" --prerelease --latest=false
 
   # ClipMonster Remote for macOS, added to the same release (or the dev build) once the Windows build is up:
   # ClipMonster-Remote-mac.dmg for Apple silicon, ClipMonster-Remote-mac-intel.dmg for Intel Macs.
