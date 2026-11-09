@@ -24,6 +24,7 @@ import hashlib
 import hmac
 import re
 import secrets
+import socket
 
 API_VERSION = 1  # bumped when a change would break an older Mac app or host
 APP = "ClipMonster"
@@ -111,3 +112,13 @@ def parse_auth(header: str) -> tuple[str, str]:
         return "", ""
     device, _, token = h[7:].strip().partition(".")
     return (device, token) if device and token else ("", "")
+
+
+def udp_no_resets(sock: socket.socket) -> None:
+    """Windows: a UDP socket whose earlier packet was refused (the other side had closed) fails its next
+    recvfrom with WSAECONNRESET; turn that off, so one Mac that went away can't stop discovery."""
+    if hasattr(socket, "SIO_UDP_CONNRESET"):
+        try:
+            sock.ioctl(socket.SIO_UDP_CONNRESET, False)
+        except (OSError, ValueError):
+            pass

@@ -432,11 +432,20 @@ def test_discovery_finds_the_pc(world):
     p.DISCOVERY_PORT = port
     try:
         world.server._open_discovery()
-        found = discover.discover(timeout=1.0, port=port, targets=["127.0.0.1"])
+        assert world.server._udp is not None  # listening for the question
+        found = discover.discover(timeout=3.0, port=port, targets=["127.0.0.1"])
+        # a Mac that asked and went away before the answer (on Windows, the answer bouncing back made the
+        # PC's next read fail) doesn't stop the PC answering the next one
+        gone = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        gone.sendto(p.DISCOVER_HELLO + b"gone", ("127.0.0.1", port))
+        gone.close()
+        time.sleep(0.3)
+        again = discover.discover(timeout=3.0, port=port, targets=["127.0.0.1"])
     finally:
         p.DISCOVERY_PORT = old
     assert len(found) == 1
     assert found[0]["fp"] == world.server.fp and found[0]["port"] == world.port and found[0]["address"] == "127.0.0.1"
+    assert [f["id"] for f in again] == [found[0]["id"]]
 
 
 def test_the_player_streams_through_the_mac_only_proxy(world):

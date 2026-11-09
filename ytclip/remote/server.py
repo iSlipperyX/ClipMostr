@@ -39,6 +39,7 @@ from pathlib import Path
 from typing import Callable
 from urllib.parse import parse_qs, urlsplit
 
+from .. import __version__
 from . import certs, protocol, state
 from .host import Host, HostError
 
@@ -441,6 +442,7 @@ class RemoteServer:
             udp = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             udp.bind((self.bind, protocol.DISCOVERY_PORT))
             udp.settimeout(1.0)
+            protocol.udp_no_resets(udp)
         except OSError as exc:
             self.log(f"Macs can't find this PC by themselves (UDP {protocol.DISCOVERY_PORT}: {exc}); type its "
                      "address in the Mac app instead.")
@@ -455,7 +457,7 @@ class RemoteServer:
         while self._udp is udp and not self.stop_event.is_set():
             try:
                 data, addr = udp.recvfrom(512)
-            except socket.timeout:
+            except (socket.timeout, ConnectionResetError):  # (Windows: an earlier answer's Mac had gone)
                 continue
             except OSError:
                 return
@@ -466,9 +468,12 @@ class RemoteServer:
                 continue
             last[addr[0]] = now
             nonce = data[len(protocol.DISCOVER_HELLO):][:64].decode("ascii", "replace")
+            try:
+                pairing = bool(state.pairing(state.load(self.state_file), self.now()))
+            except Exception:  # noqa: BLE001 - an unreadable remote.json still gets an answer
+                pairing = False
             reply = {"app": protocol.APP, "api": protocol.API_VERSION, "name": self.name, "id": self.host_id,
-                     "port": self.port, "fp": self.fp, "nonce": nonce, "version": self.host.hello()["version"],
-                     "pairing": bool(state.pairing(state.load(self.state_file), self.now()))}
+                     "port": self.port, "fp": self.fp, "nonce": nonce, "version": __version__, "pairing": pairing}
             try:
                 udp.sendto(json.dumps(reply).encode(), addr)
             except OSError:
