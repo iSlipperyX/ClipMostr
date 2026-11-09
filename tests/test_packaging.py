@@ -171,8 +171,12 @@ def test_self_test_says_what_failed(monkeypatch):
     assert selftest.main(["--strict"], out=said.append) == 1
 
 
-def test_real_checks_that_need_nothing_extra():
+def test_every_module_of_the_app_loads():
+    pytest.importorskip("ytclip.gui.main_window", exc_type=ImportError)  # no Qt Multimedia libraries (Linux CI)
     assert "modules and what they use" in selftest.check_code()
+
+
+def test_real_checks_that_need_nothing_extra():
     assert "certificates" in selftest.check_python_tls()
     assert selftest.check_ffmpeg().startswith("ffmpeg version")
     with pytest.raises(selftest.Missing):
