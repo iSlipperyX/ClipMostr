@@ -211,6 +211,8 @@ def clear(layout) -> None:
         item = layout.takeAt(0)
         w = item.widget()
         if w is not None:
+            w.hide()  # gone from the screen now, not only when the event loop gets to deleting it
+            w.setParent(None)
             w.deleteLater()
         elif item.layout() is not None:
             clear(item.layout())

@@ -11,8 +11,8 @@ import html
 import time
 from typing import Callable
 
-from PySide6.QtCore import QTimer
-from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
+from PySide6.QtCore import Qt, QTimer
+from PySide6.QtWidgets import QFrame, QGridLayout, QHBoxLayout, QLabel, QPushButton, QVBoxLayout, QWidget
 
 from ..remote import protocol, state
 from . import forms, theme
@@ -42,6 +42,7 @@ class MacLink(QWidget):
         self._on, self._port = on, port
         self._sig = None
         self._devices_before: set[str] | None = None  # the linked Macs when Link a Mac was pressed
+        self._addr_cache: tuple[float, list[str]] | None = None
 
         v = QVBoxLayout(self)
         v.setContentsMargins(0, 6, 0, 0)
@@ -51,7 +52,8 @@ class MacLink(QWidget):
             "(ClipMonster-Remote-mac.dmg) and drag it to Applications.<br>2. Tick <b>Let my Mac run ClipMonster</b> "
             "above, Save, and keep automation running (Automation tab, or Start with Windows): the server runs with "
             "it. The first time, Windows asks whether ClipMonster may use the network: allow it on private networks."
-            "<br>3. Press <b>Link a Mac</b>, pick this PC in the Mac app and type the code.")
+            "<br>3. Press <b>Link a Mac</b>. In the Mac app, type the IP address, port and authorization code it "
+            "shows (or pick this PC from the list there and type the code).")
         how.setOpenExternalLinks(True)
         how.setProperty("muted", True)
         v.addWidget(how)
@@ -71,15 +73,34 @@ class MacLink(QWidget):
         self.code_box.setObjectName("card")
         box = QVBoxLayout(self.code_box)
         box.setContentsMargins(14, 10, 14, 10)
-        self.code_label = QLabel("")
-        self.code_label.setStyleSheet("font-size: 26px; font-weight: 600; letter-spacing: 6px;")
+        box.setSpacing(6)
+        type_these = QLabel("In ClipMonster Remote on your Mac, type:")
+        type_these.setStyleSheet("font-weight: 600;")
+        box.addWidget(type_these)
+        grid = QGridLayout()
+        grid.setHorizontalSpacing(18)
+        grid.setVerticalSpacing(4)
+        self.ip_label, self.port_label, self.code_label = QLabel(""), QLabel(""), QLabel("")
+        self.ip_more = QLabel("")
+        self.ip_more.setProperty("muted", True)
+        for row, (name, value) in enumerate((("IP address", self.ip_label), ("Port", self.port_label),
+                                             ("Authorization code", self.code_label))):
+            n = QLabel(name)
+            n.setProperty("muted", True)
+            value.setTextInteractionFlags(Qt.TextSelectableByMouse)
+            value.setStyleSheet("font-size: 20px; font-weight: 600;" if value is not self.code_label else
+                                "font-size: 26px; font-weight: 600; letter-spacing: 3px;")
+            grid.addWidget(n, row, 0, Qt.AlignVCenter)
+            grid.addWidget(value, row, 1, Qt.AlignVCenter)
+        grid.addWidget(self.ip_more, 0, 2, Qt.AlignVCenter)
+        grid.setColumnStretch(2, 1)
+        box.addLayout(grid)
         self.code_text = forms.WrapLabel("")
         crow = QHBoxLayout()
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.clicked.connect(self._stop_linking)
         crow.addWidget(self.stop_btn)
         crow.addStretch(1)
-        box.addWidget(self.code_label)
         box.addWidget(self.code_text)
         box.addLayout(crow)
         self.code_box.hide()
@@ -98,7 +119,7 @@ class MacLink(QWidget):
 
         away = forms.WrapLabel(
             "Away from home: install <a href='%s' style='color:%s'>Tailscale</a> on this PC and the Mac, signed in "
-            "to the same account, then type this PC's Tailscale name or address in the Mac app. The connection "
+            "to the same account, then type this PC's Tailscale address in the Mac app instead of its IP address. The connection "
             "stays encrypted end to end, and nothing is opened to the internet." % (TAILSCALE, theme.ACCENT_2))
         away.setOpenExternalLinks(True)
         away.setProperty("muted", True)
@@ -133,14 +154,14 @@ class MacLink(QWidget):
             line = (f"<span style='color:{theme.WARN}'>○</span> It starts with automation once you Save: start "
                     "automation in the Automation tab if it isn't running.")
         self.server_line.setText(line)
-        self._show_code(data, now, running)
+        self._show_code(data, now, running, status)
         sig = tuple((d["id"], d.get("name"), int(d.get("seen_at") or 0) // 60, d.get("address"))
                     for d in data["devices"])
         if sig != self._sig:
             self._sig = sig
             self._fill(data["devices"], now)
 
-    def _show_code(self, data: dict, now: float, running: bool) -> None:
+    def _show_code(self, data: dict, now: float, running: bool, status: dict | None = None) -> None:
         p = state.pairing(data, now)
         if self._devices_before is not None:
             new = [d for d in data["devices"] if d["id"] not in self._devices_before]
@@ -170,15 +191,31 @@ class MacLink(QWidget):
         self.code_box.show()
         left = max(0, int(float(p.get("until") or 0) - now))
         self.code_label.setText(protocol.show_code(p["code"]))
+        status = status or {}
+        addrs = (status.get("addresses") if running else None) or self._addresses()
+        self.ip_label.setText(_esc(addrs[0]) if addrs else "unknown")
+        self.ip_more.setText(("or " + ", ".join(_esc(a) for a in addrs[1:3])) if len(addrs) > 1 else "")
+        self.port_label.setText(str(status.get("port") if running and status.get("port") else self._port()))
         tries = protocol.MAX_WRONG - int(p.get("wrong") or 0)
-        text = (f"In ClipMonster Remote on your Mac, pick this PC and type this code. It works for "
-                f"{left // 60}:{left % 60:02d} more.")
+        text = f"The code works for {left // 60}:{left % 60:02d} more."
         if tries < protocol.MAX_WRONG:
             text += f" <span style='color:{theme.WARN}'>{tries} tr{'y' if tries == 1 else 'ies'} left.</span>"
         if not running:
             text += (f"<br><span style='color:{theme.WARN}'>Automation's server isn't running, so the Mac can't reach "
                      "this PC yet: Save with Let my Mac run ClipMonster ticked, and start automation.</span>")
         self.code_text.setText(text)
+
+    def _addresses(self) -> list[str]:
+        """This PC's addresses while the server isn't up to say (looked up once a minute at most)."""
+        now = time.monotonic()
+        if self._addr_cache is None or now - self._addr_cache[0] > 60:
+            try:
+                from ..remote.server import local_addresses
+
+                self._addr_cache = (now, local_addresses())
+            except Exception:  # noqa: BLE001 - only a hint on screen
+                self._addr_cache = (now, [])
+        return self._addr_cache[1]
 
     def _fill(self, devices: list[dict], now: float) -> None:
         while self.devices_box.count():

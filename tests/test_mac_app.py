@@ -174,34 +174,98 @@ def test_offline_shows_a_banner(app, window, world):  # noqa: F811
     assert wait(app, lambda: not window.offline.isVisibleTo(window.main))
 
 
-def test_linking_from_the_connect_page(app, world):  # noqa: F811
-    from ytclip.mac.connect import PairDialog
+@pytest.fixture
+def connect_page(app, world):  # noqa: F811
+    from ytclip.mac.connect import ConnectPage
     from ytclip.mac.session import Tasks
 
-    tasks = Tasks()
+    page = ConnectPage(Tasks())
+    page.linked_to = []
+    page.connect_to.connect(page.linked_to.append)
+    return page
+
+
+def test_linking_with_the_ip_address_port_and_code(app, world, connect_page):  # noqa: F811
+    page = connect_page
     code = world.code()
-    d = PairDialog(tasks, "127.0.0.1", world.port, "PC")
-    assert wait(app, lambda: "This PC's ID" in d.pc_id.text())
-    d.code.setText(code.lower())
-    d._typed(code.lower())
-    assert d.code.text() == f"{code[:4]}-{code[4:]}"
-    d._link()
-    assert wait(app, lambda: d.result_host is not None, timeout=20)
-    h = hosts.last()
-    assert h.fp == world.server.fp and h.token()
+    page.address.setText("127.0.0.1")
+    page.port.setText(str(world.port))
+    page._check()
+    assert wait(app, lambda: "Found" in page.pc_line.text() and "a code is up" in page.pc_line.text())
+    from ytclip.remote import protocol
+
+    assert protocol.short_fingerprint(world.server.fp) in page.pc_line.text()  # the ID the PC's settings show
+    page.code.setText(code.lower())
+    page._code_edited(code.lower())
+    assert page.code.text() == f"{code[:4]}-{code[4:]}"
+    assert page.go_btn.text() == "Link"
+    page.go_btn.click()
+    assert wait(app, lambda: page.linked_to, timeout=20)
+    h = page.linked_to[0]
+    assert (h.address, h.port, h.fp) == ("127.0.0.1", world.port, world.server.fp) and h.token()
+    assert hosts.last().id == h.id
     assert mclient.Client("127.0.0.1", world.port, h.fp, h.device_id, h.token()).get("/api/whoami")
+    assert page.code.text() == ""  # a used code isn't left on screen
 
 
-def test_a_wrong_code_says_so(app, world):  # noqa: F811
-    from ytclip.mac.connect import PairDialog
-    from ytclip.mac.session import Tasks
-
+def test_a_wrong_code_says_so(app, world, connect_page):  # noqa: F811
+    page = connect_page
     code = world.code()
-    d = PairDialog(Tasks(), "127.0.0.1", world.port, "PC")
-    d.code.setText(("B" if code[0] != "B" else "C") + code[1:])
-    d._link()
-    assert wait(app, lambda: "isn't right" in d.msg.text(), timeout=20)
-    assert d.result_host is None and d.go.isEnabled()
+    page.address.setText("127.0.0.1")
+    page.port.setText(str(world.port))
+    page.code.setText(("B" if code[0] != "B" else "C") + code[1:])
+    page._go()
+    assert wait(app, lambda: "isn't right" in page.form_msg.text(), timeout=20)
+    assert not page.linked_to and page.go_btn.isEnabled() and page.code.isEnabled()
+
+
+def test_the_form_checks_what_was_typed(app, world, connect_page):  # noqa: F811
+    page = connect_page
+    page.address.setText("")
+    page._go()
+    assert "IP address" in page.form_msg.text()
+    page.address.setText("127.0.0.1")
+    page.port.setText("0")
+    page._go()
+    assert "port" in page.form_msg.text()
+    page.port.setText(str(world.port))
+    page.code.setText("ABC")
+    page._go()
+    assert "8 letters" in page.form_msg.text()
+    page.code.setText("")
+    page._go()  # not linked, no code: asks for it
+    assert wait(app, lambda: "isn't linked to" in page.form_msg.text())
+    assert not page.linked_to
+
+
+def test_address_with_its_port_goes_in_two_boxes(app, connect_page):
+    page = connect_page
+    page.address.setText("192.168.1.20:47999")
+    assert page.target() == ("192.168.1.20", 47999)
+    page._split_address()
+    assert page.address.text() == "192.168.1.20" and page.port.text() == "47999"
+    page.address.setText("https://10.0.0.5:47320/")
+    page._split_address()
+    assert page.address.text() == "10.0.0.5" and page.port.text() == "47320"
+
+
+def test_a_linked_pc_connects_without_a_code(app, world, connect_page):  # noqa: F811
+    page = connect_page
+    h = linked_host(world)
+    page.address.setText("127.0.0.1")
+    page.port.setText(str(world.port))
+    page._update_button()
+    assert page.go_btn.text() == "Connect"
+    page._go()
+    assert page.linked_to and page.linked_to[0].id == h.id
+
+
+def test_a_found_pc_fills_in_its_address(app, world, connect_page):  # noqa: F811
+    page = connect_page
+    page._pick_found({"name": "JUSTYN-PC", "id": "x", "address": "192.168.1.20", "port": 47320, "fp": "ab" * 32,
+                      "version": "3.6.0", "api": 1})
+    assert page.address.text() == "192.168.1.20" and page.port.text() == "47320"
+    assert "authorization code" in page.form_msg.text() and not page.linked_to
 
 
 def test_self_check(app, capsys):
