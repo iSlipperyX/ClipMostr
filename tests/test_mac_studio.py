@@ -492,6 +492,50 @@ def test_an_unlinked_macs_videos_are_dropped(tmp_path):
     assert not (tmp_path / "mac_jobs" / made["id"]).exists()  # the clips nobody can fetch
 
 
+def test_which_macs_are_linked_is_asked_once_a_look(tmp_path):
+    mj = mac_jobs(tmp_path)
+    asked = []
+    mj.linked = lambda: asked.append(1) or {"mac1"}
+    for _ in range(5):
+        mj.add("mac1", "MacBook", {"source": URL})
+    del asked[:]
+    assert mj._next() is not None and len(asked) == 1
+
+
+def test_clean_up_leaves_an_odd_links_download_while_its_made(tmp_path, isolated_profile):
+    """A link whose id can't be read off it (not YouTube): its download's own id was only written down once
+    the video was prepared, so Clean up could delete the download while it was being transcribed."""
+    from ytclip import cleanup
+    from ytclip.jobs import JobDB
+    from ytclip.settings import app_dir
+
+    class Slow(FakeEngine):
+        def prepare(self, p):
+            p.video = SimpleNamespace(title="Odd Talk", channel="Chan", id="realid12345", url=p.source)
+            self.progress("Transcribing", 0.1)  # downloaded: the long part starts
+            super().prepare(p)
+
+    mj = mac_jobs(tmp_path)
+    mj._engine = Slow
+    mj.root = app_dir() / "mac_jobs"
+    odd = "https://example.com/talks/odd"
+    j = mj.add("mac1", "MacBook", {"source": odd})
+    FakeEngine.gate = threading.Event()
+    t = threading.Thread(target=mj.make, args=(mj._next(),))
+    t.start()
+    try:
+        working(mj, j["id"])
+        end = time.time() + 5
+        while not FakeEngine.made and time.time() < end:
+            time.sleep(0.02)
+        time.sleep(0.05)
+        assert "realid12345" in cleanup.busy_ids(JobDB(tmp_path / "jobs.db"), tmp_path / "none.json")
+    finally:
+        FakeEngine.gate.set()
+        t.join(5)
+    assert mj.job(j["id"], "mac1")["status"] == "done"
+
+
 def test_a_video_being_made_stops_when_its_mac_is_unlinked(tmp_path, monkeypatch):
     mj = mac_jobs(tmp_path)
     monkeypatch.setattr(studio, "LINK_CHECK", 0.0)
@@ -1496,6 +1540,17 @@ def test_fetched_clips_replace_an_earlier_export_of_the_video(app, pc_list):
     assert json.loads((here / "clips.json").read_text(encoding="utf-8"))["clips"] == [{"file": "01 - clip.mp4"}]
 
 
+def test_an_earlier_export_with_an_odd_index_doesnt_stop_the_clips_coming(app, pc_list):
+    here = pc_list.out / FOLDER
+    here.mkdir(parents=True)
+    (here / "clips.json").write_text(json.dumps({"clips": 7}), encoding="utf-8")  # not a list of clips
+    key, = pc_list.send([URL])
+    assert wait(app, lambda: pc_list.get(key)["status"] == "queued")
+    pc_list.pc.made(pc_list.get(key)["id"], {"01 - clip.mp4": b"new one"})
+    assert wait(app, lambda: pc_list.get(key)["status"] == "done"), pc_list.get(key)
+    assert (here / "01 - clip.mp4").read_bytes() == b"new one"
+
+
 def test_an_earlier_export_stays_when_the_pc_lost_the_clips(app, pc_list):
     here = pc_list.out / FOLDER
     here.mkdir(parents=True)
@@ -1531,6 +1586,45 @@ def test_two_videos_never_come_into_one_folder_at_once(app, pc_list):
     texts = {p.read_bytes().decode()[:7] for p in here.glob("*.mp4")}
     assert len(texts) == 1 and len(list(here.glob("*.mp4"))) == 3  # one video's clips, whole
     assert not list(here.glob("*.part"))
+
+
+def test_clips_that_stop_arriving_are_tried_again_on_the_next_look_not_at_once(app, pc_list):
+    """A fetch that ended with the PC out of reach started itself again the moment it ended, round and round
+    with no pause, for as long as the download kept failing."""
+    from ytclip.mac.client import Offline
+
+    tries = []
+
+    def download(path, dest, progress=None, cancelled=None):
+        tries.append(path)
+        raise Offline("The file stopped arriving part way.")
+
+    pc_list.pc.download = download
+    pc_list.timer.setInterval(300)
+    key, = pc_list.send([URL])
+    assert wait(app, lambda: pc_list.get(key)["status"] == "queued")
+    pc_list.pc.made(pc_list.get(key)["id"], {"01 - clip.mp4": b"new one"})
+    assert wait(app, lambda: len(tries) >= 1)
+    wait(app, lambda: False, timeout=0.7)
+    assert len(tries) <= 5, len(tries)  # one a look
+    assert pc_list.get(key)["status"] == "fetching" and "stopped arriving" in pc_list.get(key)["error"]
+    del pc_list.pc.download  # the PC is back: the next look brings them
+    assert wait(app, lambda: pc_list.get(key)["status"] == "done"), pc_list.get(key)
+
+
+def test_a_fetch_that_breaks_says_so_and_stops(app, pc_list):
+    def broken(path, dest, progress=None, cancelled=None):
+        raise TypeError("something nobody thought of")
+
+    pc_list.pc.download = broken
+    key, = pc_list.send([URL])
+    assert wait(app, lambda: pc_list.get(key)["status"] == "queued")
+    pc_list.pc.made(pc_list.get(key)["id"], {"01 - clip.mp4": b"new one"})
+    assert wait(app, lambda: pc_list.get(key)["status"] == "failed", timeout=3), pc_list.get(key)
+    assert "TypeError" in pc_list.get(key)["error"] and wait(app, lambda: not pc_list._threads)
+    asked = len(pc_list.pc.asked)
+    wait(app, lambda: False, timeout=0.3)
+    assert len(pc_list.pc.asked) == asked  # and it isn't tried over and over
 
 
 def test_removing_a_video_whose_clips_are_coming_asks_first(app, mac, monkeypatch):

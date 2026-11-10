@@ -162,8 +162,14 @@ class PCJobs(QObject):
 
     def _thread_ended(self, key: str) -> None:
         self._threads.pop(key, None)
-        if self._fetching.pop(key, None) is not None:
-            self.poll()  # another video's clips may be waiting for this folder
+        folder = self._fetching.pop(key, None)
+        if folder is None or self.link.session is None:
+            return
+        # another video's clips may be waiting for this folder. (Not this one again: if it couldn't be
+        # finished, it's tried on the next look at the PC, not round and round.)
+        for j in self.ordered():
+            if j["key"] != key and j.get("status") == "fetching" and self._here(j) and j["key"] not in self._threads:
+                self._start_fetch(j["key"])
 
     # --- sending --------------------------------------------------------------------------------------------
 
@@ -462,6 +468,9 @@ class PCJobs(QObject):
             except OSError as exc:
                 self._moved.emit(key, {"status": "failed", "frac": None, "stage": "",
                                        "error": f"The clips couldn't be saved on this Mac ({exc.strerror or exc})."})
+            except Exception as exc:  # noqa: BLE001 - a failure in words, on the row (and it isn't tried again)
+                self._moved.emit(key, {"status": "failed", "frac": None, "stage": "",
+                                       "error": f"{type(exc).__name__}: {exc}"})
             finally:
                 self._ended.emit(key)
 
@@ -534,7 +543,8 @@ def _remove_previous(folder: Path) -> None:
     except (OSError, ValueError):
         return
     gone = [index]
-    for rec in (meta.get("clips") or []) if isinstance(meta, dict) else []:
+    clips = meta.get("clips") if isinstance(meta, dict) else None
+    for rec in clips if isinstance(clips, list) else []:
         if not isinstance(rec, dict) or not isinstance(rec.get("file"), str) or not rec["file"]:
             continue
         clip = folder / rec["file"]
