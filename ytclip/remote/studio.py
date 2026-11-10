@@ -30,6 +30,7 @@ from dataclasses import asdict, fields
 from pathlib import Path
 from typing import Callable
 
+from . import paths
 from .host import HostError
 
 AI_KEEP = 600.0  # s a finished AI task waits for the Mac to read its answer
@@ -806,9 +807,11 @@ class MacJobs:
         out = self._out(job_id) / "out"
         files = []
         for f in sorted(Path(folder).rglob("*")):
-            rel = f.relative_to(out).as_posix()
             if f.is_file() and not any(part.startswith((".", "_rejected")) for part in f.relative_to(out).parts):
-                files.append({"path": rel, "size": f.stat().st_size})
+                try:  # only ever relative, with "/" (remote/paths.py): this PC's own paths never travel
+                    files.append({"path": paths.to_wire(f, out), "size": f.stat().st_size})
+                except paths.UnsafePath:  # (a link out of the folder)
+                    continue
         made = len([c for c in p.clips if c.enabled])
         rejected = p.qc.get("rejected", 0) if p.qc else 0
         title = p.video.title if p.video else job.get("title") or job.get("name")

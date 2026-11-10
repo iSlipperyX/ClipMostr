@@ -15,16 +15,23 @@ it's talking to your PC, and the certificate is then remembered ("pinned") for e
    shows the Mac that the PC knew the code too.
 
 After that, every request carries the key ("Authorization: Bearer <device>.<token>") over a connection whose
-certificate must match the pinned fingerprint.
+certificate must match the pinned fingerprint; a Mac with no pinned fingerprint never sends its key at all.
+The key is 256 random bits (stretching adds nothing to a random key; PBKDF2 is for the short code people
+type), and the PC keeps only its SHA-256.
+
+Both ends speak TLS 1.2 or 1.3 only, with forward-secret key exchange and authenticated ciphers (harden), and
+a Mac that loses the PC tries again on a growing, jittered delay (Backoff) rather than every few seconds.
 """
 
 from __future__ import annotations
 
 import hashlib
 import hmac
+import random
 import re
 import secrets
 import socket
+import ssl
 
 API_VERSION = 1  # bumped when a change would break an older Mac app or host
 APP = "ClipMonster"
@@ -38,6 +45,46 @@ CODE_LIFE = 10 * 60.0
 MAX_WRONG = 5  # wrong proofs before the code is thrown away
 ITERATIONS = 200_000  # PBKDF2-SHA256 rounds that stretch the code
 MIN_ITERATIONS = 100_000  # a Mac won't link with a PC asking for fewer
+
+
+# TLS 1.2's suites: ECDHE key exchange (forward secrecy) with AES-GCM or ChaCha20 only (TLS 1.3's are all of that
+# kind already). The PC's own key is ECDSA (certs.py).
+TLS12_CIPHERS = "ECDHE+AESGCM:ECDHE+CHACHA20:!aNULL:!eNULL:!MD5:!DSS"
+
+
+def harden(ctx: ssl.SSLContext) -> ssl.SSLContext:
+    """TLS 1.2 or newer, the ciphers above, no compression or renegotiation: for both ends."""
+    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    try:
+        ctx.set_ciphers(TLS12_CIPHERS)
+    except ssl.SSLError:  # an OpenSSL that names them differently: its defaults are still modern
+        pass
+    ctx.options |= ssl.OP_NO_COMPRESSION | getattr(ssl, "OP_NO_RENEGOTIATION", 0)
+    return ctx
+
+
+class Backoff:
+    """How long to wait before trying a lost PC again: `base` seconds, doubling each failure up to `cap`, each
+    wait moved up to ±`jitter` of itself at random (so several Macs, or a Mac's own threads, don't all knock at
+    once when the PC comes back). reset() after a success."""
+
+    def __init__(self, base: float = 2.0, cap: float = 60.0, factor: float = 2.0, jitter: float = 0.2,
+                 rand=random.random):
+        self.base, self.cap, self.factor, self.jitter, self.rand = base, cap, factor, jitter, rand
+        self.failures = 0
+
+    def peek(self) -> float:
+        """The wait the next failure gets, before jitter."""
+        return min(self.cap, self.base * self.factor ** self.failures)
+
+    def next(self) -> float:
+        """One more failure: how long to wait now."""
+        delay = self.peek()
+        self.failures += 1
+        return max(0.0, delay * (1 + self.jitter * (2 * self.rand() - 1)))
+
+    def reset(self) -> None:
+        self.failures = 0
 
 
 def new_code() -> str:

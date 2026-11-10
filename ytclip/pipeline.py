@@ -1004,6 +1004,13 @@ class Runner:
 
         now = self.now() if now is None else now
         self.db.set_meta("weekly_at", now)
+        if getattr(s, "learn_from_results", True):  # the learner's daily distilling (intelligence/learner.py)
+            try:
+                from .intelligence import learner
+
+                learner.refresh(s, now=now, log=self.log)
+            except Exception as exc:  # noqa: BLE001 - learning is a bonus: it never stops automation
+                self.log(f"⚠ Couldn't learn from the latest results: {type(exc).__name__}: {exc}")
         try:
             w = weekly.tick(s, self.db, now, log=self.log)
         except Exception as exc:  # noqa: BLE001 - a report problem never stops automation

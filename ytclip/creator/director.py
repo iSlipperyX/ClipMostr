@@ -262,8 +262,13 @@ def word_target(seconds: float, wpm: float = DEFAULT_WPM) -> tuple[int, int, int
     return round(aim * (1 - WORD_SLACK)), aim, round(aim * (1 + WORD_SLACK))
 
 
-def scene_range(seconds: float) -> tuple[int, int]:
-    """How many scenes a video this long wants: a new picture about every 4-8 seconds."""
+def scene_range(seconds: float, per: float = 0.0) -> tuple[int, int]:
+    """How many scenes a video this long wants: a new picture about every 4-8 seconds, or about every `per`
+    seconds (the pace your best videos had: intelligence/learner.py)."""
+    if per > 0:
+        lo = max(MIN_SCENES, min(MAX_SCENES, round(seconds / (per * 1.2))))
+        hi = min(MAX_SCENES, max(lo + 1, round(seconds / (per * 0.85))))
+        return lo, hi
     lo = max(MIN_SCENES, round(seconds / 8))
     hi = min(MAX_SCENES, max(lo + 2, round(seconds / 4.5)))
     return lo, hi
@@ -474,7 +479,8 @@ class Brief:
     style: str = ""  # STYLES key; "" = from the category
     avoid: list[str] = field(default_factory=list)  # titles of earlier videos on this, to take a new angle
     facts: str = ""  # today's date and what was found online (web.brief); "" = just today's date
-    lessons: str = ""  # how earlier videos did (learn.Lessons.creator_text); "" = nothing to go on yet
+    lessons: str = ""  # how earlier videos did (intelligence/learner.py, else learn.Lessons.creator_text); "" = none yet
+    scene_seconds: float = 0.0  # a new picture about this often (learner.Pacing); 0 = the usual 4-8 s
 
 
 def write(s, brief: Brief, *, log: Log | None = None, check: Callable[[], None] | None = None,
@@ -488,7 +494,7 @@ def write(s, brief: Brief, *, log: Log | None = None, check: Callable[[], None] 
     log = log or (lambda m: None)
     style = get_style(brief.style or style_for(brief.category, brief.prompt, brief.instructions))
     lo, aim, hi = word_target(brief.seconds, brief.wpm)
-    scenes_lo, scenes_hi = scene_range(brief.seconds)
+    scenes_lo, scenes_hi = scene_range(brief.seconds, brief.scene_seconds)
     system = SYSTEM.format(hook=HOOK_WORDS)
     base = ASK.format(prompt=brief.prompt.strip(), category=brief.category or "general",
                       instructions=f"\nWhat this account wants: {brief.instructions.strip()}" if brief.instructions.strip() else "",

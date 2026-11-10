@@ -19,6 +19,7 @@ from typing import Callable
 from urllib.parse import quote
 
 from .. import ai
+from ..remote.protocol import Backoff
 from .client import ApiError, Offline
 
 WAIT = 20  # s the PC holds each long poll
@@ -135,6 +136,7 @@ class PCAI:
         path = f"/api/ai/tasks/{quote(task_id, safe='')}"
         finished = False
         lost_since = None
+        retry = Backoff(base=1.0, cap=15.0)
         said: list = [None]
         rev = started.get("rev")
 
@@ -156,13 +158,15 @@ class PCAI:
                 try:
                     st = client.request("GET", path, query={"wait": WAIT, "rev": rev}, timeout=POLL_TIMEOUT)
                     lost_since = None
+                    retry.reset()
                     rev = st.get("rev", rev)
                 except Offline as exc:
                     now = self.now()
                     lost_since = lost_since if lost_since is not None else now
                     if now - lost_since > GONE_FOR:
                         raise ai.AIError(f"Lost your PC while its local AI was answering ({exc.message})") from exc
-                    self.sleep(3.0)
+                    # its question keeps going on the PC: ask again sooner at first, then less often
+                    self.sleep(min(retry.next(), max(0.5, GONE_FOR - (now - lost_since))))
                     continue
                 except ApiError as exc:
                     if exc.status == 404:  # automation restarted on the PC: the question went with it

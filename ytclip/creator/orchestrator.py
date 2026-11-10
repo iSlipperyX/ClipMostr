@@ -208,15 +208,25 @@ class VideoCreatorOrchestrator:
                                    wpm=wpm, style=style, avoid=originality.earlier_titles(req.prompt),
                                    facts=web.brief(found))
             from .. import learn
+            from ..intelligence import learner
 
             lessons = learn.for_settings(self.s)
             if lessons is not None and not lessons.empty:
-                brief.lessons = lessons.creator_text(category.id if category else "")
+                cid = category.id if category else ""
+                few = learner.guide(self.s, req.prompt, category_id=cid,
+                                    sport=category.sport if category else "", purpose="script")
+                brief.lessons = few or lessons.creator_text(cid)
                 if brief.lessons:
                     n = sum(1 for o in lessons.outcomes if o.creator)
                     self.log(f"Learning from how your earlier videos did ({n} Creator video{'s' if n != 1 else ''}"
                              f" with results" + (", and your clips' hooks)." if "your TikTok clips" in brief.lessons
-                                                  else ")."))
+                                                  else "; the openings closest to this one)." if few else ")."))
+                pace = learner.calibrate(lessons.outcomes, cid, default_wpm=wpm)
+                if pace.wpm:
+                    # The voice is sped up or slowed to land on the length (0.8-1.2x): aim where it can reach.
+                    brief.wpm = round(max(wpm * 0.85, min(wpm * 1.15, pace.wpm)), 1)
+                    brief.scene_seconds = pace.scene_seconds or 0.0
+                    self.log(pace.note)
             entries = originality.load()
             try:
                 board = director.write(self.s, brief, log=self.log, check=self.check, progress=report,

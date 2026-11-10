@@ -80,7 +80,7 @@ class Account:
     onboarded: str = ""
 
     def __post_init__(self) -> None:
-        self.browser_profile = self.browser_profile or f"browser-profiles/{self.id}"
+        self.browser_profile = self.browser_profile or default_profile(self.id)
 
     @property
     def label(self) -> str:
@@ -93,8 +93,13 @@ class Account:
         """'@name' when known, else the label; used in log lines and notifications."""
         return f"@{self.username}" if self.username else self.label
 
+    def profile_path(self) -> Path:
+        """Where its browser profile (its TikTok sign-in) is, always inside posting's own folder: a profile
+        named outside it in accounts.json (an absolute path, "..") is taken as this account's usual one."""
+        return profile_path(self.browser_profile, self.id)
+
     def browser_dir(self) -> Path:
-        path = cache_dir() / self.browser_profile
+        path = self.profile_path()
         path.mkdir(parents=True, exist_ok=True)
         return path
 
@@ -175,6 +180,7 @@ class Accounts:
                     if k in known:
                         setattr(a, k, v)
                 out.append(a)
+        _own_profiles(out)
         self.items = out
 
     # --- access -----------------------------------------------------------------
@@ -231,8 +237,12 @@ class Accounts:
 
     @staticmethod
     def delete_login(a: Account) -> None:
-        """Delete a removed account's browser profile (its TikTok login) from this PC."""
-        shutil.rmtree(cache_dir() / a.browser_profile, ignore_errors=True)
+        """Delete a removed account's browser profile (its TikTok login) from this PC. Only ever a folder inside
+        posting's profiles: never posting's own folder or anything beside it."""
+        path = a.profile_path()
+        root = cache_dir().resolve()
+        if path.resolve() != root and path.resolve().is_relative_to(root):
+            shutil.rmtree(path, ignore_errors=True)
 
     def move(self, account_id: str, delta: int) -> None:
         with self.lock:
@@ -242,6 +252,48 @@ class Accounts:
             i = self.items.index(a)
             j = max(0, min(len(self.items) - 1, i + delta))
             self.items.insert(j, self.items.pop(i))
+
+
+PROFILES = "browser-profiles"
+
+
+def default_profile(account_id: str) -> str:
+    return f"{PROFILES}/{account_id}"
+
+
+def profile_path(rel: str, account_id: str) -> Path:
+    """`rel` (accounts.json's browser_profile) under posting's folder, or the account's usual profile when it
+    would land anywhere else: absolute, a drive or a share, a "..", or posting's folder itself."""
+    root = cache_dir()
+    text = str(rel or "").replace("\\", "/").strip()
+    parts = [x for x in text.split("/") if x not in ("", ".")]
+    bad = (not parts or text.startswith("/") or ":" in text or any(x == ".." for x in parts))
+    path = root.joinpath(*parts) if not bad else None
+    if path is not None:
+        try:
+            r, base = path.resolve(), root.resolve()
+            bad = r == base or not r.is_relative_to(base)
+        except OSError:
+            bad = True
+    return root.joinpath(*default_profile(account_id).split("/")) if bad else path
+
+
+def _own_profiles(accounts: list[Account]) -> list[Account]:
+    """Each account signs in in a profile of its own: two accounts pointed at one profile (a copied
+    accounts.json entry) would post as whoever signed in last. The later one gets its usual profile back and
+    is asked to sign in again. Returns the accounts that were moved."""
+    seen: set[str] = set()
+    moved = []
+    for a in accounts:
+        key = str(a.profile_path()).casefold()
+        if key in seen:
+            a.browser_profile = default_profile(a.id)
+            a.logged_in = False
+            a.session_check, a.session_detail = "expired", "It shared a browser profile with another account."
+            moved.append(a)
+            key = str(a.profile_path()).casefold()
+        seen.add(key)
+    return moved
 
 
 def _entries(data) -> dict[str, dict]:

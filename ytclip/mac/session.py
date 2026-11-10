@@ -16,10 +16,12 @@ from typing import Callable
 
 from PySide6.QtCore import QObject, QTimer, Signal
 
+from ..remote.protocol import Backoff
 from . import hosts
 from .client import ApiError, Client, Offline, WrongPC
 
 STATUS_EVERY = 3000  # ms
+RETRY_CAP = 60.0  # s: a PC that's gone is asked about this often at most rarely (3, 6, 12 … 60 s)
 VIDEOS_EVERY = 6000
 DELIVERIES_EVERY = 20000  # the sports clips inbox (news of a new one asks at once)
 EVENTS_WAIT = 12.0  # s a long poll waits (under the client's timeout)
@@ -80,6 +82,7 @@ class Session(QObject):
         self._stop = threading.Event()
         self._events_thread: threading.Thread | None = None
         self._seq = -1
+        self.backoff = Backoff(base=STATUS_EVERY / 1000, cap=RETRY_CAP)
         self.status_timer = QTimer(self)
         self.status_timer.setInterval(STATUS_EVERY)
         self.status_timer.timeout.connect(self.refresh_status)
@@ -144,6 +147,9 @@ class Session(QObject):
 
         def ok(st):
             self._busy["status"] = False
+            if self.backoff.failures:  # back: the usual few seconds again
+                self.backoff.reset()
+                self.status_timer.setInterval(STATUS_EVERY)
             if self.state != "online":
                 self.host.seen_at = time.time()
                 try:
@@ -156,13 +162,27 @@ class Session(QObject):
             if st.get("videos_rev") and st["videos_rev"] != self._videos_rev:
                 self.refresh_videos()
 
-        def fail(_exc):
+        def fail(exc):
             self._busy["status"] = False
+            if isinstance(exc, (Offline, WrongPC)) or (isinstance(exc, ApiError) and exc.status in (401, 429)):
+                # Lost (or turned away): ask again later and later, not every few seconds.
+                self.status_timer.setInterval(int(self.backoff.next() * 1000))
 
         self.call(lambda c: c.get("/api/status"), ok, fail)
 
+    def retry_now(self) -> None:
+        """Try the PC at once (the window's Try again), and from then on at the usual pace."""
+        self.backoff.reset()
+        self.status_timer.setInterval(STATUS_EVERY)
+        self.refresh_status()
+
+    @property
+    def reachable(self) -> bool:
+        """Worth asking for more than the status: online, or not known to be gone yet."""
+        return self.state in ("online", "connecting")
+
     def refresh_videos(self, force: bool = False) -> None:
-        if self._busy["videos"]:
+        if self._busy["videos"] or not self.reachable:  # (the status call finds out when it's back)
             return
         self._busy["videos"] = True
         known = "" if force else self._videos_rev
@@ -180,7 +200,7 @@ class Session(QObject):
         self.call(lambda c: c.get("/api/videos", rev=known) if known else c.get("/api/videos"), ok, fail)
 
     def refresh_deliveries(self, force: bool = False) -> None:
-        if self._busy["deliveries"]:
+        if self._busy["deliveries"] or not self.reachable:
             return
         self._busy["deliveries"] = True
         known = "" if force else self._deliveries_rev
@@ -203,7 +223,7 @@ class Session(QObject):
         """The news feed: one long poll at a time, on its own connection."""
         client = Client(self.host.address, self.host.port, self.host.fp, self.host.device_id, self.client.token,
                         timeout=EVENTS_WAIT + 10)
-        backoff = 2.0
+        backoff = Backoff(base=2.0, cap=30.0)
         while not self._stop.is_set():
             try:
                 if self._seq < 0:  # the news so far, shown but not announced
@@ -213,10 +233,9 @@ class Session(QObject):
                         if not self._stop.is_set():
                             self.event.emit({**e, "old": True})
                 got = client.get("/api/events", after=self._seq, wait=EVENTS_WAIT)
-                backoff = 2.0
+                backoff.reset()
             except ApiError:
-                self._stop.wait(backoff)
-                backoff = min(30.0, backoff * 2)
+                self._stop.wait(backoff.next())
                 continue
             seq = int(got.get("seq") or 0)
             if seq < self._seq:  # the PC's automation restarted: its news starts again from 0

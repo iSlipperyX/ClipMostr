@@ -30,13 +30,11 @@ PROFILE_URL = "https://www.tiktok.com/@{username}?lang=en"
 SESSION_COOKIES = ("sessionid", "sessionid_ss", "sid_tt")
 # Playwright adds --no-sandbox unless told otherwise, and Edge/Chrome then show "You are using an
 # unsupported command-line flag" (and run without their sandbox). Windows doesn't need it; Linux
-# test machines running as root do. --disable-blink-features is on the same warning list, so
-# navigator.webdriver is hidden by WEBDRIVER_SCRIPT instead.
+# test machines running as root do.
 SANDBOX = os.name == "nt"
-# A normal browser answers navigator.webdriver with false (on Navigator.prototype); one that's
-# remote-controlled answers true. Make the controlled one answer like a normal one.
-WEBDRIVER_SCRIPT = ("Object.defineProperty(Navigator.prototype, 'webdriver', "
-                    "{get: () => false, configurable: true, enumerable: true});")
+# The window is the browser you installed, with your own sign-in, and says what it is: nothing is
+# injected to hide that it's being driven (3.8 removed the old script that made navigator.webdriver
+# read false, in line with ClipMonster not disguising its automation).
 
 CAPTCHA = "#captcha-verify-image, div[class*='captcha_verify'], #captcha_container"
 # TikTok Studio's cover editor (posting/cover.py), most specific first; any one of each may match
@@ -100,10 +98,15 @@ class TikTokBrowser:
             if "Executable doesn't exist" in msg or "is not found" in msg:
                 raise BrowserError(f"Couldn't find {self.s.browser_channel}. Pick another browser in Settings.") from exc
             raise
-        self.ctx.set_default_timeout(20_000)
-        self.ctx.add_init_script(WEBDRIVER_SCRIPT)
-        self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
-        self.page.on("dialog", lambda d: d.accept())
+        try:
+            self.ctx.set_default_timeout(20_000)
+            self.page = self.ctx.pages[0] if self.ctx.pages else self.ctx.new_page()
+            self.page.on("dialog", lambda d: d.accept())
+        except BaseException:
+            # `with` never calls __exit__ when __enter__ fails: close the window and Playwright here, or the
+            # profile stays locked ("already open") until the app quits.
+            self.__exit__(None, None, None)
+            raise
         return self
 
     def launch_options(self) -> dict:
@@ -114,12 +117,16 @@ class TikTokBrowser:
                     viewport={"width": 1280, "height": 900}, locale="en-US")
 
     def __exit__(self, *exc) -> None:
+        ctx, pw = self.ctx, self._pw
+        self.ctx = self.page = self._pw = None  # (closing twice is a no-op)
         try:
-            if self.ctx:
-                self.ctx.close()
+            if ctx:
+                ctx.close()
+        except Exception as e:  # noqa: BLE001 - a window already gone; Playwright still has to stop
+            self.log(f"The browser window didn't close cleanly ({type(e).__name__}).")
         finally:
-            if self._pw:
-                self._pw.stop()
+            if pw:
+                pw.stop()
 
     def _check(self) -> None:
         if self.cancelled():

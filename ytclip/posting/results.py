@@ -45,6 +45,8 @@ class Outcome:
     lift: float  # views / the account's usual views
     category_id: str = ""  # ClipMonster's category id for the clip (clips.json "automation" → "category_id"), "" if none
     origin: str = ""  # "creator" (the Video Creator made it) or "clip" (cut from a YouTube video)
+    words: int = 0  # a Creator video's script in words, and its scenes: its pace, for the learner
+    scenes: int = 0
 
 
 def from_clipmonster(item: VideoItem) -> bool:
@@ -83,9 +85,20 @@ def outcomes(store: Store, now: float | None = None, min_age_hours: float = MIN_
                     hook=it.hook, caption=it.caption, length=round(it.duration or v.duration, 1),
                     rating=it.source_rating, score=it.source_score, posted_at=posted, views=v.views,
                     likes=v.likes, comments=v.comments, shares=v.shares, lift=round(v.views / usual, 3),
-                    category_id=it.category_id, origin="creator" if it.ai_generated else "clip"))
+                    category_id=it.category_id, origin="creator" if it.ai_generated else "clip",
+                    **_pace(it)))
     out.sort(key=lambda o: o.posted_at, reverse=True)
     return out
+
+
+def _pace(it: VideoItem) -> dict:
+    """A Creator video's words and scenes, from the record posting kept of how it was made (clipsjson)."""
+    made = (it.facts or {}).get("creator") if isinstance(it.facts, dict) else None
+    if not it.ai_generated or not isinstance(made, dict):
+        return {}
+    words = len(str(made.get("script") or "").split())
+    scenes = made.get("scenes")
+    return {"words": words, "scenes": int(scenes) if isinstance(scenes, (int, float)) and scenes > 0 else 0}
 
 
 def results_path() -> Path:

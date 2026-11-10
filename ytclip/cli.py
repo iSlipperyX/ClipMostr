@@ -780,9 +780,17 @@ def run_results(argv: list[str]) -> int:
     p = argparse.ArgumentParser(prog="ytclip results", description="What's working: how your posted clips did, "
                                 "from the stats posting reads from TikTok.")
     p.add_argument("--json", action="store_true", help="print the lessons as JSON")
+    p.add_argument("--learner", action="store_true",
+                   help="what the AI is shown: the top-performing and underperforming openings it learns from, "
+                        "and the Video Creator's pace")
+    p.add_argument("--query", default="", help="with --learner: the examples a video about this would get")
+    p.add_argument("--category", default="", help="with --learner: for this category (its id)")
+    p.add_argument("--refresh", action="store_true", help="with --learner: distil results.json again now")
     args = p.parse_args(argv)
     import json
 
+    if args.learner:
+        return _learner_report(args)
     lessons = learn.Lessons.load()
     if args.json:
         print(json.dumps({"posts": len(lessons.outcomes), "written_at": lessons.written_at,
@@ -806,6 +814,40 @@ def run_results(argv: list[str]) -> int:
     for title, rows in (("Hooks that worked", good), ("Hooks that flopped", bad)):
         if rows:
             console.print(f"[bold]{title}[/]: " + "; ".join(f"{escape(h)} ({lift:.1f}×)" for h, lift in rows))
+    return 0
+
+
+def _learner_report(args) -> int:
+    import json
+
+    from .intelligence import learner
+
+    s = Settings.load()
+    if args.refresh:
+        learner.refresh(s, force=True)
+    got = learner.report(s, query=args.query, category_id=args.category)
+    if args.json:
+        print(json.dumps(got, indent=1, default=str))
+        return 0
+    counts = got["counts"]
+    if not counts:
+        console.print("Nothing to learn from yet: no posted video has done 2x its account's usual views, or half "
+                      "of them, after its first two days.")
+        return 0
+    console.print(f"{counts.get('top', 0)} top-performing and {counts.get('bottom', 0)} underperforming openings "
+                  f"in {escape(got['database'])}.")
+    for title, key in (("Top performers", "top"), ("Underperformers", "bottom")):
+        rows = got[key]
+        if rows:
+            console.print(f"[bold]{title}[/]:")
+            for e in rows:
+                console.print(f"  {e['lift']:.1f}×  {escape(e['text'])}  [dim]({escape(e['shape'])})[/]")
+    if got["prompt"]:
+        console.print("[bold]What the AI is shown[/]" + (f" for “{escape(args.query)}”" if args.query else "") + ":")
+        console.print(escape(got["prompt"]))
+    pace = got["pacing"]
+    console.print(escape(pace["note"]) if pace.get("wpm") else
+                  "[dim]Pacing: as usual until two Creator videos have done 2x their account's usual views.[/]")
     return 0
 
 

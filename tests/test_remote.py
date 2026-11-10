@@ -262,7 +262,7 @@ def test_the_mac_can_unlink_itself(world):
 
 
 def test_wrong_keys_are_slowed_down(world):
-    c = mclient.Client("127.0.0.1", world.port, device_id="nope", token="nope")
+    c = mclient.Client("127.0.0.1", world.port, fp=world.server.fp, device_id="nope", token="nope")
     statuses = []
     for _ in range(14):
         try:
