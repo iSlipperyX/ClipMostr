@@ -121,7 +121,7 @@ def test_first_reading_says_its_watching_then_changes_become_events(tmp_path):
     st = Store(tmp_path / "lib.json")
     w = live.Watcher(a.id)
     s = settings()
-    t0 = time.time() - 600
+    t0 = live.day_start(time.time()) + 300  # today, so the totals count it at any hour
     ev = w.apply(st, a, s, reading(t0, 10, [("v1", "cat jumps", t0 - 5 * HOUR, 100, 5)]))
     assert [e.kind for e in ev] == ["start"] and "Watching @cats live" in ev[0].text
     ev = w.apply(st, a, s, reading(t0 + 60, 12, [("v1", "cat jumps", t0 - 5 * HOUR, 220, 13, 1)]))
@@ -138,7 +138,7 @@ def test_quiet_readings_add_nothing_and_many_videos_are_summed_up(tmp_path):
     a = connected_account()
     st = Store(tmp_path / "lib.json")
     w = live.Watcher(a.id)
-    t0 = time.time() - 900
+    t0 = live.day_start(time.time()) + 300  # today, so the totals count it at any hour
     vids = [(f"v{n}", f"clip number {n}", t0 - n * HOUR, 100) for n in range(10)]
     w.apply(st, a, settings(), reading(t0, 10, vids))
     assert w.apply(st, a, settings(), reading(t0 + 60, 10, vids)) == []

@@ -60,19 +60,37 @@ def spiky_heatmap(duration=1200, peaks=(300, 700, 1000), base=0.15, segments=100
     return out
 
 
+def close_leftovers(qapp, folder) -> None:
+    """Close and delete every window still open, with the settings folders pointed at `folder`. A window saves
+    its settings when it closes, and by the end of the run each test's own temp profile is no longer in force,
+    so without this it would save over the developer's real ones."""
+    from PySide6.QtCore import QCoreApplication, QEvent
+
+    keys = ("APPDATA", "LOCALAPPDATA")
+    before = {key: os.environ.get(key) for key in keys}
+    os.environ["APPDATA"] = str(Path(folder) / "roaming")
+    os.environ["LOCALAPPDATA"] = str(Path(folder) / "local")
+    try:
+        for w in qapp.topLevelWidgets():
+            w.close()
+            w.deleteLater()
+        QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    finally:
+        for key, was in before.items():
+            if was is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = was
+
+
 @pytest.fixture(scope="session")
-def app():
+def app(tmp_path_factory):
     """One QApplication for the whole run. A module-scoped app was freed between test files while
     widgets from the earlier file were still alive, which crashed Qt at exit."""
     widgets = pytest.importorskip("PySide6.QtWidgets", exc_type=ImportError)
-    from PySide6.QtCore import QCoreApplication, QEvent
-
     qapp = widgets.QApplication.instance() or widgets.QApplication([])
     yield qapp
-    for w in qapp.topLevelWidgets():
-        w.close()
-        w.deleteLater()
-    QCoreApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+    close_leftovers(qapp, tmp_path_factory.mktemp("leftovers"))
     import gc
 
     gc.collect()

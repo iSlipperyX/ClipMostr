@@ -139,6 +139,19 @@ def test_typed_out_on_the_graphics_card(fake_cli):
     assert whisper_cpp.unavailable() == ""
 
 
+def test_typed_out_on_a_macs_graphics_card(fake_cli):
+    """whisper.cpp calls a Mac's card MTL0 ("using MTL0 backend"). Read as no card at all, every video after the
+    first was typed out on the CPU."""
+    fake_cli["said"] = ["whisper_backend_init_gpu: using MTL0 backend", "ggml_metal_device_init: GPU name:   MTL0",
+                        "ggml_metal_init: found device: Apple M2", "progress = 100%"]
+    notes = []
+    _, words = whisper_cpp.transcribe(np.zeros(16000 * 5, np.float32), "base", "en", None, 8, lambda m, f: None,
+                                      notes.append)
+    assert words
+    assert whisper_cpp.unavailable() == ""
+    assert notes == ["Whisper is using the graphics card (Apple M2)."]
+
+
 def test_no_usable_card_is_remembered(fake_cli):
     fake_cli["said"] = ["whisper_backend_init_gpu: no GPU found"]
     notes = []

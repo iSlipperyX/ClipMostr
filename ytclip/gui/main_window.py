@@ -182,13 +182,15 @@ class QueueItem(QWidget):
         state = job.get("status") or "queued"
         status = steps.Status.from_json(job.get("progress"))
         colour, tip = theme.MUTED, ""
-        if job.get("note") and state in ("queued", "working", "fetching"):  # waiting for the PC to be back
+        if job.get("note") and state in ("waiting", "queued", "working", "fetching"):  # waiting for the PC to be back
             self.sub.setText(job["note"])
             self.sub.setToolTip("")
             self.sub.setStyleSheet(f"color:{theme.WARN}; font-size:9pt;")
             self.bar.setVisible(False)
             return
-        if state == "sending":
+        if state == "waiting":  # still on the Mac: the PC takes so many at once
+            text = job.get("stage") or "Waiting to go to your PC"
+        elif state == "sending":
             text = "Sending it to your PC"
             self.bar.set_fraction(job.get("frac"))
         elif state == "queued":

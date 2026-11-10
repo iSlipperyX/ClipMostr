@@ -54,7 +54,11 @@ MODELS = {
 NOT_WORDS = re.compile(r"^\s*(\[[^\]]*\]|\([^)]*\)|\*[^*]*\*)\s*$")  # [BLANK_AUDIO], (music), *laughs*
 SENTENCE_END = (".", "!", "?", "…")
 GPU_API = "Metal" if sys.platform == "darwin" else "Vulkan"  # what whisper.cpp is built with here
-GPU_FOUND = re.compile(r"ggml_vulkan: Found [1-9]|using (Vulkan|CUDA|Metal)\d* backend", re.I)
+# A Mac's card is "MTL0" to whisper.cpp ("using MTL0 backend"); older builds said "Metal".
+GPU_FOUND = re.compile(r"ggml_vulkan: Found [1-9]|using (Vulkan|CUDA|Metal|MTL)\d* backend", re.I)
+# The card's name. On a Mac the "found device" line has it ("Apple M2"); "GPU name" may only say "MTL0".
+GPU_NAME = [re.compile(r"ggml_vulkan: \d+ = ([^|(\n]+)"), re.compile(r"ggml_metal\w*: found device:\s*([^\n]+)"),
+            re.compile(r"ggml_metal\w*: GPU name:\s*([^\n]+)")]
 NO_GPU = re.compile(r"no GPU found|ggml_vulkan: Found 0|ggml_vulkan: No devices", re.I)
 PROGRESS = re.compile(r"progress\s*=\s*(\d+)%")
 LANGUAGE = re.compile(r"auto-detected language:\s*([a-z]{2,3})")
@@ -392,8 +396,8 @@ def _on_card(exe: Path, model: Path, wav: Path, out: Path, language: str, thread
             known = _remembered(exe)
             if not known.get("ok") or known.get("fails"):  # the first time, or back after failing
                 _remember(exe, True)
-                found = re.search(r"ggml_vulkan: \d+ = ([^|(]+)|ggml_metal\w*: (?:found device|GPU name):\s*([^\n]+)", text)
-                card = (found[1] or found[2] or "").strip() if found else ""
+                found = next((m for m in (name.search(text) for name in GPU_NAME) if m), None)
+                card = found[1].strip() if found else ""
                 log("Whisper is using the graphics card" + (f" ({card})" if card else "") + ".")
         return data
 

@@ -12,9 +12,10 @@ ClipMonster for Mac (ytclip/mac) works on its own, and can lean on the PC it's l
 * **The PC's processing** ("Make on: Your PC" in the Mac's Studio). The whole video is made here, start to
   finish: downloaded (or sent from the Mac first: PUT /api/studio/uploads), typed out, its clips found and
   exported, with the Mac's own clip settings (how many, how long, its captions and layout), on this PC's
-  graphics card and with its AI. MacJobs keeps them in mac_jobs/, makes one at a time (automation waits for
-  it between its own videos), and keeps the clips until the Mac has fetched them into its Library and says so
-  (POST /api/studio/jobs/<id>/done), or for KEEP_DAYS.
+  graphics card and with its local AI (never its Claude or Gemini key). MacJobs keeps them in mac_jobs/, makes
+  one at a time (automation waits for it between its own videos), and keeps the clips until the Mac has fetched
+  them into its Library and says so (POST /api/studio/jobs/<id>/done), or for KEEP_DAYS. A Mac that's unlinked
+  takes its videos with it.
 """
 
 from __future__ import annotations
@@ -40,6 +41,8 @@ JOBS_MAX = 20  # videos waiting or being made at once
 UPLOAD_MAX = 40 * 1024 ** 3
 UPLOAD_KEEP = 86400.0  # an upload no video uses goes after this long
 FREE_AFTER_UPLOAD = 2 * 1024 ** 3  # room left on the disk after an upload, for the clips
+LOOP_RETRY = 5.0  # s before the list is looked at again after it couldn't be read or saved
+LINK_CHECK = 3.0  # s between looks at whether the Mac a video is being made for is still linked
 DAY = 86400.0
 VIDEO_EXTS = (".mp4", ".mov", ".m4v", ".mkv", ".webm", ".avi", ".mpg", ".mpeg", ".ts", ".mts", ".wmv", ".flv")
 
@@ -322,11 +325,14 @@ class MacJobs:
     """Videos Macs asked this PC to make clips from, made one at a time on a thread of their own."""
 
     def __init__(self, settings: Callable, log: Callable[[str], None], events: Callable | None = None,
-                 root: Path | None = None, now: Callable[[], float] = time.time, engine=None):
+                 root: Path | None = None, now: Callable[[], float] = time.time, engine=None,
+                 linked: Callable | None = None):
         from ..settings import app_dir
 
         self.settings, self.log, self.now = settings, log, now
-        self.events = events or (lambda kind, text, item="": None)
+        self.events = events or (lambda kind, text, item="", device="": None)
+        self.linked = linked or (lambda: None)  # the linked Macs' ids; None: can't be told now (every video stays)
+        self._incoming: dict[str, int] = {}  # upload id -> bytes of it still to come (room is kept for them)
         self.root = root or app_dir() / "mac_jobs"
         self._engine = engine  # tests: (settings, log, progress, cancelled) -> an Engine
         self.lock = threading.RLock()
@@ -353,7 +359,14 @@ class MacJobs:
         self.root.mkdir(parents=True, exist_ok=True)
         tmp = self._index().with_name("jobs.json.tmp")
         tmp.write_text(json.dumps({"version": 1, "jobs": jobs}, indent=1), encoding="utf-8")
-        tmp.replace(self._index())
+        for attempt in range(20):
+            try:
+                tmp.replace(self._index())
+                return
+            except PermissionError:  # Windows: jobs.json is being read this instant
+                if attempt == 19:
+                    raise
+                time.sleep(0.05)
 
     def _change(self, job_id: str, **changes) -> dict | None:
         with self.lock:
@@ -372,15 +385,18 @@ class MacJobs:
 
     def jobs_for(self, device: str) -> dict:
         with self.lock:
-            jobs = [j for j in self._load() if j.get("device") == device]
-        queued = [j["id"] for j in sorted(self._load(), key=lambda j: j.get("created") or 0) if j.get("status") == "queued"]
+            everything = self._load()
+        jobs = [j for j in everything if j.get("device") == device]
+        queued = [j["id"] for j in sorted(everything, key=lambda j: j.get("created") or 0)
+                  if j.get("status") == "queued"]
         out = []
         for j in sorted(jobs, key=lambda j: -(j.get("created") or 0)):
             d = self._public(j)
             if j.get("status") == "queued":
                 d["waiting"] = queued.index(j["id"]) if j["id"] in queued else 0
             out.append(d)
-        return {"jobs": out, "busy": self.working}
+        count = sum(1 for j in everything if j.get("status") in ("queued", "working"))
+        return {"jobs": out, "busy": self.working, "count": count, "limit": JOBS_MAX}  # (of all Macs: is there room)
 
     def job(self, job_id: str, device: str) -> dict:
         j = self._find(job_id, device)
@@ -397,12 +413,18 @@ class MacJobs:
         return bool(self.working)
 
     def room(self) -> int:
-        """The biggest video a Mac may send now: what the disk has free, less room for its clips."""
+        """The biggest video a Mac may send now: what the disk has free, less the videos still arriving and
+        room for its clips."""
         try:
             d = self.root if self.root.exists() else self.root.parent
-            return max(0, min(UPLOAD_MAX, shutil.disk_usage(d).free - FREE_AFTER_UPLOAD))
+            return max(0, min(UPLOAD_MAX, self._free(d) - FREE_AFTER_UPLOAD))
         except OSError:
             return 0
+
+    def _free(self, d: Path) -> int:
+        """What the disk has free once every video on its way here has arrived."""
+        with self.lock:
+            return shutil.disk_usage(d).free - sum(self._incoming.values())
 
     # --- what the Mac asks for ------------------------------------------------------------------------------
 
@@ -421,8 +443,10 @@ class MacJobs:
             raise HostError(400, "Send a YouTube link, or a video from your Mac.")
         now = self.now()
         with self.lock:
-            jobs = self._prune(self._load(), now)
+            jobs = self._unlinked(self._prune(self._load(), now))
             if sum(1 for j in jobs if j.get("status") in ("queued", "working")) >= JOBS_MAX:
+                if upload and not any(j.get("upload") == upload for j in jobs):
+                    self._drop_upload({"upload": upload})  # the Mac sends it again when there's room
                 raise HostError(429, f"Your PC already has {JOBS_MAX} videos to make. Wait for some to finish.")
             job = {"id": secrets.token_hex(8), "device": device, "device_name": _text(device_name, 80),
                    "source": "" if upload else source, "upload": upload, "name": name,
@@ -490,8 +514,9 @@ class MacJobs:
         except OSError:
             return None
 
-    def check_upload(self, name: str, size: int) -> str:
-        """Whether a video `size` bytes big called `name` may come (raises HostError if not); its name here."""
+    def check_upload(self, name: str, size: int, hold: str = "") -> str:
+        """Whether a video `size` bytes big called `name` may come (raises HostError if not); its name here.
+        With `hold` (the id it arrives under), its room is kept from then on: receive() gives it back."""
         safe = _file_name(name)
         if Path(safe).suffix.lower() not in VIDEO_EXTS:
             raise HostError(400, "That isn't a video ClipMonster can open.")
@@ -501,36 +526,44 @@ class MacJobs:
             raise HostError(413, "That video is too big to send.")
         d = self._uploads()
         d.mkdir(parents=True, exist_ok=True)
-        if shutil.disk_usage(d).free < size + FREE_AFTER_UPLOAD:
-            raise HostError(507, "Your PC hasn't room for that video.")
+        with self.lock:  # one at a time, so two videos can't both take the same room
+            self._prune_uploads()  # first: what a stray upload holds may be the room this one needs
+            if self._free(d) < size + FREE_AFTER_UPLOAD:
+                raise HostError(507, "Your PC hasn't room for that video.")
+            if hold:
+                self._incoming[hold] = size
         return safe
 
     def receive(self, name: str, size: int, read: Callable[[int], bytes]) -> dict:
         """A video from the Mac, `size` bytes read with `read`. Returns its upload id."""
-        safe = self.check_upload(name, size)
-        d = self._uploads()
-        self._prune_uploads()
         upload_id = secrets.token_hex(8)
-        folder = d / upload_id
-        folder.mkdir()
-        tmp = folder / f"{safe}.part"
+        safe = self.check_upload(name, size, hold=upload_id)
+        folder = self._uploads() / upload_id
         got = 0
         try:
-            with open(tmp, "wb") as f:
+            folder.mkdir()
+            with open(folder / f"{safe}.part", "wb") as f:
                 while got < size:
                     chunk = read(min(1024 * 1024, size - got))
                     if not chunk:
                         raise HostError(400, "The video stopped arriving part way.")
                     f.write(chunk)
                     got += len(chunk)
-            tmp.replace(folder / safe)
+                    self._incoming[upload_id] = size - got  # what's written is no longer free on the disk
+            (folder / f"{safe}.part").replace(folder / safe)
         except BaseException:
             shutil.rmtree(folder, ignore_errors=True)
             raise
+        finally:
+            with self.lock:
+                self._incoming.pop(upload_id, None)
         return {"upload": upload_id, "size": got}
 
     def _prune_uploads(self) -> None:
-        used = {j.get("upload") for j in self._load() if j.get("status") in ("queued", "working")}
+        """Uploads no waiting video is made from go after UPLOAD_KEEP (a refused video's, or half of one)."""
+        with self.lock:
+            used = {j.get("upload") for j in self._load() if j.get("status") in ("queued", "working")}
+            used |= set(self._incoming)
         try:
             for f in self._uploads().iterdir():
                 if f.name not in used and self.now() - f.stat().st_mtime > UPLOAD_KEEP:
@@ -566,6 +599,35 @@ class MacJobs:
             self._save(keep)
         return keep
 
+    def _unlinked(self, jobs: list[dict]) -> list[dict]:
+        """`jobs` without the videos of Macs that aren't linked any more: nobody could fetch, stop or remove
+        them. One being made stays: it stops itself (make) and goes then."""
+        linked = self._linked()  # asked once for them all
+        if linked is None:
+            return jobs
+        keep = [j for j in jobs if j.get("status") == "working" or j.get("device") in linked]
+        if len(keep) != len(jobs):
+            self._save(keep)
+            for j in jobs:
+                if j not in keep:
+                    self._remove_files(j)
+                    self.log(f"{j.get('device_name') or 'A Mac'} isn't linked any more, so its video was dropped: "
+                             f"{j.get('title') or j.get('name')}")
+        return keep
+
+    def _linked(self) -> set | None:
+        """The linked Macs' ids, or None when that can't be told now (and every video stays)."""
+        try:
+            linked = self.linked()
+        except Exception:  # noqa: BLE001
+            return None
+        return None if linked is None else set(linked)
+
+    def _gone(self, job: dict) -> bool:
+        """Whether the Mac that sent this video isn't linked any more."""
+        linked = self._linked()
+        return linked is not None and job.get("device") not in linked
+
     # --- making ------------------------------------------------------------------------------------------------
 
     def start(self) -> None:
@@ -590,13 +652,18 @@ class MacJobs:
 
     def _next(self) -> dict | None:
         with self.lock:
-            jobs = self._prune(self._load(), self.now())
+            jobs = self._unlinked(self._prune(self._load(), self.now()))
+            self._prune_uploads()
             waiting = sorted((j for j in jobs if j.get("status") == "queued"), key=lambda j: j.get("created") or 0)
             return waiting[0] if waiting else None
 
     def _loop(self) -> None:
         while not self.stopping.is_set():
-            job = self._next()
+            try:
+                job = self._next()
+            except Exception:  # noqa: BLE001 - the list couldn't be read or saved just now: look again shortly
+                self.stopping.wait(LOOP_RETRY)
+                continue
             if job is None:
                 self.wake.wait(30.0)
                 self.wake.clear()
@@ -604,8 +671,11 @@ class MacJobs:
             try:
                 self.make(job)
             except Exception as exc:  # noqa: BLE001 - one video never stops the others
-                self._change(job["id"], status="failed", stage="Failed", error=f"{type(exc).__name__}: {exc}",
-                             progress=None)
+                try:
+                    self._change(job["id"], status="failed", stage="Failed", error=f"{type(exc).__name__}: {exc}",
+                                 progress=None)
+                except Exception:  # noqa: BLE001 - nor does a list that can't be saved: it's tried again
+                    self.stopping.wait(LOOP_RETRY)
             finally:
                 self.working = ""
 
@@ -618,7 +688,9 @@ class MacJobs:
 
     def settings_for(self, job: dict):
         """This PC's settings with the Mac's clip settings on top, and its clips made in the job's folder. The
-        AI is this PC's local AI when it's ready, else the one Settings → AI picked on this PC."""
+        AI is this PC's local AI and no other: a Mac never spends this PC's Claude or Gemini key. Until the
+        local AI is ready (installed, its model downloaded), clips are found by the smart signals and aren't
+        polished."""
         from .. import ai
 
         s = self.settings()
@@ -626,11 +698,13 @@ class MacJobs:
         s = s.apply(clean_settings(job.get("settings"), s))
         s = s.copy(output_dir=str(self._out(job["id"]) / "out"), cache_dir=cache, keep_source=False,
                    auto_export=True)
+        s = s.copy(ai_provider="local", ai_fallback=False)
         try:
-            if ai.local_ready(s):
-                s = s.copy(ai_provider="local")
-        except Exception:  # noqa: BLE001 - the PC's own choice, then
-            pass
+            ready = ai.local_ready(s)
+        except Exception:  # noqa: BLE001 - a local AI that can't be checked isn't asked
+            ready = False
+        if not ready:
+            s = s.copy(mode="auto" if s.mode == "ai" else s.mode, ai_polish=False)
         return s
 
     def make(self, job: dict) -> None:
@@ -649,25 +723,45 @@ class MacJobs:
                 return
             source = str(f)
         tracker = steps.Tracker(steps.plan_for(s, url=not job.get("upload")))
-        last = {"t": 0.0}
+        last = {"t": 0.0, "video": ""}
         who = job.get("device_name") or "your Mac"
+        p = Project(source)
+        p.meta = {"made_for": {"mac": who, "on": "pc"}}
+
+        def mark_video() -> None:  # the video's own id, as soon as it's known: Clean up leaves its download
+            video_id = _text(getattr(p.video, "id", "") or "", 200) if p.video is not None else ""
+            if video_id and video_id != last["video"]:
+                try:
+                    self._change(job_id, video_id=video_id)
+                except OSError:  # tried again with the next progress
+                    return
+                last["video"] = video_id
 
         def progress(msg: str, frac=None) -> None:
+            mark_video()
             status = tracker.update(msg, frac)
             t = self.now()
             if t - last["t"] >= 1.5:
                 last["t"] = t
-                self._change(job_id, stage=_text(msg, 120) + (f" {frac:.0%}" if frac is not None else ""),
-                             progress=status.to_json())
+                try:
+                    self._change(job_id, stage=_text(msg, 120) + (f" {frac:.0%}" if frac is not None else ""),
+                                 progress=status.to_json())
+                except OSError:  # only what the Mac shows meanwhile: never worth failing the video for
+                    pass
+
+        looked = {"t": time.monotonic()}
 
         def cancelled() -> bool:
+            if time.monotonic() - looked["t"] >= LINK_CHECK:
+                looked["t"] = time.monotonic()
+                if self._gone(job):  # its Mac was unlinked: nobody could fetch the clips
+                    self._forget.add(job_id)
+                    self._cancel.add(job_id)
             return job_id in self._cancel or self.stopping.is_set()
 
         self._change(job_id, status="working", stage="Starting", error="", progress=None)
         self.log(f"Making clips for {who}: {job.get('title') or job.get('name')}")
         engine = self._engine_for(s, self.log, progress, cancelled)
-        p = Project(source)
-        p.meta = {"made_for": {"mac": who, "on": "pc"}}
         from ..pipeline import Watchdog
 
         last["t"] = self.now()
@@ -676,8 +770,9 @@ class MacJobs:
         watch.start()
         try:
             engine.prepare(p)
-            if p.video is not None:
-                self._change(job_id, title=_text(p.video.title, 200), channel=_text(p.video.channel, 120))
+            if p.video is not None:  # video_id: what its download is cached under, for Clean up to leave it
+                self._change(job_id, title=_text(p.video.title, 200), channel=_text(p.video.channel, 120),
+                             video_id=_text(getattr(p.video, "id", ""), 200))
             if not [c for c in p.clips if c.enabled]:
                 raise RuntimeError("No clips found in this video.")
             folder = engine.export(p)
@@ -698,7 +793,8 @@ class MacJobs:
             error = watch.reason() if watch.fired else str(exc) or type(exc).__name__
             self._change(job_id, status="failed", stage="Failed", error=error, progress=None)
             self.log(f"✗ Couldn't make clips for {who}: {error}")
-            self.events("studio", f"✗ {job.get('title') or job.get('name')}: {error}", job_id)
+            self.events("studio", f"✗ {job.get('title') or job.get('name')}: {error}", job_id,
+                        job.get("device") or "")
             self._drop_upload(job)
             return
         finally:
@@ -720,4 +816,5 @@ class MacJobs:
                      rejected=rejected, folder=Path(folder).relative_to(out).as_posix(), title=_text(title, 200))
         self._drop_upload(job)
         self.log(f"✓ {made - rejected} clips for {who} from {title}; they go to the Mac now.")
-        self.events("studio", f"✓ {made - rejected} clips from {title} are ready for your Mac", job_id)
+        self.events("studio", f"✓ {made - rejected} clips from {title} are ready for your Mac", job_id,
+                    job.get("device") or "")

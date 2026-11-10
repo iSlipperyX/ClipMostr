@@ -46,6 +46,7 @@ def self_check(app) -> int:
         proxy.close()
     finally:
         w.quit()
+        w.deleteLater()
     try:
         exe = ffmpeg_exe()
     except RuntimeError:

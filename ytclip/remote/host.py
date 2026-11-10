@@ -74,8 +74,8 @@ class Host:
         from .studio import AITasks, MacJobs
 
         self.ai_tasks = AITasks(self.settings, self.log, now)
-        self.studio = MacJobs(self.settings, self.log, lambda kind, text, item="": self.add_event(kind, text, item=item),
-                              now=now)
+        self.studio = MacJobs(self.settings, self.log, lambda kind, text, item="", device="": self.add_event(
+            kind, text, item=item, device=device), now=now)
 
     # --- what the posting worker and automation say -------------------------------------------------------
 
@@ -88,15 +88,20 @@ class Host:
         """automation's tell(): something that needs you."""
         self.add_event("problem", text, alert=True)
 
-    def add_event(self, kind: str, text: str, alert: bool = False, item: str = "", account: str = "") -> None:
+    def add_event(self, kind: str, text: str, alert: bool = False, item: str = "", account: str = "",
+                  device: str = "") -> None:
+        """`device`: the one linked Mac this is news for (a video it sent, say); "" is news for them all."""
         with self._ev_lock:
             self.seq += 1
             self.events.append({"seq": self.seq, "at": self.now(), "kind": kind, "text": str(text or ""),
-                                "alert": bool(alert), "item": item, "account": account})
+                                "alert": bool(alert), "item": item, "account": account, "device": device})
 
-    def events_after(self, after: int) -> dict:
+    def events_after(self, after: int, device: str | None = None) -> dict:
+        """The news since `after`, for the Mac `device` (None: all of it). seq counts every event, so a Mac's
+        place moves past the ones it isn't told."""
         with self._ev_lock:
-            return {"seq": self.seq, "events": [e for e in self.events if e["seq"] > after]}
+            return {"seq": self.seq, "events": [e for e in self.events if e["seq"] > after and (
+                device is None or not e.get("device") or e["device"] == device)]}
 
     # --- shared pieces ------------------------------------------------------------------------------------
 

@@ -328,7 +328,7 @@ class MacWindow(StudioWindow):
         if here or not self._on_pc():
             return super().add_sources(sources)
         sources = [s.strip().strip('"') for s in sources if s.strip()]
-        sources = [s for s in sources if is_url(s) or Path(s).is_file()]
+        sources = [s for s in sources if is_url(s) or Path(s).exists()]  # (a folder is read for its videos)
         if not sources:
             return
         why = self.pc_jobs.can_send()
@@ -423,6 +423,8 @@ class MacWindow(StudioWindow):
         where = job.get("host_name") or "your PC"
         if job.get("note"):
             return job["note"]
+        if st == "waiting":
+            return f"Waiting to go to {where}"
         if st == "sending":
             return f"Going to {where}"
         if st == "queued":
@@ -467,7 +469,7 @@ class MacWindow(StudioWindow):
         if st == "done" and job.get("here"):
             menu.addAction("Open clips folder", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(job["here"])))
             menu.addAction("Show in Library", lambda: self.tabs.setCurrentWidget(self.library))
-        if st in ("sending", "queued", "working"):
+        if st in ("waiting", "sending", "queued", "working"):
             menu.addAction("Stop", lambda: self.pc_jobs.stop(key))
         if st in ("failed", "cancelled"):
             again = menu.addAction("Send to your PC again", lambda: self.pc_jobs.send_again(key))
@@ -497,6 +499,14 @@ class MacWindow(StudioWindow):
             stop = box.addButton("Stop and remove", QMessageBox.DestructiveRole)
             box.exec()
             if box.clickedButton() is not stop:
+                return
+        elif job["status"] == "fetching":
+            box = QMessageBox(QMessageBox.Question, APP_NAME, "This video's clips are still coming over from your "
+                              "PC. Removing it now deletes the ones not here yet from your PC.",
+                              QMessageBox.Cancel, self)
+            go = box.addButton("Remove", QMessageBox.DestructiveRole)
+            box.exec()
+            if box.clickedButton() is not go:
                 return
         self.pc_jobs.remove(key)  # (its row goes with removed)
 

@@ -181,14 +181,14 @@ class Plan:
 
 
 def busy_ids(db, session: Path | None = None) -> set[str]:
-    """Videos automation has queued or is clipping, and videos in the Studio (their downloads,
-    analysis and folders stay)."""
+    """Videos automation has queued or is clipping, videos in the Studio, and videos waiting or being made
+    for a linked Mac (their downloads, analysis and folders stay)."""
     jobs = [j for j in db.jobs(limit=5000) if j.status in ("queued", "working")]
     ids = {j.id for j in jobs} | {j.video_id for j in jobs}  # a request's copy is <id>~<request>
     working = db.meta("working_video")  # the real id of a video queued by an unusual link
     if working and any(j.status == "working" for j in jobs):
         ids.add(working)
-    return ids | studio_ids(session)
+    return ids | studio_ids(session) | mac_job_ids()
 
 
 def source_id(source: str) -> str:
@@ -200,6 +200,22 @@ def source_id(source: str) -> str:
         return local_id(Path(source))
     except (OSError, ValueError):
         return ""
+
+
+def mac_job_ids(index: Path | None = None) -> set[str]:
+    """The videos a linked Mac sent this PC to make (remote/studio.py) that wait or are being made: a link's
+    download is in the same cache as automation's."""
+    try:
+        data = json.loads((index or app_dir() / "mac_jobs" / "jobs.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    ids = set()
+    for j in (data.get("jobs") or []) if isinstance(data, dict) else []:
+        if isinstance(j, dict) and j.get("status") in ("queued", "working"):
+            # "video_id": the video's own, once it was opened (a link's can't always be read off it)
+            source = str(j.get("source") or "")  # "" for a video the Mac sent as a file: that's not in the cache
+            ids |= {source_id(source) if source else "", str(j.get("video_id") or "")}
+    return ids - {""}
 
 
 def studio_ids(session: Path | None = None) -> set[str]:

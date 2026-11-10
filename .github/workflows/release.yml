@@ -270,8 +270,11 @@ jobs:
       - name: Check the app starts and says its version
         timeout-minutes: 5
         run: |
-          said=$(dist/ClipMonster.app/Contents/MacOS/ClipMonster --self-check)
+          # Its report says what's missing, so it's shown even when the check fails.
+          code=0
+          said=$(dist/ClipMonster.app/Contents/MacOS/ClipMonster --self-check) || code=$?
           echo "$said"
+          [[ $code == 0 ]] || { echo "::error::The app's check failed: '$said'"; exit 1; }
           [[ "$said" == *"${{ needs.build.outputs.version }}"* ]] || { echo "::error::The app says '$said'"; exit 1; }
       - name: Keep the build
         if: needs.build.outputs.kind == 'check'

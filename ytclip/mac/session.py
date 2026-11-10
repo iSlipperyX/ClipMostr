@@ -113,7 +113,10 @@ class Session(QObject):
     def call(self, fn: Callable[[Client], object], ok: Callable | None = None, fail: Callable | None = None) -> None:
         """Run fn(client) on a worker thread. A lost connection is reported on `connection` too."""
         def failed(exc):
-            self._failed(exc)
+            try:
+                self._failed(exc)
+            except RuntimeError:  # this PC was switched away meanwhile (Qt: "Signal source has been deleted")
+                pass
             if fail is not None:
                 fail(exc)
 
