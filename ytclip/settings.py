@@ -58,7 +58,7 @@ def work_dir() -> Path:
 
 # The keys in settings.json (Claude, Gemini, YouTube, Telegram). ClipMonster for Mac keeps them in the Mac's
 # Keychain instead (keep_secrets_in): settings.json then holds them blank, and Settings.load fills them in.
-SECRETS = ("ai_api_key", "gemini_api_key", "youtube_api_key", "telegram_token")
+SECRETS = ("ai_api_key", "gemini_api_key", "youtube_api_key", "telegram_token", "api_football_key")
 _secret_store = None
 
 
@@ -145,6 +145,16 @@ class Settings:
     polish_overpick: bool = True  # with polish: find extra clips, keep the best rated (engine.keep_best)
     polish_burned_subs: str = "off"  # off = turn our captions off when the video already has subtitles | keep
     polish_bottom_text: bool = True  # the polish writes a bottom line for each clip with no part 2
+    # The AI router and its budget (intelligence/agent_router.py, usage.py)
+    ai_budget_day: float = 0.0  # US dollars a day the paid AIs may cost; 0 = no limit
+    ai_budget_month: float = 0.0  # and a calendar month
+    ai_local_timeout: int = 240  # seconds the local AI gets before the router asks a cloud AI instead
+    # Sports event search (sportsdesk/semantic_search.py)
+    event_search_model: str = "auto"  # auto | minilm (all-MiniLM-L6-v2, ONNX) | words (no model: word matching)
+    event_feed: str = "auto"  # play-by-play feed: auto | espn | api-football | off
+    api_football_key: str = ""  # api-football.com (free tier: 100 requests a day): soccer cards, goals, VAR
+    event_pad_before: float = 12.0  # seconds kept before the event (the build-up)
+    event_pad_after: float = 25.0  # and after it (the card, the reaction, the first replay)
     # Export
     aspect: str = "vertical_blur"
     resolution: int = 1080
@@ -359,7 +369,7 @@ class Settings:
     def apply(self, overrides: dict) -> "Settings":
         known = {f.name for f in fields(self)}
         clean = {k: v for k, v in overrides.items() if k in known}
-        for key in ("ai_api_key", "gemini_api_key", "youtube_api_key", "telegram_token"):
+        for key in SECRETS:
             if isinstance(clean.get(key), str):
                 clean[key] = clean[key].strip()  # pasted keys often carry a stray space
         return replace(self, **clean)
@@ -648,6 +658,11 @@ AI_PROVIDERS = (("claude", "Claude (Anthropic)"), ("gemini", "Gemini (Google)"),
 MAC_AI_PROVIDERS = (("claude", "Claude (Anthropic)"), ("gemini", "Gemini (Google)"),
                     ("local", "Local AI on this Mac (free, private)"),
                     ("pc", "Your PC's local AI (free, private; your PC linked)"))
+EVENT_SEARCH_MODELS = (("auto", "The sentence model when it's here, else words"),
+                       ("minilm", "Sentence model (all-MiniLM-L6-v2, downloads once)"),
+                       ("words", "Words only (no download)"))
+EVENT_FEEDS = (("auto", "ESPN, or API-Football when it has a key"), ("espn", "ESPN's public scoreboard"),
+               ("api-football", "API-Football (needs its key)"), ("off", "Off: the commentary only"))
 CLAUDE_MODELS = (("claude-opus-5-5", "Claude Opus 5.5 (best)"), ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
                  ("claude-haiku-5-5", "Claude Haiku 5.5 (cheapest)"))
 GEMINI_MODELS = (("gemini-4-argon", "Gemini 4 Argon (best)"),  # gemini.MODELS
@@ -872,6 +887,30 @@ SCHEMA: list[Field] = [
     Field("polish_burned_subs", "If the video already has subtitles", "AI", "choice",
           choices=(("off", "Turn my captions off for it"), ("keep", "Keep my captions anyway")),
           help="Two sets of words on screen at once is hard to read"),
+    Field("ai_budget_day", "Spending limit a day (US $, 0 = none)", "AI", "float", lo=0, hi=1000, step=0.5,
+          help="ClipMonster counts what Claude and Gemini cost as it goes (ai_usage.json). Once today's count "
+               "reaches this, they aren't asked again until tomorrow; the local AI carries on, as it's free. "
+               "The count uses list prices, so your provider's bill is the real figure"),
+    Field("ai_budget_month", "Spending limit a month (US $, 0 = none)", "AI", "float", lo=0, hi=10000, step=1,
+          help="The same, for the calendar month"),
+    Field("ai_local_timeout", "Local AI gives up after (s)", "AI", "int", lo=30, hi=3600, step=30,
+          help="When the local AI is asked first and takes longer than this, a cloud AI is asked instead "
+               "(if one has a key)"),
+    Field("event_search_model", "Event search reads with", "Sports", "choice", choices=EVENT_SEARCH_MODELS,
+          help="Search a game for a moment (\"red card after a VAR check\"). The sentence model understands "
+               "meaning, not just words, runs on this computer and downloads once (90 MB). Without it, the "
+               "search matches words and what they usually mean in each sport"),
+    Field("event_feed", "Play-by-play feed", "Sports", "choice", choices=EVENT_FEEDS,
+          help="A game's official timeline (cards, goals, fouls, scores) finds moments the commentary never "
+               "names, and puts the minute and the player on the clip. ESPN's public scoreboard needs no key; "
+               "API-Football covers more soccer leagues with a free key"),
+    Field("api_football_key", "API-Football key", "Sports", "secret",
+          help="Free from api-football.com (100 requests a day): soccer cards, goals, substitutions and VAR "
+               "decisions, minute by minute"),
+    Field("event_pad_before", "Keep before an event (s)", "Sports", "float", lo=2, hi=60, step=1,
+          help="The build-up: the foul before the card, the pass before the goal"),
+    Field("event_pad_after", "Keep after an event (s)", "Sports", "float", lo=3, hi=90, step=1,
+          help="The referee, the crowd, the protests and the first replay"),
 
     Field("aspect", "Format", "Export", "choice", choices=ASPECTS,
           help="With TikTok-ready output on, Original and 1:1 are fitted into a 9:16 frame with a blurred fill"),

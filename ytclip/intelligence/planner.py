@@ -36,7 +36,10 @@ PROCESS_BYTES = 350 * MIB  # llama-server's own code and buffers
 
 
 def margin_bytes(vram_total: int) -> int:
-    """Graphics memory always left free: the larger of 1 GiB and 7% of the card."""
+    """Graphics memory always left free: the larger of 1 GiB and 7% of the card. It comes off what's free
+    right now, which already leaves out what Windows and open programs hold (and when no source can say
+    what's free, 10% of the card and another 0.5 GiB are taken as in use first): 1.6 GiB or more of the card
+    is never given to a model."""
     return max(GIB, int(vram_total * 0.07))
 
 

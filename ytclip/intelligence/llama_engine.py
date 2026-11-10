@@ -110,6 +110,8 @@ class Reply:
     context: int = 0
     gpu_layers: int = -1  # layers on the graphics card (-1 = not known)
     total_layers: int = 0
+    tokens_in: int = 0  # as llama.cpp counted them (an estimate from the lengths when it didn't say)
+    tokens_out: int = 0
 
 
 # ---------------------------------------------------------------- what's here
@@ -602,6 +604,7 @@ class ServerBackend:
     def _speed(self, t: dict) -> None:
         try:
             read, wrote = int(t.get("prompt_n") or 0), int(t.get("predicted_n") or 0)
+            self.last_tokens = (read, wrote)
             line = (f"The local AI read {read:,} tokens at {float(t.get('prompt_per_second') or 0):,.0f} a second "
                     f"and wrote {wrote:,} at {float(t.get('predicted_per_second') or 0):,.1f} a second.")
         except (TypeError, ValueError):
@@ -854,9 +857,12 @@ def ask_json(s, system: str, content, schema: dict, *, max_tokens: int = 4000, m
     if left < min(max_tokens, max_tokens if min_tokens is None else min_tokens):
         raise TooLong(f"The transcript is too long for the local AI's memory ({question + max_tokens:,} of "
                       f"{eng.context:,} tokens).")
+    eng.last_tokens = (0, 0)
     text = eng.chat(full_system, user, schema, min(max_tokens, left), check, progress)
+    read, wrote = getattr(eng, "last_tokens", (0, 0)) or (0, 0)
     return Reply(text, eng.model.name, eng.name, eng.device, eng.context,
-                 getattr(eng, "layers_on_gpu", -1), eng.plan.total_layers)
+                 getattr(eng, "layers_on_gpu", -1), eng.plan.total_layers,
+                 read or question, wrote or estimate_tokens(text))
 
 
 def room(s) -> int:

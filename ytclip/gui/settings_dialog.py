@@ -18,7 +18,7 @@ from .sign_in_dialog import SignInDialog
 
 ANTHROPIC_KEY_URL = "https://console.anthropic.com/settings/keys"
 GROUPS = ("General", "Download", "Clip finding", "Transcription", "Speed", "AI", "Export", "Captions", "Editing", "Creator", "Layout",
-          "Research", "Picking", "Automation", "Posting", "Telegram", "Mac app", "Updates")
+          "Research", "Sports", "Picking", "Automation", "Posting", "Telegram", "Mac app", "Updates")
 # ClipMonster for Mac makes clips itself; automation, posting and the rest stay on the PC it links to.
 MAC_GROUPS = ("General", "Download", "Clip finding", "Transcription", "Speed", "AI", "Export", "Captions", "Editing",
               "Layout")

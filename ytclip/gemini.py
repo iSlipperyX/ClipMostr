@@ -44,6 +44,8 @@ class Reply:
     text: str
     model: str  # the model version that answered
     finish: str = ""
+    tokens_in: int = 0  # as Gemini counted them (usageMetadata); its thinking counts as output, as it's billed
+    tokens_out: int = 0
 
 
 def model_path(model: str) -> str:
@@ -176,6 +178,7 @@ def _stream(resp, check: Callable[[], None] | None) -> Reply:
     """Read the server-sent events of streamGenerateContent: each `data:` line is a partial answer."""
     text: list[str] = []
     model = finish = blocked = ""
+    used: dict = {}
     for i, raw in enumerate(resp):
         line = raw.decode("utf-8", "replace").strip() if isinstance(raw, bytes) else str(raw).strip()
         if check and i % 10 == 0:
@@ -190,6 +193,7 @@ def _stream(resp, check: Callable[[], None] | None) -> Reply:
             err = chunk["error"]
             raise friendly(int(err.get("code") or 500), json.dumps({"error": err}).encode(), model)
         model = chunk.get("modelVersion") or model
+        used = chunk.get("usageMetadata") or used
         blocked = (chunk.get("promptFeedback") or {}).get("blockReason") or blocked
         for cand in chunk.get("candidates") or []:
             if cand.get("index", 0) != 0:
@@ -203,7 +207,15 @@ def _stream(resp, check: Callable[[], None] | None) -> Reply:
         if not text:
             raise GeminiError(f"Gemini declined to read this ({str(blocked).lower().replace('_', ' ')}).",
                               kind="refused")
-    return Reply("".join(text), model, finish)
+    return Reply("".join(text), model, finish, _count(used, "promptTokenCount"),
+                 _count(used, "candidatesTokenCount") + _count(used, "thoughtsTokenCount"))
+
+
+def _count(used: dict, key: str) -> int:
+    try:
+        return max(0, int(used.get(key) or 0))
+    except (TypeError, ValueError, AttributeError):
+        return 0
 
 
 def generate(key: str, model: str, system: str, content: str | list[dict], schema: dict, *,

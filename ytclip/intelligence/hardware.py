@@ -19,6 +19,12 @@ The card picks the llama.cpp backend:
 * metal  - Apple Silicon Macs
 * vulkan - AMD and Intel cards (and NVIDIA when only a Vulkan build is around)
 * cpu    - no usable graphics card: every CPU thread through OpenMP
+
+`stack()` says, for everything that runs a model here, what it runs on: the local language model and Whisper
+(llama.cpp and whisper.cpp: Metal on Apple silicon, CUDA or Vulkan on a PC's card), and the small ONNX models
+(the event search's sentence embeddings, Kokoro's voice) through onnxruntime's providers: Core ML on a Mac,
+DirectML or CUDA on Windows when that build of onnxruntime is installed, else the CPU (they're small enough
+that the CPU is quick).
 """
 
 from __future__ import annotations
@@ -66,6 +72,16 @@ class Hardware:
     vram_gb: float = 0.0  # 0 when unknown or none
     vram_source: str = ""  # where the total came from
     cards: list[Card] = field(default_factory=list)  # every card any source found
+    chip: str = ""  # "Apple M3 Pro" on Apple silicon (its memory is shared between the CPU and the GPU)
+
+    @property
+    def apple_silicon(self) -> bool:
+        return self.gpu_vendor == "apple"
+
+    @property
+    def unified_memory(self) -> bool:
+        """The graphics card's memory is the computer's own (Apple silicon), not a separate pool."""
+        return self.apple_silicon
 
     @property
     def backend(self) -> str:
@@ -85,7 +101,9 @@ class Hardware:
     def describe(self) -> str:
         """'AMD Radeon RX 9060 XT (16 GB) · 32 GB RAM · 16 threads'."""
         parts = []
-        if self.gpu_name:
+        if self.apple_silicon and self.chip:
+            parts.append(f"{self.chip} (unified memory)")
+        elif self.gpu_name:
             parts.append(self.gpu_name + (f" ({self.vram_gb:.0f} GB)" if self.vram_gb else ""))
         else:
             parts.append("No graphics card found")
@@ -535,7 +553,9 @@ def detect(refresh: bool = False) -> Hardware:
         hw = Hardware(system=system, cpu_threads=os.cpu_count() or 4, ram_gb=round(ram_bytes() / GB, 1))
         if sys.platform == "darwin" and platform.machine() == "arm64":
             # Apple Silicon shares memory with the GPU; macOS lets the GPU use about two thirds of it.
-            card = Card("apple", "Apple Silicon GPU", round(hw.ram_gb * 0.66, 1), None, "macOS")
+            hw.chip = chip_name()
+            card = Card("apple", f"{hw.chip} GPU" if hw.chip else "Apple Silicon GPU", round(hw.ram_gb * 0.66, 1),
+                        None, "macOS")
             hw.cards = [card]
         else:
             nvidia = nvml_cards() or nvidia_cards()
@@ -551,6 +571,14 @@ def detect(refresh: bool = False) -> Hardware:
                                                                       round(card.total_gb, 1), card.source)
         _cached = hw
         return hw
+
+
+def chip_name() -> str:
+    """'Apple M3 Pro' on Apple silicon ("" elsewhere, or when macOS won't say)."""
+    if sys.platform != "darwin":
+        return ""
+    name = _quiet(["sysctl", "-n", "machdep.cpu.brand_string"], timeout=4.0)
+    return name if name.lower().startswith("apple") else ""
 
 
 _memory: tuple[float, tuple, Memory] | None = None
@@ -590,3 +618,68 @@ def memory_now(hw: Hardware | None = None, exe: Path | None = None, refresh: boo
                 break
     _memory = (now, key, mem)
     return mem
+
+
+# ---------------------------------------------------------------- what runs on what
+
+# onnxruntime's execution providers, best first, for each kind of computer. A provider is only used when the
+# installed onnxruntime has it (onnxruntime-directml on Windows, onnxruntime-gpu for CUDA; the standard macOS
+# build has Core ML); the CPU provider is always last and always there.
+ONNX_ORDER = {
+    "metal": ("CoreMLExecutionProvider",),
+    "cuda": ("CUDAExecutionProvider", "DmlExecutionProvider"),
+    "vulkan": ("DmlExecutionProvider",),  # AMD, Intel Arc: DirectML (Windows); nothing on Linux
+    "cpu": (),
+}
+CPU_PROVIDER = "CPUExecutionProvider"
+PROVIDER_NAMES = {"CoreMLExecutionProvider": "Core ML", "CUDAExecutionProvider": "CUDA",
+                  "DmlExecutionProvider": "DirectML", CPU_PROVIDER: "CPU"}
+
+
+def onnx_available() -> list[str]:
+    """The providers the installed onnxruntime has ([] when it isn't installed or won't load)."""
+    try:
+        import onnxruntime
+
+        return list(onnxruntime.get_available_providers())
+    except Exception:  # noqa: BLE001 - not installed, or a DLL it needs is missing
+        return []
+
+
+def onnx_providers(hw: Hardware | None = None, available: list[str] | None = None) -> list[str]:
+    """The onnxruntime providers to ask for on this computer, best first, ending with the CPU."""
+    hw = hw or detect()
+    have = onnx_available() if available is None else list(available)
+    out = [p for p in ONNX_ORDER.get(hw.backend, ()) if p in have]
+    return out + [CPU_PROVIDER]
+
+
+def stack(hw: Hardware | None = None, available: list[str] | None = None) -> dict:
+    """What each kind of model runs on here, for `ytclip ai hardware` and the doctor:
+    {"computer", "backend", "llm", "whisper", "onnx", "onnx_providers", "memory_for_models_gb", "reserve_gb"}."""
+    from . import planner
+
+    hw = hw or detect()
+    names = {"metal": "Metal", "cuda": "CUDA", "vulkan": "Vulkan", "cpu": "the CPU"}
+    on = names[hw.backend]
+    have = onnx_available() if available is None else list(available)
+    providers = onnx_providers(hw, have)
+    reserve = planner.margin_bytes(int(hw.vram_gb * GB)) / GB if hw.has_gpu else 0.0
+    if not have:
+        onnx = "onnxruntime isn't installed (the event search matches by words instead; no Kokoro voice)"
+    else:
+        onnx = "onnxruntime on " + PROVIDER_NAMES.get(providers[0], providers[0])
+        if providers[0] == CPU_PROVIDER and hw.backend in ("cuda", "vulkan") and hw.system == "Windows":
+            onnx += " (install onnxruntime-directml to use the graphics card; the CPU is quick enough for these)"
+    return {
+        "computer": hw.describe(), "backend": hw.backend,
+        "llm": f"llama.cpp on {on}" + (f", {OFFLOAD[hw.backend]}" if hw.has_gpu else ", every thread"),
+        "whisper": f"whisper.cpp on {on}" if hw.backend in ("metal", "vulkan", "cuda") else "Whisper on the CPU",
+        "onnx": onnx, "onnx_providers": providers,
+        "memory_for_models_gb": round(max(0.0, hw.vram_gb - reserve), 1) if hw.has_gpu else round(hw.ram_gb, 1),
+        "reserve_gb": round(reserve, 2), "unified_memory": hw.unified_memory,
+    }
+
+
+OFFLOAD = {"metal": "the model loaded into unified memory", "cuda": "as many layers on the card as fit",
+           "vulkan": "as many layers on the card as fit"}
