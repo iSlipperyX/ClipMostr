@@ -489,3 +489,63 @@ def test_a_clip_starts_a_little_way_in_only_when_there_is_room():
     assert vs.start_in(5.2, 5.0) == 0.0
     assert vs.start_in(6.0, 5.0) == 0.48
     assert vs.start_in(4.0, 5.0) == 0.0
+
+
+# ---------------------------------------------------------------- what the review of the Studio found
+
+def refusing(detail: str, calls: list):
+    def http(url, headers, timeout):
+        calls.append(url)
+        raise vs.StockError("HTTP 400", 400, detail)
+    return http
+
+
+def test_a_key_pixabay_refuses_with_400_turns_it_off(tmp_path):
+    """Pixabay answers a wrong key with HTTP 400, not 401: the bad key was sent again for every scene."""
+    calls, log = [], []
+    st = vs.Stock(settings(pexels_api_key=""), tmp_path / "scenes", canvas=VERTICAL, log=log.append,
+                  http=refusing("[ERROR 400] Invalid or missing API key (https://pixabay.com/api/docs/).", calls),
+                  download=Web().download, probe=Web().probe_for(), cache=tmp_path / "cache")
+    for i in range(1, 6):
+        st.find(scene(i, query=f"city {i}"), 5.0)
+    assert len(calls) == 1 and "pixabay" in st.off and "refused the API key" in st.off["pixabay"]
+    assert not any("PIX-KEY" in m for m in log)
+
+
+def test_three_refused_searches_in_a_row_stop_the_asking_but_one_does_not(tmp_path):
+    calls, log = [], []
+    st = vs.Stock(settings(pexels_api_key=""), tmp_path / "scenes", canvas=VERTICAL, log=log.append,
+                  http=refusing("", calls), download=Web().download, probe=Web().probe_for(), cache=tmp_path / "cache")
+    for i in range(1, 8):
+        st.find(scene(i, query=f"forest {i}"), 5.0)
+    assert len(calls) == vs.REFUSALS_IN_A_ROW and "in a row" in st.off["pixabay"]
+    # One odd search among good ones just moves on.
+    web = Web({("pixabay", "video"): pixabay_videos((51, 1080, 1920, 15, 5_000_000))})
+    odd = {"n": 0}
+
+    def sometimes(url, headers, timeout):
+        odd["n"] += 1
+        if odd["n"] % 2:
+            raise vs.StockError("HTTP 400", 400, "")
+        return web.http(url, headers, timeout)
+
+    st = vs.Stock(settings(pexels_api_key=""), tmp_path / "scenes2", canvas=VERTICAL, http=sometimes,
+                  download=web.download, probe=web.probe_for(), cache=tmp_path / "cache2")
+    for i in range(1, 7):
+        st.search("pixabay", "video", f"river {i}")
+    assert st.off == {}
+
+
+def test_the_real_http_helper_keeps_what_the_site_said_but_never_the_address(monkeypatch):
+    import io
+    import urllib.error
+    import urllib.request
+
+    def refuse(req, timeout=0):
+        raise urllib.error.HTTPError(req.full_url, 400, "Bad Request", {}, io.BytesIO(b"[ERROR 400] Invalid or missing API key"))
+
+    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    with pytest.raises(vs.StockError) as err:
+        vs._http("https://pixabay.com/api/?key=SECRET&q=x", {}, 5.0)
+    assert err.value.status == 400 and "API key" in err.value.detail
+    assert "SECRET" not in str(err.value) and "SECRET" not in err.value.detail

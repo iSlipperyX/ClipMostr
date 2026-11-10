@@ -23,11 +23,12 @@ are the Video Creator's own (creator/sfx_library.py: synthesised here, or your f
 from __future__ import annotations
 
 import subprocess
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
 from ..audio import mastering
-from ..ffmpeg import NO_WINDOW, ffmpeg_exe
+from ..ffmpeg import NO_WINDOW, command_too_long, ffmpeg_exe, graph_file_args
 from ..studio.timeline_schema import AUDIO_SFX, VIDEO_BASE, Asset, AudioClip, AudioMaster, Timeline
 
 RATE = 48000
@@ -146,14 +147,27 @@ def graph(sources: list[Source], master: AudioMaster, total: float, *, voice_gai
 
 def measure(inputs: list[str], filters: str, total: float, cwd: Path | None = None) -> dict | None:
     """Run a graph that ends in loudnorm's measurement, to nowhere, and read its numbers. None if it can't be
-    measured (silence, or ffmpeg failed): the mix then falls back to one-pass loudness."""
-    cmd = [ffmpeg_exe(), "-hide_banner", "-nostats", "-v", "info", *inputs, "-filter_complex", filters, "-map",
+    measured (silence, or ffmpeg failed): the mix then falls back to one-pass loudness. The graph goes to
+    ffmpeg in a file: a long timeline's is tens of thousands of characters, more than Windows lets a command
+    line hold."""
+    try:
+        with tempfile.NamedTemporaryFile("w", suffix=".txt", prefix="measure-", dir=cwd, delete=False,
+                                         encoding="utf-8") as f:
+            f.write(filters)
+            script = Path(f.name)
+    except OSError:
+        return None
+    cmd = [ffmpeg_exe(), "-hide_banner", "-nostats", "-v", "info", *inputs, *graph_file_args(str(script)), "-map",
            "[aout]", "-t", f"{total:.3f}", "-f", "null", "-"]
     try:
+        if command_too_long(cmd):
+            return None
         done = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace", cwd=cwd,
                               creationflags=NO_WINDOW, timeout=max(180.0, total * 4))
     except (OSError, subprocess.SubprocessError):
         return None
+    finally:
+        script.unlink(missing_ok=True)
     return mastering.parse_measurement(done.stderr) if done.returncode == 0 else None
 
 

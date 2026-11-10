@@ -160,3 +160,45 @@ def test_a_made_videos_timeline_is_drawn_and_can_be_rendered_again(app, tmp_path
     view.show_timeline(tmp_path / "none.json")
     assert view.rerender_btn.isHidden()
     view.deleteLater()
+
+
+# ---------------------------------------------------------------- what the review of the Studio found
+
+def test_the_rewards_box_only_applies_to_an_upright_minute_in_the_studio(app, tmp_path):
+    """Ticked by default, it cut an eight-minute upright video to 80 seconds."""
+    view = creator_tab(tmp_path, creator_rewards_length=True)
+    view.prompt.setPlainText("Lighthouses")
+    view.engine.setCurrentIndex(view.engine.findData("studio"))
+    assert view.rewards.isChecked()
+    got = {}
+    for seconds in (30, 70, 480):
+        view.seconds.setValue(seconds)
+        got[seconds] = view.request().rewards
+    assert got == {30: False, 70: True, 480: False}
+    view.deleteLater()
+
+
+def test_a_failed_render_again_leaves_the_video_and_the_button(app, tmp_path):
+    """The panel with Play and "Render timeline again" was hidden when the render started and never came back
+    after a failure: the usual result of a typo in timeline.json."""
+    from types import SimpleNamespace as NS
+
+    view = creator_tab(tmp_path)
+    view.show()
+    path = tmp_path / "timeline.json"
+    timeline().dump(path)
+    view.result = NS(folder=tmp_path, video=tmp_path / "v.mp4")
+    view.done_panel.setVisible(True)
+    view.show_timeline(path)
+    view.done_panel.setVisible(False)  # as _start() leaves it while the render runs
+    view._rerender_failed("timeline.json can't be used: it isn't valid JSON")
+    assert view.done_panel.isVisible() and not view.rerender_btn.isHidden()
+    assert "✗ timeline.json can't be used" in view.log_box.toPlainText()
+    view.done_panel.setVisible(False)
+    view._rerender_failed("Cancelled")
+    assert view.done_panel.isVisible()
+    view.result = None  # a failed first Make has nothing to show
+    view.done_panel.setVisible(False)
+    view._rerender_failed("no")
+    assert not view.done_panel.isVisible()
+    view.deleteLater()

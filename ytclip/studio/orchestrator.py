@@ -42,7 +42,9 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import os
 import shutil
+import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -66,6 +68,7 @@ STATE_WORDS = {"input": "Checking the request", "script": "Writing the script", 
                "done": "Done", FAILED: "Stopped"}
 FORMATS = {"short": "vertical", "long": "landscape"}
 LONG_SECONDS = 300.0  # a long video's length when none is asked for
+MAX_SCENES = 600  # the most scenes a storyboard handed in may have (20 minutes at a scene every 2 s)
 MEMORY_PER_SCENE = 40e6  # bytes ffmpeg holds for each scene of a 1080p timeline while it renders
 PERMISSION = ("Made by ClipMonster Studio: script written for this video, voice synthesised, pictures made here "
               "or licensed stock footage (credits in README.md)")
@@ -211,14 +214,24 @@ class StudioOrchestrator(VideoCreatorOrchestrator):
         long = req.format == "long"
         seconds = float(req.seconds or (LONG_SECONDS if long else self.s.creator_duration or 65))
         asked_short = bool(req.seconds) and req.seconds < director.REWARDS_RANGE[0]
+        # The Rewards length is for an upright video of about a minute. Asked for by name (a flag, a ticked box)
+        # on a long or a wide one, the length you gave wins: an eight-minute video isn't cut to 80 seconds.
+        fits = self.canvas(req).vertical and not long and seconds < scriptwriter.LONG_FROM
         if req.rewards is None:
-            rewards = bool(self.s.creator_rewards_length) and self.canvas(req).vertical and not long \
-                and seconds < scriptwriter.LONG_FROM and not asked_short
+            rewards = bool(self.s.creator_rewards_length) and fits and not asked_short
         else:
-            rewards = bool(req.rewards)
+            rewards = bool(req.rewards) and fits
+        if req.rewards and not fits and not getattr(self, "_rewards_said", False):
+            self._rewards_said = True
+            self.log(f"Creator Rewards' length ({director.REWARDS_RANGE[0]:.0f}-{director.REWARDS_RANGE[1]:.0f} s, "
+                     f"upright) isn't applied here: the video is made {seconds:.0f} s long, as asked.")
         if rewards:
             seconds = min(max(seconds, director.REWARDS_RANGE[0] + 2), director.REWARDS_RANGE[1] - 5)
         return seconds, rewards
+
+    def scene_limit(self, given: int) -> int:
+        """A long video's storyboard is taken whole: twenty minutes is a few hundred scenes."""
+        return max(director.MAX_SCENES + 4, min(int(given), MAX_SCENES))
 
     def shape_name(self, req: StudioRequest) -> str:
         c = self.canvas(req)
@@ -279,8 +292,13 @@ class StudioOrchestrator(VideoCreatorOrchestrator):
                 + scraper.distil(article, 6000)
                 + "\n\nRules for facts: every date, number, name and claim in the script must be one this source "
                   "supports. Leave out what it doesn't say rather than guess.")
+            drafted = [sc.speech_text for sc in board.scenes]
+            hook = board.hook
+            scene_of = {n: i for n, i, _ in factcheck.numbered(board)}
             checked = factcheck.check(self.s, board, facts, have_sources=True, mode=mode, log=self.log,
                                       check_cancel=self.check, progress=report)
+            if article is not None:
+                self.keep_retold(board, article, checked, drafted, hook, scene_of)
             board.factcheck = checked.to_json()
         if req.title:
             board.title = req.title
@@ -289,13 +307,33 @@ class StudioOrchestrator(VideoCreatorOrchestrator):
         report("Writing the script", 1.0)
         return board
 
-    # ------------------------------------------------------------ VOICE
-    def reread(self, board, track, voice: str, speed: float, work: Path, report):
-        """A cloud narration is fitted to the length here (same pitch) instead of being paid for twice."""
-        if track.engine_key in voice_engine.CLOUD_ENGINES:
-            self.log(f"{track.engine} isn't asked to read it again: the recording is fitted instead.")
-            return voice_studio.retime(track, speed, work / "voice_fitted.wav")
-        return super().reread(board, track, voice, speed, work, report)
+    def keep_retold(self, board: director.Storyboard, article, checked, drafted: list[str], hook: str,
+                    scene_of: dict[int, int]) -> int:
+        """The fact check corrects a sentence "to say what the source says", and the nearest way to say that is
+        the source's own sentence. Each scene it rewrote is compared with the article again: one that now
+        carries the article's wording goes back to the script's own words, and its claim stays flagged for you
+        to look at instead. Returns how many scenes were put back."""
+        undone = 0
+        for i, (sc, was) in enumerate(zip(board.scenes, drafted)):
+            if sc.speech_text == was:
+                continue
+            now, before = scriptwriter.copied(sc.speech_text, article.text), scriptwriter.copied(was, article.text)
+            if now.run >= scriptwriter.COPY_RUN and now.run > before.run:
+                sc.speech_text = was
+                if i == 0:
+                    board.hook = hook
+                for c in checked.claims:
+                    if c.changed and scene_of.get(c.n) == i:
+                        c.changed = False
+                undone += 1
+        if undone:
+            self.log(f"The fact check's wording for {undone} scene{'s' if undone != 1 else ''} was the article's "
+                     "own, so the script's words were kept there and the claim is flagged for you to check.")
+        still = scriptwriter.copied(board.script, article.text)
+        if still.lifted and not scriptwriter.copied(" ".join(drafted), article.text).lifted:
+            self.log(f"Some phrases are still the article's ({still.run} words in a row: \"{still.words[:80]}\"). "
+                     "Read the script before you post.")
+        return undone
 
     # ------------------------------------------------------------ the whole run
     def create(self, req: CreateRequest, board: director.Storyboard | None = None) -> CreationResult:
@@ -489,7 +527,7 @@ def gather_files(tl: Timeline, pkg: Path) -> None:
                 sfx.mkdir(parents=True, exist_ok=True)
                 dest = sfx / path.name
                 n = 1
-                while dest.exists() and str(dest) not in copied.values():
+                while dest.exists():  # another effect with the same file name (whoosh/01.wav, impact/01.wav)
                     n += 1
                     dest = sfx / f"{path.stem}_{n}{path.suffix}"
                 shutil.copyfile(path, dest)
@@ -522,10 +560,12 @@ def memory_note(tl: Timeline, available: float | None = None) -> str:
     need = 0.4e9 + n * MEMORY_PER_SCENE * scale
     if available is None:
         try:
-            import psutil
+            from ..intelligence import hardware
 
-            available = float(psutil.virtual_memory().available)
+            available = float(hardware.ram_free_bytes())
         except Exception:  # noqa: BLE001
+            available = 0.0
+        if available <= 0:  # it couldn't be read
             return ""
     if need < available * 0.8:
         return ""
@@ -533,13 +573,55 @@ def memory_note(tl: Timeline, available: float | None = None) -> str:
             f"{available / 1e9:.1f} GB is free. Close other programs, or make it in two shorter parts.")
 
 
+def _render_folder(folder: Path):
+    """A work folder for rendering a timeline again: inside the video's own folder when that can be written
+    to, so every clip is named from there in a few characters (Windows limits a command's length, and a long
+    video has hundreds of clips); else the usual work folder."""
+    try:
+        return tempfile.TemporaryDirectory(prefix=".render-", dir=folder, ignore_cleanup_errors=True)
+    except OSError:
+        return work_folder("timeline-")
+
+
+def list_edit(folder: Path, video: Path) -> bool:
+    """Add a re-rendered video to its folder's clips.json, as an edit of the video the Studio made there: it
+    then carries the same AI-generated label, caption, hashtags and category when posting takes it in, always
+    waits for your OK in the queue (posting/store.py), and counts as something left to post, so Clean up
+    keeps the timeline while it's there. True when it was listed (False: not a creation's folder)."""
+    index = folder / "clips.json"
+    try:
+        data = json.loads(index.read_text(encoding="utf-8"))
+        name = video.resolve().relative_to(folder.resolve()).as_posix()
+    except (OSError, ValueError):
+        return False
+    clips = data.get("clips") if isinstance(data, dict) else None
+    if not isinstance(clips, list) or not isinstance(data.get("creator"), dict):
+        return False
+    originals = [c for c in clips if isinstance(c, dict) and c.get("file") and not c.get("edit_of")]
+    if not originals or any(isinstance(c, dict) and c.get("file") == name for c in clips):
+        return bool(originals)  # listed already (rendered again over the last edit)
+    first = originals[0]
+    clips.append({**first, "rank": max((int(c.get("rank") or 0) for c in clips if isinstance(c, dict)), default=0) + 1,
+                  "file": name, "title": f"{first.get('title') or video.stem} (edit)", "edit_of": first["file"]})
+    try:
+        tmp = index.with_name(index.name + ".tmp")
+        tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, index)
+    except OSError:
+        return False
+    return True
+
+
 def render_timeline(path: str | Path, out: str | Path | None = None, *, settings=None, log=None, progress=None,
                     check_cancel=None):
     """Render a timeline.json again (after editing it). The video goes beside it as "<title> (edit).mp4" unless
-    `out` says where. Returns the compiler's RenderReport."""
+    `out` says where. It's rendered to a hidden file first and put in place when it's whole, so a render that
+    fails or is stopped never leaves half a video where posting could find it. Returns the compiler's
+    RenderReport."""
     from ..organize import safe_name
     from ..settings import Settings
 
+    log = log or (lambda m: None)
     path = Path(path)
     if path.is_dir():
         path = path / "timeline.json"
@@ -547,11 +629,34 @@ def render_timeline(path: str | Path, out: str | Path | None = None, *, settings
         raise CreatorError(f"There's no timeline at {path}.")
     try:
         tl = Timeline.load(path)
-    except (TimelineError, ValueError) as exc:
+    except (TimelineError, ValueError, OSError) as exc:
         raise CreatorError(f"{path.name} can't be used: {exc}") from exc
-    dest = Path(out) if out else path.parent / f"{safe_name(tl.title or 'video', 60)} (edit).mp4"
-    try:
-        return timeline_compiler.render(tl, dest, base=path.parent, settings=settings or Settings.load(),
-                                        progress=progress, check_cancel=check_cancel, log=log)
-    except (timeline_compiler.CompileError, TimelineError) as exc:
-        raise CreatorError(str(exc)) from exc
+    for note in getattr(tl, "notes", []):
+        log(f"{path.name}: {note}")
+    note = memory_note(tl)
+    if note:
+        log(note)
+    folder = path.parent
+    dest = Path(out) if out else folder / f"{safe_name(tl.title or 'video', 60)} (edit).mp4"
+    with _render_folder(folder) as tmp:
+        work = Path(tmp)
+        part = work / ".edit.mp4"  # a name posting's intake passes over
+        try:
+            report = timeline_compiler.render(tl, part, base=folder, work=work, settings=settings or Settings.load(),
+                                              progress=progress, check_cancel=check_cancel, log=log)
+        except (timeline_compiler.CompileError, TimelineError) as exc:
+            raise CreatorError(str(exc)) from exc
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                os.replace(part, dest)
+            except OSError:  # another drive
+                shutil.copyfile(part, dest)
+        except OSError as exc:
+            raise CreatorError(f"The video was rendered but couldn't be saved as {dest.name} ({exc.strerror or exc}). "
+                               "If it's open in a player, close it and render again.") from exc
+    report.path = dest
+    if list_edit(folder, dest):
+        log(f"{dest.name} is listed with its video: if this folder is one posting watches, the edit joins the "
+            "queue labelled AI-generated and waits there for your OK. Remove the one you don't want posted.")
+    return report

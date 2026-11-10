@@ -330,3 +330,149 @@ def test_a_failing_graphics_encoder_falls_back_to_the_processor(tmp_path, monkey
     report = C.render(tl, tmp_path / "out.mp4", base=tmp_path, work=tmp_path / "work", log=said.append)
     assert report.encoder == "libx264" and (tmp_path / "out.mp4").stat().st_size > 1000
     assert "encoded on the processor" in said[0]
+
+
+# ---------------------------------------------------------------- what the review of the Studio found
+
+def test_clips_that_meet_between_two_frames_leave_no_gap():
+    """0.1 + 4.05 is a hair under 4.15, and 4.15 is frame 124.5 at 30 fps: both must land on the same frame, or
+    a one-frame gap opens between the clips and the transition there is lost."""
+    assert C.snap(0.1 + 4.05, 30) == C.snap(4.15, 30)
+    tl = T.standard("join", T.Canvas(W, H, 30), 8.0)
+    colours(tl, red=RED, blue=BLUE)
+    tl.track(T.VIDEO_BASE).clips += [T.VideoClip("a", "red", 0.1, 4.05),
+                                     T.VideoClip("b", "blue", 4.15, 3.85, transition_in=T.Transition("crossfade", 0.4))]
+    segs = C._Builder(tl, None, None).segments(tl.track(T.VIDEO_BASE))
+    assert [s.clip.id if s.clip else None for s in segs] == [None, "a", "b"]  # only the gap before the first
+    assert segs[2].lead > 0  # the crossfade is still there
+    # Over many joins written to the millisecond (as the Studio writes them), never a mismatch.
+    for fps in (24, 25, 30, 60):
+        for i in range(1, 4000):
+            a, d = round(i * 0.0137, 3), round(1 + (i % 97) * 0.0513, 3)
+            assert C.snap(a + d, fps) == C.snap(round(a + d, 3), fps)
+
+
+def test_a_gap_is_exactly_its_frames_long(tmp_path):
+    """A two-frame gap written d=0.0667 gave three frames, and every cut after it came a frame late."""
+    tl = T.standard("gap", T.Canvas(W, H, 30, background="#14EB14"), 4.0)
+    colours(tl, red=RED, blue=BLUE)
+    tl.track(T.VIDEO_BASE).clips += [T.VideoClip("a", "red", 0.0, 1.0), T.VideoClip("b", "blue", 32 / 30, 1.0),
+                                     T.VideoClip("c", "red", 62 / 30, 4.0 - 62 / 30)]
+    render(tl, tmp_path)
+    f = frames(tmp_path / "out.mp4")
+    assert len(f) == 120
+    assert near(f[29, 100, 90], RED) and near(f[30, 100, 90], GREEN) and near(f[31, 100, 90], GREEN)
+    assert near(f[32, 100, 90], BLUE) and near(f[61, 100, 90], BLUE) and near(f[62, 100, 90], RED)
+
+
+def beep(path: Path, seconds: float = 0.2) -> Path:
+    subprocess.run([ffmpeg_exe(), "-y", "-v", "error", "-f", "lavfi", "-i", f"sine=f=880:r=48000:d={seconds}",
+                    "-ac", "2", str(path)], check=True)
+    return path
+
+
+def sound(path: Path) -> np.ndarray:
+    raw = subprocess.run([ffmpeg_exe(), "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", "8000", "-f",
+                          "f32le", "-"], capture_output=True, check=True).stdout
+    return np.frombuffer(raw, np.float32)
+
+
+def test_a_sound_used_again_and_again_is_one_input(tmp_path):
+    """Fifty whooshes were fifty inputs on the command line; they're one, read as often as needed."""
+    tl = simple(tmp_path, 4)
+    beep(tmp_path / "beep.wav")
+    tl.assets["beep"] = T.Asset("audio", "beep.wav", duration=0.2)
+    tl.track(T.AUDIO_SFX).clips += [T.AudioClip(f"b{i}", "beep", t, 0.2) for i, t in enumerate((0.5, 1.5, 2.5, 3.5))]
+    compiled = C.compile_timeline(tl, tmp_path, work=tmp_path / "work")
+    assert len(compiled.audio_inputs) == 1 and len(compiled.sources) == 4
+    assert {s.label for s in compiled.sources} == {"0:a"}
+    render(tl, tmp_path)
+    x = sound(tmp_path / "out.mp4")
+    rms = lambda a, b: float(np.sqrt(np.mean(x[int(a * 8000):int(b * 8000)] ** 2)))  # noqa: E731
+    for t in (0.5, 1.5, 2.5, 3.5):  # every one of them plays, each at its own time
+        assert rms(t + 0.03, t + 0.17) > 10 * rms(t - 0.3, t - 0.05) + 0.01
+
+
+def test_inputs_are_named_from_the_work_folder_when_that_is_shorter(tmp_path):
+    work = tmp_path / "work"
+    clip = tmp_path / "pkg" / "scenes" / "scene_001_pexels_123.mp4"
+    assert C.input_path(clip, work) == str(Path("..") / "pkg" / "scenes" / "scene_001_pexels_123.mp4")
+    assert C.input_path(clip, None) == str(clip.resolve())
+    assert C.input_path(work / "-odd.mp4", work) == str((work / "-odd.mp4").resolve())  # never read as an option
+
+
+def test_a_command_too_long_for_windows_is_refused_in_plain_words(tmp_path, monkeypatch):
+    from ytclip import ffmpeg
+
+    assert ffmpeg.command_too_long(["ffmpeg", "x" * 33000], windows=True)
+    assert not ffmpeg.command_too_long(["ffmpeg", "x" * 33000], windows=False)
+    assert not ffmpeg.command_too_long(["ffmpeg", "-i", "a.mp4"], windows=True)
+    tl = simple(tmp_path, 1)
+    monkeypatch.setattr(C, "command_too_long", lambda cmd: True)
+    with pytest.raises(C.CompileError, match="more than Windows can start ffmpeg with"):
+        render(tl, tmp_path)
+    assert not (tmp_path / "out.mp4").exists()
+
+
+def test_ffmpeg_that_cannot_start_is_a_plain_error(tmp_path, monkeypatch):
+    def refuse(*a, **k):
+        raise OSError(206, "The filename or extension is too long")
+
+    monkeypatch.setattr(C, "run_with_progress", refuse)
+    with pytest.raises(C.CompileError, match="couldn't be started"):
+        render(simple(tmp_path, 1), tmp_path)
+
+
+def test_the_loudness_passes_send_their_graph_in_a_file(tmp_path, monkeypatch):
+    from ytclip.editor import audio_mixer as A
+
+    seen = {}
+    real = subprocess.run
+
+    def spy(cmd, **kw):
+        if "-f" in cmd and "null" in cmd:
+            seen["cmd"] = list(cmd)
+            option = next(a for a in cmd if a in ("-/filter_complex", "-filter_complex_script"))
+            seen["graph"] = Path(cmd[cmd.index(option) + 1]).read_text(encoding="utf-8")
+        return real(cmd, **kw)
+
+    monkeypatch.setattr(A.subprocess, "run", spy)
+    beep(tmp_path / "beep.wav", 1.0)
+    got = A.measure(["-i", str(tmp_path / "beep.wav")], "[0:a]loudnorm=print_format=json[aout]", 1.0, tmp_path)
+    assert got and "input_i" in got
+    assert "-filter_complex" not in seen["cmd"] and "loudnorm" in seen["graph"]
+    assert not list(tmp_path.glob("measure-*.txt"))  # and the file is gone afterwards
+
+
+def test_a_mix_that_could_not_be_measured_is_said(tmp_path, monkeypatch):
+    tl = simple(tmp_path, 1)
+    beep(tmp_path / "beep.wav")
+    tl.assets["beep"] = T.Asset("audio", "beep.wav", duration=0.2)
+    tl.track(T.AUDIO_SFX).clips.append(T.AudioClip("b", "beep", 0.2, 0.2))
+    monkeypatch.setattr(C, "measure_sound", lambda *a, **k: (0.0, None))
+    assert any("couldn't be measured" in w for w in render(tl, tmp_path).warnings)
+
+
+def test_a_silent_video_sent_to_a_sound_bus_is_named(tmp_path):
+    """Stock clips often have no sound: asking for it gave ffmpeg's own dump, naming neither clip nor cause."""
+    subprocess.run([ffmpeg_exe(), "-y", "-v", "error", "-f", "lavfi", "-i", f"testsrc=s={W}x{H}:r={FPS}:d=2",
+                    "-an", "-pix_fmt", "yuv420p", str(tmp_path / "silent.mp4")], check=True)
+    tl = T.standard("silent", canvas(), 2.0)
+    tl.assets["clip"] = T.Asset("video", "silent.mp4", duration=2.0)
+    tl.track(T.VIDEO_BASE).clips.append(T.VideoClip("stock", "clip", 0.0, 2.0, audio="sfx"))
+    with pytest.raises(C.CompileError, match="Clip stock: silent.mp4 has no sound of its own"):
+        render(tl, tmp_path)
+    tl.track(T.VIDEO_BASE).clips[0].audio = ""
+    assert render(tl, tmp_path).duration == 2.0
+
+
+def test_what_reading_the_file_passed_over_is_in_the_render_report(tmp_path):
+    tl = simple(tmp_path, 2)
+    data = tl.to_json()
+    clip = data["tracks"][0]["clips"][1]
+    clip["transiton_in"] = clip.pop("transition_in")
+    again = T.Timeline.from_json(data)
+    assert again.notes == ["tracks[0].clips[1].transiton_in: isn't a field the timeline knows (ignored: did you mean "
+                           "transition_in?)"]
+    report = render(again, tmp_path)
+    assert again.notes[0] in report.warnings

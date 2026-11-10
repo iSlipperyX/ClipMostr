@@ -158,3 +158,59 @@ def test_check_lists_what_is_ready_without_touching_the_network(fake, capsys, mo
                  "ElevenLabs"):
         assert word in out, word
     assert "no stock footage key" in " ".join(out.split())
+
+
+# ---------------------------------------------------------------- what the review of the Studio found
+
+class Chatty(FakeStudio):
+    """Says things while it writes, as the real one does, and writes lines longer than a console is wide."""
+
+    def storyboard(self, req):
+        self._log('Read "A story" from example.org: 900 words.')
+        self._progress("Writing the script: reading the page", None)
+        long = "This narration line is much longer than eighty characters so that any wrapping would break it — café. " * 2
+        return Storyboard("A board", scenes=[Scene(1, long.strip())],
+                          sources=[{"title": "A story", "url": "https://example.org/" + "a" * 120}])
+
+
+def test_a_storyboard_sent_to_a_file_is_json_and_nothing_else(fake, tmp_path, monkeypatch, capsys):
+    """`--storyboard-only > storyboard.json` had the log's lines in front of the JSON and its long lines
+    wrapped at 80 columns: the file could never be read back."""
+    monkeypatch.setattr(O, "StudioOrchestrator", Chatty)
+    assert cli.main(["studio", "The angle", "--url", "https://example.org/a", "--storyboard-only"]) == 0
+    got = capsys.readouterr()
+    board = json.loads(got.out)  # stdout is the storyboard alone...
+    assert board["scenes"][0]["speech_text"].endswith("café.") and got.out.isascii()
+    assert "Writing the script" in got.err and "900 words" in got.err  # ...and what happened is on the other stream
+    file = tmp_path / "boards" / "storyboard.json"
+    assert cli.main(["studio", "The angle", "--storyboard-only", "--out", str(file)]) == 0
+    assert capsys.readouterr().out == ""
+    assert json.loads(file.read_text(encoding="utf-8"))["title"] == "A board"
+    # What a tool on Windows may have done to the file on the way is read all the same.
+    for encoding in ("utf-8-sig", "utf-16"):
+        file.write_text(json.dumps(board), encoding=encoding)
+        FakeStudio.made.clear()
+        assert cli.main(["studio", "--storyboard", str(file)]) == 0
+        assert FakeStudio.made[0].storyboard["scenes"][0]["speech_text"].endswith("café.")
+
+
+def test_files_that_cannot_be_read_say_so_plainly(fake, tmp_path, capsys):
+    assert cli.main(["studio", "--script", str(tmp_path / "nope.txt")]) == 1
+    assert "nope.txt can't be read as a script" in " ".join(capsys.readouterr().out.split())
+    bad = tmp_path / "bad.json"
+    bad.write_text('{"title": "B", "scenes": [', encoding="utf-8")
+    assert cli.main(["studio", "--storyboard", str(bad)]) == 1
+    assert "bad.json can't be read as a storyboard" in " ".join(capsys.readouterr().out.split())
+    bad.write_text("[1, 2]", encoding="utf-8")
+    assert cli.main(["studio", "--storyboard", str(bad)]) == 1
+    assert "it isn't a storyboard" in " ".join(capsys.readouterr().out.split())
+    assert FakeStudio.made == []
+
+
+def test_a_render_windows_refuses_to_start_is_a_plain_line(fake, tmp_path, monkeypatch, capsys):
+    def refuse(path, out=None, **kw):
+        raise OSError(206, "The filename or extension is too long")
+
+    monkeypatch.setattr(O, "render_timeline", refuse)
+    assert cli.main(["studio", "--timeline", str(tmp_path)]) == 1
+    assert "✗" in capsys.readouterr().out

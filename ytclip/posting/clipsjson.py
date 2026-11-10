@@ -64,6 +64,8 @@ def read_folder_index(folder: Path) -> dict[str, dict]:
             # with its own caption and hashtags
             "ai_generated": bool(clip.get("ai_generated") or (data.get("creator") or {}).get("ai_generated")),
             "caption": str(clip.get("caption") or ""),
+            # ClipMonster 3.9: a Studio video rendered again from its edited timeline; it waits for an OK
+            "edit_of": str(clip.get("edit_of") or ""),
             "hashtags": " ".join(f"#{str(h).lstrip('#')}" for h in clip.get("hashtags") or [] if str(h).strip("# ")),
         }
     return out

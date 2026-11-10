@@ -28,10 +28,13 @@ you can put in the post.
 from __future__ import annotations
 
 import html
+import http.client
 import ipaddress
 import json
 import re
 import socket
+import string
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -149,6 +152,11 @@ def check_url(url: str, resolve: Resolve | None = None, lookup: bool = True) -> 
     host = (parts.hostname or "").rstrip(".").lower()
     if not host:
         raise ScrapeError("That address has no site in it.")
+    if not host.isascii():  # an international name (bücher.example) goes out in its ASCII form
+        try:
+            host = host.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise ScrapeError(f"That isn't a web address (its site's name can't be used: {exc}).") from exc
     local = "That address is on this computer or your own network, not the public web."
     if host == "localhost" or host.endswith((".localhost", ".local", ".internal", ".lan", ".home.arpa")):
         raise ScrapeError(local)
@@ -170,10 +178,62 @@ def check_url(url: str, resolve: Resolve | None = None, lookup: bool = True) -> 
                                       "that you're online.") from exc
     if addresses is not None and (not addresses or not all(_public(a) for a in addresses)):
         raise ScrapeError(local)
+    if addresses is not None and resolve is None:
+        with _approved_lock:  # fetch() connects to these, not to whatever the name answers next time
+            _approved[host] = list(addresses)
     netloc = host if ":" not in host else f"[{host}]"
     if port and port != {"http": 80, "https": 443}[parts.scheme]:
         netloc += f":{port}"
-    return urllib.parse.urlunsplit((parts.scheme, netloc, parts.path or "/", parts.query, ""))
+    # Letters and spaces a browser accepts in an address go out percent-encoded ("%" is kept, so an address
+    # that's already encoded isn't encoded twice).
+    path = urllib.parse.quote(parts.path or "/", safe="/%:@!$&'()*+,;=~-._")
+    query = urllib.parse.quote(parts.query, safe="/%:@!$&'()*+,;=~-._?")
+    return urllib.parse.urlunsplit((parts.scheme, netloc, path, query, ""))
+
+
+# The addresses check_url() found public for each site's name. A name can answer differently the next time it's
+# asked (deliberately: "DNS rebinding", public for the check and then 127.0.0.1 for the request), so the
+# connection is made to an address that was checked, never by looking the name up again.
+_approved: dict[str, list[str]] = {}
+_approved_lock = threading.Lock()
+
+
+def _pinned_connect(address, *args, **kwargs):
+    host, port = address[0], address[1]
+    with _approved_lock:
+        known = list(_approved.get(str(host).rstrip(".").lower(), ()))
+    if not known:  # a proxy's own address, or a name this computer couldn't look up itself
+        return socket.create_connection(address, *args, **kwargs)
+    last: OSError | None = None
+    for ip in known:
+        try:
+            return socket.create_connection((ip, port), *args, **kwargs)
+        except OSError as exc:
+            last = exc
+    raise last or OSError(f"{host} couldn't be reached")
+
+
+class _PinnedHTTP(http.client.HTTPConnection):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _pinned_connect
+
+
+class _PinnedHTTPS(http.client.HTTPSConnection):  # TLS still checks the certificate against the site's name
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self._create_connection = _pinned_connect
+
+
+class _PinnedHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_PinnedHTTP, req)
+
+
+class _PinnedTLSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        context = getattr(self, "_context", None)
+        return self.do_open(_PinnedHTTPS, req, **({"context": context} if context is not None else {}))
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -186,7 +246,7 @@ def fetch(url: str, timeout: float = TIMEOUT) -> Page:
     req = urllib.request.Request(url, headers={
         "User-Agent": web.USER_AGENT, "Accept": "text/html,application/xhtml+xml;q=0.9,text/plain;q=0.5",
         "Accept-Language": "en-US,en;q=0.8"})
-    opener = urllib.request.build_opener(_NoRedirect)
+    opener = urllib.request.build_opener(_NoRedirect, _PinnedHandler, _PinnedTLSHandler)
     try:
         with opener.open(req, timeout=timeout) as resp:
             return Page(resp.geturl(), resp.status, resp.headers.get_content_type(), resp.read(MAX_BYTES + 1),
@@ -200,8 +260,9 @@ def fetch(url: str, timeout: float = TIMEOUT) -> Page:
 
 
 def get(url: str, *, fetcher: Fetch | None = None, resolve: Resolve | None = None, timeout: float = TIMEOUT,
-        check: Callable[[], None] | None = None) -> Page:
-    """The page at a public address, following up to five redirects, each one checked like the first."""
+        check: Callable[[], None] | None = None, hop: Callable[[str], None] | None = None) -> Page:
+    """The page at a public address, following up to five redirects, each one checked like the first. `hop`
+    is called with each address a redirect leads to, before it's fetched (read() asks its robots.txt there)."""
     fetcher = fetcher or fetch
     url = check_url(url, resolve)
     for _ in range(MAX_REDIRECTS + 1):
@@ -209,11 +270,16 @@ def get(url: str, *, fetcher: Fetch | None = None, resolve: Resolve | None = Non
             check()
         try:
             page = fetcher(url, timeout)
-        except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        except (urllib.error.URLError, http.client.HTTPException, OSError, TimeoutError, ValueError) as exc:
             why = getattr(exc, "reason", None) or exc
             raise ScrapeError(f"{_host(url)} didn't answer ({why}).") from exc
         if page.status in (301, 302, 303, 307, 308) and page.location:
-            url = check_url(urllib.parse.urljoin(url, page.location), resolve)
+            # A header arrives as Latin-1 text: its raw bytes are percent-encoded as they were sent (as urllib
+            # itself does), before the address is joined and checked.
+            where = urllib.parse.quote(page.location, encoding="iso-8859-1", safe=string.punctuation)
+            url = check_url(urllib.parse.urljoin(url, where), resolve)
+            if hop:
+                hop(url)
             continue
         return page
     raise ScrapeError(f"{_host(url)} keeps redirecting.")
@@ -237,7 +303,7 @@ def allowed(url: str, *, fetcher: Fetch | None = None, resolve: Resolve | None =
     if page.status != 200 or not page.body:
         return True
     rules = urllib.robotparser.RobotFileParser()
-    rules.parse(page.body[:500_000].decode("utf-8", "replace").splitlines())
+    rules.parse(page.body[:500_000].decode("utf-8-sig", "replace").splitlines())  # a BOM would hide line one
     return rules.can_fetch(AGENT, url)
 
 
@@ -325,6 +391,7 @@ _NOISE = re.compile(r"(?i)\b(?:cookie|newsletter|sign up|subscribe|all rights re
                     r"share this|follow us|read more:|related:|click here|terms of (?:use|service)|privacy policy)\b")
 _BOILER = re.compile(r"(?i)comment|sidebar|footer|related|promo|newsletter|share|social|cookie|banner|popup|modal|"
                      r"breadcrumb|advert|sponsor|subscribe|paywall|menu|\bnav")
+_GATED = re.compile(r"(?i)paywall|premium[-_ ]?content|subscriber[-_ ]?only|members?[-_ ]?only|piano-|regwall")
 
 
 class _Reader(HTMLParser):
@@ -358,6 +425,8 @@ class _Reader(HTMLParser):
         marks = f"{a.get('class') or ''} {a.get('id') or ''} {a.get('role') or ''}"
         skipped = tag in _SKIP or (self.strict and bool(_BOILER.search(marks))
                                    and tag not in ("body", "html", "main", "article"))
+        # The part of a page marked as being for subscribers is never read, however the page is laid out.
+        skipped = skipped or (bool(_GATED.search(marks)) and tag not in ("body", "html"))
         hidden = "hidden" in a or "display:none" in (a.get("style") or "").replace(" ", "").lower() \
             or a.get("aria-hidden") == "true"
         skipped = skipped or hidden
@@ -532,10 +601,13 @@ def article_from(doc: str, url: str, asked: str = "", only: str = "") -> Article
     text, how = extract(doc, url, only)
     words = len(text.split())
     host = _host(url)
+    paid = ScrapeError(f"{host} shows this article to subscribers only. ClipMonster only reads pages anyone "
+                       "can open; paste the part you're allowed to use as your own script instead.")
+    if facts["paid"]:  # the page says so itself, whether or not its text happens to be in the HTML
+        raise paid
     if words < MIN_WORDS:
-        if facts["paid"] or PAYWALL.search(web.clean(doc)[:20000]):
-            raise ScrapeError(f"{host} shows this article to subscribers only. ClipMonster only reads pages anyone "
-                              "can open; paste the part you're allowed to use as your own script instead.")
+        if PAYWALL.search(web.clean(doc)[:20000]):
+            raise paid
         raise ScrapeError(f"No article text was found at {host} ({words} words). The page may be a video, a list of "
                           "links, or drawn by JavaScript. Paste its text as a prompt or script instead.")
     paras = text.split("\n\n")
@@ -559,10 +631,14 @@ def read(url: str, *, fetcher: Fetch | None = None, resolve: Resolve | None = No
     log = log or (lambda m: None)
     asked = check_url(url, resolve)
     host = _host(asked)
-    if robots and not allowed(asked, fetcher=fetcher, resolve=resolve):
-        raise ScrapeError(f"{host} asks programs not to read that page (its robots.txt), so ClipMonster doesn't. "
-                          "Paste the text you're allowed to use as your own script instead.")
-    page = get(asked, fetcher=fetcher, resolve=resolve, check=check)
+    def ask(address: str) -> None:
+        if robots and not allowed(address, fetcher=fetcher, resolve=resolve):
+            raise ScrapeError(f"{_host(address)} asks programs not to read that page (its robots.txt), so "
+                              "ClipMonster doesn't. Paste the text you're allowed to use as your own script instead.")
+
+    ask(asked)
+    page = get(asked, fetcher=fetcher, resolve=resolve, check=check, hop=ask)  # a redirect's site is asked too
+    host = _host(page.url or asked)
     if page.status in (401, 402, 403, 407, 451):
         raise ScrapeError(f"{host} doesn't show that page to everyone (it answered {page.status}): it needs a "
                           "sign-in or a subscription, or blocks programs. ClipMonster only reads public pages.")

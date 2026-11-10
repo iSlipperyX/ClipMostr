@@ -205,3 +205,45 @@ def test_json_schema_agrees_with_the_reader():
     bad["tracks"][0]["clips"][0]["fit"] = "stretch"
     with pytest.raises(jsonschema.ValidationError):
         jsonschema.validate(bad, schema)
+
+
+# ---------------------------------------------------------------- what the review of the Studio found
+
+def test_a_misspelt_key_is_said_with_the_nearest_real_name():
+    data = full().to_json()
+    data["tracks"][0]["clips"][1]["transiton_in"] = data["tracks"][0]["clips"][1].pop("transition_in")
+    data["audio"]["duck"] = -30
+    tl = T.Timeline.from_json(data)
+    assert tl.notes == [
+        "tracks[0].clips[1].transiton_in: isn't a field the timeline knows (ignored: did you mean transition_in?)",
+        "audio.duck: isn't a field the timeline knows (ignored: did you mean duck_db?)"]
+    assert "notes" not in tl.to_json()  # what was noticed while reading isn't part of the document
+    assert T.Timeline.from_json(full().to_json()).notes == []
+    # With something really wrong as well, the error names both.
+    data["duration"] = -1
+    with pytest.raises(T.TimelineError, match=r"Also: .*did you mean transition_in"):
+        T.Timeline.from_json(data)
+
+
+def test_a_file_saved_with_a_byte_order_mark_is_read(tmp_path):
+    """Notepad's "UTF-8 with BOM" and PowerShell 5 put three bytes in front that JSON itself refuses."""
+    path = tmp_path / "timeline.json"
+    path.write_text(full().dumps(), encoding="utf-8-sig")
+    assert path.read_bytes()[:3] == b"\xef\xbb\xbf"
+    assert T.Timeline.load(path).title == "3 stoic habits"
+
+
+def test_values_the_renderer_cannot_use_are_refused():
+    def problems(**audio):
+        tl = full()
+        for k, v in audio.items():
+            setattr(tl.audio, k, v)
+        return [str(p) for p in T.validate(tl) if p.level == "error"]
+
+    assert problems() == []
+    assert any("audio.voice_lufs: is 3" in p for p in problems(voice_lufs=3))
+    assert any("audio.duck_attack_ms: is 5000" in p for p in problems(duck_attack_ms=5000))
+    assert any("audio.duck_release_ms: is 20000" in p for p in problems(duck_release_ms=20000))
+    assert problems(duck_attack_ms=2000, duck_release_ms=9000, voice_lufs=-20) == []
+    short = T.standard("blink", T.Canvas.named("vertical"), 0.01)  # under half a frame: ffmpeg would never stop
+    assert any("less than one frame" in str(p) for p in T.validate(short) if p.level == "error")

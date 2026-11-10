@@ -46,13 +46,22 @@ fit "cover", just inside it with "contain"); `rotation` is in degrees, clockwise
 keyframes values move by the later one's `ease`. `t` counts from the clip's start. `crop` cuts the source
 first (0-1 of its width and height).
 
+**Captions.** A render draws each word's own `text`, `color` and times, in the track style's `preset`, `font`,
+`size`, `color`, `highlight`, `outline`, `position` and `emoji`. The style's `uppercase`, `max_words`, `censor`,
+`keyword_colors`, keyword colours and `emphasis` were used when the captions were built (they decided the
+words' text, colours and grouping), and a word's `box` records where it was laid out: to change those in a
+finished timeline, change the words themselves.
+
 Everything is checked by validate(): Timeline.from_json raises TimelineError listing every problem with where
 it is ("tracks[0].clips[2].asset: there's no asset called pic9"), so a hand-edited file says what's wrong.
+A key the timeline doesn't know (a misspelling: "transiton_in") is passed over and said so, with the nearest
+real name: in the loaded timeline's `notes`, and so in a render's warnings.
 JSON_SCHEMA is the same shape as a JSON Schema document, for editors and other tools.
 """
 
 from __future__ import annotations
 
+import difflib
 import json
 import math
 import re
@@ -93,9 +102,12 @@ class TimelineError(ValueError):
     def __init__(self, problems: list["Problem"]):
         self.problems = problems
         errors = [p for p in problems if p.level == "error"]
+        ignored = [p for p in problems if p.level == "warning" and "(ignored" in p.message]
         head = f"The timeline has {len(errors)} problem{'s' if len(errors) != 1 else ''}"
+        also = ("" if not ignored else ". Also: " + "; ".join(str(p) for p in ignored[:4]) +
+                (f"; and {len(ignored) - 4} more" if len(ignored) > 4 else ""))
         super().__init__(head + ": " + "; ".join(str(p) for p in errors[:8]) +
-                         (f"; and {len(errors) - 8} more" if len(errors) > 8 else ""))
+                         (f"; and {len(errors) - 8} more" if len(errors) > 8 else "") + also)
 
 
 @dataclass(frozen=True)
@@ -391,6 +403,8 @@ class Timeline:
             problems += [p for p in validate(timeline) if p.level == "error"]
             if any(p.level == "error" for p in problems):
                 raise TimelineError(problems)
+        # What reading it passed over (a misspelt key, say): kept so a render can say why an edit did nothing.
+        timeline.notes = [str(p) for p in problems if p.level == "warning"]
         return timeline
 
     @classmethod
@@ -403,7 +417,8 @@ class Timeline:
 
     @classmethod
     def load(cls, path: str | Path, *, strict: bool = True) -> "Timeline":
-        return cls.loads(Path(path).read_text(encoding="utf-8"), strict=strict)
+        # utf-8-sig: Notepad and PowerShell may put a byte-order mark in front, which JSON doesn't allow.
+        return cls.loads(Path(path).read_text(encoding="utf-8-sig"), strict=strict)
 
     def resolve(self, asset: Asset | str, base: str | Path | None = None) -> Path:
         """An asset's file. A relative path is looked for in `base` (the timeline file's folder)."""
@@ -466,8 +481,9 @@ class _Reader:
             return {}
         for key in data:
             if key not in known:
-                self.bad(f"{where}.{key}" if where else str(key), "isn't a field the timeline knows (ignored)",
-                         "warning")
+                near = difflib.get_close_matches(str(key), known, n=1, cutoff=0.7)
+                self.bad(f"{where}.{key}" if where else str(key), "isn't a field the timeline knows (ignored" +
+                         (f": did you mean {near[0]}?)" if near else ")"), "warning")
         return data
 
     def num(self, d: dict, key: str, where: str, default: float, required: bool = False) -> float:
@@ -697,6 +713,8 @@ def validate(tl: Timeline, base: str | Path | None = None, files: bool = False) 
         err("canvas.background", f"is {c.background!r}: a colour is written #RRGGBB")
     if not 0 < tl.duration <= MAX_DURATION:
         err("duration", f"is {tl.duration:g} s: it must be more than 0 and at most {MAX_DURATION / 3600:g} hours")
+    elif 1 <= c.fps <= 120 and tl.duration * c.fps < 0.5:
+        err("duration", f"is {tl.duration:g} s: that's less than one frame at {c.fps} frames a second")
 
     for key, a in tl.assets.items():
         where = f"assets.{key}"
@@ -789,8 +807,12 @@ def validate(tl: Timeline, base: str | Path | None = None, files: bool = False) 
         err("audio.true_peak", f"is {a.true_peak:g}: the peak ceiling runs from -9 to 0 dBTP")
     if not -40 <= a.duck_db <= 0:
         err("audio.duck_db", f"is {a.duck_db:g}: ducking runs from -40 dB to 0 (off)")
-    if a.duck_attack_ms <= 0 or a.duck_release_ms <= 0:
-        err("audio", "the ducking's attack and release must be more than 0 ms")
+    if not -40 <= a.voice_lufs <= -5:
+        err("audio.voice_lufs", f"is {a.voice_lufs:g}: the voice's level runs from -40 to -5 LUFS")
+    if not 0.01 <= a.duck_attack_ms <= 2000:
+        err("audio.duck_attack_ms", f"is {a.duck_attack_ms:g}: the ducking's attack runs from 0.01 to 2000 ms")
+    if not 0.01 <= a.duck_release_ms <= 9000:
+        err("audio.duck_release_ms", f"is {a.duck_release_ms:g}: the ducking's release runs from 0.01 to 9000 ms")
     if not tl.video_tracks() or not any(t.clips for t in tl.video_tracks()):
         warn("tracks", "there's no picture: the video will be the background colour")
     return sorted(out, key=lambda p: p.level != "error")

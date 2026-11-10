@@ -187,13 +187,17 @@ class VideoCreatorOrchestrator:
         report = self.stage("Writing the script")
         report("Writing the script", None)
         if req.storyboard:
-            board = director.normalise(director.Storyboard.from_json(req.storyboard), director.get_style(style),
-                                       hook_words=40)
+            given = director.Storyboard.from_json(req.storyboard)
+            board = director.normalise(given, director.get_style(style), hook_words=40,
+                                       max_scenes=self.scene_limit(len(given.scenes)))
             board.written_by = board.written_by or "you (edited)"
+            self.say_cut(board)
         elif req.script.strip():
             board = director.from_script(req.script, title=req.title, category=cat_name, style=style,
-                                         seconds=seconds, prompt=req.prompt)
+                                         seconds=seconds, prompt=req.prompt,
+                                         max_scenes=self.scene_limit(len(req.script.split()) // 3 + 1))
             self.log(f"Using your script: {len(board.scenes)} scenes, {board.word_count} words.")
+            self.say_cut(board)
         else:
             if not req.prompt.strip():
                 raise CreatorError("Say what the video is about, or paste a script.")
@@ -258,6 +262,17 @@ class VideoCreatorOrchestrator:
             self.log(pace.note)
         return text, wpm, scene_seconds
 
+    def scene_limit(self, given: int) -> int:
+        """The most scenes a storyboard or script handed in may have (`given`: how many it has, or could)."""
+        return director.MAX_SCENES + 4
+
+    def say_cut(self, board: director.Storyboard) -> None:
+        for note in board.notes:
+            if note.startswith("kept the first"):
+                self.log(f"This is longer than one video takes: {note}. Make the rest as a second video"
+                         + ("." if type(self).scene_limit is not VideoCreatorOrchestrator.scene_limit
+                            else ", or make it with the Studio, which takes long videos."))
+
     def voice(self, board: director.Storyboard, req: CreateRequest, work: Path, seconds: float,
               rewards: bool) -> voice_engine.VoiceTrack:
         """Step 2: the narration, at a speed that lands it on the target length."""
@@ -269,7 +284,8 @@ class VideoCreatorOrchestrator:
                                             progress=report, check=self.check)
             speed = self.voice_speed(track, seconds, rewards)
             if speed != 1.0:
-                self.log(f"The voice ran {track.duration:.0f} s for a {seconds:.0f} s target: reading it again "
+                how = "fitting it" if track.engine_key in voice_engine.CLOUD_ENGINES else "reading it again"
+                self.log(f"The voice ran {track.duration:.0f} s for a {seconds:.0f} s target: {how} "
                          f"{'slower' if speed < 1 else 'faster'} ({speed:.2f}x).")
                 track = self.reread(board, track, voice, speed, work, report)
         except voice_engine.VoiceError as exc:
@@ -296,7 +312,14 @@ class VideoCreatorOrchestrator:
 
     def reread(self, board: director.Storyboard, track: voice_engine.VoiceTrack, voice: str, speed: float,
                work: Path, report: Progress) -> voice_engine.VoiceTrack:
-        """The narration again at `speed`, by the engine that read it."""
+        """The narration again at `speed`, by the engine that read it. A cloud engine (ElevenLabs) charges for
+        every character it reads, so its recording is fitted to the length instead (same pitch), not paid
+        for twice."""
+        if track.engine_key in voice_engine.CLOUD_ENGINES:
+            from ..studio import voice_studio  # lazy: the Studio's modules import this one
+
+            self.log(f"{track.engine} isn't asked to read it again: the recording is fitted instead.")
+            return voice_studio.retime(track, speed, work / "voice_fitted.wav")
         return voice_engine.synthesize(board.scenes, self.s, work / "voice.wav", voice=voice, log=self.log,
                                        progress=report, check=self.check, speed=speed, engines=[track.engine_key])
 

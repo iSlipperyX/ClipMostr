@@ -72,6 +72,7 @@ MAX_CLIP_SECONDS = 90.0  # longer stock clips are large files for a few seconds'
 CACHE_SECONDS = 24 * 3600.0
 PER_PAGE = 15
 QUERIES_PER_SCENE = 2
+REFUSALS_IN_A_ROW = 3  # this many searches refused one after another turn a stock site off for the video
 DOWNLOADS_PER_SCENE = 3  # tries, when a file won't download or isn't what the site said
 MIN_KEPT = 0.45  # of a source's picture left after cropping it to the canvas's shape
 MAX_UPSCALE = 1.6
@@ -90,9 +91,10 @@ _FILLER = frozenset("""a an the of in on at with and or to from by for over unde
 class StockError(RuntimeError):
     """A stock site said no, or sent something unusable. `status` is the HTTP code when there was one."""
 
-    def __init__(self, message: str, status: int = 0):
+    def __init__(self, message: str, status: int = 0, detail: str = ""):
         super().__init__(message)
         self.status = status
+        self.detail = detail  # the start of what the site said (never the address asked for)
 
 
 @dataclass
@@ -145,9 +147,13 @@ def _http(url: str, headers: dict, timeout: float = 20.0) -> bytes:
             return r.read(MAX_JSON + 1)
     except urllib.error.HTTPError as exc:
         code = exc.code
+        try:
+            said = exc.read(200).decode("utf-8", "replace")
+        except (OSError, ValueError, AttributeError):
+            said = ""
         exc.close()
         # Never the address in the message: Pixabay's carries the key.
-        raise StockError(f"HTTP {code}", code) from None
+        raise StockError(f"HTTP {code}", code, said) from None
     except (urllib.error.URLError, OSError, TimeoutError) as exc:
         raise StockError(f"no connection ({type(getattr(exc, 'reason', exc)).__name__})") from None
 
@@ -405,6 +411,7 @@ class Stock:
         self.downloads = 0
         self._memory: dict[str, list[StockHit]] = {}
         self._told = False
+        self._refusals: dict[str, int] = {}  # provider: searches it has just refused (HTTP 400), in a row
 
     def key_for(self, provider: str) -> str:
         setting, env = KEY_SETTINGS[provider]
@@ -482,6 +489,7 @@ class Stock:
             except ValueError:
                 self._failed(provider, StockError("an answer that isn't JSON"))
                 return []
+            self._refusals.pop(provider, None)
             hits = PARSERS[(provider, kind)](data if isinstance(data, dict) else {}, self.canvas)
             hits = [h for h in hits if allowed_download(provider, h.file)]
             self._remember(provider, kind, query, hits)
@@ -495,8 +503,17 @@ class Stock:
         elif exc.status == 429:
             why = "it asked for fewer requests (its hourly limit); it's left alone for the rest of this video"
         elif exc.status == 400:
-            self.log(f"Stock footage: {name} didn't accept one search; moving on.")
-            return
+            # Pixabay answers a wrong key with 400 ("Invalid or missing API key"), not 401. And whatever a 400
+            # is about, three in a row means every search will get one: stop sending them (and the key).
+            self._refusals[provider] = self._refusals.get(provider, 0) + 1
+            if "key" in getattr(exc, "detail", "").lower():
+                why = "it refused the API key (check it in Settings → Creator)"
+            elif self._refusals[provider] >= REFUSALS_IN_A_ROW:
+                why = (f"it didn't accept {REFUSALS_IN_A_ROW} searches in a row (if its API key was only just "
+                       "added, check it in Settings → Creator)")
+            else:
+                self.log(f"Stock footage: {name} didn't accept one search; moving on.")
+                return
         else:
             why = f"it couldn't be reached ({exc})"
         self.off[provider] = why

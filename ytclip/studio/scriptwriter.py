@@ -40,6 +40,7 @@ from __future__ import annotations
 import copy
 import dataclasses
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from typing import Callable
 
@@ -239,9 +240,19 @@ class Copying:
         return self.run >= COPY_REFUSE[0] or self.share >= COPY_REFUSE[1]
 
 
+# Every way an apostrophe is typed: a page's "it’s" and a model's "it's" are the same word.
+_APOSTROPHES = dict.fromkeys(map(ord, "'’‘ʼ`´′＇"))
+
+
+def _compared(text: str) -> list[str]:
+    """A text's words as the copy check compares them: case, punctuation, apostrophes' shapes and the ways
+    Unicode writes the same letter (ligatures, full-width forms, odd spaces) aside."""
+    return originality._words(unicodedata.normalize("NFKC", str(text or "")).translate(_APOSTROPHES))
+
+
 def copied(script: str, source: str, n: int = COPY_N) -> Copying:
     """How much of `script` is `source`'s own wording (case and punctuation aside)."""
-    mine, theirs = originality._words(script), originality._words(source)
+    mine, theirs = _compared(script), _compared(source)
     if len(mine) < n or len(theirs) < n:
         return Copying(0.0, 0, "")
     have = {tuple(theirs[i:i + n]) for i in range(len(theirs) - n + 1)}

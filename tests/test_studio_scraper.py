@@ -97,7 +97,7 @@ def test_addresses_that_are_refused(url, said):
 
 
 def test_addresses_that_are_read_are_tidied():
-    assert S.check_url("example.org/a b?x=1#frag", PUBLIC) == "https://example.org/a b?x=1"
+    assert S.check_url("example.org/a b?x=1#frag", PUBLIC) == "https://example.org/a%20b?x=1"
     assert S.check_url("HTTP://Example.ORG.", PUBLIC) == "http://example.org/"
     assert S.check_url("https://example.org:8443/x", PUBLIC) == "https://example.org:8443/x"
     assert S.check_url("https://example.org:443/x", PUBLIC) == "https://example.org/x"
@@ -314,3 +314,106 @@ def test_without_the_libraries_the_built_in_reader_is_used(monkeypatch):
 
     monkeypatch.setattr(builtins, "__import__", no_libraries)
     assert S.article_from(page(), "https://www.example.org/a").extractor == "built-in"
+
+
+# ---------------------------------------------------------------- what the review of the Studio found
+
+def test_a_page_that_says_it_is_paid_for_is_not_read_even_with_its_text_in_the_html():
+    """A paywall drawn by JavaScript ships the whole article in the page; the page still says it isn't free."""
+    gated = "".join(f"<p>{p}</p>" for p in PARAS)
+    doc = page(PARAS[:1], head='<script type="application/ld+json">{"@type":"NewsArticle","isAccessibleForFree":false,'
+               '"hasPart":{"@type":"WebPageElement","isAccessibleForFree":false,"cssSelector":".paywall"}}</script>',
+               extra=f'<div class="paywall">{gated}</div>')
+    with pytest.raises(S.ScrapeError, match="subscribers only"):
+        S.article_from(doc, URL)
+    # Without the flag, the part marked as the subscribers' is still never what's read: by any pass of the reader.
+    marked = page([], extra=f'<div class="paywall">{gated}</div>')
+    assert len(S.builtin_text(marked).split()) < 80
+    assert "bioacoustician" not in S.builtin_text(marked)
+
+
+def test_robots_is_asked_again_wherever_a_redirect_leads():
+    """A short link whose own site allows everything must not get round the story's site saying no."""
+    asked = []
+
+    def fetch(url: str, timeout: float) -> S.Page:
+        asked.append(url)
+        if url == "https://short.example/robots.txt":
+            return S.Page(url, 404, "text/plain")
+        if url == "https://news.example/robots.txt":
+            return S.Page(url, 200, "text/plain", b"User-agent: *\nDisallow: /members/\n")
+        if url == "https://short.example/x":
+            return S.Page(url, 302, location="https://news.example/members/story")
+        if url == "https://short.example/y":
+            return S.Page(url, 302, location="https://news.example/open/story")
+        if url.startswith("https://news.example/"):
+            return S.Page(url, 200, "text/html", page().encode(), charset="utf-8")
+        return S.Page(url, 404, "text/html")
+
+    with pytest.raises(S.ScrapeError, match=r"news\.example asks programs not to read that page"):
+        S.read("https://short.example/x", fetcher=fetch, resolve=PUBLIC)
+    assert "https://news.example/members/story" not in asked  # refused before it was fetched
+    assert S.read("https://short.example/y", fetcher=fetch, resolve=PUBLIC).words > 100
+    assert asked.count("https://news.example/robots.txt") == 2
+
+
+def test_a_robots_file_with_a_byte_order_mark_still_says_no():
+    fetch = site({}, robots=S.Page("", 200, "text/plain", b"\xef\xbb\xbfUser-agent: *\nDisallow: /\n"))
+    assert S.allowed("https://example.org/story", fetcher=fetch, resolve=PUBLIC) is False
+
+
+def test_addresses_with_letters_a_browser_accepts_are_encoded_not_crashed_on():
+    assert S.check_url("https://de.wikipedia.org/wiki/Käse", PUBLIC) == "https://de.wikipedia.org/wiki/K%C3%A4se"
+    assert S.check_url("https://bücher.example/a", PUBLIC) == "https://xn--bcher-kva.example/a"
+    assert S.check_url("https://example.org/a%20b?q=%C3%A4", PUBLIC) == "https://example.org/a%20b?q=%C3%A4"  # once only
+    seen = []
+
+    def fetch(url: str, timeout: float) -> S.Page:
+        seen.append(url)
+        if url.endswith("/start"):  # a Location header's raw UTF-8 bytes arrive as Latin-1 text
+            return S.Page(url, 302, location="/cafÃ© au lait")
+        return S.Page(url, 200, "text/html", b"ok")
+
+    assert S.get("https://example.org/start", fetcher=fetch, resolve=PUBLIC).status == 200
+    assert seen[-1] == "https://example.org/caf%C3%A9%20au%20lait"
+
+
+def test_whatever_the_connection_throws_is_a_plain_reason():
+    import http.client
+
+    for boom in (http.client.BadStatusLine("x"), http.client.InvalidURL("bad"), UnicodeEncodeError("ascii", "é", 0, 1, "no"),
+                 TimeoutError("slow")):
+        with pytest.raises(S.ScrapeError, match="example.org didn't answer"):
+            S.get("https://example.org/a", fetcher=site({"https://example.org/a": boom}), resolve=PUBLIC)
+
+
+def test_the_connection_goes_to_the_address_that_was_checked(monkeypatch):
+    """A name can answer the check with a public address and the request with 127.0.0.1 ("DNS rebinding"): the
+    request is sent to an address check_url() approved, never to a fresh lookup of the name."""
+    lookups = []
+
+    def answers(host, *a, **k):
+        lookups.append(host)
+        ip = "93.184.216.34" if len(lookups) == 1 else "127.0.0.1"
+        return [(S.socket.AF_INET, S.socket.SOCK_STREAM, 6, "", (ip, 0))]
+
+    monkeypatch.setattr(S.socket, "getaddrinfo", answers)
+    assert S.check_url("http://rebind.example.com/") == "http://rebind.example.com/"
+    dialled = []
+
+    def dial(address, *a, **k):
+        dialled.append(address)
+        raise OSError("stop here")
+
+    monkeypatch.setattr(S.socket, "create_connection", dial)
+    with pytest.raises(OSError):
+        S._pinned_connect(("rebind.example.com", 80), 5)
+    assert dialled == [("93.184.216.34", 80)] and lookups == ["rebind.example.com"]
+    # A name that was never checked here (a proxy's own) is dialled as it is.
+    with pytest.raises(OSError):
+        S._pinned_connect(("proxy.corp.example", 3128), 5)
+    assert dialled[-1] == ("proxy.corp.example", 3128)
+    # And the opener fetch() builds really uses the pinned connections.
+    opener = S.urllib.request.build_opener(S._NoRedirect, S._PinnedHandler, S._PinnedTLSHandler)
+    kinds = {type(h).__name__ for h in opener.handlers}
+    assert {"_PinnedHandler", "_PinnedTLSHandler"} <= kinds and "HTTPSHandler" not in kinds and "HTTPHandler" not in kinds

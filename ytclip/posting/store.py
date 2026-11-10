@@ -229,6 +229,18 @@ def _build(cls, data: dict):
     return cls(**{k: v for k, v in data.items() if k in known})
 
 
+def _creation_material(f: Path) -> bool:
+    """A video that's part of how a Studio video was made, not a video to post: a scene's stock clip in the
+    video folder's scenes/, anything in its assets/, or a render in progress (studio/orchestrator.py)."""
+    for parent in list(f.parents)[:3]:
+        if parent.name.startswith(".render-"):
+            return True
+        if parent.name in ("scenes", "assets") and ((parent.parent / "timeline.json").is_file()
+                                                    or (parent.parent / "storyboard.json").is_file()):
+            return True
+    return False
+
+
 class Store:
     """Thread-safe: the worker's threads update items in the background. Shared with the other process
     through save() and refresh() (see the module docstring)."""
@@ -382,7 +394,7 @@ class Store:
                 if p.is_dir():
                     files += sorted(f for f in p.rglob("*") if f.suffix.lower() in VIDEO_EXTS
                                     and ".downloads" not in f.parts and REJECTED_DIR not in f.parts
-                                    and not f.name.startswith("."))
+                                    and not f.name.startswith(".") and not _creation_material(f))
                 elif p.suffix.lower() in VIDEO_EXTS:
                     files.append(p)
             index_cache: dict[Path, dict] = {}
@@ -394,6 +406,10 @@ class Store:
                     index_cache[f.parent] = read_folder_index(f.parent)
                 meta = index_cache[f.parent].get(f.name)
                 if meta and meta.get("rejected"):
+                    continue
+                if watched and not meta and any(m.get("ai_generated") for m in index_cache[f.parent].values()):
+                    # A video beside one the Creator or the Studio made that its clips.json doesn't list: not
+                    # automation's to post without the AI-generated label and the review. Add it by hand.
                     continue
                 if watched and not meta:
                     try:
@@ -430,6 +446,8 @@ class Store:
                         item.part, item.parts = meta.get("part"), meta.get("parts")
                     if needs_credit(meta):
                         item.credit = credit_line(item.source_channel)
+                    if meta.get("edit_of"):  # a re-render of a video that may be queued too: never on its own say-so
+                        item.review = "waiting"
                 else:
                     item.source_group = str(f.parent)
                 self.items[item.id] = item

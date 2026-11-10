@@ -94,6 +94,33 @@ def kill_running() -> int:
     return n
 
 
+@lru_cache(maxsize=4)
+def major_version(exe: str) -> int:
+    try:
+        out = subprocess.run([exe, "-version"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                             creationflags=NO_WINDOW, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    m = re.search(r"ffmpeg version n?(\d+)\.", out)
+    return int(m[1]) if m else 0  # a git build ("N-1234-g...") counts as old: it takes the older spelling too
+
+
+def graph_file_args(script: str) -> list[str]:
+    """How this ffmpeg is told to read its filter graph from a file (ffmpeg 7 renamed the option, and later
+    dropped the old spelling). A graph in a file never meets the command line's length limit."""
+    return ["-/filter_complex", script] if major_version(ffmpeg_exe()) >= 7 else ["-filter_complex_script", script]
+
+
+# Windows gives a program at most 32,767 characters of command line (CreateProcess).
+WINDOWS_COMMAND_LIMIT = 32_000
+
+
+def command_too_long(cmd: list[str], windows: bool | None = None) -> bool:
+    """Whether Windows would refuse to start this command for its length."""
+    windows = sys.platform == "win32" if windows is None else windows
+    return windows and len(subprocess.list2cmdline([str(c) for c in cmd])) > WINDOWS_COMMAND_LIMIT
+
+
 def communicate(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
     """subprocess.run for ffmpeg (text output), tracked for the watchdog."""
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, text=True,

@@ -403,3 +403,18 @@ def test_timings_before_there_is_a_voice():
     spans = W.timings(board, 150)
     assert spans[0] == (0.0, 2.4) and spans[1][0] == 2.4 and len(spans) == len(board.scenes)
     assert spans[-1][1] == pytest.approx(board.word_count / 150 * 60, abs=0.2)
+
+
+def test_the_copy_check_sees_through_apostrophes_and_unicode_spellings():
+    """A page writes it’s, a model answers it's: the same words. A word-for-word copy used to pass as original."""
+    src = ("It’s been years since I’ve seen anything like it, and I don’t think we’ll see it again. The town’s "
+           "oldest baker says she’s never worked harder, but that’s what she’s always wanted from her mornings. "
+           "“You can’t fake bread,” she told me, “and you shouldn’t try, because people’ll know.” ") * 2
+    copy = src.replace("’", "'").replace("“", '"').replace("”", '"')
+    assert W.copied(copy, src).refused and W.copied(copy, src).share > 0.9
+    assert W.copied(src, copy).refused  # and the other way round
+    wide = src.replace("years", "ｙｅａｒｓ").replace(" ", " ")  # full-width letters, no-break spaces
+    assert W.copied(copy, wide).refused
+    mine = ("A baker who has run the same oven for decades told a reporter that good bread can't be rushed, and "
+            "that customers always notice when someone tries.")
+    assert not W.copied(mine, src).lifted

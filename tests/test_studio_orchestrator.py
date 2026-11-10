@@ -402,6 +402,207 @@ def test_render_timeline_says_when_there_is_nothing_to_render(tmp_path):
         O.render_timeline(tmp_path)
 
 
+# ---------------------------------------------------------------- what the review of the Studio found
+
+def test_the_fact_checks_wording_is_not_kept_when_it_is_the_articles_own(tmp_path, monkeypatch):
+    """"Rewritten to say what the source says" is, at its laziest, the source's sentence: the copy check ran
+    before the fact check and never saw it."""
+    lifted = ARTICLE.text.split("\n\n")[2]  # a whole paragraph of the article
+
+    def check(s, board, facts, **kw):
+        report = factcheck.Report("fix", checked=3)
+        was = board.scenes[1].speech_text
+        report.claims = [factcheck.Claim(2, 2, was, "contradicted", fix=lifted, changed=True),
+                         factcheck.Claim(3, 3, board.scenes[2].speech_text, "contradicted",
+                                         fix="The lamp room was rebuilt later.", changed=True)]
+        board.scenes[1].speech_text = lifted
+        board.scenes[2].speech_text = "The lamp room was rebuilt later."
+        return report
+
+    monkeypatch.setattr(factcheck, "check", check)
+    log = []
+    st = studio(tmp_path, log=log, creator_factcheck="fix")
+    board = st.storyboard(O.StudioRequest(url=URL, seconds=20))
+    assert lifted not in board.script and board.scenes[1].speech_text.startswith("Then wave2n0")  # put back
+    assert board.scenes[2].speech_text == "The lamp room was rebuilt later."  # an honest fix stays
+    claims = {c["n"]: c for c in board.factcheck["claims"]}
+    assert claims[2]["changed"] is False and claims[3]["changed"] is True  # the first stays flagged for you
+    assert any("the article's own" in m for m in log)
+
+
+def test_the_classic_creator_fits_a_cloud_narration_too(tmp_path, monkeypatch):
+    """ElevenLabs is in the shared voice-engine list: the classic Creator re-read the whole script, paid twice."""
+    from ytclip.creator.orchestrator import VideoCreatorOrchestrator
+
+    classic = VideoCreatorOrchestrator(settings(tmp_path), register=False)
+    track = NS(engine_key="elevenlabs", engine="ElevenLabs", duration=50.0)
+    monkeypatch.setattr(voice_engine, "CLOUD_ENGINES", {"elevenlabs"})
+    monkeypatch.setattr(voice_studio, "retime", lambda t, speed, out=None: ("fitted", speed, out.name))
+    monkeypatch.setattr(voice_engine, "synthesize", lambda *a, **k: pytest.fail("paid for twice"))
+    assert classic.reread(None, track, "v", 0.9, tmp_path, None) == ("fitted", 0.9, "voice_fitted.wav")
+
+
+def test_a_long_storyboard_or_script_handed_in_is_taken_whole(tmp_path):
+    """The classic cap of 20 scenes cut an eight-minute storyboard to two and a half, without a word."""
+    long_board = script(45)
+    st = studio(tmp_path)
+    board = st.storyboard(O.StudioRequest(storyboard=long_board, format="long", seconds=480))
+    assert len(board.scenes) == 45
+    paragraphs = "\n\n".join(f"Paragraph number {i} says something about the sea." for i in range(60))
+    board = studio(tmp_path).storyboard(O.StudioRequest(script=paragraphs, format="long", seconds=480))
+    assert len(board.scenes) == 60
+    # The classic Creator still takes one short video's worth, and now says what it left out.
+    from ytclip.creator.orchestrator import VideoCreatorOrchestrator
+
+    log = []
+    classic = VideoCreatorOrchestrator(settings(tmp_path), log=log.append, register=False)
+    assert len(classic.storyboard(CreateRequest(script=paragraphs)).scenes) == 20
+    assert any("kept the first 20 of 60 scenes" in m and "Studio" in m for m in log)
+
+
+def test_a_long_or_wide_video_keeps_its_length_even_with_rewards_ticked(tmp_path):
+    log = []
+    st = studio(tmp_path, log=log, creator_rewards_length=True)
+    assert st.target(O.StudioRequest(seconds=480, rewards=True)) == (480.0, False)
+    assert st.target(O.StudioRequest(seconds=480, rewards=True, format="long")) == (480.0, False)
+    assert st.target(O.StudioRequest(seconds=70, rewards=True, orientation="landscape")) == (70.0, False)
+    assert st.target(O.StudioRequest(format="long", rewards=True)) == (O.LONG_SECONDS, False)
+    assert st.target(O.StudioRequest(seconds=70, rewards=True)) == (70.0, True)
+    assert sum("isn't applied here" in m for m in log) == 1  # said once, not for every step
+
+
+def test_two_effects_with_the_same_file_name_both_travel(tmp_path):
+    pkg, mine = tmp_path / "pkg", tmp_path / "my sfx"
+    for cue in ("whoosh", "impact"):
+        (mine / cue).mkdir(parents=True)
+        (mine / cue / "01.wav").write_bytes(cue.encode())
+    pkg.mkdir()
+    tl = T.standard("t", duration=4)
+    tl.assets = {"w": T.Asset("audio", str(mine / "whoosh" / "01.wav")), "i": T.Asset("audio", str(mine / "impact" / "01.wav"))}
+    tl.track(T.AUDIO_SFX).clips += [T.AudioClip("a", "w", 0, 1), T.AudioClip("b", "i", 2, 1), T.AudioClip("c", "w", 3, 1)]
+    O.gather_files(tl, pkg)
+    assert tl.assets["w"].path == "assets/sfx/01.wav" and tl.assets["i"].path == "assets/sfx/01_2.wav"
+    assert (pkg / tl.assets["w"].path).read_bytes() == b"whoosh" and (pkg / tl.assets["i"].path).read_bytes() == b"impact"
+
+
+def test_memory_is_read_by_the_apps_own_reader(monkeypatch):
+    """The warning was promised in the README but asked psutil, which the app doesn't ship."""
+    from ytclip.intelligence import hardware
+
+    tl = T.standard("long", duration=600)
+    tl.assets["p"] = T.Asset("image", "p.png")
+    tl.track(T.VIDEO_BASE).clips += [T.VideoClip(f"s{i}", "p", i * 4, 4) for i in range(150)]
+    monkeypatch.setattr(hardware, "ram_free_bytes", lambda *a: int(4e9))
+    assert "4.0 GB is free" in O.memory_note(tl)
+    monkeypatch.setattr(hardware, "ram_free_bytes", lambda *a: int(64e9))
+    assert O.memory_note(tl) == ""
+    monkeypatch.setattr(hardware, "ram_free_bytes", lambda *a: 0)  # it couldn't be read: no false alarm
+    assert O.memory_note(tl) == ""
+
+
+def creation(folder: Path, **over) -> Path:
+    """A Studio video's folder as the Studio leaves it (the files only)."""
+    (folder / "scenes").mkdir(parents=True)
+    (folder / "assets" / "sfx").mkdir(parents=True)
+    for name in ("01 - Title.mp4", "scenes/scene_01.png", "scenes/scene_02_pexels_123.mp4", "assets/voice.wav",
+                 "assets/sfx/whoosh.wav", "storyboard.json", "README.md"):
+        (folder / name).write_bytes(b"x")
+    tl = T.standard("Title", duration=2)
+    tl.assets["c"] = T.Asset("color", color="#101010")
+    tl.track(T.VIDEO_BASE).clips.append(T.VideoClip("a", "c", 0, 2))
+    tl.dump(folder / "timeline.json")
+    data = {"video": {"id": "c-1", "title": "Title"}, "clips": [
+        {"rank": 1, "file": "01 - Title.mp4", "title": "Title", "caption": "A caption", "hashtags": ["history"]}],
+        "automation": {"category": "History", "category_id": "h", "account_id": "acct"},
+        "creator": {"ai_generated": True, "studio": {"timeline": True}}} | over
+    (folder / "clips.json").write_text(json.dumps(data), encoding="utf-8")
+    return folder
+
+
+def test_an_edit_is_rendered_out_of_sight_then_listed_with_its_video(tmp_path, monkeypatch):
+    folder = creation(tmp_path / "Automation" / "History" / "Created" / "v1")
+    seen = {}
+
+    def render(tl, dest, *, base=None, work=None, **kw):
+        seen["dest"], seen["work"] = Path(dest), Path(work)
+        assert Path(dest).name.startswith(".") and Path(work).parent == folder  # never a name posting takes in
+        Path(dest).write_bytes(b"edited")
+        return timeline_compiler.RenderReport(Path(dest), 2.0, "libx264")
+
+    monkeypatch.setattr(timeline_compiler, "render", render)
+    log = []
+    report = O.render_timeline(folder, settings=Settings(), log=log.append)
+    assert report.path == folder / "Title (edit).mp4" and report.path.read_bytes() == b"edited"
+    assert not seen["work"].exists()
+    clips = json.loads((folder / "clips.json").read_text(encoding="utf-8"))["clips"]
+    assert [c["file"] for c in clips] == ["01 - Title.mp4", "Title (edit).mp4"]
+    assert clips[1] == clips[0] | {"rank": 2, "file": "Title (edit).mp4", "title": "Title (edit)",
+                                   "edit_of": "01 - Title.mp4"}
+    assert any("waits there for your OK" in m for m in log)
+    O.render_timeline(folder, settings=Settings())  # rendered again over the last edit: still listed once
+    assert len(json.loads((folder / "clips.json").read_text(encoding="utf-8"))["clips"]) == 2
+
+    # A render that fails leaves no half-made video behind, and nothing new in the list.
+    def fail(tl, dest, **kw):
+        Path(dest).write_bytes(b"half")
+        raise timeline_compiler.CompileError("ffmpeg couldn't render the timeline: no")
+
+    monkeypatch.setattr(timeline_compiler, "render", fail)
+    other = creation(tmp_path / "Automation" / "History" / "Created" / "v2")
+    with pytest.raises(CreatorError, match="couldn't render"):
+        O.render_timeline(other, settings=Settings())
+    assert sorted(p.name for p in other.iterdir() if p.suffix == ".mp4") == ["01 - Title.mp4"]
+    assert not list(other.glob(".render-*"))
+    # A folder that isn't a creation's (a timeline someone wrote) is rendered and nothing is listed.
+    assert O.list_edit(tmp_path, tmp_path / "x.mp4") is False
+
+
+def test_posting_takes_in_the_video_and_its_edit_but_never_the_makings(tmp_path):
+    """Intake searched the whole folder: a Studio video's raw stock clips and its unlisted edit were queued
+    with no AI label and no review."""
+    from ytclip.posting.store import Store
+
+    root = tmp_path / "Automation"
+    folder = creation(root / "History" / "Created" / "v1")
+    (folder / ".render-abc").mkdir()
+    (folder / ".render-abc" / "edit.mp4").write_bytes(b"x")
+    (folder / "Stray (edit).mp4").write_bytes(b"x")  # a video beside it that the list doesn't have
+    store = Store(tmp_path / "library.json")
+    took = store.add_paths([root], watched=True, now=1e12)
+    assert [Path(i.path).name for i in took] == ["01 - Title.mp4"]
+    assert took[0].ai_generated and took[0].review != "waiting"  # (review for it is decided when it's queued)
+    O.list_edit(folder, folder / "Stray (edit).mp4")
+    took = store.add_paths([root], watched=True, now=1e12)
+    assert [Path(i.path).name for i in took] == ["Stray (edit).mp4"]
+    edit = took[0]
+    assert edit.ai_generated and edit.review == "waiting" and edit.caption == "A caption" and edit.category_id == "h"
+    # By hand, a folder still never brings in a scene's stock clip; the file itself can be picked.
+    by_hand = Store(tmp_path / "other.json")
+    assert sorted(Path(i.path).name for i in by_hand.add_paths([folder])) == ["01 - Title.mp4", "Stray (edit).mp4"]
+    assert [Path(i.path).name for i in by_hand.add_paths([folder / "scenes" / "scene_02_pexels_123.mp4"])] \
+        == ["scene_02_pexels_123.mp4"]
+
+
+def test_the_timeline_stays_while_an_edit_of_it_is_still_to_post(tmp_path):
+    """Posting the original cleared the timeline and its files from under the edit."""
+    from ytclip.posting import records
+
+    root = tmp_path / "Automation"
+    folder = creation(root / "History" / "Created" / "v1")
+    (folder / "Title (edit).mp4").write_bytes(b"x")
+    O.list_edit(folder, folder / "Title (edit).mp4")
+    (folder / "01 - Title.mp4").unlink()  # posted and deleted
+    records._tidy(folder, {"01 - Title.mp4"}, [root], lambda p: p.unlink())
+    for name in ("timeline.json", "storyboard.json", "scenes/scene_02_pexels_123.mp4", "assets/voice.wav",
+                 "clips.json", "Title (edit).mp4"):
+        assert (folder / name).exists(), name
+    assert [c["file"] for c in json.loads((folder / "clips.json").read_text(encoding="utf-8"))["clips"]] \
+        == ["Title (edit).mp4"]
+    (folder / "Title (edit).mp4").unlink()  # the edit posted too: now everything goes
+    records._tidy(folder, {"Title (edit).mp4"}, [root], lambda p: p.unlink())
+    assert not folder.exists()
+
+
 # ---------------------------------------------------------------- for real
 
 def test_an_article_becomes_a_finished_video_and_its_timeline_renders_again(tmp_path, voice):
@@ -424,6 +625,11 @@ def test_an_article_becomes_a_finished_video_and_its_timeline_renders_again(tmp_
     again = O.render_timeline(path, settings=st.s)
     assert again.path.is_file() and again.path.name.endswith("(edit).mp4") and again.path.parent == result.folder
     assert abs(ffmpeg.probe(again.path).duration - info.duration) < 0.2
+    # The edit is listed with its video (so it's labelled and reviewed like it), and nothing is left of the work.
+    listed = json.loads((result.folder / "clips.json").read_text(encoding="utf-8"))["clips"]
+    assert [c["file"] for c in listed] == [result.video.name, again.path.name]
+    assert listed[1]["edit_of"] == result.video.name and listed[1]["title"].endswith("(edit)")
+    assert not list(result.folder.glob(".render-*")) and not list(result.folder.rglob(".edit.mp4"))
 
 
 # ---------------------------------------------------------------- automation's queue

@@ -33,11 +33,14 @@ its keyframes (ffmpeg evaluates them per frame), on screen only for its own stre
 escaped inside a filter.
 
 **Sources.** Stills are read inside the graph (the movie filter), named relative to the folder ffmpeg runs
-in; videos and sounds are inputs cut at the source (-ss/-t), one for each clip: every audio clip and every
-video clip sent to a bus. audio_mixer.graph() mixes them.
+in; videos and sounds are inputs cut at the source (-ss/-t): one for each video clip, one for each
+different cut of a sound (a whoosh used fifty times is one input, read fifty times in the graph).
+audio_mixer.graph() mixes them.
 
-The graph is written to a file and passed by name, so a long timeline never runs into the command line's
-length limit on Windows.
+**The command line.** Windows starts a program with at most 32,767 characters of command line. The graph
+is written to a file and passed by name (the loudness passes' graphs too), and inputs are named relative to
+the folder ffmpeg runs in when that's shorter, so a 20-minute timeline of stock clips fits. One that still
+doesn't is refused with a plain message before ffmpeg is started (CompileError), not by Windows.
 """
 
 from __future__ import annotations
@@ -46,14 +49,13 @@ import math
 import os
 import re
 import shutil
-import subprocess
 from dataclasses import dataclass, field
-from functools import lru_cache
 from pathlib import Path
 from typing import Callable
 
 from .. import fonts
-from ..ffmpeg import NO_WINDOW, ffmpeg_exe, pick_encoder, run_with_progress, video_args
+from ..ffmpeg import (command_too_long, ffmpeg_exe, major_version, pick_encoder, probe, run_with_progress,
+                      video_args)
 from ..rendering import filtergraph
 from ..studio.timeline_schema import (AUDIO_ROLES, VIDEO_BASE, Asset, Timeline, Track, Transition, VideoClip, check)
 from . import audio_mixer, kinetic_subtitles
@@ -103,6 +105,26 @@ class Compiled:
 
 def _t(v: float) -> str:
     return f"{v:.4f}".rstrip("0").rstrip(".") or "0"
+
+
+def snap(t: float, fps: int) -> float:
+    """A time on a whole frame. A time exactly between two frames goes up, and a hair of floating-point error
+    either side of it goes the same way: one clip's end (start + duration) and the next clip's start are the
+    same moment and must land on the same frame, or a one-frame gap opens between them."""
+    return math.floor(t * fps + 0.5 + 1e-6) / fps
+
+
+def input_path(path: Path, work: Path | None) -> str:
+    """A file as an ffmpeg input: its full path, or its path from the folder ffmpeg runs in when that's
+    shorter (a long timeline has hundreds of inputs, and Windows limits a command line's length)."""
+    full = str(Path(path).resolve())
+    if work is None:
+        return full
+    try:
+        rel = os.path.relpath(full, Path(work).resolve())
+    except ValueError:  # another drive
+        return full
+    return rel if len(rel) < len(full) and not rel.startswith("-") else full
 
 
 def _even(v: float) -> int:
@@ -159,14 +181,14 @@ class _Builder:
 
     # ------------------------------------------------------------ small things
     def snap(self, t: float) -> float:
-        return round(t * self.fps) / self.fps
+        return snap(t, self.fps)
 
     def label(self, stem: str) -> str:
         self.n += 1
         return f"{stem}{self.n}"
 
     def path(self, asset: Asset) -> str:
-        return str(self.tl.resolve(asset, self.base).resolve())
+        return input_path(self.tl.resolve(asset, self.base), self.work)
 
     def add_input(self, args: list[str]) -> int:
         self.inputs.append(args)
@@ -409,8 +431,12 @@ class _Builder:
         for seg in segs:
             if seg.clip is None:
                 lab = self.label("gap")
+                # Spare frames and then an exact cut, like every other source: the colour source alone stops
+                # on a rounded time, and a frame too many would push every later cut a frame late.
                 self.parts.append(f"color=c={_hexcolour(self.c.background)}:s={self.c.width}x{self.c.height}:"
-                                  f"r={self.fps}:d={_t(seg.length)},{','.join(self.same)}[{lab}]")
+                                  f"r={self.fps}:d={_t(seg.length + 4 / self.fps)},"
+                                  f"trim=end_frame={round(seg.length * self.fps)},setpts=PTS-STARTPTS,"
+                                  f"{','.join(self.same)}[{lab}]")
                 labels.append(lab)
                 continue
             asset = self.tl.assets[seg.clip.asset]
@@ -467,20 +493,26 @@ class _Builder:
 
 # ---------------------------------------------------------------- the sound's inputs
 
-def audio_plan(tl: Timeline, base: Path | None = None, offset: int = 0) -> tuple[list[list[str]], list[audio_mixer.Source]]:
-    """(each sound's ffmpeg input, the mixer's sources) for every audio clip and every picture clip sent to a
-    bus. Inputs are numbered from `offset`."""
+def audio_plan(tl: Timeline, base: Path | None = None, offset: int = 0,
+               work: Path | None = None) -> tuple[list[list[str]], list[audio_mixer.Source]]:
+    """(the sounds' ffmpeg inputs, the mixer's sources) for every audio clip and every picture clip sent to a
+    bus. Inputs are numbered from `offset`. Clips that are the same cut of the same file (a sound effect used
+    again and again) share one input: the graph may read an input as often as it likes."""
     inputs: list[list[str]] = []
     sources: list[audio_mixer.Source] = []
+    seen: dict[tuple[str, ...], int] = {}
 
     def add(asset: Asset, clip, role: str, gain: float, fade_in: float = 0.0, fade_out: float = 0.0) -> None:
         if clip.start >= tl.duration or clip.duration <= 0:
             return
         args = ["-stream_loop", "-1"] if clip.loop else []
         args += ["-ss", _t(clip.source_in), "-t", _t(clip.duration + 0.25), "-vn", "-i",
-                 str(tl.resolve(asset, base).resolve())]
-        inputs.append(args)
-        sources.append(audio_mixer.Source(f"{offset + len(inputs) - 1}:a", role, clip.start, clip.duration, gain,
+                 input_path(tl.resolve(asset, base), work)]
+        k = seen.get(tuple(args))
+        if k is None:
+            inputs.append(args)
+            k = seen[tuple(args)] = len(inputs) - 1
+        sources.append(audio_mixer.Source(f"{offset + k}:a", role, clip.start, clip.duration, gain,
                                           fade_in, fade_out))
 
     for track in tl.audio_tracks():
@@ -514,7 +546,7 @@ def compile_timeline(tl: Timeline, base: str | Path | None = None, *, work: str 
         captions[f"captions_{i}.ass" if i else "captions.ass"] = kinetic_subtitles.to_ass(track, tl.canvas)
         used_fonts += kinetic_subtitles.fonts_used(track)
     b.finish(last, captions, fontsdir)
-    audio_inputs, sources = audio_plan(tl, base)
+    audio_inputs, sources = audio_plan(tl, base, work=b.work)
     shifted = [audio_mixer.Source(f"{int(s.label.split(':')[0]) + len(b.inputs)}:a", s.role, s.start, s.duration,
                                   s.gain_db, s.fade_in, s.fade_out, s.skip) for s in sources]
     total = b.snap(tl.duration)
@@ -545,15 +577,8 @@ class RenderReport:
                 "passes": 1, "clips": dict(self.how), "warnings": list(self.warnings)}
 
 
-@lru_cache(maxsize=4)
 def _ffmpeg_major(exe: str) -> int:
-    try:
-        out = subprocess.run([exe, "-version"], capture_output=True, text=True, encoding="utf-8", errors="replace",
-                             creationflags=NO_WINDOW, timeout=20).stdout
-    except (OSError, subprocess.SubprocessError):
-        return 0
-    m = re.search(r"ffmpeg version n?(\d+)\.", out)
-    return int(m[1]) if m else 0  # a git build ("N-1234-g...") counts as old: it takes the older spelling too
+    return major_version(exe)
 
 
 def graph_args(script: str) -> list[str]:
@@ -603,9 +628,16 @@ def render(tl: Timeline, dest: str | Path, *, base: str | Path | None = None, wo
     work = Path(work)
     work.mkdir(parents=True, exist_ok=True)
     warnings = [str(p) for p in check(tl, base, files=True)]
+    warnings += [n for n in getattr(tl, "notes", []) if n not in warnings]  # what reading the file ignored
+    if snap(tl.duration, tl.canvas.fps) < 1.0 / tl.canvas.fps:
+        raise CompileError(f"The timeline is {tl.duration:g} s long, less than one frame: there's nothing to render.")
+    silent_sources(tl, Path(base) if base is not None else None)
     progress("Putting the video together: listening to the mix", None)
-    first = compile_timeline(tl, base)
+    first = compile_timeline(tl, base, work=work)
     gain, measured = measure_sound(first, tl, work)
+    if first.sources and measured is None:
+        warnings.append("The mix couldn't be measured before rendering, so its loudness was set in one pass "
+                        "(a little less exact).")
     if check_cancel:
         check_cancel()
     fontsdir = ":fontsdir=fonts" if first.fonts and fonts.stage(first.fonts, work) else ""
@@ -626,9 +658,18 @@ def render(tl: Timeline, dest: str | Path, *, base: str | Path | None = None, wo
         progress("Putting the video together", f)
 
     dest.parent.mkdir(parents=True, exist_ok=True)
+
+    def run(enc: str) -> None:
+        cmd = command(compiled, dest, encoder=enc, quality=quality, fps=tl.canvas.fps, audio_kbps=kbps)
+        if command_too_long(cmd):
+            raise CompileError(TOO_MANY_CLIPS.format(n=len(compiled.inputs)))
+        try:
+            run_with_progress(cmd, compiled.duration, step, cwd=work)
+        except OSError as exc:  # ffmpeg couldn't be started at all
+            raise CompileError(f"ffmpeg couldn't be started to render the timeline ({exc}).") from exc
+
     try:
-        run_with_progress(command(compiled, dest, encoder=encoder, quality=quality, fps=tl.canvas.fps,
-                                  audio_kbps=kbps), compiled.duration, step, cwd=work)
+        run(encoder)
     except RuntimeError as exc:
         if encoder == "libx264":
             raise CompileError(_plain_error(exc)) from exc
@@ -636,8 +677,7 @@ def render(tl: Timeline, dest: str | Path, *, base: str | Path | None = None, wo
         log(f"The graphics card's encoder ({encoder}) failed ({said}), so the video is encoded on the processor.")
         encoder = "libx264"
         try:
-            run_with_progress(command(compiled, dest, encoder=encoder, quality=quality, fps=tl.canvas.fps,
-                                      audio_kbps=kbps), compiled.duration, step, cwd=work)
+            run(encoder)
         except RuntimeError as again:
             raise CompileError(_plain_error(again)) from again
     progress("Putting the video together", 1.0)
@@ -648,6 +688,35 @@ def render(tl: Timeline, dest: str | Path, *, base: str | Path | None = None, wo
         pass
     return RenderReport(dest, compiled.duration, encoder, gain, before, compiled.how, len(compiled.inputs),
                         compiled.graph.count(";") + 1, warnings)
+
+
+TOO_MANY_CLIPS = ("This timeline has {n} video and sound clips of its own, more than Windows can start ffmpeg with "
+                  "in one run. Split it in two (two timelines, joined afterwards), or use fewer video clips: "
+                  "stills don't count.")
+
+
+def silent_sources(tl: Timeline, base: Path | None = None) -> None:
+    """Refuse, by name, a video whose sound the timeline asks for when the file has none (stock clips often
+    don't): ffmpeg's own words for it name neither the clip nor the cause."""
+    asked: list[tuple[str, Asset]] = []
+    for track in tl.video_tracks():
+        asked += [(c.id, tl.assets[c.asset]) for c in track.clips
+                  if c.audio in AUDIO_ROLES and c.asset in tl.assets and tl.assets[c.asset].kind == "video"]
+    for track in tl.audio_tracks():
+        asked += [(c.id, tl.assets[c.asset]) for c in track.clips
+                  if c.asset in tl.assets and tl.assets[c.asset].kind == "video"]
+    heard: dict[str, bool] = {}
+    for clip_id, asset in asked:
+        path = tl.resolve(asset, base)
+        key = str(path)
+        if key not in heard:
+            try:
+                heard[key] = bool(probe(path).has_audio)
+            except Exception:  # noqa: BLE001 - can't tell: let ffmpeg try
+                heard[key] = True
+        if not heard[key]:
+            raise CompileError(f"Clip {clip_id}: {asset.path} has no sound of its own, so it can't be sent to a "
+                               f"sound bus. Take \"audio\" off the clip (or use a file that has sound).")
 
 
 def _plain_error(exc: Exception) -> str:

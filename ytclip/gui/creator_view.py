@@ -509,8 +509,13 @@ class CreatorView(QWidget):
             return CreateRequest(**base)
         from ..studio.orchestrator import StudioRequest
 
+        from ..creator import director
+        from ..studio import scriptwriter
+
         shape = self.shape.currentData() or ""
-        if shape:  # Creator Rewards is for upright videos; the box doesn't apply
+        # Creator Rewards' length is for an upright video of about a minute: on anything else the box doesn't
+        # apply and the length asked for is the length made (StudioOrchestrator.target has the same rule).
+        if shape or not director.REWARDS_RANGE[0] <= base["seconds"] < scriptwriter.LONG_FROM:
             base["rewards"] = False
         return StudioRequest(**base, url=self.article(), orientation=shape, captions=self.captions.currentData() or "")
 
@@ -774,7 +779,14 @@ class CreatorView(QWidget):
 
         self._start(run, "🎬 Rendering the timeline again", ["render"])
         self.worker.done.connect(self._rendered_again)
-        self.worker.failed.connect(self._failed)
+        self.worker.failed.connect(self._rerender_failed)
+
+    def _rerender_failed(self, error: str) -> None:
+        """The video that was made is still there, and so is its timeline to fix and try again."""
+        self._failed(error)
+        if self.result is not None:
+            self.done_panel.setVisible(True)
+            self.show_timeline(self.result.folder / "timeline.json")
 
     def _rendered_again(self, report) -> None:
         self._finish()

@@ -436,6 +436,8 @@ def normalise(board: Storyboard, style: Style | None = None, hook_words: int = H
         else:
             out.append(sc)
     scenes = out[:max(1, max_scenes)]
+    if len(out) > len(scenes):  # never silently: the rest of the story is gone
+        board.notes.append(f"kept the first {len(scenes)} of {len(out)} scenes (the most one video takes)")
     last_motion = ""
     for i, sc in enumerate(scenes, 1):
         sc.scene_id = i
@@ -615,7 +617,7 @@ def no_writer_text(s) -> str:
 # ---------------------------------------------------------------- your own script
 
 def from_script(text: str, *, title: str = "", category: str = "", style: str = "", seconds: float = 0.0,
-                prompt: str = "") -> Storyboard:
+                prompt: str = "", max_scenes: int = 0) -> Storyboard:
     """A storyboard from a script you wrote: the first sentence is the hook, then a scene every one or two
     sentences (up to about 24 words), each picture described from its words and the style."""
     st = get_style(style or style_for(category, prompt or text[:200]))
@@ -655,4 +657,5 @@ def from_script(text: str, *, title: str = "", category: str = "", style: str = 
                        hashtags=[re.sub(r"\W", "", w) for w in (category.split() + keywords_of(text, 3)) if
                                  re.sub(r"\W", "", w)][:5],
                        prompt=prompt or "your script", written_by="your script")
-    return normalise(board, st, hook_words=40)  # your hook is kept as you wrote it
+    # Your hook is kept as you wrote it.
+    return normalise(board, st, hook_words=40, max_scenes=max_scenes or MAX_SCENES + 4)

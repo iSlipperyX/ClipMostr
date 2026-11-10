@@ -1598,7 +1598,8 @@ def run_studio(argv: list[str]) -> int:
     p.add_argument("--no-post", action="store_true", help="save it in Output/Created instead of the posting queue")
     p.add_argument("--storyboard-only", action="store_true", help="only write the script and storyboard (JSON)")
     p.add_argument("--timeline", type=Path, help="render a timeline.json (or the video folder holding one) again")
-    p.add_argument("--out", type=Path, help="with --timeline: where the video goes (default: beside the timeline)")
+    p.add_argument("--out", type=Path, help="with --timeline: where the video goes (default: beside the timeline); "
+                                            "with --storyboard-only: the file the storyboard is saved to")
     p.add_argument("--schema", action="store_true", help="print the timeline's JSON Schema")
     p.add_argument("--check", action="store_true", help="what's ready on this PC: AI, voices, pictures, stock keys")
     args = p.parse_args(argv)
@@ -1606,14 +1607,25 @@ def run_studio(argv: list[str]) -> int:
         console.print(_json.dumps(timeline_schema.JSON_SCHEMA, indent=2), markup=False, highlight=False)
         return 0
     s = Settings.load()
-    log = lambda m: console.print(f"[dim]{escape(m)}[/]")  # noqa: E731
+    # With --storyboard-only the storyboard is what's printed (to a file, often): what's happening goes to
+    # the other stream, so it never lands inside the JSON.
+    said = Console(stderr=True) if args.storyboard_only else console
+    log = lambda m: said.print(f"[dim]{escape(m)}[/]")  # noqa: E731
     last = {"m": ""}
 
     def progress(msg: str, frac) -> None:
         head = msg.split(":")[0]
         if head != last["m"]:
             last["m"] = head
-            console.print(f"[cyan]…[/] {escape(head)}")
+            said.print(f"[cyan]…[/] {escape(head)}")
+
+    def read_text(path: Path) -> str:
+        """A text file as people's tools save it: UTF-8 with or without a byte-order mark, or the UTF-16
+        Windows PowerShell's ">" writes."""
+        raw = path.read_bytes()
+        if raw[:2] in (b"\xff\xfe", b"\xfe\xff"):
+            return raw.decode("utf-16")
+        return raw.decode("utf-8-sig")
 
     if args.check:
         ready = lambda why: "[green]ready[/]" if not why else f"[dim]({escape(why)})[/]"  # noqa: E731
@@ -1643,7 +1655,7 @@ def run_studio(argv: list[str]) -> int:
             return 130
         except Cancelled:
             return 130
-        except orchestrator.CreatorError as exc:
+        except (orchestrator.CreatorError, OSError) as exc:
             console.print(f"[red]✗ {escape(str(exc))}[/]")
             return 1
         console.print(f"[green]✓ Rendered again[/] · {done.duration:.0f} s · {escape(done.encoder)}\n"
@@ -1651,8 +1663,22 @@ def run_studio(argv: list[str]) -> int:
         for w in done.warnings:
             console.print(f"  [yellow]⚠ {escape(w)}[/]")
         return 0
-    script = args.script.read_text(encoding="utf-8") if args.script else ""
-    board = _json.loads(args.storyboard.read_text(encoding="utf-8")) if args.storyboard else None
+    script, board = "", None
+    for file, what in ((args.script, "script"), (args.storyboard, "storyboard")):
+        if not file:
+            continue
+        try:
+            text = read_text(file)
+            if what == "script":
+                script = text
+            else:
+                board = _json.loads(text)
+                if not isinstance(board, dict):
+                    raise ValueError("it isn't a storyboard (a JSON object, as --storyboard-only writes)")
+        except (OSError, ValueError) as exc:
+            why = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
+            console.print(f"[red]✗ {escape(str(file))} can't be read as a {what}: {escape(why)}[/]")
+            return 1
     if not (args.prompt.strip() or args.url.strip() or script or board is not None):
         p.print_help()
         return 2
@@ -1680,7 +1706,16 @@ def run_studio(argv: list[str]) -> int:
                           "[bold]ytclip auto run[/]).")
             return 0
         if args.storyboard_only:
-            console.print(maker.storyboard(req).dumps(), markup=False, highlight=False)
+            made = maker.storyboard(req)
+            if args.out:
+                args.out.parent.mkdir(parents=True, exist_ok=True)
+                args.out.write_text(made.dumps() + "\n", encoding="utf-8")
+                said.print(f"[green]✓ Storyboard saved[/] · {len(made.scenes)} scenes\n  {escape(str(args.out))}\n"
+                           f"  [dim]Edit it, then make it with: ytclip studio --storyboard \"{escape(str(args.out))}\"[/]")
+            else:
+                # Plain ASCII, unwrapped: it survives any console's encoding and being sent to a file with ">".
+                sys.stdout.write(_json.dumps(made.to_json(), indent=2, ensure_ascii=True) + "\n")
+                sys.stdout.flush()
             return 0
         result = maker.create(req)
     except KeyboardInterrupt:
