@@ -112,8 +112,29 @@ class _Bar(QWidget):
             p.drawRoundedRect(QRectF(r.x(), r.y(), r.width() * min(1.0, self.value), r.height()), 4, 4)
 
 
+def market_lines(v: TrendingVideo) -> list[str]:
+    """The market side of a video (research/velocity.py) as lines of rich text for the detail panel."""
+    p = v.pace or {}
+    out: list[str] = []
+    if v.badge:
+        mark = CategoryPills.BADGE_MARKS.get(v.badge, "")
+        out.append(f"<b>{mark} {_esc(v.badge)}</b> · opportunity {v.opportunity:.0f}/100. {_esc(p.get('why') or '')}")
+    if p.get("delta"):
+        basis = {"channel": "its channel's 7-day median", "category": "its category in this scan",
+                 "scan": "this scan's median"}.get(p.get("basis", ""), "the usual")
+        out.append(f"Velocity delta <b>{p['delta']:g}x</b>: {compact(p.get('velocity', 0))} views/hour against "
+                   f"{compact(p.get('baseline', 0))} ({_esc(basis)}, {p.get('peers', 0)} videos).")
+    if p.get("saturation") is not None:
+        out.append(f"Saturation {p['saturation'] * 100:.0f}%: {p.get('shorts', 0)} YouTube Shorts of it by other "
+                   "channels (TikTok and Reels can't be checked).")
+    elif p.get("delta"):
+        out.append("Saturation not checked (Settings → Research → Saturation checks per scan).")
+    return out
+
+
 class Research(QWidget):
     send = Signal(list)  # video URLs for the Studio
+    event_search = Signal(dict, str)  # a video and the moment to search it for (the header's event bar)
     queue = Signal(list)  # (url, title, category) for Automation's queue
     notice = Signal(str)  # a line for the main status bar
     log = Signal(str)
@@ -413,7 +434,17 @@ class Research(QWidget):
         self.views = ViewSwitch()
         self.views.changed.connect(self.set_view)
         self.search.setFixedWidth(250)
+        self.event_box = QLineEdit()
+        self.event_box.setPlaceholderText("Search by in-game event: red card, buzzer beater…")
+        self.event_box.setClearButtonEnabled(True)
+        self.event_box.setFixedWidth(280)
+        self.event_box.setToolTip("Describe a moment (“red card after a VAR check”, “technical foul on the bench”) and "
+                                  "the video selected below is sent to Sports and searched for it: its commentary, "
+                                  "and its official play-by-play when there is one. What's found shows in Sports, "
+                                  "ready to make clips or a reel of.")
+        self.event_box.returnPressed.connect(self._event_search)
         dash.addWidget(self.pills, 1)
+        dash.addWidget(self.event_box)
         dash.addWidget(self.search)
         dash.addWidget(self.views)
         layout.addLayout(dash)
@@ -1342,7 +1373,12 @@ class Research(QWidget):
             else:
                 items.append(("Fits none" if data == "" else self.category_filter.itemText(i), data,
                               counts.get(data, 0)))
-        self.pills.set_items(items, self.category_filter.currentData())
+        from ..research import velocity
+
+        names = {data: label for label, data, _n in items if isinstance(data, str) and data}
+        roll = velocity.by_category(self.videos, names)
+        self.pills.set_items(items, self.category_filter.currentData(),
+                             {cid: (n.badge, n.why) for cid, n in roll.items() if n.badge})
         self.pills.setVisible(True)
 
     def _pill_picked(self, data: Any) -> None:
@@ -1576,7 +1612,9 @@ class Research(QWidget):
             self.parts_grid.addWidget(_Bar(value, score_colour((value or 0) * 100)), r, 1)
             self.parts_grid.addWidget(pct, r, 2)
 
-        bullets = "".join(f"<li style='margin-bottom:4px'>{_esc(r)}</li>" for r in v.reasons)
+        market = market_lines(v)
+        bullets = "".join(f"<li style='margin-bottom:4px'>{r}</li>" for r in market)
+        bullets += "".join(f"<li style='margin-bottom:4px'>{_esc(r)}</li>" for r in v.reasons)
         self.d_reasons.setText(f"<ul style='margin-left:-20px'>{bullets}</ul>" if bullets else "")
         self.d_deep.setText("Re-check replays" if v.deep else "Check replays")
         self.d_send.setText("✓  Sent, send again" if v.sent else "➜  Send to Studio")
@@ -1719,6 +1757,19 @@ class Research(QWidget):
 
     def _send_picks(self) -> None:
         self._send(self.picked_videos())
+
+    def _event_search(self) -> None:
+        """The header's "Search by in-game event": send the selected video to Sports with the question."""
+        query = " ".join(self.event_box.text().split())
+        v = self._shown or next(iter(self._selected_videos()), None)
+        if len(query) < 3:
+            self.hint.setText("Type the moment to look for, such as “red card” or “buzzer beater”.")
+            return
+        if v is None:
+            self.hint.setText("Select the video to search first: the event search looks inside one video.")
+            return
+        self.event_search.emit({"id": v.id, "title": v.title, "channel": v.channel, "published": v.published,
+                                "duration": v.duration, "views": v.views, "thumbnail": v.thumbnail}, query)
 
     def _menu(self, pos) -> None:
         item = self.table.itemAt(pos)

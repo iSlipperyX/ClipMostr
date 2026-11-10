@@ -188,6 +188,15 @@ New arrivals scoring at least your alert level (75 by default) are counted on th
 
 **Fresh results, not the same ones.** Videos you've already used (picked, queued or clipped by automation, or sent to the Studio) are ticked, and **Hide used** (on to start with) hides them. The **Seen** column says when Research first saw each video: **New** for the last day, otherwise how long it's been showing up, or **Used**. **New only** shows just the new ones. With your categories set up, each region's chart for the categories your categories use (up to four) is checked too, at 1 unit each, so a Gaming category sees the Gaming chart and not just the all-categories one (Settings → Research → *Also check my categories' category charts*).
 
+### Velocity, saturation and opportunity badges
+
+Each scan also measures the market side of every video (`ytclip/research/velocity.py`):
+
+- **Velocity delta**: its views per hour against the median of the same channel's other videos seen over the last 7 days. 1x is a normal upload for that channel; 3x is breaking out. A channel seen fewer than three times is measured against its category in the scan, then the whole scan, and the detail panel says which.
+- **Saturation**: for the fastest long-form risers, one YouTube search counts the Shorts *other* channels have posted of it since it went up. Each check costs 100 quota units, so it's 2 a scan by default, at most 20 a day, and each video once per 12 hours (Settings → Research → *Saturation checks per scan*; 0 turns it off). YouTube Shorts is the one short-video platform with a search open to everyone, so it stands in for TikTok and Reels, which can't be checked.
+- **Opportunity** (0-100) blends the delta, the clip-ability score and the replay peaks, cut down by saturation.
+- **Badges**, on each video and rolled up on the category pills: 🔥 **Hot Arbitrage** (2x or more, at least 8 minutes long, and few Shorts of it found), 🔁 **High Retention** (sharp Most replayed peaks), 🧊 **Oversaturated** (many Shorts already), 📈 **Rising** (2x or more, saturation not checked). *Hot Arbitrage* is only shown when saturation was measured.
+
 ### Find videos for a request
 
 Type what you want into **Find videos** at the top of the Research tab, in your own words, and press **Find**. For example: *Call of Duty MW4 with good comedy*.
@@ -371,12 +380,43 @@ The **Sports** tab finds games on YouTube, lets you pick the ones you want, and 
 **Make reel** (beside *Make clips* on a game with highlights, on the PC or the Mac) turns the game into one vertical recap of 65 to 85 seconds, long enough for Creator Rewards. It uses the ticked plays, topped up from the best of the rest to between 4 and 7. Choose its voice, framing and order under **Recap reel** in the filter. It goes to the category's folder under `Reels` (or `Automation\Sports\Reels`), its account's posting queue, and your Macs when the category sends clips there.
 
 - **The cut.** A 3-second opening shows the best play up to just before its moment, then cuts away. Then come the plays: as a countdown (*PLAY 4, PLAY 3… NUMBER 1*, or *THE GAME WINNER* when that's what it was) or in the order they happened. Each play keeps about two-thirds of its seconds for the build-up and the rest for the reaction, stops a second before a replay starts, and snaps to the broadcast's own shot changes. A quick slide, wipe or flash, with a whoosh, joins the plays.
+- **Transitions** are 0.3 s and yours to choose (Settings → Sports → *Reel transitions*): a mix of wipes, slides and zooms, cross-dissolves, whip-pans, or a zoom into the next play.
 - **The narrator.** The AI (Claude, Gemini or the local AI) writes the story of the game in two sentences, and the voice you pick (the Video Creator's voices: Kokoro, else Piper, Windows or eSpeak) reads it over the opening while the game's sound is ducked. The AI also writes the opening banner, the caption, the hashtags and a lower-third for each play (*LEBRON JAMES · POSTER DUNK*). A badge naming a player who isn't in the play's commentary, the title or the teams isn't used. Without an AI, the words come from the plays' own titles. A narrated reel is labelled AI-generated when it's posted.
 - **Following the action.** *Follow the action* fills the 9:16 picture with a window that moves with the play. It works out where things move between frames (taking out the camera's own pan), then eases the window there, holding still when little moves and moving faster when the play runs away. *Whole picture* shows the whole broadcast over a blurred fill.
 - **The score bug.** With Claude or Gemini, two frames of each play are sent to the AI to read the broadcast's scoreboard. The reel's own bug then shows the score at the start of each play and changes to the new score after the moment. Reads that show other teams, or a score going down, are dropped. The local AI can't see pictures, so with it the bug shows the two teams only. A **FINAL** card closes the reel when the final score is known.
 - **The sound.** The game's sound is split into its middle, where the commentary sits, and its sides, where most of the crowd's width is. The sides are lifted around every play's moment, so the crowd erupts. The music (the Creator's *Epic* bed) ducks under the commentary and the narrator. The mix is set to -14 LUFS with peaks under -1 dBTP, measured on the finished AAC.
 
-`ytclip sports-montage "GAME_URL_OR_FILE" --sport soccer --creator-rewards --output-dir "Videos/Sports"` makes a reel from the command line. It finds and ranks the plays as the tab does. Other options: `--category`, `--voice` (or `off`), `--framing follow|fit`, `--order countdown|timeline`, `--plays N`, `--home`/`--away`, `--no-ai`. With `--creator-rewards`, a game that comes to under a minute exits with code 3, and the reel is kept.
+`ytclip sports-montage "GAME_URL_OR_FILE" --sport soccer --creator-rewards --output-dir "Videos/Sports"` makes a reel from the command line. It finds and ranks the plays as the tab does. Other options: `--category`, `--voice` (or `off`), `--framing follow|fit`, `--order countdown|timeline|climax` (climax: as it happened, with the best play held for the end), `--transitions mix|dissolve|whip|zoom`, `--events "QUESTION"` (a reel of the moments an [event search](#search-by-in-game-event) finds), `--feed` and `--anchor` (lower-thirds with the feed's own minute and scorer, such as *90+4' WINNER · E. HAALAND*), `--plays N`, `--home`/`--away`, `--no-ai`. With `--creator-rewards`, a game that comes to under a minute exits with code 3, and the reel is kept.
+
+### Search by in-game event
+
+The bar at the top of the **Sports** tab finds a moment by its description. Type it and press **Search**: the game you're looking at is searched (or, with none open, every picked game). The same bar is at the top of **Research**, where it sends the selected video to Sports and searches it there, and in ClipMonster for Mac under *Your PC → Sports*.
+
+> *Red card or player ejection* · *Missed penalty or controversial offside call* · *Buzzer beater or game-tying shot in the final minute* · *Manager yellow card or sideline argument* · *Ref throws red card after VAR check in Arsenal vs Chelsea* · *Controversial pass interference in Chiefs 4th quarter* · *Technical foul on bench during game 7*
+
+- **The question** is split into its alternatives (*X or Y*) and read for what it names (a red card, a VAR review, a technical foul, pass interference, a buzzer-beater… 24 ideas, each with the phrases commentators use for it), a period (*4th quarter*, *second half*, *overtime*), the end of the game (*final minute*), an order (*after a VAR check*) and the teams. When an AI is set up it reads what the rules don't (the local one first), and it only adds to what the rules found.
+- **What the game said.** The commentary (YouTube's captions, else Whisper's transcript, timed to the word) is cut into 15-second windows that overlap by 10. Each window is compared with the question by meaning, using the sentence model **all-MiniLM-L6-v2** on this computer (a 90 MB download the first time; DirectML, CUDA or Core ML when that ONNX Runtime build is installed, else the CPU), by whether the idea's own words are said, and by whether the crowd reacted. *"That should have been a red"* counts as talk about a card, not a card: it scores lower and is marked.
+- **What the game recorded.** The game's play-by-play is looked up (Settings → Sports → **Play-by-play feed**): **ESPN**'s public scoreboard (no key), **API-Football** for soccer when you add its key, or a **timeline file** you wrote (JSON or CSV rows with `kind` or `text`, and `video`, `minute`, or `period` + `clock`). Its events are placed in the video from **anchors**, moments where the video's second and the game's clock are both known: the commentary ("the second half is under way"), the scoreboard's clock read by Claude or Gemini, or yours (`2=58:40`). Soccer's clock runs with the world, so that's good to seconds; sports that stop the clock get a wider margin, narrowed by the commentary naming the event or the crowd's loudest second. In a highlights cut there's no clock, so events are placed only where the commentary names them, in the game's order. An event that can't be placed is left out, not guessed.
+- **The cut.** The moment is where the idea is first named (or the feed's second). The clip runs from 12 s before to 25 s after (Settings → Sports), wider for ideas that take longer (a review, a fight), reaching back to the foul that drew a card, staying while the commentary is still on it, with each end moved onto a pause between sentences.
+- **What you get.** The moments join the game's plays at the top, ticked and marked 🔎, each with why it matched and what was said. **Make clips** makes them; **Make reel of found** makes one reel of them.
+
+SofaScore and FotMob aren't used: neither offers a public API, and both block automated reading. ESPN's feed is public but undocumented, so it can change; when it can't be read the search goes by the commentary and says so.
+
+`ytclip sports-find "red card or player ejection" "GAME_URL_OR_FILE" --sport soccer` does the same from the command line and prints each moment with where it is and why. Options: `--feed auto|off|espn:LEAGUE:EVENT_ID|api-football:FIXTURE_ID|FILE`, `--anchor PERIOD=TIME` (repeatable), `--limit N`, `--words` (no sentence model), `--no-ai`, `--json`, `--reel` (with `--output-dir`, `--voice`).
+
+### The Clip-Ability index of a game
+
+After **Find highlights**, a game shows a 0-100 index under its title (hover it for the parts):
+
+| Part | Weight | What it measures |
+|---|---|---|
+| Momentum | 30% | Views per hour since it was posted |
+| Most replayed | 25% | How peaked YouTube's *Most replayed* graph is: its variance and its kurtosis (a few sharp spikes score high, a flat graph zero) |
+| Emotion | 20% | How far the sound swings between its usual level and its peaks, how often the crowd roars, and how much the sound's brightness moves (which stands in for the pitch of an excited voice) |
+| Controversy | 15% | Trigger terms in the commentary: *robbed*, *never a penalty*, *terrible ref*, *fight*, *unbelievable*… |
+| Audio | 10% | The commentary's level over the noise under it, and how much of the game has a clear voice |
+
+A part that can't be measured (no graph yet, no commentary) is left out and the rest re-weighted, and the index says which.
 
 ### Learning from results
 
@@ -665,6 +705,12 @@ ytclip create --script story.txt --storyboard-only                  # check the 
 ytclip create --check                           # what's ready here: script writer, voices, pictures
 ytclip create --setup-pictures                  # AI pictures on this PC's graphics card (about 10 GB, once)
 ytclip report --week                            # the weekly report: each TikTok account's past 7 days
+ytclip sports-find "red card or player ejection" "https://youtu.be/MATCH" --sport soccer
+ytclip sports-find "technical foul on bench" game7.mp4 --sport basketball --feed timeline.json --json
+ytclip sports-montage "https://youtu.be/MATCH" --sport soccer --order climax --transitions dissolve
+ytclip sports-montage game.mp4 --sport soccer --events "red card or controversial call"
+ytclip ai ask "Three hooks for a last-minute winner"   # the local AI first, Claude or Gemini if it can't
+ytclip ai usage                                 # tokens and cost by day and model; ai route, ai hardware
 ytclip self-test                                # check this install's libraries all load
 ytclip --list-presets
 ```
@@ -672,6 +718,16 @@ ytclip --list-presets
 Pro edit: `--pro` turns on everything in *Settings → Editing* · `--creator-rewards` clips over a minute · `--music FOLDER` · `--broll FOLDER` · `--ai local` the local AI. `ytclip local-ai [status|download|test]` checks, downloads or tries the local AI.
 
 Main options: `-n` number of clips · `--min/--max` length in seconds · `--mode auto|ai|chapters` · `-f original|vertical_blur|vertical_crop|square` · `--captions` · `--polish` AI hooks and caption fixes · `--bleep` mask swearing · `--qc` check clips after export · `--stack VIDEO|FOLDER` · `--keywords` · `--sport soccer|basketball|…` clip it as [sports](#sports-categories) · `-q` max download resolution · `--encoder` · `--limit` videos per playlist · `-o` output folder · `--dry-run` analyse without exporting · `--cookies-from-browser clipmonster` to download with ClipMonster's own sign-in (`ytclip sign-in`), or `chrome`, `firefox`... for a browser's.
+
+### The AI router and what it costs
+
+Everything in ClipMonster that asks an AI goes through one place, and new code can use `ytclip.intelligence.agent_router.query_intelligence(prompt, schema=None, priority="local_first")`:
+
+- **Tier 1, local**: the GGUF model on this computer (or a linked PC's), with the answer held to your JSON schema by llama.cpp's grammar. Free.
+- **Tier 2, cloud**: Claude or Gemini, whichever has a key (your pick in Settings → AI first). Used when the local model isn't set up, runs out of memory, takes longer than *Local AI time limit* (Settings → AI, 240 s), answers in the wrong shape, or when you ask for deep reasoning (`priority="cloud_deep"`). The other priorities are `cloud_first`, `local_only`, `cloud_only` and `settings` (the order in Settings → AI).
+- **Counting.** Every call's tokens and cost are added to `ai_usage.json` in the app's folder (`%APPDATA%\ClipMonster` or `~/Library/Application Support/ClipMonster`), by day, AI and model. Prices are built in and can be overridden with an `ai_prices.json` beside it. **Settings → AI** has a daily and a monthly spending limit in dollars: when one is reached, paid AIs are skipped and the local one carries on.
+
+`ytclip ai ask "…"`, `ytclip ai route` (who would be asked, and what's missing), `ytclip ai usage` and `ytclip ai hardware` (what each kind of model runs on here) show it from the command line.
 
 ## Updates
 
@@ -727,6 +783,8 @@ python build.py
 This produces `dist/ClipMonster/` and `dist/ClipMonster-windows.zip`, and `dist/ClipMonster-Setup.exe` when [Inno Setup 6](https://jrsoftware.org/isinfo.php) is installed (`winget install JRSoftware.InnoSetup`; `python build.py --installer` fails without it). To include Whisper for the graphics card, first install the Vulkan SDK and run `python packaging/build_whisper_cpp.py build/whisper-cpp --vulkan`; `build.py` then copies it in. The local AI's `llama-server` is built the same way: `python packaging/build_llama_cpp.py build/llama-cpp --vulkan`. The release workflow does all of it. From source without that build, `pip install -e .[local]` installs llama-cpp-python, which the local AI uses instead. During development, run the app with `python -m ytclip.gui.app` and the command line with `python -m ytclip`.
 
 To build ClipMonster for Mac on a Mac (with Xcode's command line tools and CMake): `pip install -e .[mac,build]`, then `python packaging/build_mac.py`. It gathers ffmpeg and Deno from their packages and builds whisper.cpp and llama.cpp (for Metal on Apple silicon) into `build/mac-tools`, then writes `dist/ClipMonster.app` and `dist/ClipMonster-mac.dmg` (`--name ClipMonster-mac-intel.dmg` on an Intel Mac). `dist/ClipMonster.app/Contents/MacOS/ClipMonster --self-check` starts everything the app brought. Run it from source with `python -m ytclip.mac`.
+
+The [event search](#search-by-in-game-event)'s sentence model runs on ONNX Runtime. Install **one** build (they share a module name): `pip install -e .[search]` (the CPU; on a Mac this build includes Core ML), `pip install -e .[search-directml]` (Windows, any DirectX 12 card: AMD, Intel Arc, NVIDIA) or `pip install -e .[search-cuda]` (NVIDIA with CUDA 12 and cuDNN 9). The Windows app ships the standard build, with the Kokoro voice. `ytclip ai hardware` shows what's used.
 
 Run the tests with `pip install -e .[test]` and then `pytest`. They need no network or API key.
 

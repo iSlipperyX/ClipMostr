@@ -813,6 +813,9 @@ class Host:
             "choose": lambda d: d.choose(game_id, ids, bool(body.get("chosen", True))),
             "make": lambda d: d.make(game_id, ids or None, body.get("category") if "category" in body else None),
             "reel": lambda d: d.reel(game_id, ids or None, body.get("category") if "category" in body else None),
+            "events": lambda d: d.find_events(str(body.get("query") or ""), ids or ([game_id] if game_id else None),
+                                              str(body.get("feed") or ""),
+                                              body.get("anchors") if isinstance(body.get("anchors"), list) else None),
             "version": lambda d: d.version(game_id, str(body.get("video") or "")),
             "remove": lambda d: d.remove(ids or [game_id]),
             "clear": lambda d: d.clear(),
@@ -822,7 +825,7 @@ class Host:
             raise HostError(404, "No such request.")
         out = self._desk_call(acts[action])
         said = {"find": "Looking for games", "analyse": "Finding highlights", "make": "Making clips",
-                "reel": "Making a reel"}.get(action)
+                "reel": "Making a reel", "events": "Searching for a moment"}.get(action)
         if said and isinstance(out, dict) and out.get("message"):
             self.log(f"{device_name or 'A Mac'}: {out['message']}")
         return out

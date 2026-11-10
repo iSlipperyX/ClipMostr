@@ -40,7 +40,7 @@ POLL = 2.0  # s between looks for work when there's none
 STAGE_EVERY = 1.0  # s between progress writes
 WAIT_RETRY = 600.0  # s before a task waiting out YouTube's sign-in pause is looked at again
 KEEP_TASKS = 7 * 86400.0  # finished tasks are forgotten after this long
-KINDS = ("search", "highlights", "make", "reel")
+KINDS = ("search", "highlights", "make", "reel", "events")
 BUSY = ("queued", "analysing", "making")  # a game's statuses while work is waiting or under way
 
 
@@ -275,6 +275,66 @@ class Desk:
                             "Pick the games to find highlights in first.")
         return {"queued": queued, "message": f"Finding the highlights of {_plural(queued, 'game')}…"}
 
+    def add_video(self, video: dict) -> dict:
+        """Put one video (from Research, or a link) on the games list, so it can be searched for an event."""
+        vid = re.sub(r"[^\w-]", "", str(video.get("id") or ""))[:40]
+        if not vid:
+            raise DeskError("That video has no id.")
+        with self._tx() as con:
+            if con.execute("SELECT 1 FROM games WHERE id=?", (vid,)).fetchone() is None:
+                f = self.filter()
+                found = G.Found(vid, str(video.get("title") or vid), str(video.get("channel") or ""),
+                                float(video.get("published") or 0), float(video.get("duration") or 0),
+                                int(video.get("views") or 0), str(video.get("thumbnail") or ""))
+                read = G.read_title(found.title, found.duration)
+                g = G.make_game(found, read, f, self.now())
+                g.update(picked=True, new=False)
+                self._put(con, g)
+                self._bump(con)
+        return {"id": vid}
+
+    def find_events(self, query: str, ids: list[str] | None = None, feed: str = "", anchors: list[str] | None = None
+                    ) -> dict:
+        """Search games for a moment described in words ("red card after a VAR check"): the game in `ids`, or
+        every picked game. What's found joins each game's plays, ticked."""
+        from . import align
+
+        query = " ".join(str(query or "").split())[:200]
+        if len(query) < 3:
+            raise DeskError("Type the moment to look for, such as “red card” or “technical foul on the bench”.")
+        marks = [str(a).strip() for a in (anchors or []) if str(a).strip()][:8]
+        for a in marks:
+            try:
+                align.parse_anchor(a)
+            except ValueError as exc:
+                raise DeskError(f"“{a}” isn't an anchor. Write it as period=video time, such as 2=58:40 (the second "
+                                "half starts at 58:40 of the video).") from exc
+        queued, busy = 0, 0
+        with self._tx() as con:
+            if ids:
+                wanted = _ids(ids)
+            else:
+                wanted = [g["id"] for g in self._games(con) if g.get("picked") or g.get("highlights")][:6]
+            for gid in wanted:
+                row = con.execute("SELECT data FROM games WHERE id=?", (gid,)).fetchone()
+                if row is None:
+                    continue
+                g = json.loads(row["data"])
+                if g.get("status") in BUSY:
+                    busy += 1
+                    continue
+                g.update(picked=True, new=False, status="queued", stage=f"Waiting to search for “{query}”", frac=None,
+                         error="")
+                self._put(con, g)
+                self._add_task(con, "events", gid, {"query": query, "feed": str(feed or "")[:300], "anchors": marks,
+                                                    "video": g["video"]})
+                queued += 1
+            self._bump(con)
+        if not queued:
+            raise DeskError("Those games are being worked on already." if busy else
+                            "Pick a game to search first (tick it in the list, or open it).")
+        return {"queued": queued, "message": f"Searching {_plural(queued, 'game')} for “{query}”…"}
+
     def choose(self, game_id: str, ids: list[str], chosen: bool = True) -> dict:
         want = set(_ids(ids))
 
@@ -332,13 +392,21 @@ class Desk:
             if g.get("status") in BUSY:
                 raise DeskError("That game is being worked on already.")
             hl = g.get("highlights") or []
-            if len(hl) < 2:
-                raise DeskError("Find this game's highlights first: the reel is made of its best plays.")
             want = [h["id"] for h in hl if h["id"] in set(_ids(ids))] if ids else []
+            if not want:  # nothing asked for by name: the ticked ones, when they're all found moments
+                ticked = [h for h in hl if h.get("chosen")]
+                if ticked and all(h.get("origin") == "event" for h in ticked):
+                    want = [h["id"] for h in ticked]
+            events = bool(want) and all(h.get("origin") == "event" for h in hl if h["id"] in want)
+            if len(hl) < 2 and not events:
+                raise DeskError("Find this game's highlights first: the reel is made of its best plays.")
             g.update(status="queued", stage="Waiting to make the reel", frac=None, error="")
             self._put(con, g)
-            self._add_task(con, "reel", game_id, {"ids": want, "category_id": cat_id})
+            self._add_task(con, "reel", game_id, {"ids": want, "category_id": cat_id, "events": events})
             self._bump(con)
+        if events:
+            return {"message": f"Making a reel of {_plural(len(want), 'found moment')} from "
+                               f"{g.get('matchup') or g.get('title')}…"}
         n = max(MIN_PLAYS, len(want) or sum(1 for h in hl if h.get("chosen")))
         return {"message": f"Making a reel of the top {min(n, len(hl), 7)} plays from "
                            f"{g.get('matchup') or g.get('title')}…"}
@@ -404,7 +472,7 @@ class Desk:
         return {"stopped": len(rows)}
 
     def thumb(self, game_id: str, highlight_id: str) -> Path:
-        if not re.fullmatch(r"[\w-]{1,40}", game_id or "") or not re.fullmatch(r"h\d{1,3}", highlight_id or ""):
+        if not re.fullmatch(r"[\w-]{1,40}", game_id or "") or not re.fullmatch(r"[he]\d{1,3}", highlight_id or ""):
             raise DeskError("No such picture.", 404)
         path = self.media / game_id / f"{highlight_id}.jpg"
         if not path.is_file():
@@ -546,11 +614,12 @@ def public(g: dict) -> dict:
     out = {k: g.get(k) for k in ("id", "video", "url", "title", "channel", "published", "duration", "views",
                                  "thumbnail", "sport", "league", "home", "away", "matchup", "score", "kind", "found",
                                  "new", "picked", "status", "stage", "frac", "error", "ranked_by", "ai_error",
-                                 "analysed", "made", "reels")}
+                                 "analysed", "made", "reels", "events", "index")}
     out["versions"] = [{k: v.get(k) for k in ("video", "url", "title", "channel", "kind", "duration", "views")}
                        for v in g.get("versions") or []]
     out["highlights"] = [{k: h.get(k) for k in ("id", "start", "end", "length", "signal", "parts", "ai", "score",
-                                                "rank", "title", "play", "players", "why", "chosen", "made", "file")}
+                                                "rank", "title", "play", "players", "why", "chosen", "made", "file",
+                                                "origin", "badge", "certain", "t_event", "sources")}
                          for h in g.get("highlights") or []]
     sp = sports.get(g.get("sport", ""))
     out["emoji"] = sp.emoji if sp else "🏆"
@@ -662,7 +731,7 @@ class DeskWorker:
         keeper.start()
         try:
             said = {"search": self.do_search, "highlights": self.do_highlights, "make": self.do_make,
-                    "reel": self.do_reel}[task["kind"]](task)
+                    "reel": self.do_reel, "events": self.do_events}[task["kind"]](task)
             self.desk.finish(task, "done", said=said or "")
         except Stopping:
             self.desk.finish(task, "queued", said="Stopped; starts again later")
@@ -872,17 +941,22 @@ class DeskWorker:
         hl, by_ai, why_not = rank.rank(g, clips, p.signals, p.cues, es, f.per_game, log=self.log, check=self.check)
         self.check()
         folder = self.desk.media / g["id"]
-        shutil.rmtree(folder, ignore_errors=True)
         folder.mkdir(parents=True, exist_ok=True)
+        for old in folder.glob("h*.jpg"):  # (the found moments' pictures, e*.jpg, stay)
+            old.unlink(missing_ok=True)
         for h in hl:
             try:
                 thumbnail(p.video.path, folder / f"{h['id']}.jpg", h["start"] + 0.55 * (h["end"] - h["start"]))
             except Exception:  # noqa: BLE001 - a missing picture leaves the play
                 pass
+        index = self._index(g, p, sport)
 
         def fn(x):
-            x.update(highlights=hl, ranked_by=by_ai, ai_error=why_not, analysed=time.time(), status="ready",
+            found = [h for h in x.get("highlights") or [] if h.get("origin") == "event"]
+            x.update(highlights=hl + found, ranked_by=by_ai, ai_error=why_not, analysed=time.time(), status="ready",
                      stage="", frac=None, error="", picked=True)
+            if index:
+                x["index"] = index
             if p.video is not None and p.video.duration:
                 x["duration"] = p.video.duration
 
@@ -890,6 +964,124 @@ class DeskWorker:
         who = f" (ranked by {by_ai})" if by_ai else ""
         said = f"{_plural(len(hl), 'highlight')} ready: {g.get('matchup') or g.get('title')}{who}"
         self.log(f"Sports: {said}.")
+        self.events("sports", f"{sport.emoji} {said}")
+        return said
+
+    def _index(self, g: dict, p, sport) -> dict:
+        """The game's Clip-Ability index (clipability.sports_index) from what was just measured."""
+        from .. import clipability
+
+        m = getattr(p, "measurements", None)
+        if m is None or not hasattr(m, "db"):
+            return {}
+        try:
+            crowd = sports.build_signals(m, sport, []).get("crowd")
+            roars = int(((crowd[1:] >= 0.6) & (crowd[:-1] < 0.6)).sum()) if crowd is not None and len(crowd) > 1 else None
+            age = max(1.0, (time.time() - float(g.get("published") or 0)) / 3600) if g.get("published") else 0.0
+            pace = clipability.momentum(float(g.get("views") or 0) / age, []) if age and g.get("views") else None
+            return clipability.sports_index(
+                momentum=pace, heatmap=list(getattr(m, "heatmap", []) or []), duration=float(m.duration or 0),
+                db=m.db, centroid=getattr(m, "centroid", None), flatness=getattr(m, "flatness", None), roars=roars,
+                texts=[c.text for c in (p.cues or [])])
+        except Exception as exc:  # noqa: BLE001 - the index is extra: the highlights stand without it
+            self.log(f"Sports: the Clip-Ability index couldn't be worked out ({exc}).")
+            return {}
+
+    def do_events(self, task: dict) -> str:
+        """Search one game for the moment asked for (semantic_search.py), and add what's found to its plays."""
+        from ..engine import Project
+        from ..export import thumbnail
+        from ..intelligence import embeddings
+        from . import align, feeds, scoreboard
+        from . import semantic_search as ss
+
+        g = self.desk.game(task["game"])
+        pay = task["payload"]
+        s = self.settings()
+        f = self.desk.filter()
+        sport = sports.get(g.get("sport", "")) or f.sport_info
+        base, _label, _cat = self._settings_for(s, f.category_id, g["video"], g["url"])
+        es = base.apply({"sport": sport.id, "mode": "auto", "series_parts": 1, "ai_polish": False})
+        self._youtube_pause()
+        progress = self._progress(g["id"], "analysing")
+        progress("Starting", None)
+        engine, Cancelled = self._engine(es, progress)
+        p = Project(g["url"])
+        try:
+            engine.open(p)
+            engine.measure(p)
+        except Cancelled:
+            self.check()
+            raise Stopping()
+        m = p.measurements
+        duration = float(getattr(m, "duration", 0) or (p.video.duration if p.video else 0) or 0)
+        crowd = None
+        if m is not None and hasattr(m, "db"):
+            try:
+                crowd = sports.build_signals(m, sport, []).get("crowd")
+            except Exception:  # noqa: BLE001 - no crowd signal: the words and the feed decide
+                crowd = None
+        cues = list(p.cues or [])
+        progress("Reading the question", None)
+        query = ss.understand(pay.get("query", ""), sport.id, es, log=self.log, check=self.check)
+        about = dict(g)
+        if query.home and query.away and not (g.get("home") and g.get("away")):
+            about.update(home=query.home, away=query.away)
+        progress("Looking for the game's play-by-play", None)
+        feed = feeds.for_game(about, es, spec=pay.get("feed", ""), log=self.log)
+        anchors = [align.parse_anchor(a) for a in pay.get("anchors") or []]
+        src = Path(p.video.path) if p.video is not None and p.video.path else None
+        if (feed is not None and src is not None and not anchors and scoreboard.can_read(es)
+                and any(e.video is None for e in feed.events) and align.is_full_game(duration, feed.sport, g.get("kind", ""))
+                and not align.transcript_anchors(cues, feed.sport, duration)):
+            progress("Reading the game clock off the scoreboard", None)
+            try:
+                anchors += align.clock_anchors(src, duration, feed.sport, es, log=self.log, check=self.check)
+            except (Stopping, Called):
+                raise
+            except Exception as exc:  # noqa: BLE001 - no clock read: the commentary places what it can
+                self.log(f"Sports: the scoreboard's clock couldn't be read ({exc}).")
+        try:
+            embedder = embeddings.get(es, expand=ss.tags, log=self.log, progress=progress)
+            result = ss.search(query, cues, duration, sport=sport.id, s=es, fine=getattr(m, "fine", None),
+                               excitement=crowd, feed=feed, anchors=anchors, kind=g.get("kind", ""), embedder=embedder,
+                               limit=ss.MAX_HITS, cache_key=g["video"], log=self.log, check=self.check,
+                               progress=progress)
+            marks = ss.timeline(feed, cues, duration, s=es, anchors=anchors, kind=g.get("kind", ""), embedder=embedder,
+                                cache_key=g["video"]) if feed is not None else []
+        except embeddings.EmbeddingError as exc:
+            raise DeskError(f"{exc} Settings → Sports → Event search can use words instead.") from exc
+        self.check()
+        folder = self.desk.media / g["id"]
+        folder.mkdir(parents=True, exist_ok=True)
+        for old in folder.glob("e*.jpg"):
+            old.unlink(missing_ok=True)
+        found = [ss.as_highlight(h) for h in result.hits]
+        for h in found:
+            try:
+                if src is not None:
+                    thumbnail(src, folder / f"{h['id']}.jpg", h["t_event"] + 1.0)
+            except Exception:  # noqa: BLE001 - a missing picture leaves the moment
+                pass
+        record = {"query": query.text, "describe": query.describe(), "label": (query.labels or ["Moment"])[0],
+                  "at": time.time(), "found": len(found), "notes": result.notes[:4], "reader": result.reader,
+                  "device": result.device, "feed": result.feed, "feed_events": result.feed_events,
+                  "read_by": query.by, "hits": [h.to_json() for h in result.hits]}
+
+        def fn(x):
+            plays = [h for h in x.get("highlights") or [] if h.get("origin") != "event"]
+            x.update(highlights=found + plays, events=record, status="ready" if (found or plays) else "found",
+                     stage="", frac=None, error="", picked=True, analysed=x.get("analysed") or time.time())
+            if marks:
+                x["timeline"] = marks
+            if duration:
+                x["duration"] = duration
+
+        self.desk.change(g["id"], fn)
+        name = g.get("matchup") or g.get("title")
+        said = (f"{_plural(len(found), 'moment')} found for “{query.text}”: {name}" if found else
+                f"Nothing found for “{query.text}” in {name}")
+        self.log(f"Sports: {said}." + (f" {result.notes[0]}" if result.notes else ""))
         self.events("sports", f"{sport.emoji} {said}")
         return said
 
@@ -972,8 +1164,12 @@ class DeskWorker:
 
         g = self.desk.game(task["game"])
         hl = g.get("highlights") or []
-        if len(hl) < 2:
+        want = list(task["payload"].get("ids") or [])
+        hits = [h for h in (g.get("events") or {}).get("hits") or [] if h.get("id") in want] \
+            if task["payload"].get("events") else []
+        if len(hl) < 2 and not hits:
             raise DeskError("This game's highlights aren't there any more: find them again.")
+        hl = [h for h in hl if h.get("origin") != "event"] or hl  # a recap is of the game's plays
         s = self.settings()
         f = self.desk.filter()
         sport = sports.get(g.get("sport", "")) or sports.SPORTS["any"]
@@ -988,9 +1184,11 @@ class DeskWorker:
         try:
             engine.open(p)
             engine.measure(p)
-            res = R.make(p, g, hl, es, root, ids=list(task["payload"].get("ids") or []) or None, category=cat,
-                         voice=f.reel_voice, framing_mode=f.reel_framing, order=f.reel_order, log=self.log,
-                         progress=progress, check=self.check)
+            res = R.make(p, g, hl, es, root, ids=(None if hits else want or None), category=cat,
+                         voice=f.reel_voice, framing_mode=f.reel_framing,
+                         order=("timeline" if hits and f.reel_order == "countdown" else f.reel_order), log=self.log,
+                         progress=progress, check=self.check, events=hits or None,
+                         events_title=(g.get("events") or {}).get("label", ""), timeline=g.get("timeline") or None)
         except Cancelled:
             self.check()
             raise Stopping()
@@ -1013,8 +1211,9 @@ class DeskWorker:
             x.update(status="ready", stage="", frac=None, error="")
 
         self.desk.change(g["id"], fn)
-        said = (f"Made a {length:.0f} s reel of {g.get('matchup') or g.get('title')}'s top {len(res.reel.plays)} "
-                f"plays" + (f", for {cat.name}" if cat else "")
+        what = (f"{_plural(len(res.reel.plays), 'found moment')} in {g.get('matchup') or g.get('title')}" if hits else
+                f"{g.get('matchup') or g.get('title')}'s top {len(res.reel.plays)} plays")
+        said = (f"Made a {length:.0f} s reel of {what}" + (f", for {cat.name}" if cat else "")
                 + ("" if res.checks.get("rewards") else " (under a minute: not for Creator Rewards)"))
         self.log(f"Sports: {said} → {res.file}")
         for w in res.warnings:

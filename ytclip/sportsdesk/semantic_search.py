@@ -41,7 +41,6 @@ from typing import Callable
 
 import numpy as np
 
-from .. import sports
 from ..subtitles import Cue, text_between
 from . import align
 from .feeds import KIND_WORDS, Feed, FeedEvent
@@ -730,6 +729,77 @@ def event_match(embedder, reader: str, event_vecs: np.ndarray, window_vecs: np.n
     return out
 
 
+def _placer(embedder, reader: str, evecs: np.ndarray, wvecs: np.ndarray, events: list[FeedEvent], wins: list[Window],
+            cues: list[Cue]):
+    """align.place's two callbacks for `events`: the best commentary match in a stretch of the video, and
+    every event against every window (for a highlights cut)."""
+    strength = event_match(embedder, reader, evecs, wvecs, events, wins) if wins else np.zeros((len(events), 0))
+    index = {id(e): i for i, e in enumerate(events)}
+    starts = np.array([w.start for w in wins]) if wins else np.zeros(0)
+
+    def match(ev: FeedEvent, lo: float, hi: float):
+        if not len(starts):
+            return None
+        inside = np.flatnonzero((starts >= lo - WINDOW / 2) & (starts <= hi))
+        if not len(inside):
+            return None
+        row = strength[index[id(ev)], inside]
+        k = int(inside[int(np.argmax(row))])
+        found = None
+        for cid in _FEED_CONCEPTS.get(ev.kind, []):
+            found = found or _first_naming(CONCEPTS[cid], cues, wins[k].start, wins[k].end)
+        return (found[0] if found else wins[k].start + WINDOW / 3), float(strength[index[id(ev)], k])
+
+    def order_scores(evs: list[FeedEvent]):
+        rows = np.array([strength[index[id(e)]] for e in evs]) if len(wins) else np.zeros((len(evs), 0))
+        return rows, starts + WINDOW / 3
+
+    return match, order_scores
+
+
+TIMELINE_KINDS = ("goal", "penalty_goal", "own_goal", "touchdown", "field_goal", "home_run", "red_card",
+                  "second_yellow", "ejection", "penalty_missed", "knockout")
+
+
+def timeline(feed: Feed | None, cues: list[Cue], duration: float, *, s=None, anchors: list[align.Anchor] | None = None,
+             kind: str = "", embedder=None, cache_key: str = "") -> list[dict]:
+    """The game's scoring plays and sendings-off, placed in the video, for a reel's lower-thirds:
+    [{"video", "badge", "scoring", "kind", "slack"}]. Only events placed to within 15 seconds are kept (a badge
+    on the wrong play is worse than none)."""
+    from ..intelligence import embeddings
+
+    if feed is None:
+        return []
+    events = [e for e in feed.events if e.scoring or e.kind in TIMELINE_KINDS]
+    if not events:
+        return []
+    embedder = embedder or embeddings.get(s, expand=tags)
+    wins = windows(cues, duration)
+    if embedder.name == "words" and wins:
+        embedder.fit([w.text for w in wins])
+    wvecs = embed_cached(embedder, [w.text for w in wins], s, cache_key) if wins else np.zeros((0, 1), np.float32)
+    evecs = embedder.embed([e.sentence() for e in events]) if wins else np.zeros((0, 1), np.float32)
+    match, order_scores = _placer(embedder, embedder.name, evecs, wvecs, events, wins, cues)
+    placed, _note = align.place(feed, events, duration, cues, anchors=anchors, kind=kind, match=match,
+                                order_scores=order_scores)
+    out = []
+    for p in placed:
+        if p.slack > 15.0:
+            continue
+        c = next((CONCEPTS[cid] for cid in _FEED_CONCEPTS.get(p.event.kind, [])), None)
+        out.append({"video": round(p.video, 2), "badge": badge_for(p.event, c), "scoring": bool(p.event.scoring),
+                    "kind": p.event.kind, "slack": round(p.slack, 1)})
+    return out
+
+
+def as_highlight(h: "EventHit") -> dict:
+    """A found moment as one of a game's plays (the Sports tab lists it with them: tick, Make clips, Make reel)."""
+    return {"id": h.id, "start": h.start, "end": h.end, "length": round(h.end - h.start, 1), "score": h.score,
+            "rank": 0, "title": h.quote or h.label, "play": h.label, "players": list((h.feed or {}).get("players") or [])[:3],
+            "why": h.why, "chosen": True, "origin": "event", "badge": h.badge, "certain": h.certain,
+            "t_event": h.t_event, "sources": list(h.sources), "parts": {}, "signal": None, "ai": None}
+
+
 def search(query: str | Query, cues: list[Cue], duration: float, *, sport: str = "", s=None, fine=None,
            excitement: np.ndarray | None = None, feed: Feed | None = None, anchors: list[align.Anchor] | None = None,
            kind: str = "", embedder=None, limit: int = 5, use_ai: bool = True, cache_key: str = "",
@@ -842,27 +912,7 @@ def search(query: str | Query, cues: list[Cue], duration: float, *, sport: str =
         if chosen:
             progress("Placing the play-by-play in the video", None)
             evecs = embedder.embed([e.sentence() for e in chosen]) if wins else np.zeros((0, 1), np.float32)
-            strength = event_match(embedder, reader, evecs, wvecs, chosen, wins) if wins else np.zeros((len(chosen), 0))
-            index = {id(e): i for i, e in enumerate(chosen)}
-            starts = np.array([w.start for w in wins]) if wins else np.zeros(0)
-
-            def match(ev: FeedEvent, lo: float, hi: float):
-                if not len(starts):
-                    return None
-                inside = np.flatnonzero((starts >= lo - WINDOW / 2) & (starts <= hi))
-                if not len(inside):
-                    return None
-                row = strength[index[id(ev)], inside]
-                k = int(inside[int(np.argmax(row))])
-                found = None
-                for cid in _FEED_CONCEPTS.get(ev.kind, []):
-                    found = found or _first_naming(CONCEPTS[cid], cues, wins[k].start, wins[k].end)
-                return (found[0] if found else wins[k].start + WINDOW / 3), float(strength[index[id(ev)], k])
-
-            def order_scores(evs: list[FeedEvent]):
-                rows = np.array([strength[index[id(e)]] for e in evs]) if len(wins) else np.zeros((len(evs), 0))
-                return rows, starts + WINDOW / 3
-
+            match, order_scores = _placer(embedder, reader, evecs, wvecs, chosen, wins, cues)
             placed, note = align.place(feed, chosen, duration, cues, anchors=anchors, kind=kind, match=match,
                                        order_scores=order_scores)
             if note:

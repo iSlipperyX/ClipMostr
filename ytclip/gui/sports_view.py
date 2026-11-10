@@ -29,6 +29,11 @@ from .. import sports
 from ..sportsdesk import games as G
 from . import theme
 
+EVENT_HELP = ("Describe a moment and the game you're looking at (else every picked game) is searched for it:\n"
+              "“red card or player ejection”, “missed penalty”, “technical foul on the bench”,\n"
+              "“game-tying shot in the final minute”, “controversial pass interference in the 4th quarter”.\n"
+              "It reads the commentary and, when there is one, the game's official play-by-play.\n"
+              "What it finds joins the game's plays, ticked, ready for Make clips or Make reel.")
 POLL_MS = 1500  # how often the page asks how things are going while it's showing
 SLOW_POLL_MS = 6000  # ... while nothing is being worked on
 EDIT_HOLD = 4.0  # s after you change the filter before the PC's copy of it is shown in its place
@@ -41,6 +46,35 @@ STATUS_WORDS = {"found": "", "queued": "Waiting", "analysing": "Finding highligh
 
 def _plural(n: int, word: str, many: str = "") -> str:
     return f"{n} {word if n == 1 else (many or word + 's')}"
+
+
+def events_text(g: dict) -> str:
+    """What the last event search of this game found, and its Clip-Ability index, in a line or two."""
+    lines = []
+    ev = g.get("events") or {}
+    if ev.get("query"):
+        n = int(ev.get("found") or 0)
+        how = " + ".join(x for x in (ev.get("feed") or "", "the commentary") if x)
+        line = f"🔎 “{ev['query']}”: {_plural(n, 'moment')} found" if n else f"🔎 “{ev['query']}”: nothing found"
+        line += f" (read as {ev.get('describe')}; from {how}; {ev.get('reader') or 'words'})"
+        notes = " ".join(ev.get("notes") or [])
+        lines.append(line + (f". {notes}" if notes else "."))
+    ix = g.get("index") or {}
+    if ix.get("parts"):
+        lines.append(f"Clip-Ability {ix.get('score', 0):.0f}/100" + (": " + " ".join(ix.get("reasons") or [])
+                                                                       if ix.get("reasons") else ""))
+    return "\n".join(lines)
+
+
+def index_tip(g: dict) -> str:
+    from ..clipability import SPORTS_LABELS, SPORTS_WEIGHTS
+
+    ix = g.get("index") or {}
+    if not ix.get("parts"):
+        return ""
+    rows = [f"{SPORTS_LABELS[k]} ({SPORTS_WEIGHTS[k]:.0%}): " + (f"{ix['parts'][k] * 100:.0f}" if k in ix["parts"]
+                                                                  else "not measured") for k in SPORTS_WEIGHTS]
+    return "Clip-Ability index\n" + "\n".join(rows)
 
 
 def clock(seconds: float | None) -> str:
@@ -460,7 +494,8 @@ class FilterPanel(QFrame):
         for key, label in G.REEL_ORDER.items():
             self.reel_order.addItem(label, key)
         self.reel_order.setToolTip("Countdown: the plays build to the best one, labelled PLAY 4, PLAY 3... "
-                                   "NUMBER 1.\nAs it happened: in the order of the game")
+                                   "NUMBER 1.\nAs it happened: in the order of the game.\nAs it happened, the "
+                                   "best last: the game's story, with its biggest play held back for the end")
         reel.addRow("Order", self.reel_order)
         v.addLayout(reel)
 
@@ -798,7 +833,10 @@ class HighlightRow(QFrame):
         self.tick.setChecked(bool(hl.get("chosen")))
         self.tick.blockSignals(False)
         self.start = float(hl.get("start") or 0)
-        self.rank.setText(f"#{hl.get('rank') or '?'}")
+        found = hl.get("origin") == "event"
+        self.rank.setText("🔎" if found else f"#{hl.get('rank') or '?'}")
+        self.rank.setToolTip("Found by your event search" + ("" if hl.get("certain", True) else
+                             ": it's talked about here and may not have happened, so watch it first") if found else "")
         set_chip(self.play, hl.get("play") or "", theme.ACCENT)
         self.title.setText(hl.get("title") or "")
         self.title.setToolTip(hl.get("title") or "")
@@ -807,6 +845,10 @@ class HighlightRow(QFrame):
         self.why.setToolTip(self.why.text())
         parts = hl.get("parts") or {}
         bits = [f"at {clock(hl.get('start'))}", f"{hl.get('length') or 0:.0f} s"]
+        if found:
+            bits.append(" + ".join(hl.get("sources") or []) or "meaning")
+            if hl.get("badge"):
+                bits.append(hl["badge"])
         if hl.get("ai") is not None:
             bits.append(f"AI {hl['ai']}")
         if parts.get("crowd") is not None:
@@ -818,7 +860,8 @@ class HighlightRow(QFrame):
         colour = theme.GOOD if score >= 75 else theme.ACCENT if score >= 50 else theme.MUTED
         self.score.setText(f"<div style='font-size:15pt; font-weight:700; color:{colour}'>{score}</div>"
                            f"<div style='font-size:7.5pt; color:{theme.MUTED}'>score</div>")
-        self.score.setToolTip("The AI's rating and the crowd and commentary's, together" if hl.get("ai") is not None
+        self.score.setToolTip("How sure the search is that this is the moment you asked for" if found else
+                              "The AI's rating and the crowd and commentary's, together" if hl.get("ai") is not None
                               else "How the crowd and the commentary rose over this play")
         set_chip(self.made, "Made" if hl.get("made") else "", theme.GOOD)
         self.made.setToolTip(hl.get("file") or "")
@@ -927,6 +970,9 @@ class GamePanel(QFrame):
         v.addWidget(self.problem)
         self.ranked = muted("")
         v.addWidget(self.ranked)
+        self.events_note = muted("")
+        self.events_note.setVisible(False)
+        v.addWidget(self.events_note)
 
         self.list = QListWidget()
         self.list.setSelectionMode(QAbstractItemView.NoSelection)
@@ -1029,6 +1075,9 @@ class GamePanel(QFrame):
             self.ranked.setText(text + ".")
         else:
             self.ranked.setText("")
+        self.events_note.setText(events_text(g))
+        self.events_note.setToolTip(index_tip(g))
+        self.events_note.setVisible(bool(self.events_note.text()))
         self._rows(g, hl, same)
         if not hl:
             if busy:
@@ -1099,7 +1148,9 @@ class GamePanel(QFrame):
             self.where.setText("No category: just saved")
             self.where.setToolTip("The clips are saved in the Automation folder's Sports folder. Pick a category under "
                                   "Clips for to queue them for its account.")
-        self.reel_btn.setEnabled(len(hl) >= 2 and not busy)
+        only_found = bool(ticked) and all(h.get("origin") == "event" for h in ticked)
+        self.reel_btn.setEnabled((len(hl) >= 2 or only_found) and not busy)
+        self.reel_btn.setText("Make reel of found" if only_found else "Make reel")
         self.reel_btn.setVisible(bool(hl))
         made = g.get("made") or []
         reels = g.get("reels") or []
@@ -1237,6 +1288,18 @@ class SportsView(QWidget):
         self.describe = muted("", wrap=False)
         self.describe.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Preferred)
         top.addWidget(self.describe, 1)
+        self.event_box = QLineEdit()
+        self.event_box.setPlaceholderText("Search by in-game event: red card after a VAR check…")
+        self.event_box.setClearButtonEnabled(True)
+        self.event_box.setMinimumWidth(300)
+        self.event_box.setMaximumWidth(460)
+        self.event_box.setToolTip(EVENT_HELP)
+        self.event_box.returnPressed.connect(self._find_events)
+        self.event_btn = QPushButton("Search")
+        self.event_btn.setToolTip(EVENT_HELP)
+        self.event_btn.clicked.connect(self._find_events)
+        top.addWidget(self.event_box)
+        top.addWidget(self.event_btn)
         self.ai_chip = chip("")
         self.ai_chip.setCursor(Qt.PointingHandCursor)
         self.ai_chip.mousePressEvent = lambda _e: self.open_settings.emit("AI")  # type: ignore[method-assign]
@@ -1520,6 +1583,14 @@ class SportsView(QWidget):
                and g.get("status") not in ("queued", "analysing", "making")]
         if ids:
             self.ask("analyse", (ids, False))
+
+    def _find_events(self) -> None:
+        """Search the game you're looking at (else every picked game) for the moment typed in the header."""
+        query = " ".join(self.event_box.text().split())
+        if len(query) < 3:
+            self._banner("Type the moment to look for, such as “red card” or “technical foul on the bench”.")
+            return
+        self.ask("find_events", (query, [self.current] if self.current else None))
 
     def _remove(self) -> None:
         if self.current:

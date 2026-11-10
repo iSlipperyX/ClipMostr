@@ -513,15 +513,15 @@ class Handler(BaseHTTPRequestHandler):
         get = method == "GET"
         if get and path == "/api/sports":
             return self.send_json(200, host.sports(q.get("rev", "")))
-        m = re.fullmatch(r"/api/sports/thumbs/" + ID + r"/(h\d{1,3})", path)
+        m = re.fullmatch(r"/api/sports/thumbs/" + ID + r"/([he]\d{1,3})", path)
         if m and get:
             return self.send_file(host.sports_thumb(m.group(1), m.group(2)), "image/jpeg")
         if method != "POST":
             raise HostError(404, "No such request.")
-        m = re.fullmatch(r"/api/sports/(filter|find|clear|cancel)", path)
+        m = re.fullmatch(r"/api/sports/(filter|find|clear|cancel|events)", path)
         if m:
             return self.send_json(200, host.sports_do(m.group(1), self.body(), device_name=self.device.get("name", "")))
-        m = re.fullmatch(r"/api/sports/games/" + ID + r"/(pick|analyse|choose|make|reel|version|remove|cancel)", path)
+        m = re.fullmatch(r"/api/sports/games/" + ID + r"/(pick|analyse|choose|make|reel|version|remove|cancel|events)", path)
         if m:
             return self.send_json(200, host.sports_do(m.group(2), self.body(), m.group(1),
                                                       device_name=self.device.get("name", "")))

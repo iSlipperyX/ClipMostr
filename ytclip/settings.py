@@ -155,6 +155,8 @@ class Settings:
     api_football_key: str = ""  # api-football.com (free tier: 100 requests a day): soccer cards, goals, VAR
     event_pad_before: float = 12.0  # seconds kept before the event (the build-up)
     event_pad_after: float = 25.0  # and after it (the card, the reaction, the first replay)
+    reel_transitions: str = "mix"  # reel.STYLES: mix | dissolve | whip | zoom
+    reel_transition_seconds: float = 0.3
     # Export
     aspect: str = "vertical_blur"
     resolution: int = 1080
@@ -275,6 +277,7 @@ class Settings:
     research_per_region: int = 50
     research_min_minutes: float = 3.0
     research_deep_count: int = 12
+    research_saturation_checks: int = 2  # research/velocity.py: Shorts searches per scan (100 quota units each)
     research_auto: bool = True
     research_interval: int = 30
     research_alert: int = 75
@@ -658,11 +661,13 @@ AI_PROVIDERS = (("claude", "Claude (Anthropic)"), ("gemini", "Gemini (Google)"),
 MAC_AI_PROVIDERS = (("claude", "Claude (Anthropic)"), ("gemini", "Gemini (Google)"),
                     ("local", "Local AI on this Mac (free, private)"),
                     ("pc", "Your PC's local AI (free, private; your PC linked)"))
-EVENT_SEARCH_MODELS = (("auto", "The sentence model when it's here, else words"),
+EVENT_SEARCH_MODELS = (("auto", "The sentence model (a 90 MB download, once); words if it can't be had"),
                        ("minilm", "Sentence model (all-MiniLM-L6-v2, downloads once)"),
                        ("words", "Words only (no download)"))
 EVENT_FEEDS = (("auto", "ESPN, or API-Football when it has a key"), ("espn", "ESPN's public scoreboard"),
                ("api-football", "API-Football (needs its key)"), ("off", "Off: the commentary only"))
+REEL_TRANSITIONS = (("mix", "A mix of quick wipes, slides and zooms"), ("dissolve", "Cross-dissolves"),
+                    ("whip", "Whip-pans"), ("zoom", "Zoom into the next play"))
 CLAUDE_MODELS = (("claude-opus-5-5", "Claude Opus 5.5 (best)"), ("claude-sonnet-5-5", "Claude Sonnet 5.5"),
                  ("claude-haiku-5-5", "Claude Haiku 5.5 (cheapest)"))
 GEMINI_MODELS = (("gemini-4-argon", "Gemini 4 Argon (best)"),  # gemini.MODELS
@@ -911,6 +916,9 @@ SCHEMA: list[Field] = [
           help="The build-up: the foul before the card, the pass before the goal"),
     Field("event_pad_after", "Keep after an event (s)", "Sports", "float", lo=3, hi=90, step=1,
           help="The referee, the crowd, the protests and the first replay"),
+    Field("reel_transitions", "Reel transitions", "Sports", "choice", choices=REEL_TRANSITIONS,
+          help="How one play hands over to the next in a recap reel"),
+    Field("reel_transition_seconds", "Transition length (s)", "Sports", "float", lo=0.1, hi=0.6, step=0.05),
 
     Field("aspect", "Format", "Export", "choice", choices=ASPECTS,
           help="With TikTok-ready output on, Original and 1:1 are fitted into a 9:16 frame with a blurred fill"),
@@ -1129,6 +1137,9 @@ SCHEMA: list[Field] = [
           help="Short videos have little to cut. 0 keeps everything"),
     Field("research_deep_count", "Most-replayed checks per scan", "Research", "int", lo=0, hi=50,
           help="The best candidates get their Most replayed graph read (a few seconds each, no quota)"),
+    Field("research_saturation_checks", "Saturation checks per scan", "Research", "int", lo=0, hi=10,
+          help="The fastest risers get a YouTube Shorts search for clips of them already posted (100 quota units "
+               "each, at most 20 a day, each video once per 12 hours). 0 turns it off"),
     Field("research_auto", "Keep checking while ClipMonster is open", "Research", "bool"),
     Field("research_interval", "Check every (minutes)", "Research", "int", lo=10, hi=720, step=5),
     Field("research_alert", "Highlight new videos scoring at least", "Research", "int", lo=0, hi=100,

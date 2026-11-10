@@ -34,6 +34,19 @@ piper = ["piper-tts>=1.2"]
 # AI pictures from Python (SDXL-Turbo / FLUX.1-schnell). Several GB; install the torch build for your graphics
 # card first (pytorch.org). Without it, ComfyUI (if you run it), your B-roll folder or built-in textures are used.
 diffusion = ["torch>=2.3", "diffusers>=0.30", "transformers>=4.44", "accelerate>=0.33", "safetensors>=0.4"]
+# The Sports event search's sentence model (all-MiniLM-L6-v2, 90 MB, downloaded on first use) runs on ONNX
+# Runtime. Install ONE of these: the three builds share the module name `onnxruntime`, and two at once break
+# each other. Without any, the search matches by words. Which processor it uses is picked at run time
+# (intelligence/hardware.py: onnx_providers), falling back to the CPU when a provider can't load the model.
+#   search           the standard build: the CPU on Windows and Linux; on a Mac it includes Core ML
+#                    (Apple silicon's Neural Engine and graphics). The Windows app ships this one (with Kokoro).
+#   search-directml  Windows, any DirectX 12 graphics card: AMD Radeon, Intel Arc, NVIDIA
+#   search-cuda      NVIDIA with CUDA 12 and cuDNN 9 installed (Windows or Linux)
+# The local AI's own acceleration is llama.cpp's, not ONNX: Metal on a Mac, CUDA or Vulkan on Windows and Linux
+# (packaging/build_llama_cpp.py builds the server the app ships).
+search = ["onnxruntime>=1.17"]
+search-directml = ["onnxruntime-directml>=1.17; sys_platform == 'win32'"]
+search-cuda = ["onnxruntime-gpu>=1.19; sys_platform != 'darwin'"]
 build = ["pyinstaller>=6.10"]
 # ClipMonster for Mac (ytclip/mac/; packaging/build_mac.py): pip install -e ".[mac]" on a Mac. Its API keys and
 # its key for each PC go in the Keychain, and Deno (for YouTube) comes with it; whisper.cpp stands in for
@@ -54,7 +67,8 @@ testpaths = ["tests"]
 [tool.setuptools]
 packages = ["ytclip", "ytclip.gui", "ytclip.posting", "ytclip.posting.tiktok", "ytclip.intelligence",
             "ytclip.vision", "ytclip.audio", "ytclip.rendering", "ytclip.compliance",
-            "ytclip.creator", "ytclip.telegram", "ytclip.remote", "ytclip.mac", "ytclip.sportsdesk"]
+            "ytclip.creator", "ytclip.telegram", "ytclip.remote", "ytclip.mac", "ytclip.sportsdesk",
+            "ytclip.research"]
 package-data = { ytclip = ["fonts/*.ttf", "fonts/licenses/*.txt"] }
 
 [tool.setuptools.dynamic]

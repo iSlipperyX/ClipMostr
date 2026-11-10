@@ -931,7 +931,13 @@ class CategoryPills(QWidget):
         self.lay.addWidget(self.chip)
         self.lay.addStretch(1)
 
-    def set_items(self, items: list[tuple[str, object, int]], current: object) -> None:
+    BADGE_MARKS = {"Hot Arbitrage": "🔥", "High Retention": "🔁", "Oversaturated": "🧊", "Rising": "📈"}
+
+    def set_items(self, items: list[tuple[str, object, int]], current: object,
+                  badges: dict | None = None) -> None:
+        """`badges`: category id -> (badge, why), the opportunity badge shown on that category's pill
+        (research/velocity.py)."""
+        badges = badges or {}
         for b in self.buttons:
             self.group.removeButton(b)
             self.lay.removeWidget(b)
@@ -939,8 +945,12 @@ class CategoryPills(QWidget):
             b.deleteLater()
         self.buttons = []
         for k, (label, data, count) in enumerate(items):
-            b = QPushButton(f"{label}  {count}")
+            badge, why = badges.get(data, ("", "")) if isinstance(data, str) else ("", "")
+            b = QPushButton(f"{label}  {count}" + (f"  {self.BADGE_MARKS.get(badge, '')} {badge}" if badge else ""))
             b.setObjectName("pill")
+            if badge:
+                b.setToolTip(f"{badge}: {why}")
+                b.setProperty("badge", badge)
             b.setCheckable(True)
             b.setCursor(Qt.PointingHandCursor)
             b.setProperty("category", data)

@@ -104,6 +104,11 @@ class RemoteBackend(Backend):
         return c.post(f"/api/sports/games/{game_id}/reel", body)
 
     @staticmethod
+    def _find_events(c, query: str, ids: list | None = None, feed: str = "", anchors: list | None = None):
+        return c.post("/api/sports/events", {"query": query, "ids": list(ids or []), "feed": feed,
+                                             "anchors": list(anchors or [])})
+
+    @staticmethod
     def _version(c, game_id: str, video: str):
         return c.post(f"/api/sports/games/{game_id}/version", {"video": video})
 

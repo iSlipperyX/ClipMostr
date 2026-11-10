@@ -256,3 +256,166 @@ def verdict(value: float) -> str:
         return "Worth a look"
     return "Weak clip potential"
 
+
+
+# ---------------------------------------------------------------- the sports index
+#
+# A game's clip-ability once it's been listened to (the Sports tab), by the five parts of
+#
+#     S = 0.30 M_momentum + 0.25 P_replayed + 0.20 E_emotion + 0.15 C_controversy + 0.10 Q_audio
+#
+# each 0-1, the sum shown as 0-100. A part that can't be measured (no view history, no Most replayed
+# graph, no commentary to read) is left out and the rest re-weighted, as above, and the result says which.
+
+SPORTS_WEIGHTS = {"momentum": 0.30, "replayed": 0.25, "emotion": 0.20, "controversy": 0.15, "audio": 0.10}
+SPORTS_LABELS = {"momentum": "Momentum", "replayed": "Most replayed", "emotion": "Crowd & commentary emotion",
+                 "controversy": "Controversy", "audio": "Commentary clarity"}
+
+# What fans and commentators say when a call is argued about. Each is a whole word or phrase.
+CONTROVERSY_TERMS = (
+    "robbed", "robbery", "never a penalty", "never a foul", "never a red", "terrible ref", "awful ref", "worst ref",
+    "ref is blind", "blind ref", "rigged", "fixed", "cheated", "cheating", "fight", "brawl", "unbelievable",
+    "disgrace", "disgraceful", "scandal", "scandalous", "controversial", "controversy", "joke of a", "what a joke",
+    "bad call", "terrible call", "awful call", "horrible call", "blown call", "missed call", "wrong call",
+    "shocking decision", "terrible decision", "clear penalty", "clear foul", "clear red", "clearly offside",
+    "not offside", "should have been", "how is that not", "how was that not", "ejected", "sent off", "red card",
+    "var", "outrage", "outrageous", "furious", "livid", "dirty", "cheap shot", "flop", "dive", "diving", "embarrassing",
+)
+_CONTROVERSY = None
+
+
+def controversy_terms(text: str) -> list[str]:
+    """The trigger terms in `text`, once each, in the order they come."""
+    global _CONTROVERSY
+    if _CONTROVERSY is None:
+        import re
+
+        _CONTROVERSY = re.compile(r"(?<![\w'])(" + "|".join(sorted(map(re.escape, CONTROVERSY_TERMS), key=len,
+                                                                   reverse=True)) + r")(?![\w'])", re.I)
+    found: list[str] = []
+    for m in _CONTROVERSY.finditer(text or ""):
+        w = m[1].lower()
+        if w not in found:
+            found.append(w)
+    return found
+
+
+def replayed_shape(heatmap: list[dict], duration: float) -> float | None:
+    """P_replayed: how peaked the Most replayed graph is, from its variance and its kurtosis. A flat graph is
+    0; a few sharp spikes standing far above the rest is 1. None without a graph."""
+    if not heatmap:
+        return None
+    values = np.array([float(h.get("value", 0.0)) for h in heatmap], float)
+    if len(values) > 12:  # the first seconds are always replayed (people starting over): not a moment
+        values = values[max(1, len(values) // 33):]
+    if len(values) < 4 or float(values.max()) <= 0:
+        return 0.0
+    values = values / float(values.max())
+    var = float(values.var())
+    sd = math.sqrt(var)
+    kurt = float(np.mean(((values - values.mean()) / sd) ** 4) - 3.0) if sd > 1e-6 else 0.0  # excess: 0 = bell
+    # A flat graph's variance is ~0; a strongly peaked one's about 0.04 and up. Spiky graphs have heavy tails.
+    return round(0.6 * min(1.0, var / 0.04) + 0.4 * min(1.0, max(0.0, kurt) / 6.0), 3)
+
+
+def emotion(db: np.ndarray, centroid: np.ndarray | None = None, roars: int | None = None,
+            duration: float = 0.0) -> float | None:
+    """E_emotion: how far the sound swings (quiet build-up to a roar, in dB), how often the crowd roars, and
+    how much the voice's pitch moves (the brightness of the sound stands in for pitch: an excited commentator
+    and a roaring crowd both push it up). None without sound."""
+    if db is None or len(db) < 8:
+        return None
+    loud = db[np.isfinite(db)]
+    loud = loud[loud > -70]
+    if len(loud) < 8:
+        return None
+    swing = float(np.percentile(loud, 97) - np.percentile(loud, 30))  # dB between the usual level and the peaks
+    parts = [(0.45, min(1.0, max(0.0, (swing - 4.0) / 14.0)))]
+    if roars is not None and duration > 0:
+        per_ten = roars / (duration / 600.0)
+        parts.append((0.3, min(1.0, per_ten / 3.0)))  # three roars every ten minutes is a lively game
+    if centroid is not None and len(centroid) >= 8:
+        c = centroid[np.isfinite(centroid) & (centroid > 0)]
+        if len(c) >= 8:
+            spread = float(np.std(c) / max(1.0, np.mean(c)))  # variation relative to its own level
+            parts.append((0.25, min(1.0, spread / 0.45)))
+    return round(sum(w * x for w, x in parts) / sum(w for w, _ in parts), 3)
+
+
+def controversy(texts: list[str], minutes: float = 0.0) -> tuple[float | None, list[str]]:
+    """C_controversy: the trigger terms in the commentary and the comments. (0-1, the terms found); None when
+    there's nothing to read."""
+    texts = [t for t in texts if t and t.strip()]
+    if not texts:
+        return None, []
+    joined = "\n".join(texts)
+    found = controversy_terms(joined)
+    if not found:
+        return 0.0, []
+    total = len(_CONTROVERSY.findall(joined))
+    variety = min(1.0, len(found) / 5.0)  # five different terms: it's an argued-about game
+    rate = min(1.0, total / max(4.0, (minutes or 10.0) * 0.6))  # more than one every two minutes or so
+    return round(0.6 * variety + 0.4 * rate, 3), found
+
+
+def audio_quality(db: np.ndarray, flatness: np.ndarray | None = None) -> float | None:
+    """Q_audio: the commentary against the noise under it. The level of the clear (voice-like) seconds over
+    the level of the noise-like ones, with how much of the game has a clear voice at all."""
+    if db is None or len(db) < 8:
+        return None
+    ok = np.isfinite(db) & (db > -70)
+    if flatness is None or len(flatness) != len(db) or int(ok.sum()) < 8:
+        loud = db[ok]
+        if len(loud) < 8:
+            return None
+        ratio = float(np.percentile(loud, 75) - np.percentile(loud, 10))  # speech over the floor, roughly
+        return round(min(1.0, max(0.0, (ratio - 3.0) / 15.0)), 3)
+    flat = flatness[ok]
+    loud = db[ok]
+    voice = flat < np.percentile(flat, 50)  # the more tonal half: a voice
+    if voice.sum() < 4 or (~voice).sum() < 4:
+        return None
+    ratio = float(np.median(loud[voice]) - np.percentile(loud[~voice], 25))  # dB of voice over the bed of noise
+    clear = float(np.mean(flat < 0.25))  # the share of the game that isn't a wall of noise
+    return round(0.65 * min(1.0, max(0.0, (ratio + 2.0) / 14.0)) + 0.35 * min(1.0, clear / 0.6), 3)
+
+
+def sports_index(*, momentum: float | None = None, heatmap: list[dict] | None = None, duration: float = 0.0,
+                 db: np.ndarray | None = None, centroid: np.ndarray | None = None, flatness: np.ndarray | None = None,
+                 roars: int | None = None, texts: list[str] | None = None) -> dict:
+    """{"score": 0-100, "parts": {name: 0-1}, "missing": [names], "terms": [...], "reasons": [sentences]}.
+
+    `momentum` is 0-1 already (momentum() above, or research's velocity demand); `heatmap` YouTube's Most
+    replayed; `db`/`centroid`/`flatness` the game's sound per half second (analyze.Measurements); `roars` how
+    many crowd roars sports.py found; `texts` the commentary and any comments."""
+    parts: dict[str, float] = {}
+    if momentum is not None:
+        parts["momentum"] = float(min(1.0, max(0.0, momentum)))
+    shape = replayed_shape(heatmap or [], duration)
+    if shape is not None:
+        parts["replayed"] = shape
+    e = emotion(db, centroid, roars, duration) if db is not None else None
+    if e is not None:
+        parts["emotion"] = e
+    c, terms = controversy(texts or [], duration / 60.0)
+    if c is not None:
+        parts["controversy"] = c
+    q = audio_quality(db, flatness) if db is not None else None
+    if q is not None:
+        parts["audio"] = q
+    missing = [k for k in SPORTS_WEIGHTS if k not in parts]
+    weight = sum(SPORTS_WEIGHTS[k] for k in parts)
+    value = 100 * sum(SPORTS_WEIGHTS[k] * p for k, p in parts.items()) / weight if weight else 0.0
+    reasons: list[str] = []
+    if parts.get("replayed", 0) >= 0.6:
+        reasons.append("Viewers rewatch a few sharp moments.")
+    if parts.get("emotion", 0) >= 0.6:
+        reasons.append("The crowd and the commentary swing a lot: big moments.")
+    if terms:
+        reasons.append("Argued about: " + ", ".join(f"“{t}”" for t in terms[:4]) + ".")
+    if "audio" in parts and parts["audio"] < 0.35:
+        reasons.append("The commentary is hard to hear over the noise.")
+    if missing:
+        reasons.append("Not measured: " + ", ".join(SPORTS_LABELS[k].lower() for k in missing) + ".")
+    return {"score": round(value, 1), "parts": {k: round(v, 3) for k, v in parts.items()}, "missing": missing,
+            "terms": terms, "reasons": reasons}

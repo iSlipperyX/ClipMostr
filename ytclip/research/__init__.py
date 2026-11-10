@@ -14,13 +14,13 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from dataclasses import dataclass, field
 from typing import Callable
 
-from . import clipability, categories
-from .download import is_blocked
-from .policy import language_codes
-from .categories import Category
-from .settings import Settings, app_dir
-from .sources import ChannelRef, Gathered, gather
-from .trending import (CATEGORIES, ChartUnavailable, DeepInfo, History, ResearchError, TrendingVideo, deep_check,
+from .. import clipability, categories
+from ..download import is_blocked
+from ..policy import language_codes
+from ..categories import Category
+from ..settings import Settings, app_dir
+from ..sources import ChannelRef, Gathered, gather
+from ..trending import (CATEGORIES, ChartUnavailable, DeepInfo, History, ResearchError, TrendingVideo, deep_check,
                        fetch_chart, parse_regions)
 
 Log = Callable[[str], None]
@@ -50,6 +50,7 @@ class ScanOptions:
     # Charts of the YouTube categories your categories use, besides the all-categories chart: trending videos
     # for each category that the overall chart, crowded with music and sports, never shows.
     category_charts: list[str] = field(default_factory=list)
+    saturation_checks: int = 0  # YouTube Shorts searches for the best risers (100 quota units each)
 
     @classmethod
     def from_settings(cls, s: Settings) -> "ScanOptions":
@@ -60,7 +61,8 @@ class ScanOptions:
                    cookies=s.cookies_browser or None, channels=channels,
                    searches=searches, unreadable=bad,
                    language=next(iter(language_codes(s.pick_languages)), ""), categories=categories.load(s),
-                   category_charts=category_charts(s) if s.research_category_charts else [])
+                   category_charts=category_charts(s) if s.research_category_charts else [],
+                   saturation_checks=max(0, int(getattr(s, "research_saturation_checks", 0) or 0)))
 
     @property
     def charts(self) -> list[str]:
@@ -248,6 +250,12 @@ def scan(opts: ScanOptions, history: History, log: Log | None = None, progress: 
             pool.shutdown(wait=finished, cancel_futures=True)
         for v in videos:
             clipability.score(v, velocities, now)
+
+    # The market side: each video's pace against its channel's week, and how many Shorts of it exist already.
+    from . import velocity
+
+    step("Measuring velocity and saturation", None)
+    quota += velocity.annotate(videos, history, now, api_key=opts.api_key, checks=opts.saturation_checks, log=log)
 
     videos.sort(key=lambda v: (v.score, v.velocity), reverse=True)
     result = ScanResult(videos, now, list(opts.regions), opts.category, problems, quota, first, extra.notes,
