@@ -313,26 +313,47 @@ class StudioOrchestrator(VideoCreatorOrchestrator):
         the source's own sentence. Each scene it rewrote is compared with the article again: one that now
         carries the article's wording goes back to the script's own words, and its claim stays flagged for you
         to look at instead. Returns how many scenes were put back."""
+        def measure(text: str):
+            return scriptwriter.copied(text, article.text)
+
+        def put_back(i: int) -> None:
+            board.scenes[i].speech_text = drafted[i]
+            if i == 0:
+                board.hook = hook
+            for c in checked.claims:
+                if c.changed and scene_of.get(c.n) == i:
+                    c.changed = False
+
         undone = 0
         for i, (sc, was) in enumerate(zip(board.scenes, drafted)):
             if sc.speech_text == was:
                 continue
-            now, before = scriptwriter.copied(sc.speech_text, article.text), scriptwriter.copied(was, article.text)
+            now, before = measure(sc.speech_text), measure(was)
             if now.run >= scriptwriter.COPY_RUN and now.run > before.run:
-                sc.speech_text = was
-                if i == 0:
-                    board.hook = hook
-                for c in checked.claims:
-                    if c.changed and scene_of.get(c.n) == i:
-                        c.changed = False
+                put_back(i)
                 undone += 1
+        # A short's scenes are a sentence each, so the article's sentences put into scenes side by side are
+        # each under the mark and only the script as a whole shows the run. If it's worse than the draft was,
+        # every remaining rewrite that brought the article's wording with it goes back too.
+        base, still = measure(" ".join(drafted)), measure(board.script)
+        if still.lifted and (still.run > base.run or still.share > base.share + 1e-9):
+            for i, (sc, was) in enumerate(zip(board.scenes, drafted)):
+                if sc.speech_text == was:
+                    continue
+                now, before = measure(sc.speech_text), measure(was)
+                if now.run > before.run or now.share > before.share + 1e-9:
+                    put_back(i)
+                    undone += 1
+            still = measure(board.script)
         if undone:
             self.log(f"The fact check's wording for {undone} scene{'s' if undone != 1 else ''} was the article's "
                      "own, so the script's words were kept there and the claim is flagged for you to check.")
-        still = scriptwriter.copied(board.script, article.text)
-        if still.lifted and not scriptwriter.copied(" ".join(drafted), article.text).lifted:
+        if still.lifted and not base.lifted:
             self.log(f"Some phrases are still the article's ({still.run} words in a row: \"{still.words[:80]}\"). "
                      "Read the script before you post.")
+            board.notes = [n for n in board.notes if not n.startswith("some phrases are still the article's")]
+            board.notes.append(f"some phrases are still the article's ({still.run} words in a row at most): "
+                               "check them before posting")
         return undone
 
     # ------------------------------------------------------------ the whole run
@@ -538,7 +559,10 @@ def gather_files(tl: Timeline, pkg: Path) -> None:
 def move_package(pkg: Path, folder: Path, visuals: list) -> list:
     """Everything in `pkg` moved into the video's folder (same layout); the visuals' paths follow."""
     pkg, folder = Path(pkg), Path(folder)
-    for src in sorted(p for p in pkg.rglob("*") if p.is_file()):
+    # timeline.json first: it's what tells posting's intake that the stock clips arriving in scenes/ are a
+    # video's makings and not videos to post (posting/store.py), and intake can look at any moment.
+    for src in sorted((p for p in pkg.rglob("*") if p.is_file()),
+                      key=lambda p: (p.relative_to(pkg).as_posix() != "timeline.json", p)):
         dest = folder / src.relative_to(pkg)
         dest.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(src), str(dest))
@@ -573,33 +597,68 @@ def memory_note(tl: Timeline, available: float | None = None) -> str:
             f"{available / 1e9:.1f} GB is free. Close other programs, or make it in two shorter parts.")
 
 
+RENDER_PREFIX = ".render-"  # posting/store.py and posting/records.py know the name too
+RENDER_STALE = 3600.0  # seconds: a render folder nothing has written to for this long was left by a crash
+
+
+def sweep_renders(folder: Path, now: float | None = None) -> int:
+    """Remove the work folders an interrupted render left in a video's folder (the app was closed, the PC
+    lost power, a scanner held a file). Only ones gone quiet: another window may be rendering here now.
+    Returns how many went."""
+    now = time.time() if now is None else now
+    gone = 0
+    try:
+        found = [d for d in Path(folder).glob(RENDER_PREFIX + "*") if d.is_dir()]
+    except OSError:
+        return 0
+    for d in found:
+        try:
+            newest = max([d.stat().st_mtime, *[f.stat().st_mtime for f in d.rglob("*")]])
+        except OSError:
+            continue
+        if now - newest > RENDER_STALE:
+            shutil.rmtree(d, ignore_errors=True)
+            gone += not d.exists()
+    return gone
+
+
 def _render_folder(folder: Path):
     """A work folder for rendering a timeline again: inside the video's own folder when that can be written
     to, so every clip is named from there in a few characters (Windows limits a command's length, and a long
     video has hundreds of clips); else the usual work folder."""
+    sweep_renders(folder)
     try:
-        return tempfile.TemporaryDirectory(prefix=".render-", dir=folder, ignore_cleanup_errors=True)
+        return tempfile.TemporaryDirectory(prefix=RENDER_PREFIX, dir=folder, ignore_cleanup_errors=True)
     except OSError:
         return work_folder("timeline-")
 
 
-def list_edit(folder: Path, video: Path) -> bool:
+def list_edit(folder: Path, video: Path) -> str:
     """Add a re-rendered video to its folder's clips.json, as an edit of the video the Studio made there: it
     then carries the same AI-generated label, caption, hashtags and category when posting takes it in, always
     waits for your OK in the queue (posting/store.py), and counts as something left to post, so Clean up
-    keeps the timeline while it's there. True when it was listed (False: not a creation's folder)."""
+    keeps the timeline while it's there.
+
+    "new" when it was added, "listed" when a video of that name was listed already (rendered again over the
+    last edit), "" when it isn't listed: not a creation's folder, or the video isn't right in it (posting
+    looks a file up in the clips.json of the file's own folder, so a record for one anywhere else would
+    promise a label and a hold that never come)."""
     index = folder / "clips.json"
     try:
         data = json.loads(index.read_text(encoding="utf-8"))
-        name = video.resolve().relative_to(folder.resolve()).as_posix()
+        if video.resolve().parent != folder.resolve():
+            return ""
     except (OSError, ValueError):
-        return False
+        return ""
+    name = video.name
     clips = data.get("clips") if isinstance(data, dict) else None
     if not isinstance(clips, list) or not isinstance(data.get("creator"), dict):
-        return False
+        return ""
     originals = [c for c in clips if isinstance(c, dict) and c.get("file") and not c.get("edit_of")]
-    if not originals or any(isinstance(c, dict) and c.get("file") == name for c in clips):
-        return bool(originals)  # listed already (rendered again over the last edit)
+    if not originals:
+        return ""
+    if any(isinstance(c, dict) and c.get("file") == name for c in clips):
+        return "listed"
     first = originals[0]
     clips.append({**first, "rank": max((int(c.get("rank") or 0) for c in clips if isinstance(c, dict)), default=0) + 1,
                   "file": name, "title": f"{first.get('title') or video.stem} (edit)", "edit_of": first["file"]})
@@ -608,8 +667,8 @@ def list_edit(folder: Path, video: Path) -> bool:
         tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
         os.replace(tmp, index)
     except OSError:
-        return False
-    return True
+        return ""
+    return "new"
 
 
 def render_timeline(path: str | Path, out: str | Path | None = None, *, settings=None, log=None, progress=None,
@@ -656,7 +715,16 @@ def render_timeline(path: str | Path, out: str | Path | None = None, *, settings
             raise CreatorError(f"The video was rendered but couldn't be saved as {dest.name} ({exc.strerror or exc}). "
                                "If it's open in a player, close it and render again.") from exc
     report.path = dest
-    if list_edit(folder, dest):
+    listed = list_edit(folder, dest)
+    if listed == "new":
         log(f"{dest.name} is listed with its video: if this folder is one posting watches, the edit joins the "
             "queue labelled AI-generated and waits there for your OK. Remove the one you don't want posted.")
+    elif listed:
+        log(f"{dest.name} replaces the edit made before. If that one is still in the queue, this is now what it "
+            "posts (after your OK). If you removed it from the queue, or it has posted, posting won't pick this "
+            "one up by itself: add it in the Queue tab.")
+    elif out and dest.resolve().parent != folder.resolve():
+        log(f"{dest.name} was saved outside its video's folder, so it isn't listed with the video. A folder "
+            "posting watches would take it in as an ordinary video: no AI-generated label and no wait for your "
+            "OK. Leave out the place to save it and the edit is listed, labelled and held.")
     return report

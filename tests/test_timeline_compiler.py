@@ -391,6 +391,60 @@ def test_a_sound_used_again_and_again_is_one_input(tmp_path):
     rms = lambda a, b: float(np.sqrt(np.mean(x[int(a * 8000):int(b * 8000)] ** 2)))  # noqa: E731
     for t in (0.5, 1.5, 2.5, 3.5):  # every one of them plays, each at its own time
         assert rms(t + 0.03, t + 0.17) > 10 * rms(t - 0.3, t - 0.05) + 0.01
+    assert abs(len(x) / 8000 - 4.0) < 0.1  # and the sound runs the whole length
+
+
+def seconds_of_sound(path: Path) -> float:
+    raw = subprocess.run([ffmpeg_exe(), "-v", "error", "-i", str(path), "-vn", "-ac", "1", "-ar", "8000", "-f",
+                          "f32le", "-"], capture_output=True, check=True).stdout
+    return len(raw) / 4 / 8000
+
+
+def test_a_repeated_sound_never_ends_the_mix_early(tmp_path):
+    """Several reads of one input reach their mix together, the mix lost its clock when the first of them
+    ended, and the bus (padded from that clock) stopped at its last clip: with music placed three times and no
+    voice, a 12-second video had six seconds of sound and no effects after them."""
+    tl = simple(tmp_path, 12)
+    beep(tmp_path / "bed.wav", 2.0)
+    beep(tmp_path / "beep.wav")
+    tl.assets["bed"] = T.Asset("audio", "bed.wav", duration=2.0)
+    tl.assets["beep"] = T.Asset("audio", "beep.wav", duration=0.2)
+    tl.track(T.AUDIO_MUSIC).clips += [T.AudioClip(f"m{i}", "bed", 2.0 * i, 2.0, gain_db=-20) for i in range(3)]
+    tl.track(T.AUDIO_SFX).clips += [T.AudioClip("late", "beep", 10.0, 0.2)]
+    render(tl, tmp_path)
+    assert abs(seconds_of_sound(tmp_path / "out.mp4") - 12.0) < 0.1
+    x = sound(tmp_path / "out.mp4")
+    rms = lambda a, b: float(np.sqrt(np.mean(x[int(a * 8000):int(b * 8000)] ** 2)))  # noqa: E731
+    assert rms(10.03, 10.17) > 10 * rms(9.0, 9.9) + 0.01  # the late effect is there
+
+    # The same when it's the voice (the first layer of the mix) that repeats a cut.
+    spoken = simple(tmp_path, 12)
+    spoken.assets["say"] = T.Asset("audio", "bed.wav", duration=2.0)
+    spoken.assets["beep"] = T.Asset("audio", "beep.wav", duration=0.2)
+    spoken.track(T.AUDIO_VOICE).clips += [T.AudioClip("v0", "say", 0.0, 2.0), T.AudioClip("v1", "say", 4.0, 2.0)]
+    spoken.track(T.AUDIO_SFX).clips += [T.AudioClip("late", "beep", 10.0, 0.2)]
+    render(spoken, tmp_path, "spoken.mp4")
+    assert abs(seconds_of_sound(tmp_path / "spoken.mp4") - 12.0) < 0.1
+
+
+def test_a_first_picture_one_frame_long_is_kept(tmp_path):
+    """Joining streams end to end takes each one's length from the spacing of its frames, so a first stream
+    of a single frame counted as no length at all: the frame was dropped and every cut came a frame early."""
+    tl = T.standard("one", T.Canvas(W, H, 30, background="#14EB14"), 61 / 30)
+    colours(tl, red=RED, blue=BLUE)
+    tl.track(T.VIDEO_BASE).clips += [T.VideoClip("a", "red", 1 / 30, 1.0), T.VideoClip("b", "blue", 31 / 30, 1.0)]
+    render(tl, tmp_path)
+    f = frames(tmp_path / "out.mp4")
+    assert len(f) == 61
+    assert near(f[0, 100, 90], GREEN) and near(f[1, 100, 90], RED) and near(f[30, 100, 90], RED)
+    assert near(f[31, 100, 90], BLUE) and near(f[60, 100, 90], BLUE)
+    # A first clip of one frame, the same.
+    tl = T.standard("one", T.Canvas(W, H, 30), 31 / 30)
+    colours(tl, red=RED, blue=BLUE)
+    tl.track(T.VIDEO_BASE).clips += [T.VideoClip("a", "red", 0.0, 1 / 30), T.VideoClip("b", "blue", 1 / 30, 1.0)]
+    render(tl, tmp_path, "clip.mp4")
+    f = frames(tmp_path / "clip.mp4")
+    assert len(f) == 31 and near(f[0, 100, 90], RED) and near(f[1, 100, 90], BLUE)
 
 
 def test_inputs_are_named_from_the_work_folder_when_that_is_shorter(tmp_path):
@@ -399,6 +453,29 @@ def test_inputs_are_named_from_the_work_folder_when_that_is_shorter(tmp_path):
     assert C.input_path(clip, work) == str(Path("..") / "pkg" / "scenes" / "scene_001_pexels_123.mp4")
     assert C.input_path(clip, None) == str(clip.resolve())
     assert C.input_path(work / "-odd.mp4", work) == str((work / "-odd.mp4").resolve())  # never read as an option
+
+
+def test_a_relative_input_counts_up_the_way_the_system_will(tmp_path, monkeypatch):
+    """Windows takes ".." off the text of the folder ffmpeg runs in; macOS and Linux follow the real
+    folders. With the video's folder reached through a link (a subst drive, a junction), a name worked out
+    from the real folders pointed nowhere on Windows."""
+    import os
+
+    real = tmp_path / "real" / "long" / "path" / "videos"
+    (real / "w").mkdir(parents=True)
+    clip = tmp_path / "real" / "long" / "path" / "broll" / "a clip with a long enough name.mp4"
+    link = tmp_path / "s"
+    try:
+        link.symlink_to(real, target_is_directory=True)
+    except OSError:
+        pytest.skip("no links here")
+    work = link / "w"
+    rel = C.input_path(clip, work)  # here: through the real folders
+    assert not os.path.isabs(rel) and os.path.realpath(os.path.join(work, rel)) == os.path.realpath(clip)
+    monkeypatch.setattr(C.sys, "platform", "win32")  # there: by the text of the path
+    rel = C.input_path(clip, work)
+    assert os.path.normpath(os.path.join(work, rel)) == str(clip)
+    assert C.relative_to_work(clip, work) == os.path.relpath(clip, work)  # the link is left as written
 
 
 def test_a_command_too_long_for_windows_is_refused_in_plain_words(tmp_path, monkeypatch):

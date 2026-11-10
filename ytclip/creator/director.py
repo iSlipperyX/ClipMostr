@@ -389,6 +389,9 @@ def normalise(board: Storyboard, style: Style | None = None, hook_words: int = H
     camera moves, pictures for every scene. Notes what it changed in board.notes. `max_scenes`: the most
     scenes kept (a long video's scriptwriter asks for more)."""
     style = style or get_style(DEFAULT_STYLE)
+    # What an earlier pass left out is that pass's news: a storyboard previewed, trimmed and handed back
+    # would otherwise be announced as cut again.
+    board.notes = [n for n in board.notes if not str(n).startswith("kept the first")]
     scenes: list[Scene] = []
     for raw in board.scenes:
         text = clean_speech(raw.speech_text)

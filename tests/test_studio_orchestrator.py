@@ -17,6 +17,7 @@ from ytclip.editor import timeline_compiler
 from ytclip.settings import Settings
 from ytclip.studio import orchestrator as O
 from ytclip.studio import scraper, timeline_builder, voice_studio
+from ytclip.studio import scriptwriter as W
 from ytclip.studio import timeline_schema as T
 
 URL = "https://example.org/news/lighthouse"
@@ -430,6 +431,36 @@ def test_the_fact_checks_wording_is_not_kept_when_it_is_the_articles_own(tmp_pat
     assert any("the article's own" in m for m in log)
 
 
+def test_the_articles_sentences_put_into_scenes_side_by_side_go_back_too(tmp_path, monkeypatch):
+    """Each rewrite was under the mark on its own (a short's scenes are a sentence each), so each was kept,
+    and together they were the article word for word."""
+    words = ARTICLE.text.split("\n\n")[2].split()
+    parts = [" ".join(words[0:9]) + ".", " ".join(words[9:18]) + ".", " ".join(words[18:]) + ""]
+    assert all(len(p.split()) < W.COPY_RUN for p in parts)
+
+    def check(s, board, facts, **kw):
+        report = factcheck.Report("fix", checked=4)
+        report.claims = [factcheck.Claim(n, n, board.scenes[n - 1].speech_text, "contradicted", fix=parts[n - 2],
+                                         changed=True) for n in (2, 3, 4)]
+        report.claims.append(factcheck.Claim(5, 5, board.scenes[4].speech_text, "contradicted",
+                                             fix="The lamp room was rebuilt later.", changed=True))
+        for n in (2, 3, 4):
+            board.scenes[n - 1].speech_text = parts[n - 2]
+        board.scenes[4].speech_text = "The lamp room was rebuilt later."
+        return report
+
+    monkeypatch.setattr(factcheck, "check", check)
+    log = []
+    board = studio(tmp_path, log=log, creator_factcheck="fix").storyboard(O.StudioRequest(url=URL, seconds=20))
+    assert not W.copied(board.script, ARTICLE.text).lifted
+    assert [sc.speech_text.startswith("Then wave") for sc in board.scenes[1:4]] == [True, True, True]
+    assert board.scenes[4].speech_text == "The lamp room was rebuilt later."  # the honest fix stays
+    claims = {c["n"]: c["changed"] for c in board.factcheck["claims"]}
+    assert claims == {2: False, 3: False, 4: False, 5: True}
+    assert any("3 scenes was the article's own" in m for m in log)
+    assert not any(n.startswith("some phrases") for n in board.notes)
+
+
 def test_the_classic_creator_fits_a_cloud_narration_too(tmp_path, monkeypatch):
     """ElevenLabs is in the shared voice-engine list: the classic Creator re-read the whole script, paid twice."""
     from ytclip.creator.orchestrator import VideoCreatorOrchestrator
@@ -458,6 +489,38 @@ def test_a_long_storyboard_or_script_handed_in_is_taken_whole(tmp_path):
     classic = VideoCreatorOrchestrator(settings(tmp_path), log=log.append, register=False)
     assert len(classic.storyboard(CreateRequest(script=paragraphs)).scenes) == 20
     assert any("kept the first 20 of 60 scenes" in m and "Studio" in m for m in log)
+
+
+def test_a_long_storyboard_with_a_scene_that_splits_keeps_its_ending(tmp_path):
+    """Tidying a storyboard can split a long scene in two. The limit was the number of scenes handed in, so
+    a 45-scene storyboard with one long scene came back without its last scene, and one more went missing
+    each time it was handed back."""
+    long_board = script(45)
+    long_board["scenes"][20]["speech_text"] = (
+        "The keeper wrote in his log every single night for forty years without missing a day of it. "
+        "Nobody on the mainland ever read a page of what he had written there until the winter he died alone.")
+    ending = long_board["scenes"][-1]["speech_text"]
+    log = []
+    st = studio(tmp_path, log=log)
+    board = st.storyboard(O.StudioRequest(storyboard=long_board, format="long", seconds=480))
+    assert len(board.scenes) == 46 and board.scenes[-1].speech_text == ending
+    again = st.storyboard(O.StudioRequest(storyboard=board.to_json(), format="long", seconds=480))  # preview, then Make
+    assert len(again.scenes) == 46 and again.scenes[-1].speech_text == ending
+    assert not any("kept the first" in m for m in log)
+    # A cut the classic Creator made is said once: not again when the trimmed storyboard is handed back.
+    from ytclip.creator.orchestrator import VideoCreatorOrchestrator
+
+    paragraphs = "\n\n".join(f"Paragraph number {i} says something about the sea." for i in range(30))
+    log.clear()
+    classic = VideoCreatorOrchestrator(settings(tmp_path), log=log.append, register=False)
+    preview = classic.storyboard(CreateRequest(script=paragraphs))
+    assert sum("kept the first 20 of 30" in m for m in log) == 1
+    trimmed = preview.to_json()
+    trimmed["scenes"] = trimmed["scenes"][:8]
+    log.clear()
+    made = classic.storyboard(CreateRequest(storyboard=trimmed))
+    assert len(made.scenes) == 8 and not any("kept the first" in m for m in log)
+    assert not any(n.startswith("kept the first") for n in made.notes)
 
 
 def test_a_long_or_wide_video_keeps_its_length_even_with_rewards_ticked(tmp_path):
@@ -554,7 +617,7 @@ def test_an_edit_is_rendered_out_of_sight_then_listed_with_its_video(tmp_path, m
     assert sorted(p.name for p in other.iterdir() if p.suffix == ".mp4") == ["01 - Title.mp4"]
     assert not list(other.glob(".render-*"))
     # A folder that isn't a creation's (a timeline someone wrote) is rendered and nothing is listed.
-    assert O.list_edit(tmp_path, tmp_path / "x.mp4") is False
+    assert O.list_edit(tmp_path, tmp_path / "x.mp4") == ""
 
 
 def test_posting_takes_in_the_video_and_its_edit_but_never_the_makings(tmp_path):
@@ -600,6 +663,116 @@ def test_the_timeline_stays_while_an_edit_of_it_is_still_to_post(tmp_path):
         == ["Title (edit).mp4"]
     (folder / "Title (edit).mp4").unlink()  # the edit posted too: now everything goes
     records._tidy(folder, {"Title (edit).mp4"}, [root], lambda p: p.unlink())
+    assert not folder.exists()
+
+
+def fake_render(monkeypatch):
+    def render(tl, dest, *, base=None, work=None, **kw):
+        Path(dest).write_bytes(b"edited")
+        return timeline_compiler.RenderReport(Path(dest), 2.0, "libx264")
+
+    monkeypatch.setattr(timeline_compiler, "render", render)
+
+
+def test_an_edit_saved_anywhere_else_is_not_called_listed_and_never_slips_into_the_queue(tmp_path, monkeypatch):
+    """Saved into a folder inside the video's, the edit was written into clips.json under a name posting never
+    looks up, the log promised the AI-generated label and the OK, and posting took it in with neither."""
+    from ytclip.posting.store import Store
+
+    root = tmp_path / "Automation"
+    folder = creation(root / "History" / "Created" / "v1")
+    fake_render(monkeypatch)
+    log = []
+    O.render_timeline(folder, folder / "edits" / "v2.mp4", settings=Settings(), log=log.append)
+    assert (folder / "edits" / "v2.mp4").read_bytes() == b"edited"
+    clips = json.loads((folder / "clips.json").read_text(encoding="utf-8"))["clips"]
+    assert [c["file"] for c in clips] == ["01 - Title.mp4"]  # no record posting can't match
+    assert not any("waits there for your OK" in m for m in log)
+    assert any("isn't listed with the video" in m and "no AI-generated label" in m for m in log)
+    assert O.list_edit(folder, folder / "edits" / "v2.mp4") == ""
+    # Automation leaves an unlisted video inside an AI-generated video's folder alone, one folder down too.
+    took = Store(tmp_path / "library.json").add_paths([root], watched=True, now=1e12)
+    assert [Path(i.path).name for i in took] == ["01 - Title.mp4"]
+    # An ordinary clips folder one level under another is still taken in as before.
+    plain = root / "History" / "Clips" / "more"
+    plain.mkdir(parents=True)
+    (plain / "a clip.mp4").write_bytes(b"x")
+    took = Store(tmp_path / "second.json").add_paths([root], watched=True, now=1e12)
+    assert sorted(Path(i.path).name for i in took) == ["01 - Title.mp4", "a clip.mp4"]
+
+
+def test_rendering_over_an_edit_says_what_posting_will_do_with_it(tmp_path, monkeypatch):
+    """The log promised the queue every time; an edit you removed from the queue (or one that posted) never
+    comes back by itself."""
+    from ytclip.posting.store import Store
+
+    root = tmp_path / "Automation"
+    folder = creation(root / "History" / "Created" / "v1")
+    fake_render(monkeypatch)
+    log = []
+    O.render_timeline(folder, settings=Settings(), log=log.append)
+    assert any("joins the queue" in m for m in log)
+    store = Store(tmp_path / "library.json")
+    took = {Path(i.path).name: i for i in store.add_paths([root], watched=True, now=1e12)}
+    store.remove([took["Title (edit).mp4"].id])
+    log.clear()
+    O.render_timeline(folder, settings=Settings(), log=log.append)
+    assert not any("joins the queue" in m for m in log)
+    assert any("replaces the edit made before" in m and "add it in the Queue tab" in m for m in log)
+    assert store.add_paths([root], watched=True, now=1e12) == []  # as the log said
+
+
+def test_the_marker_arrives_before_the_stock_clips(tmp_path, monkeypatch):
+    """timeline.json is what tells intake a scenes/ folder holds a video's makings. Moved last, a scan landing
+    mid-delivery (seconds, when the work folder is on another drive) queued the raw stock clips."""
+    from ytclip.posting.store import Store
+
+    root = tmp_path / "Automation"
+    pkg, folder = tmp_path / "work" / "pkg", root / "History" / "Created" / "v1"
+    for name in ("assets/voice.wav", "assets/sfx/whoosh.wav", "scenes/scene_01.png", "scenes/scene_02_pexels_1.mp4",
+                 "scenes/scene_03_pixabay_9.mp4", "timeline.json"):
+        (pkg / name).parent.mkdir(parents=True, exist_ok=True)
+        (pkg / name).write_bytes(b"x")
+    folder.mkdir(parents=True)
+    store, moved, taken = Store(tmp_path / "library.json"), [], []
+    real = O.shutil.move
+
+    def move(src, dest):
+        taken.extend(store.add_paths([root], watched=True, now=1e12))  # intake looks before every file lands
+        moved.append(Path(src).name)
+        return real(src, dest)
+
+    monkeypatch.setattr(O.shutil, "move", move)
+    O.move_package(pkg, folder, [])
+    assert moved[0] == "timeline.json" and len(moved) == 6
+    assert taken == [] and store.add_paths([root], watched=True, now=1e12) == []
+
+
+def test_what_a_cut_off_render_left_is_cleared_away(tmp_path, monkeypatch):
+    """The work folder of a render is inside the video's folder. Left by a crash it was never reclaimed, and
+    it kept the folder from going once everything in it had posted."""
+    import os
+
+    from ytclip.posting import records
+
+    root = tmp_path / "Automation"
+    folder = creation(root / "History" / "Created" / "v1")
+    old, live = folder / ".render-old", folder / ".render-live"
+    for d in (old, live):
+        (d / "stills").mkdir(parents=True)
+        (d / ".edit.mp4").write_bytes(b"half")
+        (d / "stills" / "001.png").write_bytes(b"x")
+    long_ago = 1_000_000.0
+    for f in (old, *old.rglob("*")):
+        os.utime(f, (long_ago, long_ago))
+    fake_render(monkeypatch)
+    O.render_timeline(folder, settings=Settings())  # the next render clears what's gone quiet, only that
+    assert not old.exists() and (live / ".edit.mp4").exists()
+    assert O.sweep_renders(tmp_path / "nowhere") == 0
+    # Clean up, and delete-after-posting: with nothing left to post, a leftover goes with the rest.
+    for name in ("01 - Title.mp4", "Title (edit).mp4"):
+        (folder / name).unlink()
+    records._tidy(folder, {"01 - Title.mp4", "Title (edit).mp4"}, [root], lambda p: p.unlink())
     assert not folder.exists()
 
 

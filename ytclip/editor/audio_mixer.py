@@ -90,7 +90,12 @@ def _bus(sources: list[Source], role: str, total: float, tail: list[str]) -> tup
         return [], None
     parts = [_clip(s, f"{role}{i}", total) for i, s in enumerate(mine)]
     labels = "".join(f"[{role}{i}]" for i in range(len(mine)))
-    mix = f"amix=inputs={len(mine)}:normalize=0:dropout_transition=0:duration=longest," if len(mine) > 1 else ""
+    # The mix's clock is rebuilt from its sample count. Several of a bus's clips can be reads of one input
+    # (a whoosh used fifty times); their frames arrive together, and when the first of them ends the mix
+    # goes on without timestamps. The padding after it continues from the last timestamp, so without this
+    # the bus (and, when it's the first layer, the whole mix) stopped at its last clip.
+    mix = (f"amix=inputs={len(mine)}:normalize=0:dropout_transition=0:duration=longest,asetpts=N/SR/TB,"
+           if len(mine) > 1 else "")
     # Every bus runs the whole length, so the mix never ends early and the ducking always has a key to follow.
     parts.append(f"{labels}{mix}{','.join([*tail, f'apad=whole_dur={total:.3f}', f'atrim=duration={total:.3f}'])}"
                  f"[{role}bus]")

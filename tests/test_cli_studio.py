@@ -194,6 +194,30 @@ def test_a_storyboard_sent_to_a_file_is_json_and_nothing_else(fake, tmp_path, mo
         assert FakeStudio.made[0].storyboard["scenes"][0]["speech_text"].endswith("café.")
 
 
+def test_with_storyboard_only_a_warning_or_a_failure_never_lands_in_the_file(fake, tmp_path, monkeypatch, capsys):
+    """Only the log had moved to the other stream: a category that doesn't exist put its warning in front of
+    the JSON, and a failure put its reason in the file and nothing on the screen."""
+    assert cli.main(["studio", "The angle", "--storyboard-only", "--category", "Nope"]) == 0
+    got = capsys.readouterr()
+    assert json.loads(got.out)["title"] == "A board" and "no category called Nope" in " ".join(got.err.split())
+
+    class Refused(FakeStudio):
+        def storyboard(self, req):
+            self.failed_at = "script"
+            raise creator.CreatorError("example.org asks programs not to read that page")
+
+    monkeypatch.setattr(O, "StudioOrchestrator", Refused)
+    assert cli.main(["studio", "--url", "https://example.org/a", "--storyboard-only"]) == 1
+    got = capsys.readouterr()
+    assert got.out == "" and "asks programs not to read that page" in " ".join(got.err.split())
+    assert cli.main(["studio", "--storyboard-only", "--script", str(tmp_path / "nope.txt")]) == 1
+    got = capsys.readouterr()
+    assert got.out == "" and "can't be read as a script" in " ".join(got.err.split())
+    # Without the flag everything is where it was: on the screen's own stream.
+    assert cli.main(["studio", "fail"]) == 1
+    assert "asks programs not to read that page" in " ".join(capsys.readouterr().out.split())
+
+
 def test_files_that_cannot_be_read_say_so_plainly(fake, tmp_path, capsys):
     assert cli.main(["studio", "--script", str(tmp_path / "nope.txt")]) == 1
     assert "nope.txt can't be read as a script" in " ".join(capsys.readouterr().out.split())

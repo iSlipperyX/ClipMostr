@@ -1609,6 +1609,8 @@ def run_studio(argv: list[str]) -> int:
     s = Settings.load()
     # With --storyboard-only the storyboard is what's printed (to a file, often): what's happening goes to
     # the other stream, so it never lands inside the JSON.
+    # Warnings and the reason a run stopped go the same way: "> storyboard.json" must hold the storyboard or
+    # nothing, and the reason must be on the screen, not in the file.
     said = Console(stderr=True) if args.storyboard_only else console
     log = lambda m: said.print(f"[dim]{escape(m)}[/]")  # noqa: E731
     last = {"m": ""}
@@ -1677,14 +1679,14 @@ def run_studio(argv: list[str]) -> int:
                     raise ValueError("it isn't a storyboard (a JSON object, as --storyboard-only writes)")
         except (OSError, ValueError) as exc:
             why = exc.strerror if isinstance(exc, OSError) and exc.strerror else str(exc)
-            console.print(f"[red]✗ {escape(str(file))} can't be read as a {what}: {escape(why)}[/]")
+            said.print(f"[red]✗ {escape(str(file))} can't be read as a {what}: {escape(why)}[/]")
             return 1
     if not (args.prompt.strip() or args.url.strip() or script or board is not None):
         p.print_help()
         return 2
     category = orchestrator.find_category(s, args.category) if args.category else None
     if args.category and category is None:
-        console.print(f"[yellow]⚠ There's no category called {escape(args.category)}.[/] The video goes to an "
+        said.print(f"[yellow]⚠ There's no category called {escape(args.category)}.[/] The video goes to an "
                       f"Automation folder of that name; posting queues it only if you have a single account.")
     req = studio.StudioRequest(
         prompt=args.prompt, url=args.url, script=script, storyboard=board, title=args.title,
@@ -1719,13 +1721,13 @@ def run_studio(argv: list[str]) -> int:
             return 0
         result = maker.create(req)
     except KeyboardInterrupt:
-        console.print("[red]Interrupted.[/]")
+        said.print("[red]Interrupted.[/]")
         return 130
     except Cancelled:
         return 130
     except Exception as exc:  # noqa: BLE001
         where = f" ({studio.STATE_WORDS.get(maker.failed_at, maker.failed_at).lower()})" if maker.failed_at else ""
-        console.print(f"[red]✗ {escape(str(exc))}[/][dim]{escape(where)}[/]")
+        said.print(f"[red]✗ {escape(str(exc))}[/][dim]{escape(where)}[/]")
         return 1
     c = result.checks
     console.print(f"[green]✓ {escape(result.storyboard.title)}[/] · {result.duration:.0f} s · "

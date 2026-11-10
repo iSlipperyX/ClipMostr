@@ -661,9 +661,22 @@ def creation_files(folder: Path, data: dict) -> list[Path]:
     return out
 
 
+RENDER_LEFTOVERS = ".render-*"  # a work folder an interrupted re-render left behind (studio/orchestrator.py)
+
+
+def _render_leftovers(folder: Path) -> list[Path]:
+    try:
+        return sorted(d for d in folder.glob(RENDER_LEFTOVERS) if d.is_dir())
+    except OSError:
+        return []
+
+
 def creation_dirs(folder: Path) -> list[Path]:
     """The folders creation_files() may leave empty, innermost first."""
-    return [folder / "scenes", folder / "assets" / "sfx", folder / "assets"]
+    left = []
+    for d in _render_leftovers(folder):
+        left += sorted((s for s in d.rglob("*") if s.is_dir()), key=lambda s: len(s.parts), reverse=True) + [d]
+    return [folder / "scenes", folder / "assets" / "sfx", folder / "assets", *left]
 
 
 def _studio_files(folder: Path) -> list[Path]:
@@ -675,6 +688,8 @@ def _studio_files(folder: Path) -> list[Path]:
         out += sorted({p for pattern in SCENE_CLIPS for p in scenes.glob(pattern)})
     if assets.is_dir():
         out += sorted(p for p in assets.rglob("*") if p.is_file())
+    for d in _render_leftovers(folder):  # what a render that was cut off left: nothing else reclaims it
+        out += sorted(p for p in d.rglob("*") if p.is_file())
     return out
 
 

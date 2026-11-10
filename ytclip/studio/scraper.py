@@ -128,7 +128,10 @@ def _public(address: str) -> bool:
 
 
 def _resolve(host: str) -> list[str]:
-    return sorted({info[4][0] for info in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM)})
+    """A name's addresses in the order the system prefers them: they're dialled in this order, so a PC that
+    reaches the world by IPv4 isn't left waiting on an IPv6 address that sorts first."""
+    found = (info[4][0] for info in socket.getaddrinfo(host, None, type=socket.SOCK_STREAM))
+    return list(dict.fromkeys(found))
 
 
 def check_url(url: str, resolve: Resolve | None = None, lookup: bool = True) -> str:
@@ -534,6 +537,73 @@ def _read_blocks(doc: str, strict: bool) -> str:
     return "\n\n".join(out)
 
 
+class _Gates(HTMLParser):
+    """Where a page's subscriber-marked elements start and end, as (line, column) pairs."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.spans: list[tuple[tuple[int, int], tuple[int, int] | None]] = []
+        self.inside = ""  # the tag of the marked element being passed over
+        self.depth = 0
+        self.began = (0, 0)
+
+    def handle_starttag(self, tag, attrs):
+        if self.inside:
+            self.depth += tag == self.inside
+            return
+        if tag in _VOID or tag in ("body", "html"):
+            return
+        a = dict(attrs)
+        if _GATED.search(f"{a.get('class') or ''} {a.get('id') or ''} {a.get('role') or ''}"):
+            self.inside, self.depth, self.began = tag, 1, self.getpos()
+
+    def handle_endtag(self, tag):
+        if self.inside and tag == self.inside:
+            self.depth -= 1
+            if self.depth == 0:
+                self.spans.append((self.began, self.getpos()))
+                self.inside = ""
+
+    def close(self):
+        super().close()
+        if self.inside:  # never closed: nothing after it is read
+            self.spans.append((self.began, None))
+            self.inside = ""
+
+
+def ungated(doc: str) -> str:
+    """The page without the elements marked as being for subscribers (a "paywall" or "subscriber-only" class,
+    id or role), so no reader, ours or a library's, sees what's in them."""
+    if not _GATED.search(doc):
+        return doc
+    gates = _Gates()
+    try:
+        gates.feed(doc)
+        gates.close()
+    except Exception:  # noqa: BLE001 - markup the parser chokes on: the readers' own passes still skip them
+        return doc
+    if not gates.spans:
+        return doc
+    starts, at = [0], doc.find("\n")  # the parser counts lines by "\n" alone
+    while at != -1:
+        starts.append(at + 1)
+        at = doc.find("\n", at + 1)
+    offset = lambda pos: starts[pos[0] - 1] + pos[1]  # noqa: E731
+    out, at = [], 0
+    for began, ended in gates.spans:
+        a = offset(began)
+        if a < at:
+            continue
+        out.append(doc[at:a])
+        if ended is None:
+            at = len(doc)
+            break
+        close = doc.find(">", offset(ended))
+        at = len(doc) if close == -1 else close + 1
+    out.append(doc[at:])
+    return "".join(out)
+
+
 def _with_trafilatura(doc: str, url: str) -> str:
     import trafilatura  # type: ignore[import-not-found]
 
@@ -566,6 +636,7 @@ EXTRACTORS: tuple[tuple[str, Callable[[str, str], str]], ...] = (
 def extract(doc: str, url: str, only: str = "") -> tuple[str, str]:
     """(the article's text, which reader found it). `only` names one of EXTRACTORS."""
     best, how = "", ""
+    doc = ungated(doc)  # before any reader, a library's included, sees the page
     for name, fn in EXTRACTORS:
         if only and name != only:
             continue

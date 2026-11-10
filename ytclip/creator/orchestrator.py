@@ -189,13 +189,13 @@ class VideoCreatorOrchestrator:
         if req.storyboard:
             given = director.Storyboard.from_json(req.storyboard)
             board = director.normalise(given, director.get_style(style), hook_words=40,
-                                       max_scenes=self.scene_limit(len(given.scenes)))
+                                       max_scenes=self.scene_limit(2 * len(given.scenes) + 1))
             board.written_by = board.written_by or "you (edited)"
             self.say_cut(board)
         elif req.script.strip():
             board = director.from_script(req.script, title=req.title, category=cat_name, style=style,
                                          seconds=seconds, prompt=req.prompt,
-                                         max_scenes=self.scene_limit(len(req.script.split()) // 3 + 1))
+                                         max_scenes=self.scene_limit(len(req.script.split()) + 1))
             self.log(f"Using your script: {len(board.scenes)} scenes, {board.word_count} words.")
             self.say_cut(board)
         else:
@@ -263,7 +263,9 @@ class VideoCreatorOrchestrator:
         return text, wpm, scene_seconds
 
     def scene_limit(self, given: int) -> int:
-        """The most scenes a storyboard or script handed in may have (`given`: how many it has, or could)."""
+        """The most scenes a storyboard or script handed in may have. `given`: the most it could come to
+        (tidying a storyboard can split a long scene in two and the hook off the first, so twice its scenes
+        and one)."""
         return director.MAX_SCENES + 4
 
     def say_cut(self, board: director.Storyboard) -> None:

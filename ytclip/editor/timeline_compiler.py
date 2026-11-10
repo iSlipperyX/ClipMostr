@@ -49,6 +49,7 @@ import math
 import os
 import re
 import shutil
+import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -114,17 +115,30 @@ def snap(t: float, fps: int) -> float:
     return math.floor(t * fps + 0.5 + 1e-6) / fps
 
 
+def _rooted(path: Path | str) -> str:
+    """A full path to work a relative name out from, the way the system will read that name. macOS and
+    Linux follow ".." through the real folders, so links are resolved; Windows takes ".." off the text of
+    the folder ffmpeg runs in, so there a link (a subst drive, a junction, a folder of a mapped share) must
+    stay as it was written, or "..\\..\\x.mp4" counts up from a folder the path never names."""
+    return os.path.abspath(path) if sys.platform == "win32" else str(Path(path).resolve())
+
+
+def relative_to_work(path: Path | str, work: Path | str) -> str:
+    """A file's name from the folder ffmpeg runs in, or "" when there isn't one (another drive)."""
+    try:
+        return os.path.relpath(_rooted(path), _rooted(work))
+    except ValueError:
+        return ""
+
+
 def input_path(path: Path, work: Path | None) -> str:
     """A file as an ffmpeg input: its full path, or its path from the folder ffmpeg runs in when that's
     shorter (a long timeline has hundreds of inputs, and Windows limits a command line's length)."""
     full = str(Path(path).resolve())
     if work is None:
         return full
-    try:
-        rel = os.path.relpath(full, Path(work).resolve())
-    except ValueError:  # another drive
-        return full
-    return rel if len(rel) < len(full) and not rel.startswith("-") else full
+    rel = relative_to_work(path, work)
+    return rel if rel and len(rel) < len(full) and not rel.startswith("-") else full
 
 
 def _even(v: float) -> int:
@@ -165,7 +179,7 @@ class _Builder:
     def __init__(self, tl: Timeline, base: Path | None, work: Path | None = None):
         self.tl = tl
         self.base = base
-        self.work = work.resolve() if work is not None else None
+        self.work = work  # the folder ffmpeg runs in, as it was given: relative names are worked out from it
         self.named: dict[str, str] = {}  # a still's file -> its name in the graph
         self.staged: dict[str, Path] = {}  # names in the work folder -> the files to copy there
         self.c = tl.canvas
@@ -199,15 +213,13 @@ class _Builder:
         inputs: ffmpeg then only opens each when its turn comes, which halves the memory a long timeline
         takes and the time it takes too. The file is named relative to the folder ffmpeg runs in; a name with
         characters a filter graph would trip over (or on another drive) is copied there under a plain one."""
-        path = self.tl.resolve(asset, self.base).resolve()
+        given = self.tl.resolve(asset, self.base)
+        path = given.resolve()
         if self.work is None:
             return "movie=" + graph_quote(str(path).replace("\\", "/"))
         key = str(path)
         if key not in self.named:
-            try:
-                rel = os.path.relpath(path, self.work).replace(os.sep, "/")
-            except ValueError:  # another drive
-                rel = ""
+            rel = relative_to_work(given, self.work).replace(os.sep, "/")
             if not rel or not _PLAIN.match(rel) or len(rel) > 200:
                 rel = f"stills/{len(self.staged) + 1:03d}{path.suffix.lower()}"
                 self.staged[rel] = path
@@ -444,14 +456,22 @@ class _Builder:
             self.how[seg.clip.id] = how
             labels.append(self.whole_frames(seg, asset, how))
         last = labels[0]
-        for seg, lab in zip(segs[1:], labels[1:]):
+        # Joining end to end takes a stream's length from the spacing of its frames, so a first stream of one
+        # frame counts as no length and its frame is lost. It's given a second frame, taken off after the join.
+        # (One frame is too short to carry a transition, so that join is always end to end.)
+        doubled = len(segs) > 1 and round(segs[0].length * self.fps) == 1 and segs[1].lead <= 0
+        if doubled:
+            last = self.label("two")
+            self.parts.append(f"[{labels[0]}]tpad=stop=1:stop_mode=clone[{last}]")
+        for i, (seg, lab) in enumerate(zip(segs[1:], labels[1:])):
             out = self.label("j")
             if seg.lead > 0:
                 name = M.TRANSITION_XFADE.get(seg.transition.type, "fade")
                 self.parts.append(f"[{last}][{lab}]xfade=transition={name}:duration={_t(2 * seg.lead)}:"
                                   f"offset={_t(seg.start - seg.lead)}[{out}]")
             else:
-                self.parts.append(f"[{last}][{lab}]concat=n=2:v=1:a=0[{out}]")
+                spare = ",trim=start_frame=1,setpts=PTS-STARTPTS" if doubled and i == 0 else ""
+                self.parts.append(f"[{last}][{lab}]concat=n=2:v=1:a=0{spare}[{out}]")
             last = out
         ends: list[str] = []
         first, final = segs[0], segs[-1]

@@ -247,7 +247,10 @@ _APOSTROPHES = dict.fromkeys(map(ord, "'’‘ʼ`´′＇"))
 def _compared(text: str) -> list[str]:
     """A text's words as the copy check compares them: case, punctuation, apostrophes' shapes and the ways
     Unicode writes the same letter (ligatures, full-width forms, odd spaces) aside."""
-    return originality._words(unicodedata.normalize("NFKC", str(text or "")).translate(_APOSTROPHES))
+    # Apostrophes go before the letters are normalised as well as after: normalising turns the acute accent
+    # some keyboards type for one ("it´s") into a space and a combining mark, and the full-width one into "'".
+    text = unicodedata.normalize("NFKC", str(text or "").translate(_APOSTROPHES))
+    return originality._words(text.translate(_APOSTROPHES))
 
 
 def copied(script: str, source: str, n: int = COPY_N) -> Copying:

@@ -407,10 +407,15 @@ class Store:
                 meta = index_cache[f.parent].get(f.name)
                 if meta and meta.get("rejected"):
                     continue
-                if watched and not meta and any(m.get("ai_generated") for m in index_cache[f.parent].values()):
-                    # A video beside one the Creator or the Studio made that its clips.json doesn't list: not
-                    # automation's to post without the AI-generated label and the review. Add it by hand.
-                    continue
+                if watched and not meta:
+                    # A video beside one the Creator or the Studio made (or in a folder inside that video's
+                    # folder) that its clips.json doesn't list: not automation's to post without the
+                    # AI-generated label and the review. Add it by hand.
+                    above = f.parent.parent
+                    if above not in index_cache:
+                        index_cache[above] = read_folder_index(above)
+                    if any(m.get("ai_generated") for d in (f.parent, above) for m in index_cache[d].values()):
+                        continue
                 if watched and not meta:
                     try:
                         if now - f.stat().st_mtime < settle:

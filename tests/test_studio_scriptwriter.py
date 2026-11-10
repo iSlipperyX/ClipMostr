@@ -415,6 +415,9 @@ def test_the_copy_check_sees_through_apostrophes_and_unicode_spellings():
     assert W.copied(src, copy).refused  # and the other way round
     wide = src.replace("years", "ｙｅａｒｓ").replace(" ", " ")  # full-width letters, no-break spaces
     assert W.copied(copy, wide).refused
+    for mark in "’‘ʼ`´′＇":  # every shape an apostrophe is typed in, the acute accent included
+        assert W._compared(f"it{mark}s don{mark}t") == ["its", "dont"], mark
+        assert W.copied(copy, src.replace("’", mark)).refused, mark
     mine = ("A baker who has run the same oven for decades told a reporter that good bread can't be rushed, and "
             "that customers always notice when someone tries.")
     assert not W.copied(mine, src).lifted

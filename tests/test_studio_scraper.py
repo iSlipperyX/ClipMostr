@@ -332,6 +332,33 @@ def test_a_page_that_says_it_is_paid_for_is_not_read_even_with_its_text_in_the_h
     assert "bioacoustician" not in S.builtin_text(marked)
 
 
+def test_the_subscribers_part_is_cut_before_any_reader_sees_the_page():
+    """The built-in reader skipped a block marked as the subscribers'; a library reading the page first
+    (trafilatura, with the studio extra installed) knew nothing of the mark and read it."""
+    gated = "".join(f"<p>{p}</p>" for p in PARAS)
+    marked = page([], extra=f'<div class="paywall">{gated}</div>')
+    assert "bioacoustician" in marked and "bioacoustician" not in S.ungated(marked)
+    for name, _ in S.EXTRACTORS:
+        text, _how = S.extract(marked, URL, name)
+        assert "bioacoustician" not in text and len(text.split()) < 80, name
+    with pytest.raises(S.ScrapeError):  # what's left isn't an article
+        S.article_from(marked, URL)
+    # A free opening and a marked rest: only the opening is read.
+    teaser = page(PARAS[:1], extra=f'<div class="article-rest subscriber-only"><div>{gated}</div></div><p>Free footer '
+                  'line that anyone may read without an account.</p>')
+    cut = S.ungated(teaser)
+    assert "bioacoustician" not in cut and "Free footer line" in cut and PARAS[0][:30] in cut
+    for name, _ in S.EXTRACTORS:
+        assert "bioacoustician" not in S.extract(teaser, URL, name)[0], name
+    # Nested blocks of the same tag end at the right place; one never closed takes the rest of the page.
+    nested = "<div id='a'>keep one</div>\n<div class='regwall'>\n<div>no</div><div><div>no</div></div>\n</div>\n<p>keep two</p>"
+    assert S.ungated(nested) == "<div id='a'>keep one</div>\n\n<p>keep two</p>"
+    assert S.ungated("<p>keep</p><section class='members-only'><p>no") == "<p>keep</p>"
+    assert S.ungated("<body class='paywall-active'><p>keep</p></body>") == "<body class='paywall-active'><p>keep</p></body>"
+    plain = page(PARAS)
+    assert S.ungated(plain) is plain  # an ordinary page isn't touched
+
+
 def test_robots_is_asked_again_wherever_a_redirect_leads():
     """A short link whose own site allows everything must not get round the story's site saying no."""
     asked = []
