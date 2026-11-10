@@ -249,6 +249,7 @@ class Settings:
     creator_film_look: bool = True  # vignette and fine grain
     creator_downloads: bool = True  # download voice and picture models when they're first needed
     # The Studio (studio/, editor/): the Creator's timeline engine. Keys are yours, from each service's site.
+    creator_engine: str = "creator"  # what the Creator tab makes videos with: creator (classic) | studio
     studio_captions: str = "pop"  # editor/kinetic_subtitles presets: pop | bounce | karaoke | plain
     studio_stock: bool = True  # look for a scene's footage on Pexels and Pixabay (needs a key below)
     studio_stock_video: bool = True  # prefer stock video clips to stock photos
@@ -737,6 +738,8 @@ CREATOR_VOICES = (("en_male_deep", "Deep Male Narrator"), ("en_storyteller", "En
 CREATOR_TTS = (("auto", "Best available on this PC"), ("kokoro", "Kokoro-82M (natural)"), ("piper", "Piper (light)"),
                ("windows", "Windows voices"), ("espeak", "eSpeak NG (robotic)"),
                ("elevenlabs", "ElevenLabs (online, your key)"))
+CREATOR_ENGINES = (("creator", "Video Creator (classic)"),
+                   ("studio", "Studio (an editable timeline)"))
 STUDIO_CAPTIONS = (("pop", "Pop: words pop in, the spoken one lights up"), ("bounce", "Bounce: a springier pop"),
                    ("karaoke", "Karaoke: the colour sweeps through each word"), ("plain", "Plain: no movement"))
 CREATOR_STYLES = (("", "Pick from the category"), ("cinematic", "Cinematic dark"), ("documentary", "Documentary"),
@@ -1097,8 +1100,12 @@ SCHEMA: list[Field] = [
     Field("creator_film_look", "Film look (vignette, fine grain)", "Creator", "bool"),
     Field("creator_downloads", "Download voice and picture models when needed", "Creator", "bool",
           help="Into %LOCALAPPDATA%\\ClipMonster\\models, once. Off: put them there yourself"),
+    Field("creator_engine", "Make videos with", "Creator", "choice", choices=CREATOR_ENGINES,
+          help="What the Creator tab starts on. The Studio lays every video out as a timeline you can edit and "
+               "render again, takes a public article's address, makes wide and long videos and can use stock "
+               "footage. The classic Video Creator is the one this app has always had"),
     Field("studio_captions", "Studio captions", "Creator", "choice", choices=STUDIO_CAPTIONS,
-          help="How the Studio's captions move (ytclip studio, and timelines rendered again)"),
+          help="How the Studio's captions move"),
     Field("studio_stock", "Use stock footage sites", "Creator", "bool",
           help="For a scene your B-roll folder has nothing for, the Studio searches Pexels and Pixabay (their "
                "official APIs, with your own free keys below) before it makes a picture. Each clip's author and "
