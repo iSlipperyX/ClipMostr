@@ -602,7 +602,10 @@ class MacJobs:
     def _unlinked(self, jobs: list[dict]) -> list[dict]:
         """`jobs` without the videos of Macs that aren't linked any more: nobody could fetch, stop or remove
         them. One being made stays: it stops itself (make) and goes then."""
-        keep = [j for j in jobs if j.get("status") == "working" or not self._gone(j)]
+        linked = self._linked()  # asked once for them all
+        if linked is None:
+            return jobs
+        keep = [j for j in jobs if j.get("status") == "working" or j.get("device") in linked]
         if len(keep) != len(jobs):
             self._save(keep)
             for j in jobs:
@@ -612,12 +615,17 @@ class MacJobs:
                              f"{j.get('title') or j.get('name')}")
         return keep
 
-    def _gone(self, job: dict) -> bool:
-        """Whether the Mac that sent this video isn't linked any more."""
+    def _linked(self) -> set | None:
+        """The linked Macs' ids, or None when that can't be told now (and every video stays)."""
         try:
             linked = self.linked()
-        except Exception:  # noqa: BLE001 - can't be told now: the video stays
-            return False
+        except Exception:  # noqa: BLE001
+            return None
+        return None if linked is None else set(linked)
+
+    def _gone(self, job: dict) -> bool:
+        """Whether the Mac that sent this video isn't linked any more."""
+        linked = self._linked()
         return linked is not None and job.get("device") not in linked
 
     # --- making ------------------------------------------------------------------------------------------------
@@ -715,10 +723,22 @@ class MacJobs:
                 return
             source = str(f)
         tracker = steps.Tracker(steps.plan_for(s, url=not job.get("upload")))
-        last = {"t": 0.0}
+        last = {"t": 0.0, "video": ""}
         who = job.get("device_name") or "your Mac"
+        p = Project(source)
+        p.meta = {"made_for": {"mac": who, "on": "pc"}}
+
+        def mark_video() -> None:  # the video's own id, as soon as it's known: Clean up leaves its download
+            video_id = _text(getattr(p.video, "id", "") or "", 200) if p.video is not None else ""
+            if video_id and video_id != last["video"]:
+                try:
+                    self._change(job_id, video_id=video_id)
+                except OSError:  # tried again with the next progress
+                    return
+                last["video"] = video_id
 
         def progress(msg: str, frac=None) -> None:
+            mark_video()
             status = tracker.update(msg, frac)
             t = self.now()
             if t - last["t"] >= 1.5:
@@ -742,8 +762,6 @@ class MacJobs:
         self._change(job_id, status="working", stage="Starting", error="", progress=None)
         self.log(f"Making clips for {who}: {job.get('title') or job.get('name')}")
         engine = self._engine_for(s, self.log, progress, cancelled)
-        p = Project(source)
-        p.meta = {"made_for": {"mac": who, "on": "pc"}}
         from ..pipeline import Watchdog
 
         last["t"] = self.now()

@@ -428,6 +428,31 @@ def test_which_macs_are_linked(world, tmp_path):
     assert state.linked_ids(world.server.state_file) is None  # can't be read: not the same as nobody linked
 
 
+def test_one_failed_read_never_says_no_mac_is_linked(world, monkeypatch):
+    """remote.json was read twice for one answer: when only the second read failed (Windows, while the file is
+    being replaced), every Mac counted as unlinked and its videos and clips on the PC were deleted."""
+    from ytclip.posting import safefile
+
+    _, got = world.linked()
+    real, reads = safefile._parse, []
+
+    def parse(path):
+        reads.append(path)
+        if len(reads) > 1:
+            raise ValueError("[WinError 5] Access is denied")
+        return real(path)
+
+    monkeypatch.setattr(safefile, "_parse", parse)
+    assert state.linked_ids(world.server.state_file) == {got["device_id"]} and len(reads) == 1
+
+    def denied(self, *a, **k):
+        raise PermissionError(13, "Access is denied")
+
+    monkeypatch.setattr(safefile, "_parse", real)
+    monkeypatch.setattr(type(world.server.state_file), "read_text", denied)
+    assert state.linked_ids(world.server.state_file) is None
+
+
 def test_week_and_log(world, monkeypatch):
     c, _ = world.linked()
     w = c.get("/api/week")
