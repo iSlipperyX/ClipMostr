@@ -58,7 +58,8 @@ def work_dir() -> Path:
 
 # The keys in settings.json (Claude, Gemini, YouTube, Telegram). ClipMonster for Mac keeps them in the Mac's
 # Keychain instead (keep_secrets_in): settings.json then holds them blank, and Settings.load fills them in.
-SECRETS = ("ai_api_key", "gemini_api_key", "youtube_api_key", "telegram_token", "api_football_key")
+SECRETS = ("ai_api_key", "gemini_api_key", "youtube_api_key", "telegram_token", "api_football_key",
+           "elevenlabs_api_key", "pexels_api_key", "pixabay_api_key")
 _secret_store = None
 
 
@@ -247,6 +248,15 @@ class Settings:
     creator_hook_card: bool = True  # the hook in big letters over the first seconds
     creator_film_look: bool = True  # vignette and fine grain
     creator_downloads: bool = True  # download voice and picture models when they're first needed
+    # The Studio (studio/, editor/): the Creator's timeline engine. Keys are yours, from each service's site.
+    studio_captions: str = "pop"  # editor/kinetic_subtitles presets: pop | bounce | karaoke | plain
+    studio_stock: bool = True  # look for a scene's footage on Pexels and Pixabay (needs a key below)
+    studio_stock_video: bool = True  # prefer stock video clips to stock photos
+    pexels_api_key: str = ""  # pexels.com/api (free)
+    pixabay_api_key: str = ""  # pixabay.com/api/docs (free)
+    elevenlabs_api_key: str = ""  # elevenlabs.io: a cloud voice, used only when chosen as the voice engine
+    elevenlabs_voice: str = ""  # one of your ElevenLabs voices, by name or id ("" = the first that suits)
+    elevenlabs_model: str = "eleven_multilingual_v2"
     # Layout (banners and stacked video)
     banner_top: bool = False
     banner_top_text: str = "{title}"
@@ -723,8 +733,11 @@ CREATOR_VOICES = (("en_male_deep", "Deep Male Narrator"), ("en_storyteller", "En
                   ("en_documentary", "Calm Documentary"), ("en_female_warm", "Warm Female Narrator"),
                   ("en_female_bright", "Bright Female"), ("en_hushed", "Hushed Storyteller"),
                   ("en_british_male", "British Male"), ("en_male_calm", "Calm Male"))
-CREATOR_TTS = (("auto", "Best available"), ("kokoro", "Kokoro-82M (natural)"), ("piper", "Piper (light)"),
-               ("windows", "Windows voices"), ("espeak", "eSpeak NG (robotic)"))
+CREATOR_TTS = (("auto", "Best available on this PC"), ("kokoro", "Kokoro-82M (natural)"), ("piper", "Piper (light)"),
+               ("windows", "Windows voices"), ("espeak", "eSpeak NG (robotic)"),
+               ("elevenlabs", "ElevenLabs (online, your key)"))
+STUDIO_CAPTIONS = (("pop", "Pop: words pop in, the spoken one lights up"), ("bounce", "Bounce: a springier pop"),
+                   ("karaoke", "Karaoke: the colour sweeps through each word"), ("plain", "Plain: no movement"))
 CREATOR_STYLES = (("", "Pick from the category"), ("cinematic", "Cinematic dark"), ("documentary", "Documentary"),
                   ("history", "Old-world painting"), ("horror", "Horror"), ("bright", "Bright and bold"),
                   ("dreamy", "Calm and dreamy"))
@@ -1083,6 +1096,25 @@ SCHEMA: list[Field] = [
     Field("creator_film_look", "Film look (vignette, fine grain)", "Creator", "bool"),
     Field("creator_downloads", "Download voice and picture models when needed", "Creator", "bool",
           help="Into %LOCALAPPDATA%\\ClipMonster\\models, once. Off: put them there yourself"),
+    Field("studio_captions", "Studio captions", "Creator", "choice", choices=STUDIO_CAPTIONS,
+          help="How the Studio's captions move (ytclip studio, and timelines rendered again)"),
+    Field("studio_stock", "Use stock footage sites", "Creator", "bool",
+          help="For a scene your B-roll folder has nothing for, the Studio searches Pexels and Pixabay (their "
+               "official APIs, with your own free keys below) before it makes a picture. Each clip's author and "
+               "address are kept in the video's README and timeline.json"),
+    Field("studio_stock_video", "Prefer stock video to photos", "Creator", "bool"),
+    Field("pexels_api_key", "Pexels API key", "Creator", "secret",
+          help="Free from pexels.com/api. Pexels' licence lets you use its photos and videos in your own videos; "
+               "its terms apply"),
+    Field("pixabay_api_key", "Pixabay API key", "Creator", "secret",
+          help="Free from pixabay.com/api/docs. Pixabay's content licence and terms apply"),
+    Field("elevenlabs_api_key", "ElevenLabs key", "Creator", "secret",
+          help="Only used when Voice engine is ElevenLabs: the script's text is then sent to elevenlabs.io to be "
+               "read, and they charge your account by the character"),
+    Field("elevenlabs_voice", "ElevenLabs voice", "Creator", "str", placeholder="a voice's name or id",
+          help="One of the voices in your ElevenLabs account. Empty = the first that suits the narrator chosen. "
+               "Only use voices you have the right to use"),
+    Field("elevenlabs_model", "ElevenLabs model", "Creator", "str"),
 
     Field("banner_top", "Top banner", "Layout", "bool", help="A bar of text above the video"),
     Field("banner_top_text", "Top text", "Layout", "str",

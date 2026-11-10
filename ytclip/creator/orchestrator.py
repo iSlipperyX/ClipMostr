@@ -257,20 +257,11 @@ class VideoCreatorOrchestrator:
         try:
             track = voice_engine.synthesize(board.scenes, self.s, work / "voice.wav", voice=voice, log=self.log,
                                             progress=report, check=self.check)
-            # How far off the length is: aim the speech (not the breath and tail) at the target.
-            fixed = track.duration - track.speech_seconds + voice_engine.LEAD_IN
-            want_speech = max(5.0, seconds - fixed)
-            have = track.speech_seconds
-            factor = have / want_speech
-            if rewards and track.duration < REWARDS_MIN:
-                factor = min(factor, have / max(5.0, REWARDS_MIN + 0.8 - fixed))
-            if abs(factor - 1) > SPEED_STEP:
-                speed = max(0.8, min(1.2, factor))
+            speed = self.voice_speed(track, seconds, rewards)
+            if speed != 1.0:
                 self.log(f"The voice ran {track.duration:.0f} s for a {seconds:.0f} s target: reading it again "
                          f"{'slower' if speed < 1 else 'faster'} ({speed:.2f}x).")
-                track = voice_engine.synthesize(board.scenes, self.s, work / "voice.wav", voice=voice, log=self.log,
-                                                progress=report, check=self.check, speed=speed,
-                                                engines=[track.engine_key])
+                track = self.reread(board, track, voice, speed, work, report)
         except voice_engine.VoiceError as exc:
             raise CreatorError(str(exc)) from exc
         voice_engine.remember_wpm(voice, track.wpm, track.speed, track.engine_key)
@@ -280,6 +271,24 @@ class VideoCreatorOrchestrator:
                  f"{track.wpm:.0f} words a minute; word times {track.timing}.")
         self._timed("voice", started)
         return track
+
+    def voice_speed(self, track: voice_engine.VoiceTrack, seconds: float, rewards: bool) -> float:
+        """How much faster (over 1) or slower the narration must be read to land on `seconds`; 1.0 when it's
+        close enough as it is."""
+        # How far off the length is: aim the speech (not the breath and tail) at the target.
+        fixed = track.duration - track.speech_seconds + voice_engine.LEAD_IN
+        want_speech = max(5.0, seconds - fixed)
+        have = track.speech_seconds
+        factor = have / want_speech
+        if rewards and track.duration < REWARDS_MIN:
+            factor = min(factor, have / max(5.0, REWARDS_MIN + 0.8 - fixed))
+        return max(0.8, min(1.2, factor)) if abs(factor - 1) > SPEED_STEP else 1.0
+
+    def reread(self, board: director.Storyboard, track: voice_engine.VoiceTrack, voice: str, speed: float,
+               work: Path, report: Progress) -> voice_engine.VoiceTrack:
+        """The narration again at `speed`, by the engine that read it."""
+        return voice_engine.synthesize(board.scenes, self.s, work / "voice.wav", voice=voice, log=self.log,
+                                       progress=report, check=self.check, speed=speed, engines=[track.engine_key])
 
     def create(self, req: CreateRequest, board: director.Storyboard | None = None) -> CreationResult:
         """Make the video. `board`: a storyboard already written (the Creator tab's preview)."""
@@ -400,12 +409,13 @@ class VideoCreatorOrchestrator:
         return out
 
     # ------------------------------------------------------------ checks
-    def checks(self, video: Path, duration: float, rewards: bool, board, warnings: list[str]) -> dict:
+    def checks(self, video: Path, duration: float, rewards: bool, board, warnings: list[str],
+               size: tuple[int, int] = (compositor.WIDTH, compositor.HEIGHT)) -> dict:
         info = probe(video)
         loud = compositor.ebur128(video)
         problems: list[str] = []
-        if (info.width, info.height) != (compositor.WIDTH, compositor.HEIGHT):
-            problems.append(f"It came out {info.width}x{info.height}, not 1080x1920.")
+        if (info.width, info.height) != tuple(size):
+            problems.append(f"It came out {info.width}x{info.height}, not {size[0]}x{size[1]}.")
         if not info.has_audio:
             problems.append("It has no sound.")
         if info.duration < 3:

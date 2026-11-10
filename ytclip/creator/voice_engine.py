@@ -350,10 +350,22 @@ class EspeakEngine(Engine):
 
 
 ENGINE_CLASSES = {"kokoro": KokoroEngine, "piper": PiperEngine, "windows": WindowsEngine, "espeak": EspeakEngine}
+# Engines that send the script to a service (studio/voice_studio.py adds them). Never picked by "auto": only
+# when Settings → Creator → Voice engine names one, so nothing leaves this PC unasked.
+CLOUD_ENGINES: set[str] = set()
+
+
+def _cloud() -> None:
+    """Bring in the cloud engines (they add themselves to ENGINE_CLASSES)."""
+    try:
+        from ..studio import voice_studio  # noqa: F401
+    except ImportError:  # a build without the Studio
+        pass
 
 
 def available(s) -> dict[str, str]:
     """Each engine: "" when it can be used here, else why not."""
+    _cloud()
     return {key: cls(s, lambda m: None, lambda m, f: None).missing() for key, cls in ENGINE_CLASSES.items()}
 
 
@@ -361,7 +373,7 @@ def pick_engines(s) -> list[str]:
     """The engines to try, in turn: the chosen one, then (on auto, or when it fails) the others that work."""
     choice = str(getattr(s, "creator_tts", "auto") or "auto")
     have = available(s)
-    order = [k for k in ENGINE_CLASSES if not have[k]]
+    order = [k for k in ENGINE_CLASSES if not have[k] and k not in CLOUD_ENGINES]
     if choice in ENGINE_CLASSES:
         order = [choice] + [k for k in order if k != choice]
     return order
