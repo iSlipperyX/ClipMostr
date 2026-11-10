@@ -38,6 +38,7 @@ import math
 import re
 
 from .. import fonts, textlayout
+from ..captions import _SENTENCE_END as SENTENCE_END
 from ..captions import ACTIVE_SCALE, BREAK, HOLD, KINETIC_BOTTOM, _ass_colour, _escape, _groups, _ts
 from ..rendering.ass_builder import DANGER, bare, keyword_kind
 from ..studio.timeline_schema import (SUBTITLES, Canvas, SubtitleEvent, SubtitleStyle, Track, WordEvent)
@@ -46,6 +47,7 @@ from ..subtitles import Word, censor
 POP_MS = (80, 150)  # the group's pop: to 110% by 80 ms, settled by 150 ms
 ICON_GAP = 3.5  # seconds between one icon and the next
 LANDSCAPE_BOTTOM = 0.88  # where captions end on a wide video
+BREAK_PAUSE = 0.6  # captions._groups: a pause this long ends a caption
 MARGIN = 60 / 1080  # the side margin, as a share of the canvas's short side
 
 
@@ -167,6 +169,8 @@ def build_track(words: list[Word], canvas: Canvas, style: SubtitleStyle | None =
     marked = frozenset(bare(w) for w in emphasis if w)
     timed = sorted((w for w in words if w.text.strip() and w.end > 0 and w.start < duration), key=lambda w: w.start)
     groups = _groups(timed, max(1, min(style.max_words, 3 if style.preset != "plain" else 12)))
+    if style.preset != "plain":
+        groups = _two_lines(groups, style, Geometry(style, canvas))
     events: list[SubtitleEvent] = []
     last_icon = -1e9
     for g, group in enumerate(groups):
@@ -201,6 +205,48 @@ def build_track(words: list[Word], canvas: Canvas, style: SubtitleStyle | None =
     track = Track(track_id, "subtitle", events=events, style=style)
     layout(track, canvas)
     return track
+
+
+MAX_LINES = 2  # a kinetic caption is one or two lines: three long words don't become a stack of three
+
+
+def _two_lines(groups: list[list[Word]], style: SubtitleStyle, geo: Geometry) -> list[list[Word]]:
+    """Groups that need more than MAX_LINES lines give their last words to the group after them (or to a
+    new one, when a pause or the sentence's end comes between), so "BEFORE ELECTRICITY, HOW" is shown as
+    "BEFORE ELECTRICITY," and then "HOW DID A"."""
+
+    def lines(group: list[Word]) -> int:
+        texts = [(censor(w.text) if style.censor else w.text) for w in group]
+        texts = [t.upper() if style.uppercase else t for t in texts]
+        return len(textlayout.break_lines(texts, geo.font, geo.size, geo.max_width))
+
+    size = max(1, min(style.max_words, 3))
+    out: list[list[Word]] = []
+    carry: list[Word] = []
+    for g, group in enumerate(groups):
+        cur = carry + group
+        carry = []
+        while cur:
+            n = min(len(cur), size)
+            while n > 1 and lines(cur[:n]) > MAX_LINES:
+                n -= 1
+            head, rest = cur[:n], cur[n:]
+            if not rest:
+                out.append(head)
+                break
+            # What's left over joins the next group unless this one ended on a pause or a full stop.
+            last = group[-1]
+            nxt = groups[g + 1][0] if g + 1 < len(groups) else None
+            joins = (nxt is not None and nxt.start - last.end <= BREAK_PAUSE and not last.text.endswith(SENTENCE_END)
+                     and len(rest) < size)
+            out.append(head)
+            if joins:
+                carry = rest
+                break
+            cur = rest
+    if carry:
+        out.append(carry)
+    return out
 
 
 # ---------------------------------------------------------------- where it all goes

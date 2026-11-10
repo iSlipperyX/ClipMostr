@@ -46,6 +46,28 @@ def test_words_group_in_ones_to_threes_breaking_at_pauses_and_sentences():
     assert [e.text for e in plain.events] == ["one two three four five six", "seven"]
 
 
+def test_a_caption_is_never_more_than_two_lines():
+    """Three long words would stack three high on an upright video: the last one goes to the next caption."""
+    said = words("Before electricity, how did a lighthouse throw a beam. Extraordinarily complicated "
+                 "infrastructure | everywhere")
+    track = K.build_track(said, VERTICAL, duration=20.0)
+    geo = K.Geometry(track.style, VERTICAL)
+    assert [e.text for e in track.events] == ["BEFORE ELECTRICITY,", "HOW DID A", "LIGHTHOUSE THROW A", "BEAM.",
+                                              "EXTRAORDINARILY COMPLICATED", "INFRASTRUCTURE", "EVERYWHERE"]
+    assert all(len(K.lines_of(e, geo)) <= K.MAX_LINES for e in track.events)
+    assert [w.text for e in track.events for w in e.words] == [w.text.upper() for w in said]  # nothing lost
+    # Words that fit on two lines are two lines (evening the lines out once made three of them).
+    fits = K.build_track(words("fast every single"), VERTICAL, duration=5.0)
+    assert [[fits.events[0].words[i].text for i in ln] for ln in K.lines_of(fits.events[0], geo)] \
+        == [["FAST", "EVERY"], ["SINGLE"]]
+    # A word carried over never crosses a sentence's end or a pause, and a wide video has room for all three.
+    wide = K.build_track(said, WIDE, duration=20.0)
+    assert wide.events[0].text == "BEFORE ELECTRICITY, HOW"
+    # Plain captions are a block of text: they wrap as they always did.
+    plain = K.build_track(said, VERTICAL, T.SubtitleStyle(preset="plain", max_words=12), duration=20.0)
+    assert len(plain.events[0].words) > 3
+
+
 def test_overlapping_word_times_never_overlap_captions():
     said = [Word(0.0, 0.5, "one"), Word(0.4, 0.9, "two"), Word(0.8, 1.4, "three."), Word(1.3, 1.8, "four"),
             Word(9.9, 12.0, "late"), Word(15.0, 16.0, "never")]

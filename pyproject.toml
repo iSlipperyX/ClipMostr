@@ -31,6 +31,9 @@ local = ["llama-cpp-python>=0.3"]
 # then Windows' own voices or eSpeak NG, so none of these is required.
 creator = ["kokoro-onnx>=0.4", "soundfile>=0.12"]
 piper = ["piper-tts>=1.2"]
+# The Studio reads an article with trafilatura when it's installed, else readability-lxml, else its own
+# reader (so neither is required).
+studio = ["trafilatura>=1.8", "readability-lxml>=0.8.1", "lxml_html_clean>=0.1"]
 # AI pictures from Python (SDXL-Turbo / FLUX.1-schnell). Several GB; install the torch build for your graphics
 # card first (pytorch.org). Without it, ComfyUI (if you run it), your B-roll folder or built-in textures are used.
 diffusion = ["torch>=2.3", "diffusers>=0.30", "transformers>=4.44", "accelerate>=0.33", "safetensors>=0.4"]
