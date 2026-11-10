@@ -122,6 +122,14 @@ def test_topics_and_category_pills():
     assert pills["empty"].videos == 0 and pills["empty"].badge == ""
 
 
+def test_a_scan_saved_by_a_3_7_dev_build_still_reports_its_topics():
+    v = video(1, 5000.0, title="VAR drama", category_id="soccer")
+    v.pace = {"niches": ["soccer-refs"], "delta": 1.0}  # what 3.7.0 dev builds called them
+    assert [n.key for n in velocity.topic_report([v])] == ["soccer-refs"]
+    v.pace = {"topics": ["soccer-goals"], "niches": ["soccer-refs"]}  # the new key wins
+    assert [n.key for n in velocity.topic_report([v])] == ["soccer-goals"]
+
+
 def test_a_scan_fills_pace_and_keeps_the_channel(tmp_path):
     vids = [video(i, channel="c1") for i in range(4)]
     h = History(tmp_path / "research.json")

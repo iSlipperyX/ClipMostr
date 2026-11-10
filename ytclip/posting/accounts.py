@@ -280,19 +280,25 @@ def profile_path(rel: str, account_id: str) -> Path:
 
 def _own_profiles(accounts: list[Account]) -> list[Account]:
     """Each account signs in in a profile of its own: two accounts pointed at one profile (a copied
-    accounts.json entry) would post as whoever signed in last. The later one gets its usual profile back and
-    is asked to sign in again. Returns the accounts that were moved."""
+    accounts.json entry) would post as whoever signed in last. An account keeps its usual profile when another
+    points at it; otherwise the first in the list keeps a shared one. The others get their usual profile back
+    and are asked to sign in again. Returns the accounts that were moved."""
+    def key(a: Account) -> str:
+        return str(a.profile_path()).casefold()
+
+    usual = {str(profile_path(default_profile(a.id), a.id)).casefold(): a for a in accounts}
     seen: set[str] = set()
     moved = []
-    for a in accounts:
-        key = str(a.profile_path()).casefold()
-        if key in seen:
+    # the accounts in their own usual profile claim it first, so a copied entry can't push one out
+    for a in sorted(accounts, key=lambda a: usual.get(key(a)) is not a):
+        k = key(a)
+        if k in seen:
             a.browser_profile = default_profile(a.id)
             a.logged_in = False
             a.session_check, a.session_detail = "expired", "It shared a browser profile with another account."
             moved.append(a)
-            key = str(a.profile_path()).casefold()
-        seen.add(key)
+            k = key(a)
+        seen.add(k)
     return moved
 
 

@@ -55,6 +55,7 @@ SCENE_RANGE = (3.0, 8.0)  # seconds a picture stays up
 PACE_MIN = 2  # top-performing Creator videos (with their pace known) before pacing moves at all
 PACE_SHRINK = 3  # n / (n + PACE_SHRINK) of the way from the usual pace to theirs
 DEFAULT_WPM = 150.0
+DEFAULT_SCENE = 6.0  # seconds a picture stays up when nothing has been learned (director.scene_range: 4.5-8)
 SCHEMA_VERSION = 1
 
 Log = Callable[[str], None]
@@ -475,7 +476,7 @@ def calibrate(outcomes: Iterable[learn.Outcome], category_id: str = "", default_
     pers = [x for _, x in top if x > 0]
     if pers:
         best_per = statistics.median(pers)
-        base_per = default_scene or best_per
+        base_per = _clamp(default_scene or DEFAULT_SCENE, SCENE_RANGE)
         out.scene_seconds = round(_clamp(base_per + (best_per - base_per) * pull, SCENE_RANGE), 2)
     where = "this category's" if pool is own and own else "your"
     slow = bottom and statistics.median(w for w, _ in bottom) < best_wpm

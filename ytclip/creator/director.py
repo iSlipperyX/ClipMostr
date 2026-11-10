@@ -266,7 +266,7 @@ def scene_range(seconds: float, per: float = 0.0) -> tuple[int, int]:
     """How many scenes a video this long wants: a new picture about every 4-8 seconds, or about every `per`
     seconds (the pace your best videos had: intelligence/learner.py)."""
     if per > 0:
-        lo = max(MIN_SCENES, min(MAX_SCENES, round(seconds / (per * 1.2))))
+        lo = max(MIN_SCENES, min(MAX_SCENES - 1, round(seconds / (per * 1.2))))
         hi = min(MAX_SCENES, max(lo + 1, round(seconds / (per * 0.85))))
         return lo, hi
     lo = max(MIN_SCENES, round(seconds / 8))

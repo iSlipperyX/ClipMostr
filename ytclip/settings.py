@@ -1193,7 +1193,8 @@ SCHEMA: list[Field] = [
           help="Comma separated words or phrases"),
     Field("learn_from_results", "Learn from how my clips do", "Picking", "bool",
           help="Posting reads the views your posted clips get. Channels whose clips beat your usual views rank "
-               "higher, ones that flop rank lower, and the AI polish sees which hooks worked"),
+               "higher, ones that flop rank lower, and the AI sees the hooks that worked (and flopped) closest "
+               "to what it's writing. The Video Creator also aims at the pace of your best Creator videos"),
 
     Field("auto_output_dir", "Clips go to", "Automation", "path",
           help="Empty = an Automation folder inside your output folder"),
