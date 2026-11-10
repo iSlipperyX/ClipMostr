@@ -345,7 +345,7 @@ def test_words_embedder_sees_two_wordings_of_one_idea():
 
 def tiny_model(folder, vocab_size=12, width=8):
     """A model with all-MiniLM's inputs and output shape: an embedding table and nothing else."""
-    onnx = pytest.importorskip("onnx")
+    onnx = pytest.importorskip("onnx", exc_type=ImportError)
     from onnx import TensorProto, helper, numpy_helper
 
     table = np.random.default_rng(3).normal(size=(vocab_size, width)).astype(np.float32)
@@ -365,7 +365,7 @@ def tiny_model(folder, vocab_size=12, width=8):
 
 
 def test_the_onnx_model_runs_and_pools_over_real_tokens(tmp_path):
-    pytest.importorskip("onnxruntime")
+    pytest.importorskip("onnxruntime", exc_type=ImportError)
     table = tiny_model(tmp_path)
     m = embeddings.MiniLM(tmp_path, providers=["CPUExecutionProvider"])
     got = m.embed(["red card", "a goal ! the goal ! a goal"])
