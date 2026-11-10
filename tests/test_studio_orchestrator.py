@@ -424,3 +424,49 @@ def test_an_article_becomes_a_finished_video_and_its_timeline_renders_again(tmp_
     again = O.render_timeline(path, settings=st.s)
     assert again.path.is_file() and again.path.name.endswith("(edit).mp4") and again.path.parent == result.folder
     assert abs(ffmpeg.probe(again.path).duration - info.duration) < 0.2
+
+
+# ---------------------------------------------------------------- automation's queue
+
+def test_a_queued_studio_request_is_made_by_the_studio_and_a_creators_by_the_creator(tmp_path, monkeypatch):
+    from test_pipeline import _runner
+
+    from ytclip.creator import director
+    from ytclip.creator import orchestrator as creator
+
+    made = []
+
+    def by(name):
+        def create(self, req, board=None):
+            made.append((name, type(req).__name__, getattr(req, "url", "")))
+            self._progress("Laying out the timeline", None)
+            self._progress("Putting the video together", 0.5)
+            folder = tmp_path / "Automation" / name
+            folder.mkdir(parents=True, exist_ok=True)
+            return creator.CreationResult("c-1", folder, folder / "01.mp4", director.from_script("One line here."),
+                                          64.0, timings={"render": 9.0})
+        return create
+
+    monkeypatch.setattr(O.StudioOrchestrator, "create", by("studio"))
+    monkeypatch.setattr(creator.VideoCreatorOrchestrator, "create", by("creator"))
+    s = Settings().apply({"auto_output_dir": str(tmp_path / "Automation"), "output_dir": str(tmp_path / "Out"),
+                          "auto_start_hour": 0, "auto_end_hour": 24})
+    r = _runner(tmp_path, s)
+    a = r.add_creation(O.StudioRequest(url=URL, format="long"))
+    b = r.add_creation(CreateRequest(prompt="memory"))
+    assert r.db.get(a).title == URL
+    r.process(r.db.get(a), s)
+    r.process(r.db.get(b), s)
+    assert made == [("studio", "StudioRequest", URL), ("creator", "CreateRequest", "")]
+    assert r.db.get(a).status == "done" and r.db.get(a).recipe == "Studio"
+    assert r.db.get(b).status == "done" and r.db.get(b).recipe == "Video Creator"
+
+
+def test_the_studios_progress_words_are_ones_the_status_bar_knows():
+    from ytclip import steps
+
+    for message, step in (("Writing the script: reading the page", "script"), ("Recording the voice", "voice"),
+                          ("Making pictures: finding footage for scene 2 of 9", "visuals"),
+                          ("Laying out the timeline", "render"), ("Putting the video together", "render"),
+                          ("Checking the video", "check")):
+        assert steps.step_of(message) == step, message

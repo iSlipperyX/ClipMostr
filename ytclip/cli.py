@@ -1539,6 +1539,173 @@ def run_create(argv: list[str]) -> int:
     return 1 if failed else 0
 
 
+def run_studio(argv: list[str]) -> int:
+    """ytclip studio: a finished video and its editable timeline from a prompt or an article (studio/)."""
+    import json as _json
+
+    from .creator import director, orchestrator, visual_generator, voice_engine
+    from .ffmpeg import Cancelled
+    from .intelligence import agent_router
+    from .studio import orchestrator as studio
+    from .studio import timeline_builder, timeline_schema, visual_sourcer
+
+    p = argparse.ArgumentParser(
+        prog="ytclip studio",
+        description="Make a finished video from a prompt or a public article's address: the script is written (an "
+        "article is retold in new words, its address kept as the source), a voice reads it, each scene gets "
+        "footage or a picture (your B-roll, Pexels and Pixabay with your keys, or drawn on this PC), and the "
+        "whole edit is laid out as a timeline: camera moves, transitions, kinetic captions, music ducked under "
+        "the voice, sound effects. One ffmpeg run renders it. timeline.json stays in the video's folder: edit "
+        "it and render it again with --timeline.",
+        epilog="Examples:\n"
+               '  ytclip studio "Why the Roman Empire really fell" --category History\n'
+               '  ytclip studio --url https://example.org/a-public-article --seconds 60 --captions karaoke\n'
+               '  ytclip studio "How lighthouses worked before electricity" --format long --seconds 480 --no-post\n'
+               '  ytclip studio "3 money habits" --visuals stock --tts kokoro --voice deep_male --ai local_first\n'
+               '  ytclip studio --timeline "Videos/ClipMonster/Output/Created/2026-11-10 Lighthouses [c-1a2b3c4d]"\n'
+               "  ytclip studio --check",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("prompt", nargs="?", default="", help="what the video is about (with --url: the angle to take)")
+    p.add_argument("--url", default="", help="a public article to retell (pages behind a sign-in or a paywall, and "
+                                             "pages whose robots.txt says no, aren't read)")
+    p.add_argument("--format", choices=["short", "long"], default="",
+                   help="short: vertical 9:16, about a minute (the default). long: wide 16:9, minutes")
+    p.add_argument("--orientation", choices=["vertical", "landscape", "square"], default="",
+                   help="the shape, when it isn't the format's")
+    p.add_argument("--seconds", "--duration", dest="seconds", type=float, default=0,
+                   help="seconds to aim for (default: Settings → Creator for a short, 300 for a long)")
+    p.add_argument("--fps", type=int, default=30, choices=[24, 25, 30, 50, 60])
+    p.add_argument("--captions", choices=list(timeline_builder.CAPTION_PRESETS), default="",
+                   help="caption style (default: Settings → Creator → Studio captions)")
+    p.add_argument("--tts", choices=["auto", *voice_engine.ENGINE_CLASSES], default="",
+                   help="voice engine (default: Settings → Creator). elevenlabs sends the script to ElevenLabs with "
+                        "your key and is only used when named here or in Settings")
+    p.add_argument("--voice", default="", help="voice (ytclip create --list-voices), e.g. deep_male, documentary")
+    p.add_argument("--visuals", choices=list(visual_sourcer.CHOICES), default="",
+                   help="where pictures come from. stock: stock footage first for every scene")
+    p.add_argument("--ai", choices=[x for x in agent_router.PRIORITIES if x != "settings"], default="",
+                   help="who writes the script (default: Settings → Creator → Script writer)")
+    p.add_argument("--style", choices=["", *director.STYLES], default="", help="the look (default: from the category)")
+    p.add_argument("--title", default="", help="the video's title (default: the AI's)")
+    p.add_argument("--category", default="", help="category name or id: its folder and its TikTok account")
+    p.add_argument("--script", type=Path, help="your own narration instead of the AI's (a blank line starts a scene)")
+    p.add_argument("--storyboard", type=Path, help="make a storyboard.json as it is (from --storyboard-only, edited)")
+    rewards = p.add_mutually_exclusive_group()
+    rewards.add_argument("--creator-rewards", dest="rewards", action="store_true", default=None,
+                         help="keep a vertical video 62-85 s, over the minute Creator Rewards needs")
+    rewards.add_argument("--no-creator-rewards", dest="rewards", action="store_false")
+    p.add_argument("--schedule", action="store_true", help="queue it for automation to make instead of making it now")
+    p.add_argument("--no-post", action="store_true", help="save it in Output/Created instead of the posting queue")
+    p.add_argument("--storyboard-only", action="store_true", help="only write the script and storyboard (JSON)")
+    p.add_argument("--timeline", type=Path, help="render a timeline.json (or the video folder holding one) again")
+    p.add_argument("--out", type=Path, help="with --timeline: where the video goes (default: beside the timeline)")
+    p.add_argument("--schema", action="store_true", help="print the timeline's JSON Schema")
+    p.add_argument("--check", action="store_true", help="what's ready on this PC: AI, voices, pictures, stock keys")
+    args = p.parse_args(argv)
+    if args.schema:
+        console.print(_json.dumps(timeline_schema.JSON_SCHEMA, indent=2), markup=False, highlight=False)
+        return 0
+    s = Settings.load()
+    log = lambda m: console.print(f"[dim]{escape(m)}[/]")  # noqa: E731
+    last = {"m": ""}
+
+    def progress(msg: str, frac) -> None:
+        head = msg.split(":")[0]
+        if head != last["m"]:
+            last["m"] = head
+            console.print(f"[cyan]…[/] {escape(head)}")
+
+    if args.check:
+        ready = lambda why: "[green]ready[/]" if not why else f"[dim]({escape(why)})[/]"  # noqa: E731
+        writers = director.script_writers(s)
+        console.print("[bold]Script writer:[/] " + (", ".join(writers) if writers else
+                                                   f"[yellow]{escape(director.no_writer_text(s))}[/]"))
+        console.print("[bold]Voice engines:[/] " + ", ".join(
+            f"{voice_engine.ENGINE_NAMES.get(k, k)} {ready(why)}" for k, why in voice_engine.available(s).items()))
+        console.print("[bold]Pictures:[/] " + ", ".join(
+            f"{visual_generator.BACKEND_NAMES[k]} {ready(why)}" for k, why in visual_generator.available(s).items()))
+        stock = visual_sourcer.Stock(s, Path("."))  # only asked what it has; nothing is searched or saved
+        names = [visual_sourcer.PROVIDER_NAMES[x] for x in visual_sourcer.PROVIDERS if stock.keys.get(x)]
+        console.print("[bold]Stock footage:[/] " + (f"[green]ready[/] ({' and '.join(names)}, your key)"
+                                                   if not stock.missing() else f"[dim]{escape(stock.missing())}[/]"))
+        from importlib.util import find_spec
+
+        readers = [name for name, module in (("trafilatura", "trafilatura"), ("readability-lxml", "readability"))
+                   if find_spec(module)]
+        console.print("[bold]Article reader:[/] " + ", ".join([*readers, "built-in"])
+                      + " [dim](the first that reads a page well is used)[/]")
+        return 0
+    if args.timeline:
+        try:
+            done = studio.render_timeline(args.timeline, args.out, settings=s, log=log, progress=progress)
+        except KeyboardInterrupt:
+            console.print("[red]Interrupted.[/]")
+            return 130
+        except Cancelled:
+            return 130
+        except orchestrator.CreatorError as exc:
+            console.print(f"[red]✗ {escape(str(exc))}[/]")
+            return 1
+        console.print(f"[green]✓ Rendered again[/] · {done.duration:.0f} s · {escape(done.encoder)}\n"
+                      f"  {escape(str(done.path))}")
+        for w in done.warnings:
+            console.print(f"  [yellow]⚠ {escape(w)}[/]")
+        return 0
+    script = args.script.read_text(encoding="utf-8") if args.script else ""
+    board = _json.loads(args.storyboard.read_text(encoding="utf-8")) if args.storyboard else None
+    if not (args.prompt.strip() or args.url.strip() or script or board is not None):
+        p.print_help()
+        return 2
+    category = orchestrator.find_category(s, args.category) if args.category else None
+    if args.category and category is None:
+        console.print(f"[yellow]⚠ There's no category called {escape(args.category)}.[/] The video goes to an "
+                      f"Automation folder of that name; posting queues it only if you have a single account.")
+    req = studio.StudioRequest(
+        prompt=args.prompt, url=args.url, script=script, storyboard=board, title=args.title,
+        category=category.id if category else args.category, voice=args.voice, seconds=args.seconds,
+        visuals=args.visuals, style=args.style, rewards=args.rewards, post=not args.no_post, format=args.format,
+        orientation=args.orientation, captions=args.captions, tts=args.tts, ai=args.ai, fps=args.fps)
+    maker = studio.StudioOrchestrator(s, log=log, progress=progress)
+    try:
+        if args.schedule:
+            from .jobs import JobDB
+
+            maker.accept(req)  # a request that can't be made is refused now, not at three in the morning
+            db = JobDB()
+            try:
+                orchestrator.queue(db, req, category.id if category else "")
+            finally:
+                db.close()
+            console.print("[green]✓ Queued.[/] Automation makes it in turn (start it in the Automation tab or with "
+                          "[bold]ytclip auto run[/]).")
+            return 0
+        if args.storyboard_only:
+            console.print(maker.storyboard(req).dumps(), markup=False, highlight=False)
+            return 0
+        result = maker.create(req)
+    except KeyboardInterrupt:
+        console.print("[red]Interrupted.[/]")
+        return 130
+    except Cancelled:
+        return 130
+    except Exception as exc:  # noqa: BLE001
+        where = f" ({studio.STATE_WORDS.get(maker.failed_at, maker.failed_at).lower()})" if maker.failed_at else ""
+        console.print(f"[red]✗ {escape(str(exc))}[/][dim]{escape(where)}[/]")
+        return 1
+    c = result.checks
+    console.print(f"[green]✓ {escape(result.storyboard.title)}[/] · {result.duration:.0f} s · "
+                  f"{c.get('width')}x{c.get('height')} · {c.get('lufs')} LUFS · {c.get('size_mb')} MB\n"
+                  f"  {escape(str(result.video))}")
+    if (result.folder / "timeline.json").is_file():
+        console.print(f"  [dim]Edit {escape(str(result.folder / 'timeline.json'))} and render it again with "
+                      f"ytclip studio --timeline[/]")
+    for line in maker.visual_credits:
+        console.print(f"  [dim]{escape(line)}[/]")
+    for w in result.warnings:
+        console.print(f"  [yellow]⚠ {escape(w)}[/]")
+    return 0
+
+
 def run_sports_montage(argv: list[str]) -> int:
     """ytclip sports-montage: one 65-85 s vertical recap reel of a game's best plays (sportsdesk/reel.py)."""
     from . import categories
@@ -1984,6 +2151,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_sports_montage(argv[1:])
     if argv[:1] == ["create"]:
         return run_create(argv[1:])
+    if argv[:1] == ["studio"]:
+        return run_studio(argv[1:])
     if argv[:1] == ["report"]:
         return run_report(argv[1:])
     if argv[:1] == ["whisper-test"]:

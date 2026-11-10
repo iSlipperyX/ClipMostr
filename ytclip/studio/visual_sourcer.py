@@ -705,7 +705,7 @@ def source_all(board, s, folder: Path, *, canvas: tuple[int, int] = (1080, 1920)
         if not footage:
             continue
         need = float(seconds.get(sc.scene_id, 3.0))
-        progress(f"Finding footage: scene {i + 1} of {n}", 0.5 * i / max(1, n))
+        progress(f"Making pictures: finding footage for scene {i + 1} of {n}", 0.5 * i / max(1, n))
         hit = _local(sc, lib, used, need, probe) if lib else None
         if hit is None and stock is not None and stock.providers():
             tried_stock.add(sc.scene_id)
@@ -745,7 +745,7 @@ def source_all(board, s, folder: Path, *, canvas: tuple[int, int] = (1080, 1920)
     log("Pictures used: " + describe(out) + ".")
     if stock is not None and (stock.searches or stock.downloads):
         log(f"Stock footage: {stock.searches} search(es) sent, {stock.downloads} file(s) downloaded.")
-    progress("Pictures ready", 1.0)
+    progress("Making pictures", 1.0)
     return out
 
 

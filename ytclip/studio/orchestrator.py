@@ -41,6 +41,7 @@ The video's folder:
 from __future__ import annotations
 
 import dataclasses
+import json
 import shutil
 import time
 from dataclasses import dataclass
@@ -82,6 +83,18 @@ class StudioRequest(CreateRequest):
 
     def label(self) -> str:
         return super().label() if (self.title or self.prompt or self.script) else (self.url or "A new video")[:80]
+
+
+STUDIO_KEYS = frozenset(StudioRequest.__dataclass_fields__) - frozenset(CreateRequest.__dataclass_fields__)
+
+
+def read_request(text: str) -> CreateRequest:
+    """A queued request read back (jobs.db keeps it as JSON): a StudioRequest when it was one, which is when
+    any of the Studio's own fields is in it, else the Video Creator's."""
+    data = json.loads(text or "{}")
+    if isinstance(data, dict) and STUDIO_KEYS & set(data):
+        return StudioRequest.from_json(text)
+    return CreateRequest.from_json(text)
 
 
 def as_request(req: CreateRequest) -> StudioRequest:
@@ -346,7 +359,7 @@ class StudioOrchestrator(VideoCreatorOrchestrator):
             visuals = visual_sourcer.source_all(
                 board, s, scenes, canvas=(canvas.width, canvas.height), seconds=on_screen,
                 choice=req.visuals or s.creator_visuals, style=style, log=self.log,
-                progress=self.stage("Finding and making the pictures"), check=self.check, stock=self._stock)
+                progress=self.stage("Making pictures"), check=self.check, stock=self._stock)
             self.visual_credits = visual_sourcer.credits(visuals)
             self._timed("visuals", started)
 
@@ -378,7 +391,7 @@ class StudioOrchestrator(VideoCreatorOrchestrator):
             self.enter("render")
             started = time.monotonic()
             video = work / "final.mp4"
-            put = self.stage("Rendering the video")
+            put = self.stage("Putting the video together")
             rendered = timeline_compiler.render(tl, video, base=pkg, work=work / "render", settings=s, progress=put,
                                                 check_cancel=self.check, log=self.log)
             self.render_report = rendered
