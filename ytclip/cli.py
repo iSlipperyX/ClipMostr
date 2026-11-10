@@ -44,6 +44,7 @@ def build_parser() -> argparse.ArgumentParser:
            "Automation: ytclip auto --help\n"
            "Quality check: ytclip qc --help\nWhat's working: ytclip results --help\n"
            "Local AI (no key, offline): ytclip local-ai --help\n"
+           "Sports recap reel: ytclip sports-montage --help\n"
            "TikTok posting: ytclip posting --help\nClear out space: ytclip clean --help\n"
            "Check this install's libraries: ytclip self-test",
     formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -1496,6 +1497,125 @@ def run_create(argv: list[str]) -> int:
     return 1 if failed else 0
 
 
+def run_sports_montage(argv: list[str]) -> int:
+    """ytclip sports-montage: one 65-85 s vertical recap reel of a game's best plays (sportsdesk/reel.py)."""
+    from . import categories
+    from .creator import voice_engine
+    from .engine import Cancelled
+    from .sportsdesk import games as G, montage, rank, reel as R
+
+    p = argparse.ArgumentParser(
+        prog="ytclip sports-montage",
+        description="Make one vertical recap reel of a game: its 4 to 7 best plays cut to 65-85 s, an opening "
+        "teaser, a narrator reading a two-sentence story of the game, countdown labels, the score bug and player "
+        "badges, the camera following the action, the crowd lifted at each big moment and the loudness set for "
+        "TikTok. The plays are found and ranked as the Sports tab does (by your AI, local or with a key, when one "
+        "is set up).",
+        epilog='Examples:  ytclip sports-montage "https://youtu.be/…" --sport soccer --creator-rewards '
+               '--output-dir "Videos/Sports"\n           ytclip sports-montage game.mp4 --sport basketball '
+               '--voice off --order timeline',
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("source", help="the game: a YouTube link or a video file")
+    p.add_argument("--sport", choices=sorted(SPORTS), default="any", help="the sport (default: any)")
+    p.add_argument("--home", default="", help="the home team (default: read from the title)")
+    p.add_argument("--away", default="", help="the away team (default: read from the title)")
+    p.add_argument("--output-dir", type=Path, default=None,
+                   help="where the reel's folder goes (default: the category's Automation folder, else "
+                        "Automation/Sports/Reels)")
+    p.add_argument("--category", default="", help="category name or id: its folder, look and TikTok account")
+    p.add_argument("--voice", default="en_storyteller",
+                   help="the narrator's voice (ytclip create --list-voices), or off for none")
+    p.add_argument("--framing", choices=sorted(G.REEL_FRAMING), default="follow",
+                   help="follow: the 9:16 picture follows the action; fit: the whole picture over a blurred fill")
+    p.add_argument("--order", choices=sorted(G.REEL_ORDER), default="countdown",
+                   help="countdown: the best play last; timeline: as it happened")
+    p.add_argument("--plays", type=int, default=0,
+                   help=f"how many plays ({montage.MIN_PLAYS}-{montage.MAX_PLAYS}; default: as many as fit)")
+    p.add_argument("--creator-rewards", action="store_true",
+                   help="fail (exit 3) when the game hasn't enough plays for over a minute; the reel is kept")
+    p.add_argument("--no-ai", action="store_true", help="rank the plays by the crowd and commentary only")
+    args = p.parse_args(argv)
+    if args.voice != "off" and args.voice not in voice_engine.VOICES:
+        console.print(f"[red]No voice called {escape(args.voice)}.[/] Try: off, "
+                      + ", ".join(voice_engine.VOICES))
+        return 2
+    s = Settings.load()
+    cat = None
+    if args.category:
+        cat = categories.find(s, args.category) or next(
+            (n for n in categories.load(s) if n.name.lower() == " ".join(args.category.split()).lower()), None)
+        if cat is None:
+            console.print(f"[red]No category called {escape(args.category)}.[/]")
+            return 2
+    sport = SPORTS[args.sport]
+    base = s
+    if cat is not None:  # the category's look and account, as automation and the Sports tab use
+        from .jobs import Job
+        from .pipeline import settings_for
+
+        base, _label = settings_for(Job(id="sports-montage", url=args.source, category_id=cat.id), s)
+    own = cat.clip_overrides() if cat else {}
+    es = base.apply({"sport": sport.id, "mode": "auto", "clip_count": rank.CANDIDATES, "quality_floor": 0.2,
+                     "series_parts": 1, "ai_polish": False, "min_len": own.get("min_len", sport.lengths[0]),
+                     "max_len": own.get("max_len", sport.lengths[1])})
+    root = (args.output_dir.expanduser() if args.output_dir else
+            (s.auto_output_path / cat.folder if cat else s.auto_output_path / "Sports") / "Reels")
+    log = lambda m: console.print(f"[dim]{escape(m)}[/]")  # noqa: E731
+    with Progress(TextColumn("[cyan]{task.description}"), BarColumn(), TimeElapsedColumn(),
+                  console=console, transient=True) as bar:
+        task = bar.add_task("Starting", total=None)
+
+        def progress(msg: str, f) -> None:
+            bar.update(task, description=msg, completed=f, total=1 if f is not None else None)
+
+        engine = Engine(es, log=log, progress=progress)
+        proj = Project(args.source)
+        try:
+            engine.open(proj)
+            v = proj.video
+            read = G.read_title(v.title, v.duration)
+            home, away = args.home or read.get("home") or "", args.away or read.get("away") or ""
+            game = {"id": f"cli-{v.id}", "video": v.id, "url": args.source, "title": v.title, "sport": sport.id,
+                    "home": home, "away": away, "matchup": G.matchup(home, away, sport.id) or v.title,
+                    "score": read.get("score") or "", "duration": v.duration}
+            console.print(f"[bold]{escape(game['matchup'])}[/]  [dim]{escape(v.title)} · {stamp(v.duration)}[/]")
+            engine.measure(proj)
+            progress("Finding the plays", None)
+            engine.find(proj, use_ai=False)
+            clips = [c for c in proj.clips if c.enabled]
+            if not clips:
+                console.print("[red]No plays stood out: the crowd and the commentary never rose much.[/]")
+                return 1
+            progress("Ranking the plays", None)
+            hl, by_ai, why_not = rank.rank(game, clips, proj.signals, proj.cues, es, montage.MAX_PLAYS, log=log,
+                                           use_ai=not args.no_ai)
+            if why_not:
+                console.print(f"[yellow]⚠ {escape(why_not)}[/]")
+            ids = [h["id"] for h in hl[:max(montage.MIN_PLAYS, min(montage.MAX_PLAYS, args.plays))]] \
+                if args.plays else None
+            res = R.make(proj, game, hl, es, root, ids=ids, category=cat, voice=args.voice,
+                         framing_mode=args.framing, order=args.order, log=log, progress=progress)
+        except Cancelled:
+            return 130
+        except montage.ReelError as exc:
+            console.print(f"[red]{escape(str(exc))}[/]")
+            return 1
+    for w in res.warnings:
+        console.print(f"[yellow]⚠ {escape(w)}[/]")
+    length = float(res.checks.get("length") or res.reel.duration)
+    loud = res.checks.get("lufs")
+    console.print(f"[green]✓ {length:.1f} s reel of the top {len(res.reel.plays)} plays[/]"
+                  + (f" [dim](ranked by {escape(by_ai)})[/]" if by_ai else "")
+                  + (f" [dim]· {loud:.1f} LUFS[/]" if isinstance(loud, (int, float)) else "")
+                  + f" → {escape(str(res.file))}")
+    if res.reel.story.opening and res.info.get("narrator"):
+        console.print(f"[dim]Narrator: “{escape(res.reel.story.opening)}”[/]")
+    if not res.checks.get("rewards"):
+        console.print("[yellow]Under a minute: not for Creator Rewards.[/]")
+        return 3 if args.creator_rewards else 0
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     if argv[:1] == ["--apply-update"]:  # the updater's install step, run from the unpacked new version
@@ -1516,6 +1636,8 @@ def main(argv: list[str] | None = None) -> int:
         return run_categories(argv[1:])
     if argv[:1] == ["request"]:
         return run_request(argv[1:])
+    if argv[:1] == ["sports-montage"]:
+        return run_sports_montage(argv[1:])
     if argv[:1] == ["create"]:
         return run_create(argv[1:])
     if argv[:1] == ["report"]:

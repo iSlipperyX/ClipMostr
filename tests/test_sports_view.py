@@ -72,6 +72,24 @@ def test_ticking_plays_and_making_them_into_clips(app, page):
     assert task["kind"] == "make" and task["game"] == "v0" and len(task["payload"]["ids"]) == 3
 
 
+def test_making_a_reel_of_the_best_plays(app, page):
+    panel = page.panel
+    assert wait(app, lambda: panel.list.count() == 4)
+    assert panel.reel_btn.isVisible() and panel.reel_btn.isEnabled()
+    panel.reel_btn.click()
+    assert wait(app, lambda: page.desk.game("v0")["status"] == "queued")
+    task = page.desk.claim("test:1")
+    assert task["kind"] == "reel" and task["game"] == "v0" and len(task["payload"]["ids"]) == 2
+
+
+def test_the_reels_settings_are_kept(app, page):
+    assert wait(app, lambda: page.list.count() == 3)
+    f = page.filter
+    f.reel_voice.setCurrentIndex(f.reel_voice.findData("off"))
+    f.reel_order.setCurrentIndex(f.reel_order.findData("timeline"))
+    assert wait(app, lambda: (page.desk.filter().reel_voice, page.desk.filter().reel_order) == ("off", "timeline"))
+
+
 def test_open_in_studio_hands_over_the_ticked_plays(app, page):
     got = []
     page.open_studio.connect(lambda url, title, clips: got.append((url, title, clips)))

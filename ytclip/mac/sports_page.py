@@ -97,6 +97,13 @@ class RemoteBackend(Backend):
         return c.post(f"/api/sports/games/{game_id}/make", body)
 
     @staticmethod
+    def _reel(c, game_id: str, ids: list | None = None, category: str | None = None):
+        body: dict = {"ids": list(ids or [])}
+        if category is not None:
+            body["category"] = category
+        return c.post(f"/api/sports/games/{game_id}/reel", body)
+
+    @staticmethod
     def _version(c, game_id: str, video: str):
         return c.post(f"/api/sports/games/{game_id}/version", {"video": video})
 
