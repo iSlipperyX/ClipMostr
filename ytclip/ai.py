@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable
 
 import numpy as np
@@ -85,11 +85,16 @@ class AICutOff(AIError):
     """The answer ran out of room before it finished."""
 
 
+class AIBudget(AIError):
+    """The spending limit (Settings → AI) is reached, so a paid AI wasn't asked (intelligence/usage.py)."""
+
+
 @dataclass
 class Answer:
     data: dict
     model: str  # the model that actually answered
-    provider: str  # "claude" | "gemini"
+    provider: str  # "claude" | "gemini" | "local" | "pc"
+    usage: dict = field(default_factory=dict)  # tokens_in, tokens_out, usd (intelligence/usage.py), when counted
 
 
 # The linked PC lending its local AI ("pc"), set by ClipMonster for Mac while a PC is linked. It has:
@@ -221,17 +226,24 @@ def ask_json(s, task: str, system: str, content: str | list[dict], schema: dict,
         providers.append("local")  # asked for by name: its model may download (order() only falls back to it once it's here)
     if not providers:
         raise AIError(missing_key(s))
+    from .intelligence import usage
+
     failures: list[tuple[str, AIError]] = []
     for provider in providers:
         model = model_for(s, task, provider)
         if failures and log:
             log(f"{name(failures[-1][0])} didn't work: {failures[-1][1]} Trying {name(provider)} instead.")
+        stopped = usage.guard(s, provider)
+        if stopped:  # the spending limit: on to an AI that's free, if there is one
+            failures.append((provider, AIBudget(stopped)))
+            continue
         if log and what:
             log(f"Asking {model} to {what}…")
+        usage.forget_last()
         try:
             if provider == "pc":
                 data, used = _ask_pc(task, system, content, schema, effort, max_tokens, log, check, progress)
-                return Answer(data, used or model, provider)
+                return Answer(data, used or model, provider, _counted(provider, used or model, system, content, data))
             if provider == "local":
                 text, used = _ask_local(s, system, content, schema, max_tokens, log, check, progress)
             elif provider == "gemini":
@@ -246,13 +258,37 @@ def ask_json(s, task: str, system: str, content: str | list[dict], schema: dict,
                 raise AIError(f"{name(provider)}'s answer couldn't be read. Try again.") from exc
             if not isinstance(data, dict):
                 raise AIError(f"{name(provider)}'s answer couldn't be read. Try again.")
-            return Answer(data, used or model, provider)
+            return Answer(data, used or model, provider, _counted(provider, used or model, system, content, text))
         except AIError as exc:
             failures.append((provider, exc))
     if len(failures) == 1:
         raise failures[0][1]
     kind = type(failures[0][1]) if len({type(e) for _, e in failures}) == 1 else AIError
     raise kind(" ".join(f"{name(p)}: {e}" for p, e in failures))
+
+
+def _counted(provider: str, model: str, system: str, content, answer) -> dict:
+    """This answer's tokens and cost. The AI's own count when it gave one (usage.note was called as the answer
+    came back); else an estimate from the lengths, counted now."""
+    from .intelligence import usage
+
+    call = usage.last()
+    if call is None or call.provider != provider:
+        from .intelligence.llama_engine import as_text, estimate_tokens
+
+        out = answer if isinstance(answer, str) else json.dumps(answer)
+        call = usage.note(provider, model, estimate_tokens(system) + estimate_tokens(as_text(content)),
+                          estimate_tokens(out))
+    return call.to_json()
+
+
+def _note_usage(provider: str, model: str, tokens_in, tokens_out) -> None:
+    from .intelligence import usage
+
+    try:
+        usage.note(provider, model, int(tokens_in or 0), int(tokens_out or 0))
+    except (TypeError, ValueError):
+        pass
 
 
 def _ask_claude(key: str, model: str, system: str, content, schema: dict, effort: str, max_tokens: int,
@@ -282,6 +318,12 @@ def _ask_claude(key: str, model: str, system: str, content, schema: dict, effort
     except (anthropic.APIError, TypeError) as exc:
         raise _friendly(exc, model) from exc
 
+    used = getattr(response, "usage", None)
+    if used is not None:  # billed even when the answer is refused or cut off
+        tokens_in = sum(int(getattr(used, k, 0) or 0) for k in ("input_tokens", "cache_creation_input_tokens",
+                                                                 "cache_read_input_tokens"))
+        _note_usage("claude", getattr(response, "model", None) or model, tokens_in,
+                    getattr(used, "output_tokens", 0))
     if response.stop_reason == "refusal":
         category = getattr(getattr(response, "stop_details", None), "category", None)
         raise AIRefused("Claude declined to answer" + (f" (its {category} safety filter triggered)" if category
@@ -303,6 +345,8 @@ def _ask_gemini(key: str, model: str, system: str, content, schema: dict, effort
     except gemini.GeminiError as exc:
         kind = {"refused": AIRefused, "cut_off": AICutOff}.get(exc.kind, AIError)
         raise kind(str(exc)) from exc
+    if reply.tokens_in or reply.tokens_out:
+        _note_usage("gemini", reply.model or model, reply.tokens_in, reply.tokens_out)
     return reply.text, reply.model
 
 
@@ -317,6 +361,8 @@ def _ask_local(s, system: str, content, schema: dict, max_tokens: int, log, chec
         raise AICutOff(str(exc)) from exc
     except llama_engine.LocalAIError as exc:
         raise AIError(str(exc)) from exc
+    if reply.tokens_in or reply.tokens_out:
+        _note_usage("local", reply.model, reply.tokens_in, reply.tokens_out)
     return reply.text, reply.model
 
 

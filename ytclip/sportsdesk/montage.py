@@ -89,6 +89,9 @@ class Reel:
     notes: list[str] = field(default_factory=list)  # what the viewer of the plan should know
     story: Story = field(default_factory=Story)
     final: str = ""  # "Lakers 108-106 Warriors", when the score is known
+    style: str = "mix"  # how one play hands over to the next: mix | dissolve | whip | zoom (reel.STYLES)
+    kind: str = "plays"  # "plays" (a game's best) | "events" (the moments an event search found)
+    title: str = ""  # an event reel's subject: "Red card"
 
     @property
     def duration(self) -> float:
@@ -113,6 +116,7 @@ class Reel:
 
     def to_json(self) -> dict:
         return {"duration": round(self.duration, 2), "transition": self.transition, "order": self.order,
+                "style": self.style, "kind": self.kind, "title": self.title,
                 "eligible": self.eligible, "notes": self.notes, "final": self.final,
                 "starts": self.starts(), "segments": [asdict(s) for s in self.segments], "story": asdict(self.story)}
 
@@ -179,7 +183,7 @@ def is_winner(h: dict) -> bool:
 
 def labels_for(order: list[dict], best: dict, how: str) -> list[str]:
     """Each play's on-screen label, in the reel's order."""
-    if how == "timeline":
+    if how in ("timeline", "climax"):
         return [("THE GAME WINNER" if h is best and is_winner(h) else f"#{h.get('rank') or i + 1} PLAY")
                 for i, h in enumerate(order)]
     n = len(order)
@@ -192,8 +196,12 @@ def labels_for(order: list[dict], best: dict, how: str) -> list[str]:
 
 def plan(game: dict, highlights: list[dict], *, crowd: np.ndarray | None, cues=(), scene_cuts=(),
          duration: float = 0.0, ids: list[str] | None = None, order: str = "countdown",
-         teaser: bool = True) -> Reel:
-    """The reel's cut: which plays, in what order, from where to where, sized to 65-85 s."""
+         teaser: bool = True, transition: float = TRANSITION, style: str = "mix") -> Reel:
+    """The reel's cut: which plays, in what order, from where to where, sized to 65-85 s.
+
+    `order`: "countdown" (worst to best), "timeline" (as they happened) or "climax" (as they happened, with
+    the best play held back for the end: the game's story, then its biggest moment)."""
+    TRANSITION = max(0.1, min(0.6, float(transition)))  # noqa: N806 - this plan's own, used as the constant below
     if not highlights:
         raise ReelError("This game has no highlights yet: find its highlights first.")
     plays, spare = pick_plays(highlights, ids)
@@ -271,6 +279,8 @@ def plan(game: dict, highlights: list[dict], *, crowd: np.ndarray | None, cues=(
     best = plays[0]
     if order == "timeline":
         ordered = sorted(plays, key=lambda h: spans[h["id"]][0])
+    elif order == "climax":
+        ordered = sorted((h for h in plays if h is not best), key=lambda h: spans[h["id"]][0]) + [best]
     else:
         ordered = list(reversed(plays))  # the best last
     labels = labels_for(ordered, best, order)
@@ -287,12 +297,113 @@ def plan(game: dict, highlights: list[dict], *, crowd: np.ndarray | None, cues=(
         a, b, m = spans[h["id"]]
         segments.append(Segment("play", h["id"], round(a, 3), round(b, 3), round(m, 3), h.get("rank") or 0, label,
                                 h.get("play") or "", h.get("title") or "", list(h.get("players") or [])[:3]))
-    reel = Reel(segments, TRANSITION, order, notes, final=final_score(game))
+    reel = Reel(segments, TRANSITION, order, notes, final=final_score(game), style=style)
     if not reel.eligible:
         notes.append(f"It comes to {reel.duration:.0f} s, under a minute: this game hasn't enough strong plays for "
                      "Creator Rewards. Find the highlights in a longer version of its footage (Extended highlights or "
                      "the Full game) for more.")
     return reel
+
+
+# ---------------------------------------------------------------- a reel of found moments
+
+EVENT_MIN, EVENT_MAX = 9.0, 22.0  # seconds each found moment gets
+EVENT_SETUP = 0.42  # of a moment's seconds, how many come before it (the aftermath is the point of these)
+MAX_EVENTS = 6
+
+
+def plan_events(game: dict, hits: list[dict], *, duration: float = 0.0, scene_cuts=(), order: str = "timeline",
+                title: str = "", teaser: bool = True, transition: float = TRANSITION, style: str = "mix") -> Reel:
+    """A reel of the moments an event search found (semantic_search.EventHit as dicts): every red card, each
+    argued call, the flashpoints of a game. Each keeps the search's own cut when it fits, else is trimmed
+    around its moment; they run as they happened, or (climax, countdown) with the surest match last."""
+    hits = [h for h in hits if h.get("end", 0) - h.get("start", 0) >= 3.0]
+    if not hits:
+        raise ReelError("There are no found moments to make a reel from: search the game for an event first.")
+    best_first = sorted(hits, key=lambda h: -(h.get("score") or 0))[:MAX_EVENTS]
+    n = len(best_first)
+    tr = max(0.1, min(0.6, float(transition)))
+    fixed = (TEASER - tr if teaser and n > 1 else 0.0) - tr * (n - 1)
+    want = max(EVENT_MIN, min(EVENT_MAX, (REEL_AIM - fixed) / n))
+    cuts = sorted(float(c) for c in scene_cuts)
+    spans: dict[str, tuple[float, float, float]] = {}
+    for h in best_first:
+        a, b, m = float(h["start"]), float(h["end"]), float(h.get("t_event", h["start"]))
+        if b - a > want + 0.5:  # trim around the moment, keeping the search's own edges where they're inside
+            start = max(a, m - EVENT_SETUP * want)
+            end = min(b, start + want)
+            start = max(a, end - want)
+            a, b = snap(start, end, cuts, m)
+        spans[h["id"]] = (a, b, m)
+    best = best_first[0]
+    by_time = sorted(best_first, key=lambda h: spans[h["id"]][0])
+    if order == "countdown":
+        ordered = list(reversed(best_first))
+    elif order == "climax":
+        ordered = [h for h in by_time if h is not best] + [best]
+    else:
+        ordered = by_time
+    segments: list[Segment] = []
+    if teaser and n > 1:
+        a, _b, m = spans[best["id"]]
+        stop = max(a + 1.5, m - TEASER_STOP)
+        seg = Segment("teaser", best["id"], max(a, stop - TEASER), stop, m, 1, play=best.get("label") or "")
+        if seg.length >= 1.5:
+            segments.append(seg)
+    for i, h in enumerate(ordered, 1):
+        a, b, m = spans[h["id"]]
+        ev = h.get("feed") or {}
+        when = ev.get("when") or ""
+        label = (h.get("label") or "MOMENT").upper() if n == 1 else f"{(h.get('label') or 'Moment').upper()} {i}/{n}"
+        segments.append(Segment("play", h["id"], round(a, 3), round(b, 3), round(m, 3), i, label,
+                                h.get("label") or "", h.get("quote") or "", list(ev.get("players") or [])[:3],
+                                badge=h.get("badge") or (f"{when} {h.get('label', '')}".strip().upper())))
+    notes: list[str] = []
+    reel = Reel(segments, tr, order, notes, final=final_score(game), style=style, kind="events", title=title)
+    if not reel.eligible:
+        notes.append(f"It comes to {reel.duration:.0f} s, under a minute, so it isn't for Creator Rewards: the "
+                     f"search found {n} moment{'s' if n != 1 else ''} here. It's still a clip worth posting.")
+    if any(not h.get("certain", True) for h in ordered):
+        notes.append("Some of these are only talked about in the commentary and may not show the event: watch "
+                     "the reel before posting.")
+    return reel
+
+
+def event_story(game: dict, reel: Reel, narrator: bool) -> Story:
+    """An event reel's words, from what the search and the feed found (nothing here is made up by an AI: the
+    badges are the feed's own minute and player, the hook is the subject)."""
+    matchup = game.get("matchup") or game.get("title") or "this game"
+    n = len(reel.plays)
+    what = (reel.title or "moment").strip()
+    plural = what if n == 1 else (what + "s" if not what.lower().endswith(("s", "review", "call")) else what)
+    words = {1: "One", 2: "Two", 3: "Three", 4: "Four", 5: "Five", 6: "Six"}.get(n, str(n))
+    opening = (f"{matchup}. {words} {plural.lower()} that changed the game, starting here." if narrator and n > 1
+               else f"{matchup}. The {what.lower()} everyone is talking about." if narrator else "")
+    hook = tidy(f"EVERY {plural}" if n > 1 else f"THE {what}", 48).upper()
+    sp = sports.get(game.get("sport", "")) or sports.SPORTS["any"]
+    tags = [t for t in (re.sub(r"\W", "", game.get("league") or ""), re.sub(r"\W", "", game.get("home") or ""),
+                        re.sub(r"\W", "", game.get("away") or ""), sp.id if sp.id != "any" else "sports",
+                        re.sub(r"\W", "", what.title())) if t]
+    badges = {seg.hid: tidy(seg.badge, 34).upper() for seg in reel.plays if seg.badge}
+    return Story(opening, hook, tidy(f"{matchup}: {'every ' + plural.lower() if n > 1 else 'the ' + what.lower()}", 150),
+                 list(dict.fromkeys(tags))[:5], badges)
+
+
+def feed_badges(reel: Reel, timeline: list[dict]) -> dict[str, str]:
+    """Lower-thirds from the game's official timeline: for each play, the scoring event (or card) the feed
+    places inside it, as "90+4' WINNER · E. HAALAND". `timeline` is [{"video": seconds, "badge": text,
+    "scoring": bool, "kind": str}] (the desk keeps it after an event search with a feed)."""
+    out: dict[str, str] = {}
+    for seg in reel.plays:
+        inside = [e for e in timeline if seg.start - 2.0 <= float(e.get("video", -1)) <= seg.end + 2.0 and e.get("badge")]
+        if not inside:
+            continue
+        pick = min(inside, key=lambda e: (not e.get("scoring"), abs(float(e["video"]) - seg.moment)))
+        text = str(pick["badge"])
+        if seg.label == "THE GAME WINNER" and pick.get("scoring"):
+            text = re.sub(r"\b(GOAL|TOUCHDOWN|BASKET|SCORE)\b", "WINNER", text, count=1)
+        out[seg.hid] = tidy(text, 34).upper()
+    return out
 
 
 def final_score(game: dict) -> str:

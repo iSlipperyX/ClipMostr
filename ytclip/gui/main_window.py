@@ -528,6 +528,24 @@ class MainWindow(QMainWindow):
         self.sports.open_studio.connect(self.open_in_studio)
         self.sports.open_settings.connect(self._open_settings)
         self.tabs.addTab(self.sports, "Sports", "sports")
+        if getattr(self, "research", None) is not None:
+            self.research.event_search.connect(self._event_search)
+
+    def _event_search(self, video: dict, query: str) -> None:
+        """Research's "Search by in-game event": the video joins Sports' games and is searched there."""
+        from ..sportsdesk.desk import DeskError
+
+        try:
+            gid = self.desk.add_video(video)["id"]
+            said = self.desk.find_events(query, [gid])
+        except DeskError as exc:
+            self._notice(exc.message)
+            return
+        self._notice(said.get("message", ""))
+        self.sports.event_box.setText(query)
+        self.sports.current = gid
+        self.tabs.setCurrentWidget(self.sports)
+        self.sports.refresh(force=True)
 
     def open_in_studio(self, url: str, title: str, clips: list) -> None:
         """A game's plays (from Sports) in the Studio, as its clips, to edit before exporting."""

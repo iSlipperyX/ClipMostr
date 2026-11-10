@@ -1513,7 +1513,9 @@ def run_sports_montage(argv: list[str]) -> int:
         "is set up).",
         epilog='Examples:  ytclip sports-montage "https://youtu.be/…" --sport soccer --creator-rewards '
                '--output-dir "Videos/Sports"\n           ytclip sports-montage game.mp4 --sport basketball '
-               '--voice off --order timeline',
+               '--voice off --order timeline\n           ytclip sports-montage game.mp4 --sport soccer '
+               '--order climax --transitions dissolve --feed espn:eng.1:401879244 --anchor 1=4:10 --anchor 2=1:06:40\n'
+               '           ytclip sports-montage game.mp4 --sport soccer --events "red card or controversial call"',
         formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("source", help="the game: a YouTube link or a video file")
     p.add_argument("--sport", choices=sorted(SPORTS), default="any", help="the sport (default: any)")
@@ -1534,6 +1536,12 @@ def run_sports_montage(argv: list[str]) -> int:
     p.add_argument("--creator-rewards", action="store_true",
                    help="fail (exit 3) when the game hasn't enough plays for over a minute; the reel is kept")
     p.add_argument("--no-ai", action="store_true", help="rank the plays by the crowd and commentary only")
+    p.add_argument("--events", default="", metavar="QUESTION",
+                   help='make the reel of the moments an event search finds instead of the best plays: '
+                        '"red card or player ejection", "controversial call"')
+    _add_event_options(p)
+    p.add_argument("--transitions", choices=("mix", "dissolve", "whip", "zoom"), default="",
+                   help="how one play hands over to the next (default: Settings → Sports → Reel transitions)")
     args = p.parse_args(argv)
     if args.voice != "off" and args.voice not in voice_engine.VOICES:
         console.print(f"[red]No voice called {escape(args.voice)}.[/] Try: off, "
@@ -1557,7 +1565,10 @@ def run_sports_montage(argv: list[str]) -> int:
     own = cat.clip_overrides() if cat else {}
     es = base.apply({"sport": sport.id, "mode": "auto", "clip_count": rank.CANDIDATES, "quality_floor": 0.2,
                      "series_parts": 1, "ai_polish": False, "min_len": own.get("min_len", sport.lengths[0]),
-                     "max_len": own.get("max_len", sport.lengths[1])})
+                     "max_len": own.get("max_len", sport.lengths[1])}
+                    | ({"reel_transitions": args.transitions} if args.transitions else {})
+                    | ({"event_search_model": "words"} if args.words else {}))
+    by_ai = ""
     root = (args.output_dir.expanduser() if args.output_dir else
             (s.auto_output_path / cat.folder if cat else s.auto_output_path / "Sports") / "Reels")
     log = lambda m: console.print(f"[dim]{escape(m)}[/]")  # noqa: E731
@@ -1580,21 +1591,36 @@ def run_sports_montage(argv: list[str]) -> int:
                     "score": read.get("score") or "", "duration": v.duration}
             console.print(f"[bold]{escape(game['matchup'])}[/]  [dim]{escape(v.title)} · {stamp(v.duration)}[/]")
             engine.measure(proj)
-            progress("Finding the plays", None)
-            engine.find(proj, use_ai=False)
-            clips = [c for c in proj.clips if c.enabled]
-            if not clips:
-                console.print("[red]No plays stood out: the crowd and the commentary never rose much.[/]")
-                return 1
-            progress("Ranking the plays", None)
-            hl, by_ai, why_not = rank.rank(game, clips, proj.signals, proj.cues, es, montage.MAX_PLAYS, log=log,
-                                           use_ai=not args.no_ai)
-            if why_not:
-                console.print(f"[yellow]⚠ {escape(why_not)}[/]")
-            ids = [h["id"] for h in hl[:max(montage.MIN_PLAYS, min(montage.MAX_PLAYS, args.plays))]] \
-                if args.plays else None
-            res = R.make(proj, game, hl, es, root, ids=ids, category=cat, voice=args.voice,
-                         framing_mode=args.framing, order=args.order, log=log, progress=progress)
+            if args.events:
+                found, marks = _event_search(args.events, proj, game, es, args, log, progress)
+                for note in found.notes:
+                    console.print(f"[yellow]{escape(note)}[/]")
+                if not found.hits:
+                    return 1
+                res = R.make(proj, game, [], es, root, category=cat, voice=args.voice, framing_mode=args.framing,
+                             order=("timeline" if args.order == "countdown" else args.order), log=log,
+                             progress=progress, events=[h.to_json() for h in found.hits],
+                             events_title=(found.query.labels or ["Moment"])[0], timeline=marks)
+            else:
+                progress("Finding the plays", None)
+                engine.find(proj, use_ai=False)
+                clips = [c for c in proj.clips if c.enabled]
+                if not clips:
+                    console.print("[red]No plays stood out: the crowd and the commentary never rose much.[/]")
+                    return 1
+                progress("Ranking the plays", None)
+                hl, by_ai, why_not = rank.rank(game, clips, proj.signals, proj.cues, es, montage.MAX_PLAYS, log=log,
+                                               use_ai=not args.no_ai)
+                if why_not:
+                    console.print(f"[yellow]⚠ {escape(why_not)}[/]")
+                ids = [h["id"] for h in hl[:max(montage.MIN_PLAYS, min(montage.MAX_PLAYS, args.plays))]] \
+                    if args.plays else None
+                marks = []
+                if args.feed or args.anchor:  # the feed's own minute and scorer on each play's lower-third
+                    _found, marks = _event_search("", proj, game, es, args, log, progress)
+                res = R.make(proj, game, hl, es, root, ids=ids, category=cat, voice=args.voice,
+                             framing_mode=args.framing, order=args.order, log=log, progress=progress,
+                             timeline=marks or None)
         except Cancelled:
             return 130
         except montage.ReelError as exc:
@@ -1604,7 +1630,9 @@ def run_sports_montage(argv: list[str]) -> int:
         console.print(f"[yellow]⚠ {escape(w)}[/]")
     length = float(res.checks.get("length") or res.reel.duration)
     loud = res.checks.get("lufs")
-    console.print(f"[green]✓ {length:.1f} s reel of the top {len(res.reel.plays)} plays[/]"
+    what = (f"{len(res.reel.plays)} found moments" if res.reel.kind == "events" else
+            f"the top {len(res.reel.plays)} plays")
+    console.print(f"[green]✓ {length:.1f} s reel of {what}[/]"
                   + (f" [dim](ranked by {escape(by_ai)})[/]" if by_ai else "")
                   + (f" [dim]· {loud:.1f} LUFS[/]" if isinstance(loud, (int, float)) else "")
                   + f" → {escape(str(res.file))}")
@@ -1613,6 +1641,276 @@ def run_sports_montage(argv: list[str]) -> int:
     if not res.checks.get("rewards"):
         console.print("[yellow]Under a minute: not for Creator Rewards.[/]")
         return 3 if args.creator_rewards else 0
+    return 0
+
+
+def _add_event_options(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--feed", default="",
+                   help="the game's play-by-play: auto (default: Settings → Sports), off, espn:LEAGUE:EVENT_ID "
+                        "(espn:eng.1:401879244), api-football:FIXTURE_ID, or a JSON/CSV timeline file you wrote")
+    p.add_argument("--anchor", action="append", default=[], metavar="PERIOD=TIME",
+                   help="where a period starts in the video, to place the feed's events: 1=4:10 (the first half "
+                        "kicks off at 4:10), 2=1:06:40, or 3@7:30=1:41:05 (7:30 into the third at 1:41:05). Repeatable")
+    p.add_argument("--words", action="store_true",
+                   help="match by words only: don't use (or download) the sentence model")
+
+
+def _event_search(question: str, proj, game: dict, es, args, log, progress):
+    """(the search's result or None, the game's placed timeline) for a measured project. With no question only
+    the timeline is worked out."""
+    from .intelligence import embeddings
+    from .sportsdesk import align, feeds, scoreboard
+    from .sportsdesk import semantic_search as ss
+
+    m = proj.measurements
+    sport = SPORTS.get(game.get("sport") or "any") or SPORTS["any"]
+    duration = float(getattr(m, "duration", 0) or proj.video.duration or 0)
+    cues = list(proj.cues or [])
+    crowd = None
+    if m is not None and hasattr(m, "db"):
+        try:
+            from . import sports as sports_mod
+
+            crowd = sports_mod.build_signals(m, sport, []).get("crowd")
+        except Exception:  # noqa: BLE001 - no crowd signal: the words and the feed decide
+            crowd = None
+    query = ss.understand(question, sport.id, es, use_ai=not getattr(args, "no_ai", False), log=log) if question else None
+    about = dict(game)
+    if query is not None and query.home and query.away and not (game.get("home") and game.get("away")):
+        about.update(home=query.home, away=query.away)
+    feed = feeds.for_game(about, es, spec=args.feed, log=log)
+    anchors = [align.parse_anchor(a) for a in args.anchor]
+    if (feed is not None and not anchors and scoreboard.can_read(es) and any(e.video is None for e in feed.events)
+            and align.is_full_game(duration, feed.sport, game.get("kind", ""))
+            and not align.transcript_anchors(cues, feed.sport, duration)):
+        progress("Reading the game clock off the scoreboard", None)
+        anchors += align.clock_anchors(Path(proj.video.path), duration, feed.sport, es, log=log)
+    embedder = embeddings.get(es, expand=ss.tags, log=log, progress=progress)
+    marks = ss.timeline(feed, cues, duration, s=es, anchors=anchors, kind=game.get("kind", ""), embedder=embedder,
+                        cache_key=proj.video.id) if feed is not None else []
+    if query is None:
+        return None, marks
+    result = ss.search(query, cues, duration, sport=sport.id, s=es, fine=getattr(m, "fine", None),
+                       excitement=crowd, feed=feed, anchors=anchors, kind=game.get("kind", ""), embedder=embedder,
+                       limit=getattr(args, "limit", 0) or ss.MAX_HITS, cache_key=proj.video.id, log=log,
+                       progress=progress)
+    return result, marks
+
+
+def run_sports_find(argv: list[str]) -> int:
+    """ytclip sports-find: the moments of a game that match a description (sportsdesk/semantic_search.py)."""
+    import json as _json
+
+    from .engine import Cancelled
+    from .intelligence import embeddings
+    from .sportsdesk import align, feeds, games as G, montage, reel as R
+
+    p = argparse.ArgumentParser(
+        prog="ytclip sports-find",
+        description="Find a moment in a game by describing it. The commentary (captions, or Whisper's transcript) "
+        "is read in overlapping 15-second windows and compared with your question by meaning and by the words a "
+        "commentator uses for it; the game's official play-by-play (ESPN, API-Football with a key, or a timeline "
+        "file) is placed in the video and matched too. Each moment found is cut from about 12 s before to 25 s "
+        "after, on pauses between sentences.",
+        epilog='Examples:  ytclip sports-find "red card or player ejection" "https://youtu.be/…" --sport soccer\n'
+               '           ytclip sports-find "Ref throws red card after VAR check in Arsenal vs Chelsea" game.mp4 '
+               '--sport soccer --feed espn:eng.1:401879244 --anchor 1=4:10 --anchor 2=1:06:40\n'
+               '           ytclip sports-find "technical foul on bench during game 7" game7.mp4 --sport basketball '
+               '--json\n           ytclip sports-find "controversial pass interference in the 4th quarter" chiefs.mp4 '
+               '--sport football --reel --output-dir "Videos/Sports"',
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    p.add_argument("question", help='the moment, in words: "missed penalty or controversial offside call"')
+    p.add_argument("source", help="the game: a YouTube link or a video file")
+    p.add_argument("--sport", choices=sorted(SPORTS), default="any", help="the sport (default: any)")
+    p.add_argument("--home", default="", help="the home team (default: read from the title or the question)")
+    p.add_argument("--away", default="", help="the away team")
+    _add_event_options(p)
+    p.add_argument("--limit", type=int, default=5, help="at most this many moments (default 5)")
+    p.add_argument("--no-ai", action="store_true", help="read the question by its words only (no AI)")
+    p.add_argument("--json", action="store_true", help="print the result as JSON")
+    p.add_argument("--reel", action="store_true", help="make one vertical reel of the moments found")
+    p.add_argument("--output-dir", type=Path, default=None, help="where the reel's folder goes")
+    p.add_argument("--voice", default="off", help="the reel's narrator (default: off)")
+    args = p.parse_args(argv)
+    for a in args.anchor:
+        try:
+            align.parse_anchor(a)
+        except ValueError:
+            console.print(f"[red]“{escape(a)}” isn't an anchor.[/] Write it as PERIOD=TIME, such as 2=58:40.")
+            return 2
+    s = Settings.load()
+    sport = SPORTS[args.sport]
+    es = s.apply({"sport": sport.id, "mode": "auto", "series_parts": 1, "ai_polish": False}
+                 | ({"event_search_model": "words"} if args.words else {}))
+    quiet = args.json
+    log = (lambda m: None) if quiet else (lambda m: console.print(f"[dim]{escape(m)}[/]"))
+    with Progress(TextColumn("[cyan]{task.description}"), BarColumn(), TimeElapsedColumn(),
+                  console=console, transient=True, disable=quiet) as bar:
+        task = bar.add_task("Starting", total=None)
+
+        def progress(msg: str, f) -> None:
+            bar.update(task, description=msg, completed=f, total=1 if f is not None else None)
+
+        engine = Engine(es, log=log, progress=progress)
+        proj = Project(args.source)
+        try:
+            engine.open(proj)
+            v = proj.video
+            read = G.read_title(v.title, v.duration)
+            home, away = args.home or read.get("home") or "", args.away or read.get("away") or ""
+            game = {"id": f"cli-{v.id}", "video": v.id, "url": args.source, "title": v.title, "sport": sport.id,
+                    "home": home, "away": away, "matchup": G.matchup(home, away, sport.id) or v.title,
+                    "score": read.get("score") or "", "duration": v.duration, "kind": read.get("kind") or "",
+                    "published": getattr(v, "published", 0) or 0}
+            engine.measure(proj)
+            result, marks = _event_search(args.question, proj, game, es, args, log, progress)
+            res = None
+            if args.reel and result.hits:
+                root = args.output_dir.expanduser() if args.output_dir else s.auto_output_path / "Sports" / "Reels"
+                res = R.make(proj, game, [], es, root, voice=args.voice, order="timeline", log=log, progress=progress,
+                             events=[h.to_json() for h in result.hits],
+                             events_title=(result.query.labels or ["Moment"])[0], timeline=marks)
+        except Cancelled:
+            return 130
+        except (embeddings.EmbeddingError, feeds.FeedError, montage.ReelError) as exc:
+            console.print(f"[red]{escape(str(exc))}[/]")
+            return 1
+    if args.json:
+        out = result.to_json() | {"game": {k: game[k] for k in ("title", "matchup", "sport", "home", "away")},
+                                  "timeline": marks, "reel": str(res.file) if res else ""}
+        print(_json.dumps(out, indent=2, ensure_ascii=False))
+        return 0 if result.hits else 1
+    console.print(f"[bold]{escape(game['matchup'])}[/]  [dim]{escape(v.title)} · {stamp(v.duration)}[/]")
+    how = " + ".join(x for x in (result.feed, "the commentary" if result.windows else "") if x) or "nothing to read"
+    console.print(f"[dim]Looking for: {escape(result.query.describe())} · from {escape(how)} · "
+                  f"{escape(result.reader)}{' on ' + escape(result.device) if result.device else ''}[/]")
+    if result.hits:
+        table = Table(show_lines=False)
+        for col in ("#", "At", "Clip", "Sure", "What", "Why"):
+            table.add_column(col, overflow="fold")
+        for h in result.hits:
+            table.add_row(h.id, stamp(h.t_event), f"{stamp(h.start)}-{stamp(h.end)} ({h.length:.0f} s)",
+                          f"{h.score:.0f}" + ("" if h.certain else " ?"), escape(h.badge or h.label), escape(h.why))
+        console.print(table)
+    for note in result.notes:
+        console.print(f"[yellow]{escape(note)}[/]")
+    if res is not None:
+        for w in res.warnings:
+            console.print(f"[yellow]⚠ {escape(w)}[/]")
+        console.print(f"[green]✓ {float(res.checks.get('length') or res.reel.duration):.1f} s reel[/] → "
+                      f"{escape(str(res.file))}")
+    return 0 if result.hits else 1
+
+
+def run_ai(argv: list[str]) -> int:
+    """ytclip ai: ask the AI router, and see what it would use, what it has used and what this computer runs."""
+    import json as _json
+
+    from .intelligence import agent_router, hardware, usage
+
+    p = argparse.ArgumentParser(
+        prog="ytclip ai",
+        description="The AI router: the local model first (free, on this computer), a cloud AI (Claude or Gemini, "
+        "whichever has a key) when the local one can't answer or you ask for deep reasoning. Every call's tokens "
+        "and cost are counted in ai_usage.json in the app's folder.",
+        epilog='Examples:  ytclip ai ask "Give three hooks for a clip about a last-minute winner"\n'
+               '           ytclip ai ask "Rate this title 1-10" --schema rating.json --priority cloud_deep\n'
+               "           ytclip ai route\n           ytclip ai usage --days 7\n           ytclip ai hardware",
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", required=True)
+    ask = sub.add_parser("ask", help="ask a question")
+    ask.add_argument("prompt")
+    ask.add_argument("--priority", choices=agent_router.PRIORITIES, default="local_first")
+    ask.add_argument("--schema", type=Path, default=None, help="a JSON Schema file: the answer is JSON of that shape")
+    ask.add_argument("--system", default="", help="instructions that come before the question")
+    ask.add_argument("--max-tokens", type=int, default=2000)
+    ask.add_argument("--json", action="store_true", help="print the answer with how it was got, as JSON")
+    route = sub.add_parser("route", help="which AIs would be asked, in order")
+    route.add_argument("--priority", choices=agent_router.PRIORITIES, default="local_first")
+    route.add_argument("--json", action="store_true")
+    use = sub.add_parser("usage", help="tokens and cost, by day and model")
+    use.add_argument("--days", type=int, default=30)
+    use.add_argument("--json", action="store_true")
+    hw = sub.add_parser("hardware", help="what each kind of model runs on here")
+    hw.add_argument("--json", action="store_true")
+    args = p.parse_args(argv)
+    s = Settings.load()
+    if args.cmd == "ask":
+        schema = None
+        if args.schema:
+            try:
+                schema = _json.loads(args.schema.expanduser().read_text(encoding="utf-8"))
+            except (OSError, ValueError) as exc:
+                console.print(f"[red]{escape(str(args.schema))} isn't a readable JSON Schema ({escape(str(exc))}).[/]")
+                return 2
+        try:
+            got = agent_router.query_intelligence(args.prompt, schema, args.priority, system=args.system, settings=s,
+                                                  max_tokens=args.max_tokens,
+                                                  log=None if args.json else lambda m: console.print(f"[dim]{escape(m)}[/]"))
+        except agent_router.RouterError as exc:
+            console.print(f"[red]{escape(str(exc))}[/]")
+            for t in exc.tried:
+                console.print(f"[dim]  {escape(str(t.get('provider')))}: {escape(str(t.get('error')))}[/]")
+            return 1
+        if args.json:
+            print(_json.dumps(got.to_json(), indent=2, ensure_ascii=False))
+            return 0
+        print(_json.dumps(got.data, indent=2, ensure_ascii=False) if schema else got.text)
+        u = got.usage or {}
+        cost = f" · ${u.get('usd', 0):.4f}" if u.get("usd") else " · free" if got.tier == "local" else ""
+        console.print(f"[dim]{escape(got.model)} ({escape(got.provider)}, {got.tier}) · "
+                      f"{u.get('tokens_in', 0)} in / {u.get('tokens_out', 0)} out tokens{cost} · {got.seconds:.1f} s"
+                      + (f" · after {len(got.tried)} that couldn't" if got.tried else "") + "[/]")
+        return 0
+    if args.cmd == "route":
+        steps = agent_router.route(s, args.priority)
+        if args.json:
+            print(_json.dumps([x.to_json() for x in steps], indent=2))
+            return 0
+        for i, x in enumerate(steps, 1):
+            d = x.to_json()
+            state = ("[green]ready[/]" if d.get("ready") else
+                     f"[yellow]not ready[/] [dim]({escape(str(d.get('why') or ''))})[/]")
+            console.print(f"{i}. {d.get('tier')} · {escape(str(d.get('provider')))} · "
+                          f"{escape(str(d.get('model') or ''))} · {state}")
+        if not any(x.ready for x in steps):
+            console.print("[yellow]No AI is set up: download a local model (ytclip local-ai) or add a Claude or "
+                          "Gemini key in Settings → AI.[/]")
+            return 1
+        return 0
+    if args.cmd == "usage":
+        rows = usage.summary(args.days)
+        budget = usage.status(s)
+        if args.json:
+            print(_json.dumps({"rows": rows, "budget": dict(budget), "file": str(usage.path())}, indent=2))
+            return 0
+        if not rows:
+            console.print(f"[dim]No AI calls counted yet ({escape(str(usage.path()))}).[/]")
+        else:
+            table = Table()
+            for col in ("Day", "AI", "Model", "Calls", "Tokens in", "Tokens out", "Cost"):
+                table.add_column(col)
+            for r in rows:
+                table.add_row(r["day"], r["provider"], r["model"], str(r["calls"]), f"{r['in']:,}", f"{r['out']:,}",
+                              "free" if r["provider"] in ("local", "pc") else f"${r['usd']:.4f}"
+                              + (" ~" if r.get("estimated") else ""))
+            console.print(table)
+        for period in ("day", "month"):
+            limit = float(budget.get(f"{period}_limit") or 0)
+            spent = float(budget.get(f"{period}_usd") or 0)
+            console.print(f"[dim]This {period}: ${spent:.2f}" + (f" of ${limit:.2f}" if limit else " (no limit set)") + "[/]")
+        if budget.over:
+            console.print(f"[yellow]The {budget.over}'s spending limit is reached: paid AIs are paused, the local "
+                          "one carries on.[/]")
+        return 0
+    info = hardware.stack()
+    if args.json:
+        print(_json.dumps(info, indent=2))
+        return 0
+    for key, label in (("computer", "Computer"), ("llm", "Local AI (GGUF)"), ("whisper", "Whisper"),
+                       ("onnx", "Sentence model & voice (ONNX)"), ("memory_for_models_gb", "Memory for models (GB)"),
+                       ("reserve_gb", "Kept free (GB)")):
+        console.print(f"{label + ':':34}{escape(str(info.get(key)))}")
     return 0
 
 
@@ -1636,6 +1934,10 @@ def main(argv: list[str] | None = None) -> int:
         return run_categories(argv[1:])
     if argv[:1] == ["request"]:
         return run_request(argv[1:])
+    if argv[:1] == ["sports-find"]:
+        return run_sports_find(argv[1:])
+    if argv[:1] == ["ai"]:
+        return run_ai(argv[1:])
     if argv[:1] == ["sports-montage"]:
         return run_sports_montage(argv[1:])
     if argv[:1] == ["create"]:

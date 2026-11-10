@@ -41,6 +41,13 @@ W, H = 1080, 1920
 COMMENTARY_CHARS = 320
 OPENING_FLASH = "fadewhite"
 TRANSITIONS = ("wipeleft", "slideleft", "smoothleft", "wiperight", "slideup", "zoomin")
+# How one play hands over to the next (Settings → Sports → Reel transitions), as ffmpeg xfade names
+STYLES = {
+    "mix": TRANSITIONS,  # a different quick wipe, slide or zoom each time
+    "dissolve": ("fade",),  # a cross-dissolve
+    "whip": ("smoothleft", "smoothright", "slideleft", "slideright"),  # whip-pans, alternating sides
+    "zoom": ("zoomin",),  # a push in to the next play
+}
 PERMISSION = "Picked by you in Sports: a recap reel of the game's best plays"
 
 
@@ -115,7 +122,8 @@ def video_graph(reel: montage.Reel, ass: bool, fontsdir: str) -> str:
         if reel.segments[i - 1].kind == "teaser":
             name = OPENING_FLASH
         else:
-            name = TRANSITIONS[k % len(TRANSITIONS)]
+            names = STYLES.get(getattr(reel, "style", "mix"), TRANSITIONS)
+            name = names[k % len(names)]
             k += 1
         parts.append(f"[{last}][s{i}]xfade=transition={name}:duration={reel.transition:.3f}:offset={starts[i]:.3f}"
                      f"[x{i}]")
@@ -170,9 +178,14 @@ def commentary_for(reel: montage.Reel, cues) -> dict[str, str]:
 def make(p, game: dict, highlights: list[dict], s, out_root: Path, *, ids: list[str] | None = None,
          category=None, voice: str = "en_storyteller", framing_mode: str = "follow", order: str = "countdown",
          log: Log | None = None, progress: Progress | None = None, check: Callable[[], None] | None = None,
-         work: Path | None = None) -> ReelResult:
+         work: Path | None = None, events: list[dict] | None = None, events_title: str = "",
+         timeline: list[dict] | None = None) -> ReelResult:
     """Make the reel of `game` from `p` (opened and measured). Raises montage.ReelError for a game that can't
-    make one, and whatever `check` raises to stop."""
+    make one, and whatever `check` raises to stop.
+
+    `events` (an event search's hits, semantic_search.EventHit as dicts) makes a reel of those moments instead
+    of the game's best plays. `timeline` is the game's placed play-by-play (desk: game["timeline"]); with it a
+    play's lower-third carries the feed's own minute and scorer."""
     from ..organize import safe_name
 
     log = log or (lambda m: None)
@@ -192,13 +205,25 @@ def make(p, game: dict, highlights: list[dict], s, out_root: Path, *, ids: list[
     timings: dict[str, float] = {}
 
     progress("Planning the reel", None)
-    reel = montage.plan(game, highlights, crowd=crowd, cues=p.cues, scene_cuts=m.scene_cuts if m else [],
-                        duration=media.duration or (p.video.duration or 0), ids=ids, order=order)
-    quantize(reel)
+    style = str(getattr(s, "reel_transitions", "mix") or "mix")
+    seconds = float(getattr(s, "reel_transition_seconds", montage.TRANSITION) or montage.TRANSITION)
     narrator = bool(voice) and voice != "off"
-    commentary = commentary_for(reel, p.cues)
-    progress("Writing the opening and the badges", None)
-    reel.story = montage.story(game, reel, s, commentary, narrator=narrator, log=log, check=check)
+    if events:
+        reel = montage.plan_events(game, events, duration=media.duration or (p.video.duration or 0),
+                                   scene_cuts=m.scene_cuts if m else [], order=order, title=events_title,
+                                   transition=seconds, style=style)
+        quantize(reel)
+        reel.story = montage.event_story(game, reel, narrator)
+    else:
+        reel = montage.plan(game, highlights, crowd=crowd, cues=p.cues, scene_cuts=m.scene_cuts if m else [],
+                            duration=media.duration or (p.video.duration or 0), ids=ids, order=order,
+                            transition=seconds, style=style)
+        quantize(reel)
+        commentary = commentary_for(reel, p.cues)
+        progress("Writing the opening and the badges", None)
+        reel.story = montage.story(game, reel, s, commentary, narrator=narrator, log=log, check=check)
+        if timeline:  # the feed's own minute and scorer beat a badge written from the commentary
+            reel.story.badges.update(montage.feed_badges(reel, timeline))
     if reel.story.note:
         log(reel.story.note)
     check()
@@ -328,7 +353,8 @@ def _deliver(p, game: dict, reel: montage.Reel, video: Path, folder: Path, s, ca
     from ..organize import clip_filename, write_index
 
     st = reel.story
-    title = f"{game.get('matchup') or game.get('title')}: top {len(reel.plays)} plays"
+    title = (f"{game.get('matchup') or game.get('title')}: {st.hook.lower()}" if reel.kind == "events" else
+             f"{game.get('matchup') or game.get('title')}: top {len(reel.plays)} plays")
     clip = Clip(0.0, round(result_checks.get("length") or reel.duration, 2), 100.0, title, origin="manual",
                 reason=st.caption, hook=st.hook.title() if st.hook else "")
     name = clip_filename(1, clip, folder, "{rank:02d} - {label}")

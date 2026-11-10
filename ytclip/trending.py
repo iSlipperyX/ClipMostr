@@ -144,6 +144,10 @@ class TrendingVideo:
     used: bool = False  # already picked, queued or clipped (fresh.used_ids), so not recommended again
     match: float = -1.0  # 0-100, how well it's what a typed request asked for (lookup.py); -1 = not asked
     match_why: str = ""
+    # Filled in by research/velocity.py:
+    pace: dict = field(default_factory=dict)  # velocity against the channel's 7-day median, saturation (Pace)
+    opportunity: float = 0.0  # 0-100
+    badge: str = ""  # Hot Arbitrage | High Retention | Oversaturated | Rising | ""
 
     @property
     def url(self) -> str:
@@ -345,12 +349,14 @@ class History:
         # What the extra sources (channel list, Creative Commons searches) found and when,
         # so they're only re-read when due. See sources.py.
         self.sources: dict[str, dict] = {"channels": {}, "searches": {}}
+        self.market: dict = {}  # research/velocity.py: today's count of saturation checks
         self.lock = threading.RLock()  # a scan thread and the GUI both touch it
         if path:
             try:
                 data = json.loads(path.read_text(encoding="utf-8"))
                 self.videos = data.get("videos") or {}
                 self.last_scan = data.get("last_scan") or {}
+                self.market = data.get("market") if isinstance(data.get("market"), dict) else {}
                 for kind, recs in (data.get("sources") or {}).items():
                     if kind in self.sources and isinstance(recs, dict):
                         self.sources[kind] = recs
@@ -377,6 +383,8 @@ class History:
             thin_snapshots(snaps, now)
         rec["last_seen"] = now
         rec["title"] = v.title
+        if v.channel_id:  # research/velocity.py: what's normal for this channel over the week
+            rec["channel"], rec["pace"] = v.channel_id, round(v.velocity, 1)
 
     @_locked
     def cached_deep(self, video_id: str, now: float) -> DeepInfo | None:
@@ -420,7 +428,7 @@ class History:
         tmp = self.path.with_suffix(".tmp")
         try:
             tmp.write_text(json.dumps({"videos": self.videos, "last_scan": self.last_scan,
-                                       "sources": self.sources}), encoding="utf-8")
+                                       "sources": self.sources, "market": self.market}), encoding="utf-8")
             os.replace(tmp, self.path)
         except OSError:
             pass

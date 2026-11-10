@@ -43,7 +43,8 @@ SINCE_DAYS = {k: d for k, _, d in SINCE}
 
 # The recap reel's choices: how the picture is framed, and the order of its plays.
 REEL_FRAMING = {"follow": "Follow the action", "fit": "Whole picture"}
-REEL_ORDER = {"countdown": "Countdown to the best", "timeline": "As it happened"}
+REEL_ORDER = {"countdown": "Countdown to the best", "timeline": "As it happened",
+              "climax": "As it happened, the best last"}
 
 # What a game is called in each sport, for searches ("full match", "full fight").
 GAME_WORD = {"soccer": "match", "tennis": "match", "cricket": "match", "combat": "fight", "motorsport": "race",
