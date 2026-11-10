@@ -66,6 +66,7 @@ class Host:
         self.now = now
         self._posting = posting  # (store, accounts, service) for tests
         self._own = None
+        self._desk = None  # the Sports section (desk), made on first use
         self.lock = threading.RLock()  # one change at a time
         self.events: collections.deque = collections.deque(maxlen=EVENTS_KEPT)
         self.seq = 0
@@ -784,3 +785,53 @@ class Host:
             except (OSError, TimeoutError):
                 pass
         return {"message": {"got": "Saved on this Mac.", "seen": "", "dismissed": "Removed from this Mac's inbox."}[what]}
+
+    # --- the Sports section (sportsdesk/desk.py) ----------------------------------------------------------------
+
+    @property
+    def desk(self):
+        """The Sports section's state, the same sports.db the PC's window shows (made on first use)."""
+        if self._desk is None:
+            from ..sportsdesk.desk import Desk
+
+            self._desk = Desk(settings=self.settings, now=self.now)
+        return self._desk
+
+    def sports(self, known_rev: str = "") -> dict:
+        """The Sports page: the filter, the games found, each one's ranked highlights, and what's being done."""
+        return self._desk_call(lambda d: d.state(known_rev))
+
+    def sports_do(self, action: str, body: dict, game_id: str = "", device_name: str = "") -> dict:
+        """One thing asked of the Sports section, from a Mac."""
+        body = body if isinstance(body, dict) else {}
+        ids = body.get("ids") if isinstance(body.get("ids"), list) else []
+        acts = {
+            "filter": lambda d: d.set_filter(body.get("filter") if isinstance(body.get("filter"), dict) else body),
+            "find": lambda d: d.find_games(body.get("filter") if isinstance(body.get("filter"), dict) else None),
+            "pick": lambda d: d.pick(ids or [game_id], bool(body.get("picked", True))),
+            "analyse": lambda d: d.analyse(ids or [game_id], bool(body.get("again"))),
+            "choose": lambda d: d.choose(game_id, ids, bool(body.get("chosen", True))),
+            "make": lambda d: d.make(game_id, ids or None, body.get("category") if "category" in body else None),
+            "version": lambda d: d.version(game_id, str(body.get("video") or "")),
+            "remove": lambda d: d.remove(ids or [game_id]),
+            "clear": lambda d: d.clear(),
+            "cancel": lambda d: d.cancel(game_id or "search"),
+        }
+        if action not in acts:
+            raise HostError(404, "No such request.")
+        out = self._desk_call(acts[action])
+        said = {"find": "Looking for games", "analyse": "Finding highlights", "make": "Making clips"}.get(action)
+        if said and isinstance(out, dict) and out.get("message"):
+            self.log(f"{device_name or 'A Mac'}: {out['message']}")
+        return out
+
+    def sports_thumb(self, game_id: str, highlight_id: str) -> Path:
+        return self._desk_call(lambda d: d.thumb(game_id, highlight_id))
+
+    def _desk_call(self, fn):
+        from ..sportsdesk.desk import DeskError
+
+        try:
+            return fn(self.desk)
+        except DeskError as exc:
+            raise HostError(exc.status, exc.message) from exc

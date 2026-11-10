@@ -437,6 +437,8 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, host.deliveries(self.device["id"], q.get("rev", "")))
         if path.startswith(("/api/ai", "/api/studio")):
             return self.lend(method, path, q)
+        if path.startswith("/api/sports"):
+            return self.sports(method, path, q)
         m = re.fullmatch(r"/api/deliveries/" + ID + r"/([a-z]+)", path)
         if m:
             did, action = m.group(1), m.group(2)
@@ -504,6 +506,30 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_json(200, {"message": "This Mac is unlinked."})
         raise HostError(404, "No such request.")
 
+
+    def sports(self, method: str, path: str, q: dict) -> None:
+        """The Sports section (sportsdesk/desk.py): the same games, highlights and filter the PC's window shows."""
+        host = self.remote.host
+        get = method == "GET"
+        if get and path == "/api/sports":
+            return self.send_json(200, host.sports(q.get("rev", "")))
+        m = re.fullmatch(r"/api/sports/thumbs/" + ID + r"/(h\d{1,3})", path)
+        if m and get:
+            return self.send_file(host.sports_thumb(m.group(1), m.group(2)), "image/jpeg")
+        if method != "POST":
+            raise HostError(404, "No such request.")
+        m = re.fullmatch(r"/api/sports/(filter|find|clear|cancel)", path)
+        if m:
+            return self.send_json(200, host.sports_do(m.group(1), self.body(), device_name=self.device.get("name", "")))
+        m = re.fullmatch(r"/api/sports/games/" + ID + r"/(pick|analyse|choose|make|version|remove|cancel)", path)
+        if m:
+            return self.send_json(200, host.sports_do(m.group(2), self.body(), m.group(1),
+                                                      device_name=self.device.get("name", "")))
+        m = re.fullmatch(r"/api/sports/(pick|analyse|remove)", path)
+        if m:
+            return self.send_json(200, host.sports_do(m.group(1), self.body(), device_name=self.device.get("name", "")))
+        self.body()  # read what was sent, so the Mac hears the 404 instead of a dropped connection
+        raise HostError(404, "No such request.")
 
     def lend(self, method: str, path: str, q: dict) -> None:
         """What a Mac hands this PC: questions for its local AI, and videos to make (studio.py)."""

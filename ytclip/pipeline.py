@@ -323,7 +323,7 @@ class Runner:
                  history: Callable[[], History] | None = None, picks: Callable[[], PickLog] | None = None,
                  priority: Callable[[str], str] | None = None,
                  fetch: Callable[..., Video] = download, self_update: bool = False, posting: bool = False,
-                 telegram: bool = False, remote: bool = False):
+                 telegram: bool = False, remote: bool = False, sports: bool = False):
         self.db = db or JobDB()
         self.load = load
         self._log = log or (lambda m: None)
@@ -348,6 +348,8 @@ class Runner:
         self.telegram = None  # the bot while run() runs
         self._remote = remote  # run the Mac app's server alongside (remote/server.py)
         self.remote = None  # the server while run() runs
+        self._sports = sports  # do the Sports section's work alongside (sportsdesk/desk.py)
+        self.sports = None  # its worker while run() runs
 
     # ------------------------------------------------------------ bookkeeping
     def log(self, msg: str) -> None:
@@ -463,6 +465,9 @@ class Runner:
             if self.making_for_mac():  # a video your Mac sent comes first: its owner is waiting for it
                 self.state("Waiting: making clips your Mac asked for")
                 return 5.0
+            if self.working_on_sports():  # so do the games you picked in Sports: you're waiting for them
+                self.state("Waiting: working on the games you picked in Sports")
+                return 5.0
             self.process(job, s)
             if self.poster is not None:  # the new clips go to their account's queue now, not in a few minutes
                 self.poster.service.nudge()
@@ -483,6 +488,13 @@ class Runner:
         """A linked Mac's video is being made on this PC (remote/studio.py)."""
         try:
             return self.remote is not None and self.remote.host.studio.busy()
+        except Exception:  # noqa: BLE001
+            return False
+
+    def working_on_sports(self) -> bool:
+        """The Sports section's worker is finding a game's highlights or making its clips (sportsdesk/desk.py)."""
+        try:
+            return self.sports is not None and self.sports.busy
         except Exception:  # noqa: BLE001
             return False
 
@@ -1347,6 +1359,27 @@ class Runner:
             return None
         return bot
 
+    def start_sports(self):
+        """The Sports section's worker (sportsdesk/desk.py): the games you (or a linked Mac) picked, their
+        highlights found and their clips made, one at a time, beside the queue (which waits for it)."""
+        try:
+            from .sportsdesk.desk import Desk, DeskWorker, owner_name
+
+            worker = DeskWorker(Desk(settings=self.load), self.load, owner_name("automation"), log=self.log,
+                                events=self._sports_news, deliver=self.deliver)
+            worker.start()
+            return worker
+        except Exception as exc:  # noqa: BLE001 - clipping carries on without it
+            self.log(f"⚠ The Sports section's worker couldn't start: {exc}")
+            return None
+
+    def _sports_news(self, kind: str, text: str) -> None:
+        if self.remote is not None:  # a linked Mac hears at once (its Sports page refreshes, and it notifies)
+            try:
+                self.remote.host.add_event(kind, text)
+            except Exception:  # noqa: BLE001
+                pass
+
     def start_remote(self):
         """The Mac app's server on its threads (it listens once Settings → Mac app is on), hearing posting's
         news too."""
@@ -1379,6 +1412,7 @@ class Runner:
         self.telegram = self.start_telegram() if self._telegram else None
         # The Mac app's server, when Settings → Mac app is on (remote/server.py): it waits quietly until it is.
         self.remote = self.start_remote() if self._remote else None
+        self.sports = self.start_sports() if self._sports else None
         stop = self._stop = stop or (lambda: False)
         try:
             self.health()
@@ -1406,6 +1440,9 @@ class Runner:
             pass
         finally:
             self.stop_prefetch()
+            if self.sports is not None:
+                self.sports.stop()  # what it was on goes back in its queue, for next time
+                self.sports = None
             if self.remote is not None:
                 self.remote.stop()
                 self.remote = None
@@ -1658,7 +1695,7 @@ def run_headless() -> int:
     except Exception:
         pass
     return Runner(log=file_logger(), priority=speed.set_priority, self_update=True, posting=True, telegram=True,
-                  remote=True).run()
+                  remote=True, sports=True).run()
 
 
 def request_scan(db: JobDB, category_id: str = "") -> None:

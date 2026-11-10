@@ -44,6 +44,7 @@ hiddenimports = (
     + collect_submodules("ytclip.intelligence") + collect_submodules("ytclip.vision")
     + collect_submodules("ytclip.audio") + collect_submodules("ytclip.rendering")
     + collect_submodules("ytclip.compliance") + collect_submodules("ytclip.mac")
+    + collect_submodules("ytclip.sportsdesk")
     + ["cv2", "anthropic", "keyring.backends.macOS", "PySide6.QtNetwork", "PySide6.QtMultimedia",
        "PySide6.QtMultimediaWidgets",
        "certifi"]  # HTTPS's certificates (pyinstaller-hooks-contrib's hook brings its cacert.pem; mac/app.py)
