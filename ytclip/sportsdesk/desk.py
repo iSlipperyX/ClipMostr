@@ -40,7 +40,7 @@ POLL = 2.0  # s between looks for work when there's none
 STAGE_EVERY = 1.0  # s between progress writes
 WAIT_RETRY = 600.0  # s before a task waiting out YouTube's sign-in pause is looked at again
 KEEP_TASKS = 7 * 86400.0  # finished tasks are forgotten after this long
-KINDS = ("search", "highlights", "make")
+KINDS = ("search", "highlights", "make", "reel")
 BUSY = ("queued", "analysing", "making")  # a game's statuses while work is waiting or under way
 
 
@@ -312,6 +312,37 @@ class Desk:
             self._bump(con)
         return {"message": f"Making {_plural(len(want), 'clip')} from {g.get('matchup') or g.get('title')}…"}
 
+    def reel(self, game_id: str, ids: list[str] | None = None, category_id: str | None = None) -> dict:
+        """Make a game's recap reel (reel.py): its ticked plays (or `ids`), topped up from its best, as one
+        65-85 s video for `category_id` (else the filter's)."""
+        from .montage import MIN_PLAYS
+
+        cat_id = self.filter().category_id if category_id is None else re.sub(r"[^\w-]", "", str(category_id))
+        s = self.settings()
+        if cat_id:
+            from .. import categories
+
+            if categories.find(s, cat_id) is None:
+                raise DeskError("That category isn't there any more. Pick another under Clips for.")
+        with self._tx() as con:
+            row = con.execute("SELECT data FROM games WHERE id=?", (game_id,)).fetchone()
+            if row is None:
+                raise DeskError("That game isn't in the list any more.", 404)
+            g = json.loads(row["data"])
+            if g.get("status") in BUSY:
+                raise DeskError("That game is being worked on already.")
+            hl = g.get("highlights") or []
+            if len(hl) < 2:
+                raise DeskError("Find this game's highlights first: the reel is made of its best plays.")
+            want = [h["id"] for h in hl if h["id"] in set(_ids(ids))] if ids else []
+            g.update(status="queued", stage="Waiting to make the reel", frac=None, error="")
+            self._put(con, g)
+            self._add_task(con, "reel", game_id, {"ids": want, "category_id": cat_id})
+            self._bump(con)
+        n = max(MIN_PLAYS, len(want) or sum(1 for h in hl if h.get("chosen")))
+        return {"message": f"Making a reel of the top {min(n, len(hl), 7)} plays from "
+                           f"{g.get('matchup') or g.get('title')}…"}
+
     def version(self, game_id: str, video_id: str) -> dict:
         """Use another upload of the game (its full game instead of its highlights, say)."""
         def fn(g):
@@ -515,7 +546,7 @@ def public(g: dict) -> dict:
     out = {k: g.get(k) for k in ("id", "video", "url", "title", "channel", "published", "duration", "views",
                                  "thumbnail", "sport", "league", "home", "away", "matchup", "score", "kind", "found",
                                  "new", "picked", "status", "stage", "frac", "error", "ranked_by", "ai_error",
-                                 "analysed", "made")}
+                                 "analysed", "made", "reels")}
     out["versions"] = [{k: v.get(k) for k in ("video", "url", "title", "channel", "kind", "duration", "views")}
                        for v in g.get("versions") or []]
     out["highlights"] = [{k: h.get(k) for k in ("id", "start", "end", "length", "signal", "parts", "ai", "score",
@@ -630,7 +661,8 @@ class DeskWorker:
         keeper = threading.Thread(target=renew_loop, name="sports-lease", daemon=True)
         keeper.start()
         try:
-            said = {"search": self.do_search, "highlights": self.do_highlights, "make": self.do_make}[task["kind"]](task)
+            said = {"search": self.do_search, "highlights": self.do_highlights, "make": self.do_make,
+                    "reel": self.do_reel}[task["kind"]](task)
             self.desk.finish(task, "done", said=said or "")
         except Stopping:
             self.desk.finish(task, "queued", said="Stopped; starts again later")
@@ -930,6 +962,63 @@ class DeskWorker:
                 + (f" ({rejected} rejected by the quality check)" if rejected else "")
                 + (f", for {cat.name}" if cat else ""))
         self.log(f"Sports: {said} → {folder}")
+        self.events("sports", f"{sport.emoji} {said}")
+        return said
+
+
+    def do_reel(self, task: dict) -> str:
+        from ..engine import Project
+        from . import reel as R
+
+        g = self.desk.game(task["game"])
+        hl = g.get("highlights") or []
+        if len(hl) < 2:
+            raise DeskError("This game's highlights aren't there any more: find them again.")
+        s = self.settings()
+        f = self.desk.filter()
+        sport = sports.get(g.get("sport", "")) or sports.SPORTS["any"]
+        base, _label, cat = self._settings_for(s, task["payload"].get("category_id", ""), g["video"], g["url"])
+        root = (s.auto_output_path / cat.folder if cat else s.auto_output_path / "Sports") / "Reels"
+        es = base.apply({"sport": sport.id, "mode": "auto", "series_parts": 1})
+        self._youtube_pause()
+        progress = self._progress(g["id"], "making")
+        progress("Starting the reel", None)
+        engine, Cancelled = self._engine(es, progress)
+        p = Project(g["url"])
+        try:
+            engine.open(p)
+            engine.measure(p)
+            res = R.make(p, g, hl, es, root, ids=list(task["payload"].get("ids") or []) or None, category=cat,
+                         voice=f.reel_voice, framing_mode=f.reel_framing, order=f.reel_order, log=self.log,
+                         progress=progress, check=self.check)
+        except Cancelled:
+            self.check()
+            raise Stopping()
+        except R.montage.ReelError as exc:
+            raise DeskError(str(exc)) from exc
+        sent = 0
+        if self.deliver is not None and cat is not None:
+            try:
+                sent = int(self.deliver(res.folder, cat) or 0)
+            except Exception as exc:  # noqa: BLE001 - the reel is made either way
+                self.log(f"⚠ The reel couldn't be sent to your Macs: {exc}")
+        length = float(res.checks.get("length") or res.reel.duration)
+
+        def fn(x):
+            x.setdefault("reels", []).append({
+                "at": time.time(), "folder": str(res.folder), "file": str(res.file), "length": round(length, 1),
+                "plays": len(res.reel.plays), "rewards": bool(res.checks.get("rewards")), "sent": sent,
+                "category": cat.name if cat else "", "narrator": bool(res.info.get("narrator")),
+                "story_by": res.reel.story.written_by, "warnings": res.warnings[:3]})
+            x.update(status="ready", stage="", frac=None, error="")
+
+        self.desk.change(g["id"], fn)
+        said = (f"Made a {length:.0f} s reel of {g.get('matchup') or g.get('title')}'s top {len(res.reel.plays)} "
+                f"plays" + (f", for {cat.name}" if cat else "")
+                + ("" if res.checks.get("rewards") else " (under a minute: not for Creator Rewards)"))
+        self.log(f"Sports: {said} → {res.file}")
+        for w in res.warnings:
+            self.log(f"⚠ {w}")
         self.events("sports", f"{sport.emoji} {said}")
         return said
 

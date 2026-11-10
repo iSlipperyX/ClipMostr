@@ -35,7 +35,7 @@ EDIT_HOLD = 4.0  # s after you change the filter before the PC's copy of it is s
 PICTURES_KEPT = 400
 
 SINCE_SHORT = {"day": "24 h", "3days": "3 days", "week": "Week", "month": "Month", "any": "Any"}
-STATUS_WORDS = {"found": "", "queued": "Waiting", "analysing": "Finding highlights", "making": "Making clips",
+STATUS_WORDS = {"found": "", "queued": "Waiting", "analysing": "Finding highlights", "making": "Making",
                 "ready": "Highlights ready", "failed": "Failed"}
 
 
@@ -432,6 +432,38 @@ class FilterPanel(QFrame):
         more.addRow("Best", self.per_game)
         v.addLayout(more)
 
+        v.addWidget(muted("Recap reel"))
+        reel = QFormLayout()
+        reel.setContentsMargins(0, 0, 0, 0)
+        reel.setHorizontalSpacing(10)
+        reel.setVerticalSpacing(8)
+        reel.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        self.reel_voice = QComboBox()
+        self.reel_voice.addItem("No narrator", "off")
+        from ..creator.voice_engine import VOICES
+
+        for key, prof in VOICES.items():
+            self.reel_voice.addItem(prof.label, key)
+            self.reel_voice.setItemData(self.reel_voice.count() - 1, prof.blurb, Qt.ToolTipRole)
+        self.reel_voice.setToolTip("The voice that opens a reel with two sentences on the game, written by the AI "
+                                   "(the Video Creator's voices). A narrated reel is labelled AI-generated when it "
+                                   "posts")
+        reel.addRow("Narrator", self.reel_voice)
+        self.reel_framing = QComboBox()
+        for key, label in G.REEL_FRAMING.items():
+            self.reel_framing.addItem(label, key)
+        self.reel_framing.setToolTip("Follow the action: a 9:16 window that moves with the play, filling the "
+                                     "screen.\nWhole picture: all of the 16:9 broadcast, over a blurred fill of "
+                                     "itself")
+        reel.addRow("Framing", self.reel_framing)
+        self.reel_order = QComboBox()
+        for key, label in G.REEL_ORDER.items():
+            self.reel_order.addItem(label, key)
+        self.reel_order.setToolTip("Countdown: the plays build to the best one, labelled PLAY 4, PLAY 3... "
+                                   "NUMBER 1.\nAs it happened: in the order of the game")
+        reel.addRow("Order", self.reel_order)
+        v.addLayout(reel)
+
         row = QHBoxLayout()
         self.find_btn = QPushButton("Find games")
         self.find_btn.setObjectName("primary")
@@ -463,6 +495,8 @@ class FilterPanel(QFrame):
             box.toggled.connect(self._kind_toggled)
         self.category.currentIndexChanged.connect(self._edited)
         self.per_game.valueChanged.connect(self._edited)
+        for box in (self.reel_voice, self.reel_framing, self.reel_order):
+            box.currentIndexChanged.connect(self._edited)
         self._leagues(self.sport.currentData())
 
     def _leagues(self, sport_id: str) -> None:
@@ -506,7 +540,10 @@ class FilterPanel(QFrame):
         return {"sport": self.sport.currentData() or "any", "league": self.league.currentText().strip(),
                 "teams": self.teams.text(), "since": since,
                 "kinds": [k for k, b in self.kinds.items() if b.isChecked()], "channels": self.channels.text(),
-                "category_id": self.category.currentData() or "", "per_game": self.per_game.value()}
+                "category_id": self.category.currentData() or "", "per_game": self.per_game.value(),
+                "reel_voice": self.reel_voice.currentData() or "off",
+                "reel_framing": self.reel_framing.currentData() or "follow",
+                "reel_order": self.reel_order.currentData() or "countdown"}
 
     def recently_edited(self) -> bool:
         return self._timer.isActive() or time.monotonic() - self.edited_at < EDIT_HOLD
@@ -535,6 +572,11 @@ class FilterPanel(QFrame):
             self.per_game.setValue(int(f.get("per_game") or 5))
             i = self.category.findData(f.get("category_id", ""))
             self.category.setCurrentIndex(max(0, i))
+            for box, key, default in ((self.reel_voice, "reel_voice", "en_storyteller"),
+                                      (self.reel_framing, "reel_framing", "follow"),
+                                      (self.reel_order, "reel_order", "countdown")):
+                i = box.findData(f.get(key) or default)
+                box.setCurrentIndex(max(0, i))
         finally:
             self._filling = False
 
@@ -912,11 +954,20 @@ class GamePanel(QFrame):
         self.make_btn = QPushButton("Make clips")
         self.make_btn.setObjectName("primary")
         self.make_btn.clicked.connect(self._make)
+        self.reel_btn = QPushButton("Make reel")
+        self.reel_btn.setToolTip("One 65-85 s video of the game: an opening that teases the best play, then the "
+                                 "ticked plays (at least 4, at most 7) counted down, with the score, player badges "
+                                 "and the narrator set under Recap reel. Long enough for Creator Rewards")
+        self.reel_btn.clicked.connect(self._reel)
         foot.addWidget(self.all_btn)
         foot.addWidget(self.where, 1)
         foot.addWidget(self.folder_btn)
         foot.addWidget(self.studio_btn)
+        foot.addWidget(self.reel_btn)
         foot.addWidget(self.make_btn)
+        self.reel_note = Elided()
+        self.reel_note.setObjectName("muted")
+        v.addWidget(self.reel_note)
         v.addLayout(foot)
         self.stack.addWidget(page)
         self.folder_btn.setVisible(False)
@@ -1048,12 +1099,29 @@ class GamePanel(QFrame):
             self.where.setText("No category: just saved")
             self.where.setToolTip("The clips are saved in the Automation folder's Sports folder. Pick a category under "
                                   "Clips for to queue them for its account.")
+        self.reel_btn.setEnabled(len(hl) >= 2 and not busy)
+        self.reel_btn.setVisible(bool(hl))
         made = g.get("made") or []
-        self.folder_btn.setVisible(self.backend.local and bool(made))
-        if made:
-            last = made[-1]
-            self.folder_btn.setToolTip(f"{last.get('folder', '')}\n{_plural(int(last.get('clips') or 0), 'clip')} "
-                                       f"made {ago(last.get('at'))}")
+        reels = g.get("reels") or []
+        latest = max(made + reels, key=lambda x: x.get("at") or 0) if made or reels else None
+        self.folder_btn.setVisible(self.backend.local and latest is not None)
+        if latest is not None:
+            is_reel = latest in reels
+            self.folder_btn.setText("Show reel" if is_reel else "Show clips")
+            self.folder_btn.setToolTip(f"{latest.get('folder', '')}\n" + (
+                f"A {latest.get('length', 0):.0f} s reel made {ago(latest.get('at'))}" if is_reel else
+                f"{_plural(int(latest.get('clips') or 0), 'clip')} made {ago(latest.get('at'))}"))
+        if reels:
+            r = reels[-1]
+            bits = [f"Reel made {ago(r.get('at'))}: {r.get('length', 0):.0f} s, {_plural(int(r.get('plays') or 0), 'play')}",
+                    "for Creator Rewards" if r.get("rewards") else "under a minute (not for Creator Rewards)"]
+            if r.get("category"):
+                bits.append(f"for {r['category']}" + (", sent to your Macs" if r.get("sent") else ""))
+            self.reel_note.setText(" · ".join(bits))
+            self.reel_note.setToolTip("\n".join(r.get("warnings") or []))
+        else:
+            self.reel_note.setText("")
+        self.reel_note.setVisible(bool(reels))
 
     def _picture_ready(self, key: str) -> None:
         if self.game and key == (self.game.get("thumbnail") or ""):
@@ -1097,6 +1165,12 @@ class GamePanel(QFrame):
         if ids:
             self.ask.emit("make", (self.game["id"], ids, self.category_id))
 
+    def _reel(self) -> None:
+        if not self.game:
+            return
+        ids = [h["id"] for h in self.game.get("highlights") or [] if h.get("chosen")]
+        self.ask.emit("reel", (self.game["id"], ids, self.category_id))
+
     def _studio(self) -> None:
         if self.game:
             self.studio.emit(self.game, [h for h in self.game.get("highlights") or [] if h.get("chosen")])
@@ -1121,9 +1195,11 @@ class GamePanel(QFrame):
             QDesktopServices.openUrl(QUrl(watch_url(self.game, at)))
 
     def _show_folder(self) -> None:
-        made = (self.game or {}).get("made") or []
-        if made:
-            QDesktopServices.openUrl(QUrl.fromLocalFile(made[-1].get("folder") or ""))
+        g = self.game or {}
+        done = (g.get("made") or []) + (g.get("reels") or [])
+        if done:
+            latest = max(done, key=lambda x: x.get("at") or 0)
+            QDesktopServices.openUrl(QUrl.fromLocalFile(latest.get("folder") or ""))
 
 
 # ---------------------------------------------------------------- the page

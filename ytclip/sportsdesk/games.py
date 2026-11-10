@@ -41,6 +41,10 @@ SINCE = (("day", "24 hours", 1), ("3days", "3 days", 3), ("week", "Week", 7), ("
          ("any", "Any time", 0))
 SINCE_DAYS = {k: d for k, _, d in SINCE}
 
+# The recap reel's choices: how the picture is framed, and the order of its plays.
+REEL_FRAMING = {"follow": "Follow the action", "fit": "Whole picture"}
+REEL_ORDER = {"countdown": "Countdown to the best", "timeline": "As it happened"}
+
 # What a game is called in each sport, for searches ("full match", "full fight").
 GAME_WORD = {"soccer": "match", "tennis": "match", "cricket": "match", "combat": "fight", "motorsport": "race",
              "golf": "round"}
@@ -99,6 +103,11 @@ class GameFilter:
     channels: str = ""  # comma separated channel names: only their uploads; "" = any channel
     category_id: str = ""  # the category the clips are made for (its folder, account and look); "" = none
     per_game: int = 5  # highlights ticked to make, per game
+    # The game recap reel (reel.py): the narrator's voice ("off" = none), how the 16:9 footage becomes 9:16
+    # (REEL_FRAMING) and the order of its plays (REEL_ORDER).
+    reel_voice: str = "en_storyteller"
+    reel_framing: str = "follow"
+    reel_order: str = "countdown"
 
     @classmethod
     def from_json(cls, d) -> "GameFilter":
@@ -122,6 +131,13 @@ class GameFilter:
             f.per_game = max(1, min(20, int(d.get("per_game") or 5)))
         except (TypeError, ValueError):
             f.per_game = 5
+        from ..creator.voice_engine import VOICES
+
+        voice = str(d.get("reel_voice") or f.reel_voice)
+        f.reel_voice = voice if voice == "off" or voice in VOICES else "en_storyteller"
+        f.reel_framing = str(d.get("reel_framing") or "") if str(d.get("reel_framing") or "") in REEL_FRAMING \
+            else "follow"
+        f.reel_order = str(d.get("reel_order") or "") if str(d.get("reel_order") or "") in REEL_ORDER else "countdown"
         return f
 
     def to_json(self) -> dict:
