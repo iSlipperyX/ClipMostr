@@ -257,6 +257,7 @@ jobs:
             build/mac-tools/llama-cpp
           key: mac-tools-${{ runner.os }}-${{ runner.arch }}-${{ hashFiles('packaging/build_whisper_cpp.py', 'packaging/build_llama_cpp.py') }}
       - name: Build
+        timeout-minutes: 45
         run: python packaging/build_mac.py --name "${{ matrix.dmg }}" --version "${{ needs.build.outputs.version }}"
       - name: Keep Whisper and the local AI for the next build
         if: steps.tools.outputs.cache-hit != 'true'
@@ -267,6 +268,7 @@ jobs:
             build/mac-tools/llama-cpp
           key: ${{ steps.tools.outputs.cache-primary-key }}
       - name: Check the app starts and says its version
+        timeout-minutes: 5
         run: |
           said=$(dist/ClipMonster.app/Contents/MacOS/ClipMonster --self-check)
           echo "$said"

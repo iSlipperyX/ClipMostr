@@ -20,7 +20,7 @@ import urllib.request
 from pathlib import Path
 
 from PySide6.QtCore import QEvent, QObject, Qt, QUrl
-from PySide6.QtGui import QAction, QActionGroup, QDesktopServices, QKeySequence, QShortcut
+from PySide6.QtGui import QAction, QActionGroup, QCloseEvent, QDesktopServices, QKeySequence, QShortcut
 from PySide6.QtWidgets import (QApplication, QButtonGroup, QFrame, QHBoxLayout, QLabel, QMenu, QMessageBox,
                                QPushButton, QWidget)
 
@@ -77,6 +77,10 @@ class _QuitWatch(QObject):
                 ev.ignore()
                 return True
             self.win._quitting = True
+            if not self.win.isVisible():
+                # Qt closes only the windows on screen. One put away with its red button still has to stop
+                # what it's making and save the session, or an export dies half-written as the app ends.
+                self.win.closeEvent(QCloseEvent())
         elif ev.type() == QEvent.FileOpen:
             path = ev.file() or ev.url().toLocalFile()
             if path:

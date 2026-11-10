@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import secrets
+import socketserver
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Callable
@@ -80,6 +81,10 @@ class _Server(ThreadingHTTPServer):
         self.client = client
         self.secret = secrets.token_hex(16)
         super().__init__(("127.0.0.1", 0), _Handler)
+
+    def server_bind(self) -> None:
+        socketserver.TCPServer.server_bind(self)  # (without HTTPServer's name lookup, which nothing here uses)
+        self.server_name, self.server_port = str(self.server_address[0]), self.server_address[1]
 
     def handle_error(self, request, client_address):
         pass

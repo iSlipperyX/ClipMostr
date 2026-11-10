@@ -81,7 +81,7 @@ def device_name() -> str:
 
             name = subprocess.run(["scutil", "--get", "ComputerName"], capture_output=True, text=True,
                                   timeout=3).stdout.strip()
-        except (OSError, ValueError):
+        except (OSError, ValueError, subprocess.SubprocessError):  # (one that takes too long, too)
             name = ""
     return name or platform.node().split(".")[0] or "Mac"
 

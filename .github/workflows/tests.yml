@@ -37,14 +37,15 @@ jobs:
       - name: Test
         run: pytest -q
 
-  # ClipMonster for Mac on a real Mac (Apple silicon): the link to the PC (a real HTTPS server on the Mac, pairing,
-  # streaming, the PC's AI and video maker) and the window; Whisper and the local AI as the app brings them,
-  # built for the Mac's graphics (Metal, kept in the cache) and run for real; then the app itself built into a
-  # .dmg, opened and checked: its version, its own ffmpeg with the media engine, Deno, Whisper and llama.cpp.
+  # ClipMonster for Mac's tests on a real Mac (Apple silicon): the link to the PC (a real HTTPS server on the Mac,
+  # pairing, streaming, the PC's AI and video maker) and the window. Each test is named as it starts, and if one
+  # takes over two minutes every thread's stack is printed, so a test that hangs shows where.
   mac:
     runs-on: macos-latest  # Apple silicon
+    timeout-minutes: 30
     env:
       QT_QPA_PLATFORM: offscreen
+      PYTHONUNBUFFERED: "1"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -55,7 +56,30 @@ jobs:
       - name: Install
         run: pip install -e ".[test,mac,build]" pyyaml
       - name: Test
-        run: pytest -q tests/test_remote.py tests/test_mac_app.py tests/test_mac_inbox.py tests/test_mac_studio.py
+        timeout-minutes: 15
+        run: >-
+          pytest -v -p no:cacheprovider -o faulthandler_timeout=120 --durations=15
+          tests/test_remote.py tests/test_mac_app.py tests/test_mac_inbox.py tests/test_mac_studio.py
+
+  # ClipMonster.app as the release builds it, on a real Mac (Apple silicon), beside the tests: Whisper and the
+  # local AI built for the Mac's graphics (Metal, kept in the cache) and run for real, then the app built into a
+  # .dmg, opened and checked: its version, its own ffmpeg with the media engine, Deno, Whisper and llama.cpp.
+  # The .dmg is kept with the run for a week.
+  mac-app:
+    runs-on: macos-latest  # Apple silicon
+    timeout-minutes: 75
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUNBUFFERED: "1"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: pip install -e ".[test,mac,build]" pyyaml
       - name: Whisper and the local AI from an earlier build
         id: tools
         uses: actions/cache/restore@v4
@@ -73,6 +97,7 @@ jobs:
           python tests/local_ai/make_tiny_gguf.py llama-src build/tiny.gguf
       - name: Build Whisper and the local AI for the Mac's graphics (Metal)
         if: steps.tools.outputs.cache-hit != 'true'
+        timeout-minutes: 30
         run: |
           python packaging/build_whisper_cpp.py build/mac-tools/whisper-cpp --metal --source whisper-src
           python packaging/build_llama_cpp.py build/mac-tools/llama-cpp --metal --source llama-src
@@ -85,16 +110,19 @@ jobs:
             build/mac-tools/llama-cpp
           key: ${{ steps.tools.outputs.cache-primary-key }}
       - name: Test Whisper and the local AI for real
+        timeout-minutes: 15
         env:
           CLIPMONSTER_WHISPER_CPP: build/mac-tools/whisper-cpp/whisper-cli
           CLIPMONSTER_WHISPER_SAMPLE: whisper-src/samples/jfk.wav
           CLIPMONSTER_WHISPER_GPU_BUILD: "1"
           CLIPMONSTER_LLAMA_SERVER: build/mac-tools/llama-cpp/llama-server
           CLIPMONSTER_TEST_GGUF: build/tiny.gguf
-        run: pytest -q tests/test_whisper_cpp_real.py tests/test_local_ai_real.py
+        run: pytest -v -p no:cacheprovider -o faulthandler_timeout=120 tests/test_whisper_cpp_real.py tests/test_local_ai_real.py
       - name: Build the app
+        timeout-minutes: 40
         run: python packaging/build_mac.py
       - name: Check the app starts
+        timeout-minutes: 5
         run: dist/ClipMonster.app/Contents/MacOS/ClipMonster --self-check
       - uses: actions/upload-artifact@v4
         with:

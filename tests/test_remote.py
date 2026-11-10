@@ -29,8 +29,11 @@ from ytclip.settings import Settings
 REAL_ITERATIONS, REAL_MIN = protocol.ITERATIONS, protocol.MIN_ITERATIONS
 
 
-def free_port() -> int:
-    s = socket.socket()
+def free_port(kind: int = socket.SOCK_STREAM) -> int:
+    """A port nothing listens on at 127.0.0.1, for TCP or (kind=socket.SOCK_DGRAM) for UDP. A free TCP port can
+    still be closed to UDP: Windows reserves ranges of ports for each separately, and other programs hold UDP ports
+    of their own."""
+    s = socket.socket(socket.AF_INET, kind)
     s.bind(("127.0.0.1", 0))
     port = s.getsockname()[1]
     s.close()
@@ -47,6 +50,40 @@ def mac_home(tmp_path, monkeypatch):
 
     prefs.set("check_updates", False)
     Settings(setup_done=True).save()
+    asked = no_one_to_answer(monkeypatch)
+    yield
+    assert not asked, f"the app asked something no one was there to answer: {asked}"
+
+
+def no_one_to_answer(monkeypatch) -> list[str]:
+    """A message or question the app shows that the test doesn't answer itself is closed at once and fails the
+    test, instead of waiting for a click for ever (a run on GitHub's Mac sat silent until it was stopped).
+    Returns what was shown. A test that expects one patches QMessageBox.exec (or the call) itself."""
+    asked: list[str] = []
+    try:
+        from PySide6.QtWidgets import QDialog, QMessageBox
+    except ImportError:  # (no Qt: nothing can ask)
+        return asked
+
+    def box_exec(box, *_a, **_k):
+        asked.append(f"{box.windowTitle()}: {box.text()}")
+        return 0
+
+    def dialog_exec(dialog, *_a, **_k):
+        asked.append(f"{type(dialog).__name__} {dialog.windowTitle()!r}")
+        return 0
+
+    def static(kind):
+        def show(_parent, title, text, *_a, **_k):
+            asked.append(f"{kind} {title}: {text}")
+            return QMessageBox.StandardButton.NoButton
+        return staticmethod(show)
+
+    monkeypatch.setattr(QMessageBox, "exec", box_exec)
+    monkeypatch.setattr(QDialog, "exec", dialog_exec)
+    for kind in ("question", "information", "warning", "critical"):
+        monkeypatch.setattr(QMessageBox, kind, static(kind))
+    return asked
 
 
 @pytest.fixture
@@ -410,6 +447,45 @@ def test_a_port_in_use_is_said_plainly(world):
     assert f"Port {world.port}" in other.error
 
 
+def test_a_name_server_that_never_answers_holds_nothing_up(world, monkeypatch):
+    """Where the network's name server takes half a minute to give up on this computer's name (GitHub's Mac
+    runners: every server start took 35 s), starting the server and saying where it listens don't wait on it."""
+    from ytclip.remote import server as srv
+
+    world.server.stop()
+    answer, asked = threading.Event(), []
+    real = socket.getaddrinfo
+
+    def slow(host, *args, **kwargs):
+        if host == socket.gethostname():
+            asked.append(host)
+            answer.wait(30)  # (until the test lets it answer: the real one may take half a minute here too)
+            return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("192.0.2.7", 0))]
+        return real(host, *args, **kwargs)
+
+    def by_address(*_a):
+        raise AssertionError("a name was looked up by its address")
+
+    monkeypatch.setattr(srv, "_own_name", srv._OwnName())
+    monkeypatch.setattr(socket, "getaddrinfo", slow)
+    monkeypatch.setattr(socket, "gethostbyaddr", by_address)
+    try:
+        started = time.monotonic()
+        assert world.server.configure()
+        world.server._write_status()
+        assert srv.mac_addresses() is not None and srv.local_addresses() is not None
+        assert time.monotonic() - started < 5
+        assert asked == [socket.gethostname()]  # looked up once, in the background
+    finally:
+        answer.set()
+    end = time.monotonic() + 10
+    while srv._own_name.at is None and time.monotonic() < end:  # it comes back, and is remembered
+        time.sleep(0.02)
+    assert srv._own_name.at is not None
+    assert "192.0.2.7" in srv.local_addresses()  # what it found is used, without asking again
+    assert asked == [socket.gethostname()]
+
+
 def test_heartbeat_for_the_window(world):
     world.server._write_status()
     st = state.read_status(world.server.status_file)
@@ -439,14 +515,14 @@ def test_hosts_and_keys_are_remembered():
 
 def test_discovery_finds_the_pc(world):
     world.server.discovery = True
-    port = free_port()
+    port = free_port(socket.SOCK_DGRAM)  # (a free TCP port failed here once on Windows: it was closed to UDP)
     import ytclip.remote.protocol as p
 
     old = p.DISCOVERY_PORT
     p.DISCOVERY_PORT = port
     try:
         world.server._open_discovery()
-        assert world.server._udp is not None  # listening for the question
+        assert world.server._udp is not None, world.logs[-2:]  # listening for the question (else why not)
         found = discover.discover(timeout=3.0, port=port, targets=["127.0.0.1"])
         # a Mac that asked and went away before the answer (on Windows, the answer bouncing back made the
         # PC's next read fail) doesn't stop the PC answering the next one

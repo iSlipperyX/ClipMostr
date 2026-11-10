@@ -45,7 +45,8 @@ hiddenimports = (
     + collect_submodules("ytclip.audio") + collect_submodules("ytclip.rendering")
     + collect_submodules("ytclip.compliance") + collect_submodules("ytclip.mac")
     + ["cv2", "anthropic", "keyring.backends.macOS", "PySide6.QtNetwork", "PySide6.QtMultimedia",
-       "PySide6.QtMultimediaWidgets"]
+       "PySide6.QtMultimediaWidgets",
+       "certifi"]  # HTTPS's certificates (pyinstaller-hooks-contrib's hook brings its cacert.pem; mac/app.py)
 )
 excludes = [
     "tkinter", "matplotlib", "IPython", "pytest", "PIL", "scipy", "pandas",
@@ -82,7 +83,9 @@ app = BUNDLE(
         "CFBundleDisplayName": APP_NAME,
         "CFBundleShortVersionString": SHORT,
         "CFBundleVersion": VERSION,
-        "LSMinimumSystemVersion": "12.0",
+        # what PySide6 6.12, numpy and OpenCV's Mac builds need (their wheels are for macOS 14): an older Mac
+        # is told so by macOS, instead of the app quitting as it starts
+        "LSMinimumSystemVersion": "14.0",
         "LSApplicationCategoryType": "public.app-category.video",
         "NSHighResolutionCapable": True,
         "NSRequiresAquaSystemAppearance": False,  # dark mode follows the Mac
