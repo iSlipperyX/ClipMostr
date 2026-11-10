@@ -589,11 +589,16 @@ def _tidy(folder: Path, removed: set[str], roots: list[Path], remove: Callable[[
                 pass
         _rmdir(folder / REJECTED_DIR)  # once its last rejected clip is gone
         return False
-    # Nothing left to post from this video.
-    for f in [index, folder / "README.md", *sorted((folder / "thumbnails").glob("[0-9][0-9].jpg"))]:
+    # Nothing left to post from this video: its own files go, and what the Video Creator or the Studio kept
+    # beside a video they made (storyboard, scene pictures, timeline and its files), as posting's own
+    # delete-after-posting does.
+    from .posting.records import creation_dirs, creation_files
+
+    for f in [index, folder / "README.md", *sorted((folder / "thumbnails").glob("[0-9][0-9].jpg")),
+              *creation_files(folder, data)]:
         if f.is_file():
             remove(f)
-    for d in (folder / "thumbnails", folder / REJECTED_DIR):
+    for d in (folder / "thumbnails", folder / REJECTED_DIR, *creation_dirs(folder)):
         _rmdir(d)
     keep_dirs = {_key(r) for r in roots}
     d = folder

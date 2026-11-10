@@ -136,6 +136,8 @@ def output_folder(s: Settings, category: cats.Category | None, category_name: st
 class VideoCreatorOrchestrator:
     """Runs a creation. `cancelled()` returning True stops it at the next step (raises Cancelled)."""
 
+    permission = PERMISSION  # how the video was made, kept with it for posting
+
     def __init__(self, settings: Settings | None = None, log: Log | None = None, progress: Progress | None = None,
                  cancelled: Callable[[], bool] | None = None, register: bool = True, db=None):
         self.s = settings or Settings.load()
@@ -207,26 +209,7 @@ class VideoCreatorOrchestrator:
                                    instructions=category.instructions if category else "", seconds=seconds,
                                    wpm=wpm, style=style, avoid=originality.earlier_titles(req.prompt),
                                    facts=web.brief(found))
-            from .. import learn
-            from ..intelligence import learner
-
-            lessons = learn.for_settings(self.s)
-            if lessons is not None and not lessons.empty:
-                cid = category.id if category else ""
-                few = learner.guide(self.s, req.prompt, category_id=cid,
-                                    sport=category.sport if category else "", purpose="script")
-                brief.lessons = few or lessons.creator_text(cid)
-                if brief.lessons:
-                    n = sum(1 for o in lessons.outcomes if o.creator)
-                    self.log(f"Learning from how your earlier videos did ({n} Creator video{'s' if n != 1 else ''}"
-                             f" with results" + (", and your clips' hooks)." if "your TikTok clips" in brief.lessons
-                                                  else "; the openings closest to this one)." if few else ")."))
-                pace = learner.calibrate(lessons.outcomes, cid, default_wpm=wpm)
-                if pace.wpm:
-                    # The voice is sped up or slowed to land on the length (0.8-1.2x): aim where it can reach.
-                    brief.wpm = round(max(wpm * 0.85, min(wpm * 1.15, pace.wpm)), 1)
-                    brief.scene_seconds = pace.scene_seconds or 0.0
-                    self.log(pace.note)
+            brief.lessons, brief.wpm, brief.scene_seconds = self.lessons(req, category, wpm)
             entries = originality.load()
             try:
                 board = director.write(self.s, brief, log=self.log, check=self.check, progress=report,
@@ -247,6 +230,33 @@ class VideoCreatorOrchestrator:
         self._timed("script", started)
         report("Writing the script", 1.0)
         return board
+
+    def lessons(self, req: CreateRequest, category, wpm: float) -> tuple[str, float, float]:
+        """(what earlier videos taught, as text for the writer; the pace to write for; seconds a scene) from how
+        your posted videos did (learn.py, intelligence/learner.py). ("", `wpm`, 0) before there are results."""
+        from .. import learn
+        from ..intelligence import learner
+
+        lessons = learn.for_settings(self.s)
+        if lessons is None or lessons.empty:
+            return "", wpm, 0.0
+        cid = category.id if category else ""
+        few = learner.guide(self.s, req.prompt, category_id=cid, sport=category.sport if category else "",
+                            purpose="script")
+        text = few or lessons.creator_text(cid)
+        if text:
+            n = sum(1 for o in lessons.outcomes if o.creator)
+            self.log(f"Learning from how your earlier videos did ({n} Creator video{'s' if n != 1 else ''}"
+                     f" with results" + (", and your clips' hooks)." if "your TikTok clips" in text
+                                          else "; the openings closest to this one)." if few else ")."))
+        scene_seconds = 0.0
+        pace = learner.calibrate(lessons.outcomes, cid, default_wpm=wpm)
+        if pace.wpm:
+            # The voice is sped up or slowed to land on the length (0.8-1.2x): aim where it can reach.
+            wpm = round(max(wpm * 0.85, min(wpm * 1.15, pace.wpm)), 1)
+            scene_seconds = pace.scene_seconds or 0.0
+            self.log(pace.note)
+        return text, wpm, scene_seconds
 
     def voice(self, board: director.Storyboard, req: CreateRequest, work: Path, seconds: float,
               rewards: bool) -> voice_engine.VoiceTrack:
@@ -466,7 +476,7 @@ class VideoCreatorOrchestrator:
         tags = " ".join(f"#{t}" for t in board.hashtags)
         caption = f"{board.caption} {tags}".strip()
         account = (category.account if category else "") or ""
-        auto = {"permission": PERMISSION, "origins": ["creator"], "how": "creator", "recipe": "Video Creator",
+        auto = {"permission": self.permission, "origins": ["creator"], "how": "creator", "recipe": "Video Creator",
                 "picked_at": time.time(), "category": cat_name or "", "category_id": category.id if category else "",
                 "account": account, "account_id": category.account_id if category else ""}
         creator = {
@@ -484,7 +494,7 @@ class VideoCreatorOrchestrator:
               "to_check": sum(1 for c in board.factcheck.get("claims", [])
                               if c.get("verdict") != "supported" and not c.get("changed"))}
              if board.factcheck else {}),
-        }
+        } | self.creator_extra()
         video_meta = Video(id=cid, title=board.title, channel="ClipMonster Video Creator", upload_date=time.strftime("%Y%m%d"),
                            duration=checks.get("length") or duration, url="", path=folder / name)
         details = [{"qc": checks, "ai_generated": True, "caption": board.caption, "hashtags": board.hashtags,
@@ -493,7 +503,7 @@ class VideoCreatorOrchestrator:
         write_index(folder, video_meta, [clip], [name], ["Video Creator"], "creator",
                     extra={"automation": auto, "creator": creator}, details=details)
         (folder / "storyboard.json").write_text(board.dumps(), encoding="utf-8")
-        (folder / "README.md").write_text(readme(board, creator, checks, name), encoding="utf-8")
+        (folder / "README.md").write_text(self.readme_text(board, creator, checks, name), encoding="utf-8")
         # The video goes in last, under a name posting ignores until it's whole.
         part = folder / (name + ".part")
         shutil.move(str(video), str(part))
@@ -515,6 +525,13 @@ class VideoCreatorOrchestrator:
                      "(Categories tab).")
         return result
 
+    def creator_extra(self) -> dict:
+        """More for clips.json's "creator" block (the Studio adds its own)."""
+        return {}
+
+    def readme_text(self, board: director.Storyboard, creator: dict, checks: dict, file: str) -> str:
+        return readme(board, creator, checks, file)
+
     def _register(self, result: CreationResult, req: CreateRequest) -> None:
         """A done GENERATIVE_CREATOR job in jobs.db, so the Automation tab lists it with the clips."""
         from ..jobs import Job, JobDB, JobType
@@ -525,7 +542,7 @@ class VideoCreatorOrchestrator:
             db = db or JobDB()
             category = find_category(self.s, req.category)
             db.add(Job(id=f"create-{result.id}", url=f"creator:{result.id}", title=result.storyboard.title,
-                       channel="Video Creator", permission=PERMISSION, origins=["creator"], how="creator",
+                       channel="Video Creator", permission=self.permission, origins=["creator"], how="creator",
                        status="done", stage="Done", folder=str(result.folder), clips=1, recipe="Video Creator",
                        category_id=category.id if category else "", kind=JobType.GENERATIVE_CREATOR.value,
                        request=req.to_json()))

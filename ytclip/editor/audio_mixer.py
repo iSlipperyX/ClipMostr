@@ -176,12 +176,14 @@ class Placement:
     why: str
 
 
-def plan_sfx(tl: Timeline, lengths: dict[str, float] | None = None) -> list[Placement]:
+def plan_sfx(tl: Timeline, lengths: dict[str, float] | None = None, *, whoosh: bool = True,
+             whoosh_gap: float = 0.0) -> list[Placement]:
     """Where effects belong on a timeline: a bass drop on the hook (the very start, and each hook marker), an
     impact on each retention marker, a riser running up to each payoff, and a whoosh peaking on each change of
     picture that has a transition. Nothing lands within a second of an effect already there or already
     planned. `lengths` gives each cue's length in seconds (a whoosh peaks on its cut, a riser ends on its
-    moment)."""
+    moment). `whoosh` off leaves the changes of picture silent; `whoosh_gap` keeps that many seconds between
+    one whoosh and the next (a video with a new picture every three seconds doesn't want one on each)."""
     lengths = lengths or {}
     taken = sorted(c.start for t in tl.audio_tracks("sfx") for c in t.clips)
     out: list[Placement] = []
@@ -203,13 +205,18 @@ def plan_sfx(tl: Timeline, lengths: dict[str, float] | None = None) -> list[Plac
         elif m.kind == "payoff":
             add(m.t - lengths.get("riser", 1.2), "riser", m.label or "the payoff")
     base = tl.track(VIDEO_BASE)
-    for clip in sorted(base.clips, key=lambda c: c.start)[1:] if base else []:
-        if not clip.transition_in.cut:
+    last = -1e9
+    for clip in sorted(base.clips, key=lambda c: c.start)[1:] if base and whoosh else []:
+        if not clip.transition_in.cut and clip.start - last >= whoosh_gap:
+            before = len(out)
             add(clip.start - lengths.get("whoosh", 0.5) * 0.45, "whoosh", "a change of picture")
+            if len(out) > before:
+                last = clip.start
     return sorted(out, key=lambda p: p.t)
 
 
-def place_sfx(tl: Timeline, *, folder: str | Path = "", level_db: float = 0.0, seed: str = "") -> list[AudioClip]:
+def place_sfx(tl: Timeline, *, folder: str | Path = "", level_db: float = 0.0, seed: str = "",
+              whoosh: bool = True, whoosh_gap: float = 0.0) -> list[AudioClip]:
     """Put plan_sfx()'s effects on the timeline's sfx track (the Video Creator's sounds, or your files in
     `folder`, named for their cue). Returns the clips it added."""
     from ..creator import sfx_library
@@ -220,7 +227,7 @@ def place_sfx(tl: Timeline, *, folder: str | Path = "", level_db: float = 0.0, s
     lengths = {cue: sfx_library.length_of(path) for cue, path in sounds.items()}
     track = tl.ensure_track(AUDIO_SFX)
     added = []
-    for i, p in enumerate(plan_sfx(tl, lengths)):
+    for i, p in enumerate(plan_sfx(tl, lengths, whoosh=whoosh, whoosh_gap=whoosh_gap)):
         asset = tl.add_asset(Asset("audio", str(sounds[p.cue]), duration=round(lengths[p.cue], 3),
                                    source="made here" if not yours.get(p.cue) else "your sound effects"), p.cue)
         clip = AudioClip(f"auto_{p.cue}_{i + 1}", asset, p.t, round(min(lengths[p.cue], tl.duration - p.t), 3),

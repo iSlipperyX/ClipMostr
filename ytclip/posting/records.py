@@ -642,6 +642,40 @@ def _clip_companions(video: Path) -> list[Path]:
 
 
 SCENE_PICTURES = ("scene_*.png", "scene_*.jpg", "scene_*.jpeg", "scene_*.webp")  # the Creator's (orchestrator)
+SCENE_CLIPS = ("scene_*.mp4", "scene_*.mov", "scene_*.webm", "scene_*.m4v")  # the Studio's stock clips
+
+
+def creation_files(folder: Path, data: dict) -> list[Path]:
+    """What the Video Creator (and the Studio) keep beside a video they made, which go with it once nothing
+    in the folder is left to post: the storyboard, the scene pictures, and a Studio video's timeline, stock
+    clips and assets. [] for a folder of clips cut from someone's video. `data` is its clips.json."""
+    made = data.get("creator") if isinstance(data, dict) else None
+    if not made:
+        return []
+    scenes = folder / "scenes"
+    out = [folder / "storyboard.json"]
+    if scenes.is_dir():
+        out += sorted({p for pattern in SCENE_PICTURES for p in scenes.glob(pattern)})
+    if isinstance(made, dict) and made.get("studio"):
+        out += _studio_files(folder)
+    return out
+
+
+def creation_dirs(folder: Path) -> list[Path]:
+    """The folders creation_files() may leave empty, innermost first."""
+    return [folder / "scenes", folder / "assets" / "sfx", folder / "assets"]
+
+
+def _studio_files(folder: Path) -> list[Path]:
+    """What the Studio keeps beside a video to render it again (studio/orchestrator.py): its timeline, the
+    scenes' stock clips, and everything in assets/ (voice, music, effects)."""
+    scenes, assets = folder / "scenes", folder / "assets"
+    out = [folder / "timeline.json"]
+    if scenes.is_dir():
+        out += sorted({p for pattern in SCENE_CLIPS for p in scenes.glob(pattern)})
+    if assets.is_dir():
+        out += sorted(p for p in assets.rglob("*") if p.is_file())
+    return out
 
 
 def _tidy(folder: Path, removed: set[str], roots: list[Path], remove: Callable[[Path], None]) -> int:
@@ -688,12 +722,12 @@ def _tidy(folder: Path, removed: set[str], roots: list[Path], remove: Callable[[
     freed = 0
     for f in [index, folder / "README.md", *sorted((folder / "thumbnails").glob("[0-9][0-9].jpg")),
               *[e for e in extra if e.is_file()], *sorted(folder.glob("*.srt")),
-              *([folder / "storyboard.json"] if data.get("creator") else []), *pictures]:
+              *dict.fromkeys([*pictures, *creation_files(folder, data)])]:
         if f.is_file():
             size = _size(f)
             remove(f)
             freed += size
-    for d in (folder / "thumbnails", rejected, scenes):
+    for d in (folder / "thumbnails", rejected, *creation_dirs(folder)):
         _rmdir(d)
     keep_dirs = {_key(r) for r in roots} | {_key(c) for r in roots if r.is_dir() for c in _subdirs(r)}
     d = folder

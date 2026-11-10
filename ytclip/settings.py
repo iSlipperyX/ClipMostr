@@ -252,6 +252,7 @@ class Settings:
     studio_captions: str = "pop"  # editor/kinetic_subtitles presets: pop | bounce | karaoke | plain
     studio_stock: bool = True  # look for a scene's footage on Pexels and Pixabay (needs a key below)
     studio_stock_video: bool = True  # prefer stock video clips to stock photos
+    studio_keep_timeline: bool = True  # keep a Studio video's timeline.json and its files, to edit and render again
     pexels_api_key: str = ""  # pexels.com/api (free)
     pixabay_api_key: str = ""  # pixabay.com/api/docs (free)
     elevenlabs_api_key: str = ""  # elevenlabs.io: a cloud voice, used only when chosen as the voice engine
@@ -1103,6 +1104,10 @@ SCHEMA: list[Field] = [
                "official APIs, with your own free keys below) before it makes a picture. Each clip's author and "
                "address are kept in the video's README and timeline.json"),
     Field("studio_stock_video", "Prefer stock video to photos", "Creator", "bool"),
+    Field("studio_keep_timeline", "Keep each Studio video's timeline", "Creator", "bool",
+          help="timeline.json and the files it uses (voice, music, effects, each scene's picture or clip) stay in "
+               "the video's folder, so you can edit the timeline and render it again. Clean up removes them with "
+               "the video once it's posted"),
     Field("pexels_api_key", "Pexels API key", "Creator", "secret",
           help="Free from pexels.com/api. Pexels' licence lets you use its photos and videos in your own videos; "
                "its terms apply"),
