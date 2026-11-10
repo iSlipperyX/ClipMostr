@@ -410,3 +410,39 @@ def test_the_sentence_model_downloads_once_and_auto_falls_back(tmp_path, monkeyp
     assert embeddings.get(Settings(event_search_model="words")).name == "words"
     with pytest.raises(embeddings.EmbeddingError):
         embeddings.get(Settings(event_search_model="minilm"))
+
+
+def test_api_football_finds_the_fixture_and_reads_its_events():
+    asked = []
+
+    def get(url, headers):
+        asked.append((url, headers))
+        if "/fixtures?date=" in url:
+            return {"response": [
+                {"fixture": {"id": 11}, "teams": {"home": {"name": "Leeds"}, "away": {"name": "Burnley"}}},
+                {"fixture": {"id": 42}, "league": {"name": "Premier League"}, "goals": {"home": 2, "away": 1},
+                 "teams": {"home": {"name": "Arsenal"}, "away": {"name": "Chelsea"}}}]}
+        return {"response": [
+            {"time": {"elapsed": 23}, "team": {"name": "Arsenal"}, "player": {"name": "B. Saka"},
+             "assist": {"name": "M. Odegaard"}, "type": "Goal", "detail": "Normal Goal"},
+            {"time": {"elapsed": 59}, "team": {"name": "Chelsea"}, "player": {"name": "M. Caicedo"}, "assist": {},
+             "type": "Card", "detail": "Red Card", "comments": "Serious foul play"},
+            {"time": {"elapsed": 90, "extra": 4}, "team": {"name": "Arsenal"}, "player": {"name": "K. Havertz"},
+             "assist": {}, "type": "Var", "detail": "Goal confirmed"},
+            {"time": {}, "type": "Goal", "detail": "Normal Goal"}]}
+
+    feed = feeds.apif_feed("KEY", "Arsenal", "Chelsea FC", 1794000000.0, get=get)
+    assert asked[0][1] == {"x-apisports-key": "KEY"} and "fixture=42" in asked[-1][0]
+    assert [e.kind for e in feed.events] == ["goal", "red_card", "var"]
+    assert (feed.home, feed.away, feed.home_score, feed.league) == ("Arsenal", "Chelsea", 2, "Premier League")
+    red = feed.events[1]
+    assert (red.period, red.minute, red.players, red.team) == (2, "59'", ["M. Caicedo"], "Chelsea")
+    assert "Serious foul play" in red.text and feed.events[0].scoring and feed.events[2].minute == "90+4'"
+    assert ss.badge_for(red, ss.CONCEPTS["red_card"]) == "59' RED CARD · M. CAICEDO"
+    with pytest.raises(feeds.FeedError, match="needs its key"):
+        feeds.apif_feed("", "Arsenal", "Chelsea", 1794000000.0, get=get)
+    with pytest.raises(feeds.FeedError, match="daily limit"):
+        feeds.apif_feed("KEY", "Arsenal", "Chelsea", 1794000000.0,
+                        get=lambda url, headers: {"errors": {"requests": "You have reached the daily limit"}})
+    with pytest.raises(feeds.FeedError, match="has no Leeds v Everton"):
+        feeds.apif_feed("KEY", "Leeds", "Everton", 1794000000.0, get=get)
