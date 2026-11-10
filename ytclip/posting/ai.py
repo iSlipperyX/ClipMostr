@@ -111,34 +111,6 @@ BIO_SCHEMA = {
 }
 
 
-def suggest_bios(s: Settings, audience: str, username: str = "", name: str = "", current: str = "",
-                 examples: list[str] | None = None) -> list[str]:
-    """Three short TikTok bios for an account, from its audience (and its best captions, if any)."""
-    from .profile import BIO_MAX
-
-    if not has_key(s):
-        raise RuntimeError(f"{NO_KEY} to get bio suggestions.")
-    if not (audience or examples or current):
-        raise RuntimeError("Fill in the account's audience first, so the suggestions fit it.")
-    facts = []
-    if username:
-        facts.append(f"Account: @{username}" + (f" (shown as “{name}”)" if name else ""))
-    if audience:
-        facts.append(f"What it posts and for whom: {audience}")
-    if current:
-        facts.append(f"Current bio, for reference: {current}")
-    if examples:
-        facts.append("Captions of some of its posts:\n" + "\n".join(f"- {c}" for c in examples[:8]))
-    facts.append(f"Write three different bios, each at most {BIO_MAX} characters including emoji and spaces.")
-    data, _model = ask_json(
-        s, ("You write TikTok bios for clip accounts. A good bio says in a few words what the viewer gets "
-            "and why they should follow, in the account's own voice. At most one or two emoji, no hashtags, "
-            "no links, no claims the account can't back up, and nothing that sounds like spam."),
-        "\n".join(facts), BIO_SCHEMA, max_tokens=2000)
-    bios = [" ".join(b.split()) for b in data.get("bios", []) if isinstance(b, str) and b.strip()]
-    return [b if len(b) <= BIO_MAX else b[:BIO_MAX - 1].rstrip() + "…" for b in bios][:3]
-
-
 HASHTAG_SCHEMA = {
     "type": "object",
     "properties": {

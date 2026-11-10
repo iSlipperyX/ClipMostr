@@ -1,13 +1,13 @@
 """The Video Creator from start to finish: prompt → script → voice → pictures → render → checks → posting queue.
 
     orchestrator = VideoCreatorOrchestrator()
-    result = orchestrator.create_from_prompt(
+    result = orchestrator.create(CreateRequest(
         prompt="3 stoic habits that will change your life",
         category="Self-Improvement",
         voice="en_male_deep",
-        target_duration=65,
-        visual_backend="sdxl_turbo",  # or "local_broll", "comfyui", "texture", "auto"
-    )
+        seconds=65,
+        visuals="sdxl_turbo",  # or "local_broll", "comfyui", "texture", "auto"
+    ))
 
 Each creation gets its own folder, in its category's Automation folder when it's for posting:
 
@@ -39,7 +39,7 @@ from pathlib import Path
 from typing import Callable
 
 from .. import categories as cats
-from ..ffmpeg import Cancelled, probe
+from ..ffmpeg import Cancelled, discard, probe
 from ..organize import safe_name
 from ..settings import Settings, work_folder
 from . import (compositor, director, factcheck, motion, originality, sfx_library, soundbed, visual_generator,
@@ -163,12 +163,6 @@ class VideoCreatorOrchestrator:
 
     def _timed(self, key: str, started: float) -> None:
         self.timings[key] = round(self.timings.get(key, 0.0) + time.monotonic() - started, 1)
-
-    # ------------------------------------------------------------ the spec's entry point
-    def create_from_prompt(self, prompt: str, category: str = "", voice: str = "", target_duration: float = 0,
-                           visual_backend: str = "", **more) -> CreationResult:
-        return self.create(CreateRequest(prompt=prompt, category=category, voice=voice,
-                                         seconds=float(target_duration or 0), visuals=visual_backend, **more))
 
     # ------------------------------------------------------------ steps
     def target(self, req: CreateRequest) -> tuple[float, bool]:
@@ -388,8 +382,11 @@ class VideoCreatorOrchestrator:
         self.timeline = timeline
         out = work / "final.mp4"
         put = self.stage("Putting the video together")
-        compositor.assemble(clips, timeline, work / "mix.wav", out, work, cs, captions=True, cards=has_cards,
-                            progress=lambda f: (self.check(), put("Putting the video together", f)))
+        try:
+            compositor.assemble(clips, timeline, work / "mix.wav", out, work, cs, captions=True, cards=has_cards,
+                                progress=lambda f: (self.check(), put("Putting the video together", f)))
+        finally:  # the scene clips and the mix are in the video now (or of no use): free their space at once
+            discard(*clips, work / "mix.wav")
         return out
 
     # ------------------------------------------------------------ checks

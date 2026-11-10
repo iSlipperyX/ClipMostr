@@ -124,6 +124,3 @@ def place(lines: list[list[tuple[str, float, bool]]], font: str, size: int, cent
     return Block(font, size, built)
 
 
-def ass_lines(lines: list[list[str]]) -> str:
-    """Lines as .ass text with explicit breaks (the caller escapes and styles the words)."""
-    return "\\N".join(" ".join(ln) for ln in lines)

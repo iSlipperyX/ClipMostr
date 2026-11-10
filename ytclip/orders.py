@@ -151,11 +151,6 @@ def job_id(vid: str, order_id: str) -> str:
     return f"{vid}{SEP}{order_id}"
 
 
-def video_of(job_id: str) -> str:
-    """The video id inside a job id (a request's own copy of a video carries a suffix)."""
-    return job_id.split(SEP, 1)[0]
-
-
 def clips_for_video(order: Order, per_video: int, links_left: int) -> int:
     """How many clips to ask one video for. With links, the request's remaining clips are shared
     between the links still to clip (they were chosen for this). Picked videos give at most

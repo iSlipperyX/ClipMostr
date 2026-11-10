@@ -528,10 +528,3 @@ class Watcher:
 
     # --- for the Live page --------------------------------------------------------------
 
-    def trend(self, video_id: str) -> list[tuple[float, int]]:
-        live = self.videos.get(video_id)
-        return list(live.series) if live else []
-
-    def last_hour(self, video_id: str) -> int | None:
-        live = self.videos.get(video_id)
-        return live.gain(3600) if live else None

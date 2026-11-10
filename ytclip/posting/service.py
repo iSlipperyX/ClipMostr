@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Callable
 
 from . import actions as actions_mod
-from . import intake, jobs, live, records, results, schedule
+from . import intake, jobs, live, records, results
 from .accounts import Account, Accounts
 from .config import Settings, app_dir
 from .store import Store, VideoItem
@@ -808,12 +808,3 @@ class Thread:
             self._thread.join(timeout)
 
 
-def plan_text(store: Store, accounts: Accounts, s: Settings, account_id: str, now: float | None = None) -> str:
-    """'3 waiting · next at 16:05' for an account (the window's summary lines)."""
-    now = time.time() if now is None else now
-    q = [i for i in store.queue(account_id) if i.status == "queued"]
-    nxt = jobs.next_post(store, account_id)
-    text = f"{len(q)} waiting"
-    if nxt and nxt.planned_at:
-        text += f" · next {schedule.fmt_when(nxt.planned_at, now)}"
-    return text

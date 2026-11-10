@@ -238,11 +238,6 @@ def paused_ids(s) -> set[str]:
     return {n.id for n in load(s) if n.held}
 
 
-def without_account(s) -> list[Category]:
-    """Switched-on categories held because they have no account to post to."""
-    return [n for n in load(s) if n.enabled and n.needs_account]
-
-
 def find(s, category_id: str) -> Category | None:
     return next((n for n in load(s) if n.id == category_id), None) if category_id else None
 

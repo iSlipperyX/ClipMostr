@@ -70,11 +70,6 @@ class Timeline(QWidget):
         self.selected = i
         self.update()
 
-    def zoom_to(self, start: float, end: float, margin: float = 0.25) -> None:
-        pad = (end - start) * margin
-        self.v0, self.v1 = max(0.0, start - pad), min(self.duration, end + pad)
-        self.update()
-
     def zoom_all(self) -> None:
         self.v0, self.v1 = 0.0, self.duration
         self.update()

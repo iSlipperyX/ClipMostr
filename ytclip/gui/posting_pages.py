@@ -788,10 +788,6 @@ class QueuePage(QWidget):
             self.which.setCurrentIndex(max(0, self.which.findData(keep)))
         self.refresh()
 
-    def show_account(self, account_id: str) -> None:
-        self.which.setCurrentIndex(max(0, self.which.findData(account_id)))
-        self.refresh()
-
     # --- filling -----------------------------------------------------------------------------------
 
     def _rows(self) -> list[VideoItem]:

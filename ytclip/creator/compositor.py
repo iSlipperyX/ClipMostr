@@ -36,7 +36,10 @@ from typing import Callable
 
 from .. import speed
 from ..audio import ducking, mastering
-from ..ffmpeg import NO_WINDOW, encoder_args, ffmpeg_exe, pick_encoder, run, run_with_progress
+from ..ffmpeg import (NO_WINDOW, close_pipes, ffmpeg_exe, pick_encoder, run, run_with_progress, tracked,
+                      video_args)
+from ..ffmpeg import stop as stop_process
+from ..rendering import filtergraph
 from . import motion
 
 Progress = Callable[[str, "float | None"], None]
@@ -92,25 +95,10 @@ def scene_filter(kind: str, seconds: float, move: motion.Move | None = None) -> 
     return motion.zoompan(move or motion.get("slow_push_in"), frames, FPS, WIDTH, HEIGHT) + ",setsar=1,format=yuv420p"
 
 
-SCENE_QP = 16  # scene clips on a graphics card encoder: near-lossless (they're encoded again once, at the end)
-
-
-def intermediate_args(encoder: str = "libx264") -> list[str]:
-    """A scene clip's encoder settings: near-lossless and fast, on the graphics card when `encoder` is one."""
-    q = str(SCENE_QP)
-    if encoder == "h264_amf":
-        return ["-c:v", "h264_amf", "-usage", "transcoding", "-quality", "speed", "-rc", "cqp",
-                "-qp_i", q, "-qp_p", q, "-bf", "0"]
-    if encoder == "h264_nvenc":
-        return ["-c:v", "h264_nvenc", "-preset", "p2", "-rc", "constqp", "-qp", q, "-bf", "0"]
-    if encoder == "h264_qsv":
-        return ["-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", q]
-    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "14"]
-
-
 def _intermediate(dest: Path, encoder: str = "libx264") -> list[str]:
-    """Scene clips are kept near-lossless: they're encoded again once, at the end."""
-    return [*intermediate_args(encoder), "-pix_fmt", "yuv420p", "-an", str(dest)]
+    """Scene clips are kept near-lossless, on the graphics card when `encoder` is one: they're encoded again
+    once, at the end (ffmpeg.video_args)."""
+    return [*video_args(encoder, purpose="intermediate"), "-pix_fmt", "yuv420p", "-an", str(dest)]
 
 
 def scene_workers(s, scenes: int, logical: int | None = None) -> int:
@@ -285,23 +273,33 @@ def _render_cv2(source: Path, seconds: float, dest: Path, move: motion.Move, pro
     cmd = [ffmpeg_exe(), "-y", "-v", "error", "-f", "rawvideo", "-pix_fmt", "bgr24", "-s", f"{WIDTH}x{HEIGHT}",
            "-r", str(FPS), "-i", "-", *_intermediate(dest, encoder)]
     proc = subprocess.Popen(cmd, stdin=subprocess.PIPE, stderr=subprocess.PIPE, creationflags=NO_WINDOW)
+    err: list[bytes] = []
+    # ffmpeg's messages are read as they come: a full stderr pipe would stall it while frames are written.
+    reader = threading.Thread(target=lambda: err.extend(proc.stderr), daemon=True)
+    reader.start()
     try:
-        for f in range(frames):
-            if check and f % 15 == 0:
-                check()
-            m = np.array(motion.affine(move, f / max(1, frames - 1), w, h, WIDTH, HEIGHT), np.float32)
-            frame = cv2.warpAffine(img, m, (WIDTH, HEIGHT), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT)
-            proc.stdin.write(frame.tobytes())
-            if progress and f % 30 == 0:
-                progress(f / frames)
-        proc.stdin.close()
-        err = proc.stderr.read().decode("utf-8", "replace")
-        if proc.wait() != 0:
-            raise RuntimeError("ffmpeg couldn't encode a scene: " + err.strip()[-300:])
+        with tracked(proc):
+            for f in range(frames):
+                if check and f % 15 == 0:
+                    check()
+                m = np.array(motion.affine(move, f / max(1, frames - 1), w, h, WIDTH, HEIGHT), np.float32)
+                frame = cv2.warpAffine(img, m, (WIDTH, HEIGHT), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REFLECT)
+                proc.stdin.write(frame.tobytes())
+                if progress and f % 30 == 0:
+                    progress(f / frames)
+            proc.stdin.close()
+            code = proc.wait()
+        reader.join(timeout=5)
+        if code != 0:
+            said = b"".join(err).decode("utf-8", "replace")
+            raise RuntimeError("ffmpeg couldn't encode a scene: " + said.strip()[-300:])
     except BaseException:
-        proc.kill()
-        proc.wait()
+        stop_process(proc)
+        dest.unlink(missing_ok=True)  # half a scene is no use to anyone
         raise
+    finally:
+        reader.join(timeout=2)
+        close_pipes(proc)
     if progress:
         progress(1.0)
     return dest
@@ -417,33 +415,12 @@ def mix_audio(mi: MixInputs, dest: Path, progress: Progress | None = None) -> di
 def video_graph(timeline: Timeline, *, captions: bool, cards: bool, look: bool = True,
                 fonts: str = "") -> tuple[str, str]:
     """(graph, output label) chaining the scene clips (inputs 0..n-1) with xfade, then the look, the
-    hook card and the captions."""
-    spans = timeline.spans
-    n = len(spans)
-    parts: list[str] = []
-    for i in range(n):
-        parts.append(f"[{i}:v]settb=AVTB,fps={FPS},setsar=1,format=yuv420p[s{i}]")
-    last = "s0"
-    for i in range(1, n):
-        offset = max(0.0, timeline.bounds[i - 1] - timeline.overlap / 2)
-        name = timeline.transitions[i - 1] if i - 1 < len(timeline.transitions) else "fade"
-        if timeline.overlap > 0.02:
-            parts.append(f"[{last}][s{i}]xfade=transition={name}:duration={timeline.overlap:.3f}:"
-                         f"offset={offset:.3f}[x{i}]")
-        else:
-            parts.append(f"[{last}][s{i}]concat=n=2:v=1:a=0[x{i}]")
-        last = f"x{i}"
-    chain: list[str] = []
-    if look:
-        chain.append("vignette=angle=PI/5:mode=forward")
-        chain.append("noise=alls=3:allf=t")
-    if cards:
-        chain.append(f"subtitles=cards.ass{fonts}")
-    if captions:
-        chain.append(f"subtitles=captions.ass{fonts}")
-    chain.append("format=yuv420p")
-    parts.append(f"[{last}]{','.join(chain)}[vout]")
-    return ";".join(parts), "vout"
+    hook card and the captions (rendering/filtergraph.py builds it)."""
+    n = len(timeline.spans)
+    offsets = [b - timeline.overlap / 2 for b in timeline.bounds]
+    finish = ["vignette=angle=PI/5:mode=forward", "noise=alls=3:allf=t"] if look else []
+    finish += filtergraph.burn_in([f for f, on in (("cards.ass", cards), ("captions.ass", captions)) if on], fonts)
+    return filtergraph.video_graph(n, timeline.transitions, timeline.overlap, offsets, fps=FPS, finish=finish)
 
 
 def assemble(clips: list[Path], timeline: Timeline, audio: Path, dest: Path, work: Path, s, *,
@@ -461,23 +438,12 @@ def assemble(clips: list[Path], timeline: Timeline, audio: Path, dest: Path, wor
         cmd += ["-i", str(Path(c).resolve())]
     cmd += ["-i", str(Path(audio).resolve()), "-filter_complex", graph, "-map", f"[{out}]", "-map", f"{len(clips)}:a"]
     encoder = pick_encoder(getattr(s, "encoder", "auto"))
-    cmd += codec_args(encoder, min(int(getattr(s, "video_quality", 20)), 21)) + ["-pix_fmt", "yuv420p", "-r", str(FPS)]
+    cmd += video_args(encoder, min(int(getattr(s, "video_quality", 20)), 21), "delivery", FPS)
+    cmd += ["-pix_fmt", "yuv420p", "-r", str(FPS)]
     cmd += ["-c:a", "aac", "-b:a", f"{max(160, int(getattr(s, 'audio_bitrate', 192)))}k", "-ar", "44100",
             "-t", f"{timeline.duration:.3f}", "-movflags", "+faststart", str(Path(dest).resolve())]
     run_with_progress(cmd, timeline.duration, progress, cwd=work)
     return dest
-
-
-def codec_args(encoder: str, quality: int) -> list[str]:
-    """The encoder with a bitrate ceiling: 10 Mbps is plenty for 1080x1920 at 30 fps (TikTok re-encodes
-    anyway), and grain and soft gradients would otherwise take all they're given (a minute came to 150 MB+).
-    AMF's and Quick Sync's quality modes can't be capped, so they use peak-limited VBR."""
-    if encoder == "h264_amf":
-        return ["-c:v", "h264_amf", "-quality", "quality", "-rc", "vbr_peak", "-b:v", "8M", "-maxrate", "10M"]
-    if encoder == "h264_qsv":
-        return ["-c:v", "h264_qsv", "-preset", "medium", "-b:v", "8M", "-maxrate", "10M"]
-    cap = ["-maxrate", "10M", "-bufsize", "20M"]
-    return encoder_args(encoder, quality) + cap + (["-profile:v", "high"] if encoder == "libx264" else [])
 
 
 def describe(timeline: Timeline) -> dict:

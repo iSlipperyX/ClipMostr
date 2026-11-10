@@ -285,12 +285,6 @@ def ai_plan(request: str, s: Settings, check: Callable[[], None] | None = None, 
 # ---------------------------------------------------------------- YouTube
 
 
-def search_ids(api_key: str, query: str, published_after: float = 0.0, language: str = "",
-               limit: int = PER_SEARCH, get: Callable[[str], dict] = _get) -> list[str]:
-    """Video ids for a search, most relevant first; 100 quota units."""
-    return search_page(api_key, query, published_after, language, limit, get)[0]
-
-
 def search_page(api_key: str, query: str, published_after: float = 0.0, language: str = "",
                 limit: int = PER_SEARCH, get: Callable[[str], dict] = _get, order: str = "relevance",
                 page: str = "") -> tuple[list[str], str]:

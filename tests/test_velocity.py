@@ -109,13 +109,13 @@ def test_checks_stop_at_the_daily_cap_and_on_an_error():
     assert velocity.annotate(usual + risers, h2, NOW, api_key="", checks=5, get=broken) == 0
 
 
-def test_niches_and_category_pills():
+def test_topics_and_category_pills():
     vids = [video(1, 5000.0, title="VAR drama: red card in Arsenal vs Chelsea", category_id="soccer"),
             video(2, 900.0, title="Top 10 goals of the week", category_id="soccer", replays=0.9),
             video(3, 1000.0, title="Cooking pasta", category_id="food"), video(4, 1000.0), video(5, 1000.0)]
     velocity.annotate(vids, History(None), NOW)
-    assert "soccer-refs" in vids[0].pace["niches"] and "soccer-goals" in vids[1].pace["niches"]
-    report = velocity.niche_report(vids)
+    assert "soccer-refs" in vids[0].pace["topics"] and "soccer-goals" in vids[1].pace["topics"]
+    report = velocity.topic_report(vids)
     assert {n.key for n in report} >= {"soccer-refs", "soccer-goals"} and report[0].opportunity >= report[-1].opportunity
     pills = velocity.by_category(vids, {"soccer": "Soccer", "food": "Food", "empty": "Empty"})
     assert pills["soccer"].videos == 2 and pills["soccer"].badge in (velocity.RISING, velocity.RETENTION)

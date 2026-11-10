@@ -21,17 +21,3 @@ clip. Every step runs locally and costs nothing per video:
 Every video it makes is labelled AI-generated when it's posted (TikTok requires that label on
 realistic AI-made content) and never promises a part 2 that doesn't exist.
 """
-
-from __future__ import annotations
-
-from enum import Enum
-
-
-class Stage(str, Enum):
-    """The steps a creation goes through, in order (the status bars use steps.py's keys)."""
-
-    SCRIPT = "script"
-    VOICE = "voice"
-    VISUALS = "visuals"
-    RENDER = "render"
-    CHECK = "check"

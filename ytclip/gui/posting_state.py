@@ -78,9 +78,6 @@ class PostingState(QObject):
             self.message.emit(f"⚠ Couldn't save the posting library: {exc}")
         self.changed.emit()
 
-    def save_settings(self) -> None:
-        self.settings.save()
-
     # --- accounts -----------------------------------------------------------------------
 
     def add_account(self, name: str = "") -> Account:

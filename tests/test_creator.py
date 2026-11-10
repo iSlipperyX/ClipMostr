@@ -367,9 +367,11 @@ def test_video_graph_crossfades_every_join():
     assert plain.transitions == ["fade"]
 
 
-@pytest.mark.parametrize("encoder", ["libx264", "h264_nvenc", "h264_amf", "h264_qsv"])
-def test_codec_args_cap_the_bitrate(encoder):
-    args = compositor.codec_args(encoder, 20)
+@pytest.mark.parametrize("encoder", ["libx264", "h264_nvenc", "h264_amf", "h264_qsv", "h264_videotoolbox"])
+def test_finished_videos_cap_the_bitrate_on_every_encoder(encoder):
+    from ytclip.ffmpeg import video_args
+
+    args = video_args(encoder, 20, "delivery")
     assert args[args.index("-c:v") + 1] == encoder
     assert "10M" in " ".join(args)
 

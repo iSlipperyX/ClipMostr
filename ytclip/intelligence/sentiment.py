@@ -80,6 +80,3 @@ def score(text: str) -> float:
     return total / math.sqrt(total * total + ALPHA)
 
 
-def intensity(text: str) -> float:
-    """How emotional a line is, whichever way: 0 to 1."""
-    return abs(score(text))
