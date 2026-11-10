@@ -54,7 +54,7 @@ testpaths = ["tests"]
 [tool.setuptools]
 packages = ["ytclip", "ytclip.gui", "ytclip.posting", "ytclip.posting.tiktok", "ytclip.intelligence",
             "ytclip.vision", "ytclip.audio", "ytclip.rendering", "ytclip.compliance",
-            "ytclip.creator", "ytclip.telegram", "ytclip.remote", "ytclip.mac"]
+            "ytclip.creator", "ytclip.telegram", "ytclip.remote", "ytclip.mac", "ytclip.sportsdesk"]
 package-data = { ytclip = ["fonts/*.ttf", "fonts/licenses/*.txt"] }
 
 [tool.setuptools.dynamic]

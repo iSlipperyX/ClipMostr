@@ -158,8 +158,19 @@ def _creator(p: QPainter) -> None:  # a magic wand with sparkles
         p.drawLine(QPointF(cx, cy - r), QPointF(cx, cy + r))
 
 
+def _sports(p: QPainter) -> None:  # a ball with its seams
+    p.drawEllipse(QRectF(3, 3, 18, 18))
+    p.drawLine(QPointF(12, 3), QPointF(12, 21))
+    seam = QPainterPath(QPointF(5.2, 6.2))
+    seam.cubicTo(QPointF(9.5, 9.5), QPointF(9.5, 14.5), QPointF(5.2, 17.8))
+    p.drawPath(seam)
+    seam = QPainterPath(QPointF(18.8, 6.2))
+    seam.cubicTo(QPointF(14.5, 9.5), QPointF(14.5, 14.5), QPointF(18.8, 17.8))
+    p.drawPath(seam)
+
+
 ICONS = {
-    "creator": _creator,
+    "creator": _creator, "sports": _sports,
     "studio": _studio, "library": _library, "research": _research, "categories": _categories,
     "automation": _automation, "accounts": _accounts, "queue": _queue, "performance": _performance,
     "settings": _settings, "help": _help, "add": _add, "folder": _folder, "link": _link, "check": _check,

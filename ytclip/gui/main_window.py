@@ -461,6 +461,7 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.creator, "Creator", "creator")
         self.tabs.currentChanged.connect(
             lambda _i: self.creator.reload() if self.tabs.currentWidget() is self.creator else None)
+        self._build_sports()
         # Posting: the accounts, the queue and how it's doing. The TikTok work is done by automation's posting
         # worker in the background; these tabs show what it saved and ask it for things (posting_state.py).
         self.posting = PostingState(self)
@@ -495,6 +496,48 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self.queue_page, "Queue", "queue")
         self.performance = PerformancePage(self.posting)
         self.tabs.addTab(self.performance, "Performance", "performance")
+
+    def _build_sports(self) -> None:
+        """Sports (sportsdesk/): pick the games to clip, see each one's best highlights ranked, make the ones you
+        want. Automation does the work while it runs (so a linked Mac's asks are done too); this window's own
+        worker does it while automation isn't running."""
+        from .. import pipeline
+        from ..jobs import JobDB
+        from ..sportsdesk.desk import Desk, DeskWorker, owner_name, send_to_macs
+        from .sports_view import LocalBackend, SportsView
+
+        self.desk = Desk(settings=lambda: self.settings)
+        relay = _Relay(self)
+        relay.line.connect(self._log)
+        self._sports_relay = relay
+        db: dict = {}
+
+        def automation_off() -> bool:
+            try:
+                if "db" not in db:
+                    db["db"] = JobDB()
+                return not pipeline.runner_alive(db["db"])
+            except Exception:  # noqa: BLE001 - jobs.db busy: look again next time
+                return False
+
+        self.sports_worker = DeskWorker(self.desk, lambda: self.settings, owner_name("window"),
+                                        log=relay.line.emit, may_work=automation_off, deliver=send_to_macs)
+        self.sports_worker.start()
+        self.sports = SportsView(LocalBackend(self.desk))
+        self.sports.notice.connect(self._notice)
+        self.sports.open_studio.connect(self.open_in_studio)
+        self.sports.open_settings.connect(self._open_settings)
+        self.tabs.addTab(self.sports, "Sports", "sports")
+
+    def open_in_studio(self, url: str, title: str, clips: list) -> None:
+        """A game's plays (from Sports) in the Studio, as its clips, to edit before exporting."""
+        if not url or not clips:
+            return
+        p = self._add_project(url, saved={"source": url, "title": title, "clips": clips, "mode": "sports"})
+        self._queue_prepare(p)
+        self.queue.setCurrentRow(self.queue.count() - 1)
+        self.tabs.setCurrentIndex(0)
+        self._notice(f"Opening {len(clips)} play{'s' if len(clips) != 1 else ''} from {title[:60]} in the Studio…")
 
     def _add_account(self) -> None:
         """"Add a new account…" from a category: the account wizard."""
@@ -2072,6 +2115,10 @@ class MainWindow(QMainWindow):
         for page in (self.research, self.categories, self.automation):
             if page is not None:
                 page.shutdown()
+        if getattr(self, "sports_worker", None) is not None:
+            self.sports_worker.stop(5.0)  # what it was on goes back in the queue, for automation or next time
+        if getattr(self, "sports", None) is not None:
+            self.sports.shutdown()
         self._save_session()
         self.settings.save()
         self.qs.setValue("geometry", self.saveGeometry())

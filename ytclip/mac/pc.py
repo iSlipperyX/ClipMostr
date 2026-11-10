@@ -29,6 +29,7 @@ from .inbox import InboxPage
 from .pages import AskPage, CategoriesPage, LogPage, PostedPage, RequestsPage, WeekPage
 from .proxy import MediaProxy
 from .session import Session, Tasks
+from .sports_page import SportsPage
 from .videos import VideosPage
 
 
@@ -56,12 +57,14 @@ class PCLink(QObject):
         self.videos = VideosPage(self)
         self.posted = PostedPage(self)
         self.inbox = InboxPage(self)
+        self.sports = SportsPage(self)
+        self.sports.view.open_studio.connect(self._open_in_studio)
         self.ask = AskPage(self)
         self.requests = RequestsPage(self)
         self.categories = CategoriesPage(self)
         self.week = WeekPage(self)
         self.log = LogPage(self)
-        self.pages = (self.dashboard, self.videos, self.posted, self.inbox, self.ask, self.requests,
+        self.pages = (self.dashboard, self.videos, self.posted, self.sports, self.inbox, self.ask, self.requests,
                       self.categories, self.week, self.log)
         self.dashboard.open_videos.connect(self._open_videos)
         self.dashboard.open_page.connect(lambda name: self.nav.setCurrentIndex(
@@ -129,14 +132,15 @@ class PCLink(QObject):
         self.i_dash = nav.addTab(self.dashboard, "Overview", "automation")
         self.i_videos = nav.addTab(self.videos, "Waiting to post", "queue")
         self.i_posted = nav.addTab(self.posted, "Posted", "performance")
+        self.i_sports = nav.addTab(self.sports, "Sports", "sports")
         self.i_inbox = nav.addTab(self.inbox, "Sports clips", "library")
         self.i_ask = nav.addTab(self.ask, "New video", "creator")
         self.i_requests = nav.addTab(self.requests, "Requests", "research")
         self.i_categories = nav.addTab(self.categories, "Categories", "categories")
         self.i_week = nav.addTab(self.week, "This week", "research")
         self.i_log = nav.addTab(self.log, "Log", "studio")
-        self.pc_rows = [self.i_dash, self.i_videos, self.i_posted, self.i_inbox, self.i_ask, self.i_requests,
-                        self.i_categories, self.i_week, self.i_log]
+        self.pc_rows = [self.i_dash, self.i_videos, self.i_posted, self.i_sports, self.i_inbox, self.i_ask,
+                        self.i_requests, self.i_categories, self.i_week, self.i_log]
         self.all_rows = [self.i_link] + self.pc_rows
         self._show_rows()
 
@@ -425,6 +429,10 @@ class PCLink(QObject):
             return
         if kind == "studio":  # a video this Mac sent: pc_jobs.py fetches its clips and says so
             return
+        if kind == "sports":  # a game's highlights are ready, its clips made, new games found
+            self.sports.news(e)
+            self.notify("Sports", e.get("text") or "")
+            return
         if e.get("alert") or kind in ("error", "problem", "login_needed"):
             self.notify("ClipMonster needs you", e.get("text") or "")
         elif kind in ("posted", "milestone", "hot"):
@@ -448,7 +456,14 @@ class PCLink(QObject):
         self.nav.setCurrentIndex(self.i_videos)
         self.videos.set_filter(filt)
 
+    def _open_in_studio(self, url: str, title: str, clips: list) -> None:
+        """A game's ticked plays into this Mac's own Studio, as its clips."""
+        opener = getattr(self.win, "open_in_studio", None)
+        if opener is not None:
+            opener(url, title, clips)
+
     def shutdown(self) -> None:
+        self.sports.shutdown()
         self.close_session()
         self.tasks.shutdown()
         self._drop_tray()

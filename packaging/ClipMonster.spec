@@ -51,6 +51,7 @@ hiddenimports = (
     + collect_submodules("ytclip.intelligence") + collect_submodules("ytclip.vision")
     + collect_submodules("ytclip.audio") + collect_submodules("ytclip.rendering")
     + collect_submodules("ytclip.compliance") + collect_submodules("ytclip.creator") + creator_imports
+    + collect_submodules("ytclip.sportsdesk")
     + ["cv2", "faster_whisper", "ctranslate2", "anthropic", "playwright.sync_api", "PySide6.QtNetwork",
        "PySide6.QtMultimedia", "PySide6.QtMultimediaWidgets"]
 )
