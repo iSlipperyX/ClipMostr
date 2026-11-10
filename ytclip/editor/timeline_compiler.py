@@ -484,7 +484,13 @@ class _Builder:
             ends.append(f"fade=t=out:st={_t(final.end - d)}:d={_t(d)}:c={colour}")
         out = self.label("base")
         total = self.snap(self.tl.duration)
-        self.parts.append(f"[{last}]{','.join([*ends, f'fps={self.fps}', f'trim=duration={_t(total)}'])}[{out}]")
+        # One frame to spare, then the exact count. ffmpeg 7.1 (the one the Windows build carries) has its fps
+        # filter drop a stream's last frame when the filter before it (a transition, an overlay) ends without
+        # saying how long that frame lasts: every video with a transition came out a frame short there. The
+        # spare frame is the one it drops; where it isn't dropped, the count takes it off.
+        steps = [*ends, "tpad=stop=1:stop_mode=clone", f"fps={self.fps}",
+                 f"trim=end_frame={round(total * self.fps)}"]
+        self.parts.append(f"[{last}]{','.join(steps)}[{out}]")
         return out
 
     # ------------------------------------------------------------ layers and the finish

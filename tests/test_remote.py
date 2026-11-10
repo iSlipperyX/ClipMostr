@@ -146,7 +146,9 @@ def test_the_real_stretch_is_slow_enough():
     assert REAL_ITERATIONS >= 200_000 and REAL_MIN <= REAL_ITERATIONS
     t = time.perf_counter()
     protocol.stretch("ABCDEFGH", b"salt" * 4, REAL_ITERATIONS)
-    assert time.perf_counter() - t > 0.02  # each guess costs real time; 32^8 of them can't be tried in ten minutes
+    # Each guess costs real time; 32^8 of them can't be tried in ten minutes. (A fast Mac does the real stretch
+    # in 19 ms, so the bar is what any machine takes, not what a slow one does.)
+    assert time.perf_counter() - t > 0.005
 
 
 def test_proofs_bind_the_certificate():

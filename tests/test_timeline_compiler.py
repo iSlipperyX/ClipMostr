@@ -5,6 +5,7 @@ placed, and the whole thing comes out of one ffmpeg run with sound at the level 
 Small canvases and low frame rates keep each render to a second or two."""
 
 import subprocess
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -81,6 +82,25 @@ def test_a_transition_straddles_the_cut_and_keeps_the_length(tmp_path):
     assert near(f[16, 10, 10], RED) and near(f[23, 10, 10], BLUE)  # untouched either side of 1.7-2.3 s
     mid = f[20, 10, 10]  # the cut itself: half of each
     assert 90 < mid[0] < 170 and 90 < mid[2] < 170
+
+
+def test_the_picture_track_ends_on_a_count_of_frames_with_one_to_spare(tmp_path):
+    """ffmpeg 7.1, the one the Windows build carries, has its fps filter drop a stream's last frame when the
+    filter before it (a transition, an overlay) ends without saying how long that frame lasts: every video
+    with a transition came out one frame short there. (The length tests around this one show it on that
+    ffmpeg; this says how the graph guards against it on any.)"""
+    tl = T.standard("fade", canvas(), 4.0)
+    colours(tl, red=RED, blue=BLUE)
+    tl.track(T.VIDEO_BASE).clips += [
+        T.VideoClip("a", "red", 0, 2.0, transition_in=T.Transition("dip_black", 0.3)),
+        T.VideoClip("b", "blue", 2.0, 2.0, transition_in=T.Transition("crossfade", 0.6),
+                    transition_out=T.Transition("dip_black", 0.3))]
+    graph = C.compile_timeline(tl, tmp_path).graph
+    assert f",tpad=stop=1:stop_mode=clone,fps={FPS},trim=end_frame=40[" in graph
+    render(tl, tmp_path)
+    f = frames(tmp_path / "out.mp4")
+    assert len(f) == 40 and near(f[30, 100, 90], BLUE)
+    assert int(f[39, 100, 90, 2]) < 120  # the last frame is the fade's last step, not a spare one
 
 
 def test_a_gap_shows_the_background_and_a_last_fade_goes_to_black(tmp_path):
@@ -265,7 +285,8 @@ def test_one_graph_one_output_no_intermediate_files(tmp_path):
 def test_awkward_file_names_are_copied_under_plain_ones(tmp_path):
     """A filter graph gives : ' , ; [ ] % and \\ meanings of their own. Stills named with them are copied into the
     work folder under plain names, so the graph never has to spell them."""
-    odd = tmp_path / "it's 50% off; [new], 12:30"
+    # (Windows doesn't allow a colon in a folder's name; the drive's own colon is in the full path below.)
+    odd = tmp_path / ("it's 50% off; [new], 12.30" if sys.platform == "win32" else "it's 50% off; [new], 12:30")
     odd.mkdir()
     tl = T.standard("names", canvas(), 2.0)
     picture(odd / "a b's, [1]; 100%.png", flat(RED))
