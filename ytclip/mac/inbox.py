@@ -64,7 +64,8 @@ def dest_for(item: dict, folder: Path | None = None) -> Path:
     base = (folder or save_folder()) / _safe(item.get("category") or "Clips", 40)
     when = time.strftime("%Y-%m-%d %H.%M", time.localtime(float(item.get("at") or time.time())))
     stem = f"{when} {_safe(item.get('title'))}"
-    ext = item.get("ext") or ".mp4"
+    ext = str(item.get("ext") or "")
+    ext = ext.lower() if re.fullmatch(r"\.[A-Za-z0-9]{1,5}", ext) else ".mp4"  # (only ever an extension)
     p = base / f"{stem}{ext}"
     n = 2
     while p.exists():

@@ -1292,7 +1292,7 @@ class PretendPC:
                                  files=[{"path": f"{folder}/{name}", "size": len(data)}
                                         for name, data in sorted(files.items())])
 
-    def download(self, path, dest, progress=None, cancelled=None):
+    def download(self, path, dest, progress=None, cancelled=None, **_resume):
         from urllib.parse import parse_qs, urlsplit
 
         url = urlsplit(path)
@@ -1595,7 +1595,7 @@ def test_clips_that_stop_arriving_are_tried_again_on_the_next_look_not_at_once(a
 
     tries = []
 
-    def download(path, dest, progress=None, cancelled=None):
+    def download(path, dest, progress=None, cancelled=None, **_resume):
         tries.append(path)
         raise Offline("The file stopped arriving part way.")
 

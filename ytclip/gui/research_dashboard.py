@@ -105,9 +105,6 @@ class ElidedLabel(QLabel):
         self.setToolTip(text)
         super().setText(text)
 
-    def full_text(self) -> str:
-        return self._full
-
     def paintEvent(self, _event) -> None:
         p = QPainter(self)
         p.setPen(self.palette().color(self.foregroundRole()))

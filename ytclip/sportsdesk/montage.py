@@ -514,9 +514,17 @@ def story(game: dict, reel: Reel, s, commentary: dict[str, str], *, narrator: bo
         plain.note = "No AI is set up, so the words come from the plays' own titles."
         return plain
     sp = sports.get(game.get("sport", "")) or sports.SPORTS["any"]
+    prompt = story_prompt(game, reel, commentary)
+    if getattr(s, "learn_from_results", True):  # the reel hooks that did best for this sport (learner.py)
+        from ..intelligence import learner
+
+        few = learner.guide(s, f"{game.get('matchup') or ''} {game.get('title') or ''}",
+                            sport=sp.id if sp.id != "any" else "", purpose="reel")
+        if few:
+            prompt += "\n\n" + few
     try:
         ans = ai.ask_json(s, "polish", STORY_SYSTEM.format(sport=sp.label.split(" (")[0].lower()),
-                          story_prompt(game, reel, commentary), STORY_SCHEMA, effort="low", max_tokens=2500,
+                          prompt, STORY_SCHEMA, effort="low", max_tokens=2500,
                           log=log, check=check, what="write the reel's opening and badges")
     except ai.AIError as exc:
         plain.note = f"The AI couldn't write the words ({exc}), so they come from the plays' own titles."

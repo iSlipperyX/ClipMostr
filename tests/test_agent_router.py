@@ -215,3 +215,71 @@ def test_hardware_stack():
     assert hardware.onnx_providers(nv, ["DmlExecutionProvider", "CPUExecutionProvider"])[0] == "DmlExecutionProvider"
     cpu = hardware.Hardware("Linux", 8, 16)
     assert hardware.stack(cpu, [])["onnx_providers"] == ["CPUExecutionProvider"] and "CPU" in hardware.stack(cpu, [])["llm"]
+
+
+# ---------------------------------------------------------------- the whole chain, and what it costs
+
+
+def test_local_then_cloud_then_a_plain_error(ais):
+    asked, say = ais
+    say["local"] = ai.AIError("the model file is damaged")
+    say["claude"] = ai.AIError("overloaded")
+    say["gemini"] = ai.AIError("quota exceeded")
+    with pytest.raises(R.RouterError) as e:
+        R.query_intelligence("q", SCHEMA, settings=settings(ai_provider="claude"))
+    assert [t["provider"] for t in e.value.tried] == ["local", "claude", "gemini"]
+    assert [a[0] for a in asked] == ["local", "claude", "gemini"]  # each asked once, in that order
+    for words in ("damaged", "overloaded", "quota"):
+        assert any(words in t["error"] for t in e.value.tried)
+    assert isinstance(e.value, ai.AIError)  # callers that catch the old error still do
+
+
+def test_a_local_answer_that_isnt_json_is_not_trusted(ais):
+    _, say = ais
+    say["local"] = "Sure! Here's the JSON you asked for: {n: 3"
+    got = R.query_intelligence("q", SCHEMA, settings=settings())
+    assert got.provider == "claude" and got.fell_back and got.tried[0]["provider"] == "local"
+
+
+def test_only_the_tier_that_answered_is_paid_for(ais, monkeypatch):
+    _, say = ais
+    say["local"] = ai.AIError("no")
+
+    def claude_down(*a):
+        raise ai.AIError("down")  # refused before answering: nothing was used
+
+    monkeypatch.setattr(ai, "_ask_claude", claude_down)
+    got = R.query_intelligence("q", SCHEMA, settings=settings(ai_provider="claude"))
+    assert got.provider == "gemini"
+    # gemini's 2,000 in + 100 out at its price, and nothing for the two that didn't answer
+    want = usage.price("gemini", got.model)[0] * 2000 / 1e6 + usage.price("gemini", got.model)[1] * 100 / 1e6
+    assert usage.spent("day") == pytest.approx(want, abs=1e-6)
+    assert got.usage["usd"] == pytest.approx(want, abs=1e-6)
+
+
+def test_the_months_limit_counts_every_day_of_the_month(ais):
+    s = settings(ai_budget_month=0.02, ai_provider="claude")
+    for _ in range(3):  # $0.007 each
+        R.query_intelligence("q", SCHEMA, "cloud_first", settings=s)
+    got = R.query_intelligence("q", SCHEMA, "cloud_first", settings=s)
+    assert got.provider == "local" and "month" in got.tried[0]["error"]
+    assert usage.spent("month") == pytest.approx(0.021)
+
+
+def test_a_failed_local_model_and_a_spent_budget_say_both(ais):
+    _, say = ais
+    say["local"] = ai.AIError("not enough memory")
+    s = settings(ai_budget_day=0.001)
+    usage.note("claude", "claude-sonnet-5-5", 1000, 500)  # $0.007 already today
+    with pytest.raises(R.RouterError) as e:
+        R.query_intelligence("q", SCHEMA, settings=s)
+    errors = " ".join(t["error"] for t in e.value.tried)
+    assert "not enough memory" in errors and "spending limit" in errors
+    assert usage.spent("day") == pytest.approx(0.007)  # nothing more was spent
+
+
+def test_no_limit_means_no_limit(ais):
+    s = settings(ai_budget_day=0, ai_budget_month=0, ai_provider="claude")
+    for _ in range(5):
+        assert R.query_intelligence("q", SCHEMA, "cloud_first", settings=s).provider == "claude"
+    assert usage.status(s).over == ""

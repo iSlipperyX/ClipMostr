@@ -29,6 +29,7 @@ from PySide6.QtCore import QObject, QTimer, Signal
 
 from . import common as c
 from .client import ApiError, Offline
+from ..remote import paths as wire
 from .paths import support_dir
 
 POLL_MS = 4000  # how often the PC is asked how its videos are getting on (while it's making any)
@@ -413,7 +414,12 @@ class PCJobs(QObject):
         total = sum(int(f.get("size") or 0) for f in files) or 1
         job_id, folder_rel = job["id"], job.get("folder") or ""
         source, kind, host_name = job["source"], job["kind"], job.get("host_name") or "your PC"
-        folder = out_root / folder_rel if folder_rel else out_root
+        try:  # (the PC's folder names made safe for this Mac: remote/paths.py)
+            folder = wire.from_wire(folder_rel, out_root) if folder_rel else out_root
+        except wire.UnsafePath as exc:
+            self._apply(key, {"status": "failed", "frac": None, "stage": "",
+                              "error": f"Your PC named a folder this Mac won't write to ({exc})."})
+            return
         if folder in self._fetching.values():  # another video's clips are coming into it: after that one
             return
         # clips of this video already here (made on this Mac, or on the PC before) make way for these, once
@@ -441,14 +447,16 @@ class PCJobs(QObject):
                     self._moved.emit(key, {"cleared": str(folder)})
                 for f in files:
                     rel = str(f["path"])
-                    dest = out_root / rel
-                    if not _inside(dest, out_root):
-                        continue
+                    try:
+                        dest = wire.from_wire(rel, out_root)
+                    except wire.UnsafePath:
+                        continue  # (never written: a name that would land outside the output folder)
                     size = int(f.get("size") or 0)
                     if not (dest.is_file() and dest.stat().st_size == size):  # (one fetched before a break stays)
                         dest.parent.mkdir(parents=True, exist_ok=True)
+                        # A break part way keeps what came (.part) and the next try asks for the rest.
                         client.download(f"/api/studio/jobs/{quote(job_id, safe='')}/file?{urlencode({'path': rel})}",
-                                        dest, fetching, stop.is_set)
+                                        dest, fetching, stop.is_set, resume=True, expect=size)
                     done += size
                 _mark_index(folder, source, kind, host_name)
                 try:

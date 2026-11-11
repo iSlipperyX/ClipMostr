@@ -140,10 +140,20 @@ class Scene:
     sfx_offset_ms: int = 0
     emphasis: list[str] = field(default_factory=list)
     keywords: list[str] = field(default_factory=list)
+    # What the Studio's scriptwriter adds (studio/scriptwriter.py); empty on the Creator's own storyboards.
+    beat: str = ""  # the scene's job in the story: hook | setup | build | twist | payoff | cta
+    mood: str = ""  # this scene's feeling, when it differs from the video's music mood
+    stock_query: str = ""  # what to search stock footage for ("city skyline night")
+    chapter: str = ""  # on the first scene of a chapter of a long video: the chapter's title
 
     @property
     def words(self) -> list[str]:
         return self.speech_text.split()
+
+    def carry(self, other: "Scene") -> "Scene":
+        """Take the Studio's extras from `other` (a scene made from it keeps them)."""
+        self.beat, self.mood, self.stock_query = other.beat, other.mood, other.stock_query
+        return self
 
 
 @dataclass
@@ -161,6 +171,7 @@ class Storyboard:
     notes: list[str] = field(default_factory=list)  # what normalise() changed
     sources: list[dict] = field(default_factory=list)  # what was looked up online (web.Source.short())
     factcheck: dict = field(default_factory=dict)  # the fact check against them (factcheck.Report.to_json())
+    cta: str = ""  # the closing call to action, when the Studio's scriptwriter wrote one
 
     @property
     def word_count(self) -> int:
@@ -262,8 +273,13 @@ def word_target(seconds: float, wpm: float = DEFAULT_WPM) -> tuple[int, int, int
     return round(aim * (1 - WORD_SLACK)), aim, round(aim * (1 + WORD_SLACK))
 
 
-def scene_range(seconds: float) -> tuple[int, int]:
-    """How many scenes a video this long wants: a new picture about every 4-8 seconds."""
+def scene_range(seconds: float, per: float = 0.0) -> tuple[int, int]:
+    """How many scenes a video this long wants: a new picture about every 4-8 seconds, or about every `per`
+    seconds (the pace your best videos had: intelligence/learner.py)."""
+    if per > 0:
+        lo = max(MIN_SCENES, min(MAX_SCENES - 1, round(seconds / (per * 1.2))))
+        hi = min(MAX_SCENES, max(lo + 1, round(seconds / (per * 0.85))))
+        return lo, hi
     lo = max(MIN_SCENES, round(seconds / 8))
     hi = min(MAX_SCENES, max(lo + 2, round(seconds / 4.5)))
     return lo, hi
@@ -359,16 +375,23 @@ def split_hook(scenes: list[Scene], hook_words: int = HOOK_WORDS) -> bool:
     first.speech_text = head
     second = Scene(0, rest_text[0].upper() + rest_text[1:], first.visual_type, first.visual_prompt,
                    "slow_pull_out" if first.camera_motion != "slow_pull_out" else "pan_right", "none", 0,
-                   [w for w in first.emphasis if w.lower() in rest_text.lower()], list(first.keywords))
+                   [w for w in first.emphasis if w.lower() in rest_text.lower()], list(first.keywords)).carry(first)
+    if first.beat:
+        first.beat, second.beat = "hook", "setup"
     first.emphasis = [w for w in first.emphasis if w.lower() in head.lower()]
     scenes.insert(1, second)
     return True
 
 
-def normalise(board: Storyboard, style: Style | None = None, hook_words: int = HOOK_WORDS) -> Storyboard:
+def normalise(board: Storyboard, style: Style | None = None, hook_words: int = HOOK_WORDS,
+              max_scenes: int = MAX_SCENES + 4) -> Storyboard:
     """Fix what a grammar can't: clean speech, a short hook, no empty or tiny scenes, valid choices, varied
-    camera moves, pictures for every scene. Notes what it changed in board.notes."""
+    camera moves, pictures for every scene. Notes what it changed in board.notes. `max_scenes`: the most
+    scenes kept (a long video's scriptwriter asks for more)."""
     style = style or get_style(DEFAULT_STYLE)
+    # What an earlier pass left out is that pass's news: a storyboard previewed, trimmed and handed back
+    # would otherwise be announced as cut again.
+    board.notes = [n for n in board.notes if not str(n).startswith("kept the first")]
     scenes: list[Scene] = []
     for raw in board.scenes:
         text = clean_speech(raw.speech_text)
@@ -382,8 +405,12 @@ def normalise(board: Storyboard, style: Style | None = None, hook_words: int = H
                    max(0, min(2000, int(raw.sfx_offset_ms or 0) if str(raw.sfx_offset_ms).lstrip("-").isdigit() else 0)),
                    [str(w).strip() for w in (raw.emphasis or []) if str(w).strip()][:3],
                    [str(w).strip().lower() for w in (raw.keywords or []) if str(w).strip()][:4])
-        # A scene of two or three words after the hook joins the one before it.
-        if scenes and len(scenes) > 1 and len(sc.words) < 4:
+        sc.beat = str(getattr(raw, "beat", "") or "").strip().lower()
+        sc.mood = mood_of(getattr(raw, "mood", "")) if getattr(raw, "mood", "") else ""
+        sc.stock_query = " ".join(str(getattr(raw, "stock_query", "") or "").split())[:80]
+        sc.chapter = " ".join(str(getattr(raw, "chapter", "") or "").split())[:80]
+        # A scene of two or three words after the hook joins the one before it (never across a chapter's start).
+        if scenes and len(scenes) > 1 and len(sc.words) < 4 and not sc.chapter:
             scenes[-1].speech_text += " " + sc.speech_text
             board.notes.append(f"joined a {len(sc.words)}-word scene to the one before")
             continue
@@ -405,12 +432,15 @@ def normalise(board: Storyboard, style: Style | None = None, hook_words: int = H
                 acc += len(p.split())
             rest = parts[len(first):]
             out.append(Scene(0, " ".join(first), sc.visual_type, sc.visual_prompt, sc.camera_motion, sc.sfx_cue,
-                             sc.sfx_offset_ms, sc.emphasis, sc.keywords))
-            out.append(Scene(0, " ".join(rest), sc.visual_type, sc.visual_prompt, "", "none", 0, [], sc.keywords))
+                             sc.sfx_offset_ms, sc.emphasis, sc.keywords, chapter=sc.chapter).carry(sc))
+            out.append(Scene(0, " ".join(rest), sc.visual_type, sc.visual_prompt, "", "none", 0, [],
+                             sc.keywords).carry(sc))
             board.notes.append("split a long scene in two")
         else:
             out.append(sc)
-    scenes = out[:MAX_SCENES + 4]
+    scenes = out[:max(1, max_scenes)]
+    if len(out) > len(scenes):  # never silently: the rest of the story is gone
+        board.notes.append(f"kept the first {len(scenes)} of {len(out)} scenes (the most one video takes)")
     last_motion = ""
     for i, sc in enumerate(scenes, 1):
         sc.scene_id = i
@@ -432,6 +462,7 @@ def normalise(board: Storyboard, style: Style | None = None, hook_words: int = H
     board.title = " ".join(clean_speech(board.title).split()[:12]).rstrip(".") or " ".join(scenes[0].words[:8])
     board.hook = clean_speech(board.hook) or board.title
     board.caption = clean_speech(board.caption) or board.title
+    board.cta = clean_speech(board.cta)
     tags: list[str] = []
     for t in board.hashtags or []:
         t = re.sub(r"[^\w]", "", str(t).lstrip("#"))
@@ -474,7 +505,8 @@ class Brief:
     style: str = ""  # STYLES key; "" = from the category
     avoid: list[str] = field(default_factory=list)  # titles of earlier videos on this, to take a new angle
     facts: str = ""  # today's date and what was found online (web.brief); "" = just today's date
-    lessons: str = ""  # how earlier videos did (learn.Lessons.creator_text); "" = nothing to go on yet
+    lessons: str = ""  # how earlier videos did (intelligence/learner.py, else learn.Lessons.creator_text); "" = none yet
+    scene_seconds: float = 0.0  # a new picture about this often (learner.Pacing); 0 = the usual 4-8 s
 
 
 def write(s, brief: Brief, *, log: Log | None = None, check: Callable[[], None] | None = None,
@@ -488,7 +520,7 @@ def write(s, brief: Brief, *, log: Log | None = None, check: Callable[[], None] 
     log = log or (lambda m: None)
     style = get_style(brief.style or style_for(brief.category, brief.prompt, brief.instructions))
     lo, aim, hi = word_target(brief.seconds, brief.wpm)
-    scenes_lo, scenes_hi = scene_range(brief.seconds)
+    scenes_lo, scenes_hi = scene_range(brief.seconds, brief.scene_seconds)
     system = SYSTEM.format(hook=HOOK_WORDS)
     base = ASK.format(prompt=brief.prompt.strip(), category=brief.category or "general",
                       instructions=f"\nWhat this account wants: {brief.instructions.strip()}" if brief.instructions.strip() else "",
@@ -588,7 +620,7 @@ def no_writer_text(s) -> str:
 # ---------------------------------------------------------------- your own script
 
 def from_script(text: str, *, title: str = "", category: str = "", style: str = "", seconds: float = 0.0,
-                prompt: str = "") -> Storyboard:
+                prompt: str = "", max_scenes: int = 0) -> Storyboard:
     """A storyboard from a script you wrote: the first sentence is the hook, then a scene every one or two
     sentences (up to about 24 words), each picture described from its words and the style."""
     st = get_style(style or style_for(category, prompt or text[:200]))
@@ -628,4 +660,5 @@ def from_script(text: str, *, title: str = "", category: str = "", style: str = 
                        hashtags=[re.sub(r"\W", "", w) for w in (category.split() + keywords_of(text, 3)) if
                                  re.sub(r"\W", "", w)][:5],
                        prompt=prompt or "your script", written_by="your script")
-    return normalise(board, st, hook_words=40)  # your hook is kept as you wrote it
+    # Your hook is kept as you wrote it.
+    return normalise(board, st, hook_words=40, max_scenes=max_scenes or MAX_SCENES + 4)

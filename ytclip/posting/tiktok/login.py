@@ -170,17 +170,6 @@ class BrowserWindow:
         if self.proc.poll() is None:
             self.proc.terminate()
 
-    def wait_closed(self, timeout: float = 25) -> None:
-        """close(), then wait for the browser to let go of the profile (stopping it if it won't)."""
-        self.close()
-        end = time.time() + timeout
-        while not self.closed and time.time() < end:
-            self.tick()
-            time.sleep(0.5)
-        if not self.closed:
-            self.terminate()
-
-
 def login_window(s: Settings, profile_dir: Path, log: Callable[[str], None],
                  cancelled: Callable[[], bool] = lambda: False, timeout: float = 1200,
                  browser: Path | None = None, url: str = LOGIN_URL,

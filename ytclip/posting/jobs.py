@@ -93,27 +93,6 @@ def needs_cover(item: VideoItem, s: Settings) -> bool:
     return not (item.cover and Path(item.cover).is_file())
 
 
-def ai_item(store: Store, item_id: str, s: Settings, log: Log | None = None,
-            account: Account | None = None) -> VideoItem:
-    """The AI rates the video and writes a caption, for `account`'s audience when one is given."""
-    from .ai import rate
-
-    item = store.get(item_id)
-    if item is None:
-        raise KeyError(item_id)
-    if not item.score:
-        analyze_item(store, item_id, s)
-    result = rate(item, account.apply(s) if account else s, log)
-    with store.lock:
-        item.ai = result
-        if not item.caption.strip():
-            item.caption = result.get("caption", "")
-        if not item.hashtags.strip():
-            item.hashtags = " ".join("#" + h for h in result.get("hashtags", []))
-        recombine(item, s)
-    return item
-
-
 def proven_tags(store: Store, account_id: str, limit: int = 8, min_posts: int = 3) -> list[tuple[str, int]]:
     """The account's own hashtags whose posts got the most views (median per tag), best first.
 

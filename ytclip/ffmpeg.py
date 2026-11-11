@@ -94,6 +94,33 @@ def kill_running() -> int:
     return n
 
 
+@lru_cache(maxsize=4)
+def major_version(exe: str) -> int:
+    try:
+        out = subprocess.run([exe, "-version"], capture_output=True, text=True, encoding="utf-8", errors="replace",
+                             creationflags=NO_WINDOW, timeout=20).stdout
+    except (OSError, subprocess.SubprocessError):
+        return 0
+    m = re.search(r"ffmpeg version n?(\d+)\.", out)
+    return int(m[1]) if m else 0  # a git build ("N-1234-g...") counts as old: it takes the older spelling too
+
+
+def graph_file_args(script: str) -> list[str]:
+    """How this ffmpeg is told to read its filter graph from a file (ffmpeg 7 renamed the option, and later
+    dropped the old spelling). A graph in a file never meets the command line's length limit."""
+    return ["-/filter_complex", script] if major_version(ffmpeg_exe()) >= 7 else ["-filter_complex_script", script]
+
+
+# Windows gives a program at most 32,767 characters of command line (CreateProcess).
+WINDOWS_COMMAND_LIMIT = 32_000
+
+
+def command_too_long(cmd: list[str], windows: bool | None = None) -> bool:
+    """Whether Windows would refuse to start this command for its length."""
+    windows = sys.platform == "win32" if windows is None else windows
+    return windows and len(subprocess.list2cmdline([str(c) for c in cmd])) > WINDOWS_COMMAND_LIMIT
+
+
 def communicate(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
     """subprocess.run for ffmpeg (text output), tracked for the watchdog."""
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, text=True,
@@ -111,9 +138,52 @@ def run(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess:
     return result
 
 
+def close_pipes(proc: subprocess.Popen) -> None:
+    """Close whichever of the process's pipes are open (a pipe left to the garbage collector holds a handle
+    until then, and on Windows keeps the file it wrote locked)."""
+    for stream in (proc.stdin, proc.stdout, proc.stderr):
+        if stream is not None:
+            try:
+                stream.close()
+            except (OSError, ValueError):  # a broken pipe to a process that's gone
+                pass
+
+
+def discard(*paths) -> int:
+    """Delete intermediate files (scene clips, a mix, a narrator track) once what was made from them is
+    written, so a long render doesn't hold several GB of them until its folder goes. A file another program
+    still has open is left for the folder's own cleanup. Returns how many went."""
+    n = 0
+    for p in paths:
+        if p is None:
+            continue
+        try:
+            Path(p).unlink()
+            n += 1
+        except FileNotFoundError:
+            pass
+        except OSError:  # (Windows: still open somewhere)
+            pass
+    return n
+
+
+def stop(proc: subprocess.Popen, wait: float = 10.0) -> None:
+    """Kill the process if it's still running and reap it, so no ffmpeg is left working in the background."""
+    if proc.poll() is None:
+        try:
+            proc.kill()
+        except OSError:
+            pass
+    try:
+        proc.wait(timeout=wait)
+    except subprocess.TimeoutExpired:
+        pass
+
+
 def run_with_progress(cmd: list[str], duration: float, on_progress: Callable[[float], None] | None,
                       cwd: Path | None = None, on_stderr: Callable[[str], None] | None = None) -> None:
-    """Run ffmpeg with `-progress pipe:1`, reporting 0-1 completion as it goes."""
+    """Run ffmpeg with `-progress pipe:1`, reporting 0-1 completion as it goes. Its pipes are closed and the
+    process reaped however it ends; cancelled or failed part way, ffmpeg is stopped first."""
     cmd = [cmd[0], "-progress", "pipe:1", "-nostats", *cmd[1:]]
     proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, cwd=cwd, text=True,
                             encoding="utf-8", errors="replace", creationflags=NO_WINDOW)
@@ -121,11 +191,14 @@ def run_with_progress(cmd: list[str], duration: float, on_progress: Callable[[fl
 
     def pump_stderr() -> None:
         assert proc.stderr is not None
-        for line in proc.stderr:
-            if on_stderr:
-                on_stderr(line)
-            err_tail.append(line.rstrip())
-            del err_tail[:-8]
+        try:
+            for line in proc.stderr:
+                if on_stderr:
+                    on_stderr(line)
+                err_tail.append(line.rstrip())
+                del err_tail[:-8]
+        except (OSError, ValueError):  # closed under it
+            pass
 
     t = threading.Thread(target=pump_stderr, daemon=True)
     t.start()
@@ -141,11 +214,11 @@ def run_with_progress(cmd: list[str], duration: float, on_progress: Callable[[fl
             proc.wait()
     except BaseException:
         # Cancelled (or anything else) mid-run: don't leave ffmpeg working in the background.
-        proc.kill()
-        proc.wait()
+        stop(proc)
         raise
-    proc.wait()
-    t.join(timeout=2)
+    finally:
+        t.join(timeout=2)
+        close_pipes(proc)
     if proc.returncode != 0:
         raise RuntimeError("ffmpeg failed:\n" + "\n".join(err_tail[-6:]))
 
@@ -157,6 +230,9 @@ class MediaInfo:
     height: int = 0
     fps: float = 30.0
     has_audio: bool = True
+    codec: str = ""  # the video stream's: "h264"
+    profile: str = ""  # "High", "Main" (as ffmpeg names it)
+    pix_fmt: str = ""  # "yuv420p"
 
 
 def probe(path: Path) -> MediaInfo:
@@ -173,6 +249,10 @@ def probe(path: Path) -> MediaInfo:
                 info.width, info.height = int(m[1]), int(m[2])
             if m := re.search(r"([\d.]+) fps", line):
                 info.fps = float(m[1])
+            if m := re.search(r"Video: (\w+)(?: \(([^)]*)\))?", line):
+                info.codec, info.profile = m[1], (m[2] or "") if m[2] and "/" not in m[2] else ""
+            if m := re.search(r", (yuv\w+|nv12|rgb\w+|bgr\w+|gray\w*)[(,]", line):
+                info.pix_fmt = m[1]
             break
     return info
 
@@ -222,3 +302,79 @@ def encoder_args(encoder: str, quality: int) -> list[str]:
         return ["-c:v", "h264_videotoolbox", "-b:v", f"{rate}M", "-maxrate", f"{rate * 1.5:.1f}M",
                 "-bufsize", f"{rate * 2:.0f}M", "-allow_sw", "1"]
     return ["-c:v", "libx264", "-preset", "veryfast", "-crf", q]
+
+
+# ---------------------------------------------------------------- one output, whichever encoder makes it
+#
+# A video ClipMonster makes should come out the same whether the Mac's media engine (VideoToolbox), an NVIDIA
+# (NVENC), AMD (AMF) or Intel (Quick Sync) card or the processor (x264) encoded it: H.264 High, 4:2:0, a
+# keyframe every two seconds, a constant frame rate and, for a finished video, the same bit rate ceiling.
+# video_args() gives each encoder's own knobs for that; DELIVERY is what every finished video is checked
+# against (delivery_problems), so a card's encoder that drifts from it shows up in the video's check.
+
+PURPOSES = ("final", "intermediate", "delivery")
+SCENE_QP = 16  # an intermediate clip on a card's encoder: near-lossless (it's encoded once more, at the end)
+DELIVERY_RATE, DELIVERY_PEAK = 8, 10  # Mbit/s: plenty for 1080x1920 at 30 fps (TikTok encodes again anyway)
+DELIVERY = {"codec": "h264", "profile": "High", "pix_fmt": "yuv420p"}
+
+
+def _intermediate_args(encoder: str) -> list[str]:
+    q = str(SCENE_QP)
+    if encoder == "h264_amf":
+        return ["-c:v", "h264_amf", "-usage", "transcoding", "-quality", "speed", "-rc", "cqp",
+                "-qp_i", q, "-qp_p", q, "-bf", "0"]
+    if encoder == "h264_nvenc":
+        return ["-c:v", "h264_nvenc", "-preset", "p2", "-rc", "constqp", "-qp", q, "-bf", "0"]
+    if encoder == "h264_qsv":
+        return ["-c:v", "h264_qsv", "-preset", "veryfast", "-global_quality", q]
+    if encoder == "h264_videotoolbox":  # (before, scenes on a Mac fell back to x264)
+        if VT_QUALITY:
+            return ["-c:v", "h264_videotoolbox", "-q:v", "90", "-allow_sw", "1"]
+        return ["-c:v", "h264_videotoolbox", "-b:v", "40M", "-allow_sw", "1"]
+    return ["-c:v", "libx264", "-preset", "veryfast", "-crf", "14"]
+
+
+def _delivery_args(encoder: str, quality: int) -> list[str]:
+    """The encoder with the bit rate ceiling. AMF's and Quick Sync's quality modes can't be capped, and the
+    Mac's media engine keeps to a bit rate better than to a cap, so those three use peak-limited VBR."""
+    rate, peak, buf = f"{DELIVERY_RATE}M", f"{DELIVERY_PEAK}M", f"{2 * DELIVERY_PEAK}M"
+    if encoder == "h264_amf":
+        return ["-c:v", "h264_amf", "-quality", "quality", "-rc", "vbr_peak", "-b:v", rate, "-maxrate", peak]
+    if encoder == "h264_qsv":
+        return ["-c:v", "h264_qsv", "-preset", "medium", "-b:v", rate, "-maxrate", peak]
+    if encoder == "h264_videotoolbox":
+        return ["-c:v", "h264_videotoolbox", "-b:v", rate, "-maxrate", peak, "-bufsize", buf, "-allow_sw", "1"]
+    return encoder_args(encoder, quality) + ["-maxrate", peak, "-bufsize", buf]
+
+
+def video_args(encoder: str, quality: int = 20, purpose: str = "final", fps: int = 30) -> list[str]:
+    """The video encoder's arguments for `purpose`:
+
+    final         a finished export (Settings → Export → Quality), no ceiling
+    intermediate  a clip that's encoded again later (a Creator scene, a reel's play): near-lossless, fast
+    delivery      a finished video with the bit rate ceiling (the Video Creator, recap reels)
+
+    The final and delivery ones carry the same profile, keyframe spacing and frame rate on every encoder."""
+    if purpose not in PURPOSES:
+        raise ValueError(f"unknown purpose {purpose!r}")
+    if purpose == "intermediate":
+        return _intermediate_args(encoder)
+    args = _delivery_args(encoder, quality) if purpose == "delivery" else encoder_args(encoder, quality)
+    return args + ["-profile:v", "high", "-g", str(2 * int(fps)), "-fps_mode", "cfr"]
+
+
+def delivery_problems(info: MediaInfo, width: int = 1080, height: int = 1920, fps: float = 30.0) -> list[str]:
+    """How a finished video differs from what every encoder should give (DELIVERY), in words; [] when it
+    doesn't. Facts ffmpeg didn't print aren't held against it."""
+    out = []
+    if info.codec and info.codec != DELIVERY["codec"]:
+        out.append(f"its picture is {info.codec}, not H.264")
+    if info.profile and info.profile.lower() != DELIVERY["profile"].lower():
+        out.append(f"its H.264 profile is {info.profile}, not High")
+    if info.pix_fmt and info.pix_fmt != DELIVERY["pix_fmt"]:
+        out.append(f"its colours are stored as {info.pix_fmt}, not yuv420p")
+    if info.width and (info.width, info.height) != (width, height):
+        out.append(f"it's {info.width}x{info.height}, not {width}x{height}")
+    if info.fps and abs(info.fps - fps) > 0.05:
+        out.append(f"it runs at {info.fps:g} fps, not {fps:g}")
+    return out

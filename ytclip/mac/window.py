@@ -34,7 +34,7 @@ from . import APP_NAME, common as c
 from . import hosts, prefs
 from .pc import PCLink
 from .pc_ai import PCAI
-from .pc_jobs import ACTIVE, FINISHED, PCJobs
+from .pc_jobs import FINISHED, PCJobs
 
 REPO = "iSlipperyX/ClipMostr"
 RELEASES = f"https://github.com/{REPO}/releases/latest"

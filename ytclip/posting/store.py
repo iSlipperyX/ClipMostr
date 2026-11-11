@@ -229,6 +229,18 @@ def _build(cls, data: dict):
     return cls(**{k: v for k, v in data.items() if k in known})
 
 
+def _creation_material(f: Path) -> bool:
+    """A video that's part of how a Studio video was made, not a video to post: a scene's stock clip in the
+    video folder's scenes/, anything in its assets/, or a render in progress (studio/orchestrator.py)."""
+    for parent in list(f.parents)[:3]:
+        if parent.name.startswith(".render-"):
+            return True
+        if parent.name in ("scenes", "assets") and ((parent.parent / "timeline.json").is_file()
+                                                    or (parent.parent / "storyboard.json").is_file()):
+            return True
+    return False
+
+
 class Store:
     """Thread-safe: the worker's threads update items in the background. Shared with the other process
     through save() and refresh() (see the module docstring)."""
@@ -374,7 +386,12 @@ class Store:
 
         now = time.time() if now is None else now
         with self.lock:
-            known = {_key(i.path) for i in self.items.values()}
+            holders: dict[str, list[VideoItem]] = {}
+            for i in self.items.values():
+                holders.setdefault(_key(i.path), []).append(i)
+            known = set(holders)
+            # Paths whose every entry has posted and had its file cleared: a file there now is a new one.
+            cleared = {k for k, its in holders.items() if all(i.status == "posted" and i.cleaned_at for i in its)}
             added: list[VideoItem] = []
             files: list[Path] = []
             for p in paths:
@@ -382,19 +399,33 @@ class Store:
                 if p.is_dir():
                     files += sorted(f for f in p.rglob("*") if f.suffix.lower() in VIDEO_EXTS
                                     and ".downloads" not in f.parts and REJECTED_DIR not in f.parts
-                                    and not f.name.startswith("."))
+                                    and not f.name.startswith(".") and not _creation_material(f))
                 elif p.suffix.lower() in VIDEO_EXTS:
                     files.append(p)
             index_cache: dict[Path, dict] = {}
             for f in files:
                 key = _key(f)
-                if key in known or (watched and key in self.ignored):
+                if (key in known and key not in cleared) or (watched and key in self.ignored):
                     continue
                 if f.parent not in index_cache:
                     index_cache[f.parent] = read_folder_index(f.parent)
                 meta = index_cache[f.parent].get(f.name)
                 if meta and meta.get("rejected"):
                     continue
+                if key in known and not (meta and meta.get("edit_of")):
+                    # A name that posted before comes back only for a Studio edit rendered again (the one
+                    # that posted is on TikTok and its file is gone; this is another video, held for your
+                    # OK below). A clip exported twice under one name is the same clip: not posted twice.
+                    continue
+                if watched and not meta:
+                    # A video beside one the Creator or the Studio made (or in a folder inside that video's
+                    # folder) that its clips.json doesn't list: not automation's to post without the
+                    # AI-generated label and the review. Add it by hand.
+                    above = f.parent.parent
+                    if above not in index_cache:
+                        index_cache[above] = read_folder_index(above)
+                    if any(m.get("ai_generated") for d in (f.parent, above) for m in index_cache[d].values()):
+                        continue
                 if watched and not meta:
                     try:
                         if now - f.stat().st_mtime < settle:
@@ -430,6 +461,8 @@ class Store:
                         item.part, item.parts = meta.get("part"), meta.get("parts")
                     if needs_credit(meta):
                         item.credit = credit_line(item.source_channel)
+                    if meta.get("edit_of"):  # a re-render of a video that may be queued too: never on its own say-so
+                        item.review = "waiting"
                 else:
                     item.source_group = str(f.parent)
                 self.items[item.id] = item

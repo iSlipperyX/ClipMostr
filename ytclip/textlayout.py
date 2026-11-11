@@ -88,7 +88,11 @@ def break_lines(words: list[str], font: str, size: float, max_width: float) -> l
                 hi = mid
             else:
                 lo = mid
-        best = greedy(hi)
+        # The narrowest limit is a line's own width, added up in another order: a hair of rounding must not
+        # turn two lines into three.
+        even = greedy(hi + 1e-6)
+        if len(even) <= n:
+            best = even
     return [[words[i] for i in ln] for ln in best]
 
 
@@ -124,6 +128,3 @@ def place(lines: list[list[tuple[str, float, bool]]], font: str, size: int, cent
     return Block(font, size, built)
 
 
-def ass_lines(lines: list[list[str]]) -> str:
-    """Lines as .ass text with explicit breaks (the caller escapes and styles the words)."""
-    return "\\N".join(" ".join(ln) for ln in lines)

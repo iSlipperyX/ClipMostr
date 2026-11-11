@@ -27,11 +27,17 @@ def test_how_many_at_once():
 
 
 def test_scene_clips_stay_near_lossless_on_every_encoder():
-    assert compositor.intermediate_args("libx264")[:6] == ["-c:v", "libx264", "-preset", "veryfast", "-crf", "14"]
-    amf = compositor.intermediate_args("h264_amf")
-    assert amf[:2] == ["-c:v", "h264_amf"] and ["-rc", "cqp"] == amf[6:8] and str(compositor.SCENE_QP) in amf
-    assert compositor.intermediate_args("h264_nvenc")[:2] == ["-c:v", "h264_nvenc"]
-    assert compositor.intermediate_args("h264_qsv")[:2] == ["-c:v", "h264_qsv"]
+    from ytclip import ffmpeg
+
+    def inter(enc):
+        return ffmpeg.video_args(enc, purpose="intermediate")
+
+    assert inter("libx264")[:6] == ["-c:v", "libx264", "-preset", "veryfast", "-crf", "14"]
+    amf = inter("h264_amf")
+    assert amf[:2] == ["-c:v", "h264_amf"] and ["-rc", "cqp"] == amf[6:8] and str(ffmpeg.SCENE_QP) in amf
+    assert inter("h264_nvenc")[:2] == ["-c:v", "h264_nvenc"]
+    assert inter("h264_qsv")[:2] == ["-c:v", "h264_qsv"]
+    assert inter("h264_videotoolbox")[:2] == ["-c:v", "h264_videotoolbox"]  # a Mac's scenes on its media engine
     assert compositor._intermediate(Path("x.mp4"), "h264_amf")[-4:] == ["-pix_fmt", "yuv420p", "-an", "x.mp4"]
 
 

@@ -65,6 +65,8 @@ class Outcome:
     category_id: str = ""  # id of the ClipMonster category the clip was made for (see for_settings)
     origin: str = ""  # "creator" (made by the Video Creator) or "clip"; "" from before posting said
     title: str = ""
+    words: int = 0  # a Creator video's script, in words (0 = not known): its pace (intelligence/learner.py)
+    scenes: int = 0  # and its scenes
 
     @property
     def creator(self) -> bool:
@@ -86,7 +88,16 @@ class Outcome:
                    score=float(score) if isinstance(score, (int, float)) else None,
                    posted_at=float(d.get("posted_at") or 0), account=str(d.get("account") or ""),
                    category_id=str(d.get("category_id") or d.get("niche") or ""),
-                   origin=str(d.get("origin") or ""), title=str(d.get("clip") or d.get("title") or "").strip())
+                   origin=str(d.get("origin") or ""), title=str(d.get("clip") or d.get("title") or "").strip(),
+                   words=_count(d.get("words")), scenes=_count(d.get("scenes")))
+
+
+def _count(value) -> int:
+    try:
+        n = int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+    return n if n > 0 else 0
 
 
 @dataclass

@@ -10,6 +10,10 @@ In order:
 4. music (audio/ducking.py), ducked under the speech by a sidechain compressor;
 5. loudness: two-pass EBU R128 to -14 LUFS / -1 dBTP when mastering, else the older one-pass normalise;
 6. the overall fade in and out, and the sample rate TikTok wants.
+
+The picture side that the Video Creator (creator/compositor.py) and the sports recap reels (sportsdesk/reel.py)
+share is here too: clips normalised to one time base and frame rate, joined back to back with xfade
+transitions (join_clips), and subtitles burnt in by file name (burn_in), so the two never drift apart.
 """
 
 from __future__ import annotations
@@ -120,3 +124,50 @@ def measure(inputs: list[str], plan: AudioPlan, source: str, music: str | None, 
     except (OSError, subprocess.SubprocessError):
         return None
     return mastering.parse_measurement(done.stderr) if done.returncode == 0 else None
+
+
+# ---------------------------------------------------------------- the picture: clips joined with transitions
+
+MIN_TRANSITION = 0.02  # a join shorter than this is a plain cut
+
+
+def normalised(n: int, fps: int) -> list[str]:
+    """Inputs 0..n-1 on one time base and frame rate, square pixels, 4:2:0: what xfade needs of both sides."""
+    return [f"[{i}:v]settb=AVTB,fps={fps},setsar=1,format=yuv420p[s{i}]" for i in range(n)]
+
+
+def join_clips(n: int, transitions: list[str], duration: float, offsets: list[float], *, fps: int = 30,
+               fallback: str = "fade") -> tuple[list[str], str]:
+    """Filters joining inputs 0..n-1 in order: the clip after join k starts `offsets[k]` seconds into the
+    joined video, crossing over `duration` seconds with transitions[k] (an xfade name; `fallback` when the
+    list runs short). Joins under MIN_TRANSITION are plain cuts. Returns (filters, output label)."""
+    if n < 1:
+        raise ValueError("nothing to join")
+    if len(offsets) < n - 1:
+        raise ValueError(f"{n} clips need {n - 1} join times, got {len(offsets)}")
+    parts = normalised(n, fps)
+    last = "s0"
+    for i in range(1, n):
+        name = transitions[i - 1] if i - 1 < len(transitions) else fallback
+        if duration > MIN_TRANSITION:
+            parts.append(f"[{last}][s{i}]xfade=transition={name}:duration={duration:.3f}:"
+                         f"offset={max(0.0, offsets[i - 1]):.3f}[x{i}]")
+        else:
+            parts.append(f"[{last}][s{i}]concat=n=2:v=1:a=0[x{i}]")
+        last = f"x{i}"
+    return parts, last
+
+
+def burn_in(files: list[str], fontsdir: str = "") -> list[str]:
+    """libass filters for subtitle files named relative to ffmpeg's working folder (so a Windows path never
+    has to be escaped inside a filter argument). `fontsdir` is ":fontsdir=fonts" when fonts were staged."""
+    return [f"subtitles={name}{fontsdir}" for name in files]
+
+
+def video_graph(n: int, transitions: list[str], duration: float, offsets: list[float], *, fps: int = 30,
+                finish: list[str] | None = None, out: str = "vout") -> tuple[str, str]:
+    """The whole picture graph: the clips joined (join_clips), then `finish` (a look, burnt-in subtitles), then
+    4:2:0 for the encoder. Returns (graph, output label)."""
+    parts, last = join_clips(n, transitions, duration, offsets, fps=fps)
+    parts.append(f"[{last}]{','.join([*(finish or []), 'format=yuv420p'])}[{out}]")
+    return ";".join(parts), out

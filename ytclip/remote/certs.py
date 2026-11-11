@@ -84,6 +84,7 @@ def fingerprint_of(cert_path: Path) -> str:
 
 def server_context(key_path: Path, cert_path: Path) -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    protocol.harden(ctx)
+    ctx.options |= getattr(ssl, "OP_CIPHER_SERVER_PREFERENCE", 0)
     ctx.load_cert_chain(str(cert_path), str(key_path))
     return ctx

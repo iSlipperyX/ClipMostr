@@ -475,9 +475,18 @@ class Engine:
         self.progress("AI is polishing the clips", None)
         category = categories.find(self.s, (p.meta.get("automation") or {}).get("category_id", ""))
         lessons = learn.for_settings(self.s)
-        guide = lessons.prompt_text(category.id if category else "") if lessons else ""
+        cid = category.id if category else ""
+        few = ""
+        if lessons is not None:  # (None: learning from results is off)
+            from .intelligence import learner
+
+            sport = self.sport.id if self.sport is not None else (category.sport if category else "")
+            few = learner.guide(self.s, " ".join([p.video.title, *(c.title for c in clips if c.title)]),
+                                category_id=cid, sport=sport, purpose="hook")
+        guide = few or (lessons.prompt_text(cid) if lessons else "")
         if guide:
-            self.log("The AI sees which of your earlier hooks worked.")
+            self.log("The AI sees which of your earlier hooks worked" + (", the ones closest to this video."
+                                                                          if few else "."))
         if category:  # hooks that suit the account these clips are for
             about = f"These clips are for a TikTok account about {category.name}."
             guide = "\n\n".join(x for x in (about + (f" {category.instructions.strip()}" if category.instructions.strip()

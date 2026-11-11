@@ -24,14 +24,15 @@ HIGHPASS = "highpass=f=80:poles=2"
 COMPRESSOR = "acompressor=threshold=-20dB:ratio=3:attack=8:release=160:knee=6:makeup=2"
 
 
-def loudnorm(measured: dict | None = None) -> str:
-    """loudnorm for the first (measuring) pass, or with `measured` for the second."""
-    base = f"loudnorm=I={TARGET_I:g}:TP={TARGET_TP:g}:LRA={TARGET_LRA:g}"
+def loudnorm(measured: dict | None = None, target_i: float = TARGET_I, target_tp: float = TARGET_TP) -> str:
+    """loudnorm for the first (measuring) pass, or with `measured` for the second. `target_i` and `target_tp`
+    are the loudness and true-peak ceiling to land on (a timeline can ask for its own)."""
+    base = f"loudnorm=I={target_i:g}:TP={target_tp:g}:LRA={TARGET_LRA:g}"
     if not measured:
         return base + ":print_format=json"
     try:
         lra = max(TARGET_LRA, min(20.0, float(measured["input_lra"]) + 1.0))
-        base = f"loudnorm=I={TARGET_I:g}:TP={TARGET_TP:g}:LRA={lra:g}"
+        base = f"loudnorm=I={target_i:g}:TP={target_tp:g}:LRA={lra:g}"
         return (base + f":measured_I={float(measured['input_i']):.2f}:measured_TP={float(measured['input_tp']):.2f}"
                 f":measured_LRA={float(measured['input_lra']):.2f}:measured_thresh={float(measured['input_thresh']):.2f}"
                 f":offset={float(measured['target_offset']):.2f}:linear=true:print_format=summary")

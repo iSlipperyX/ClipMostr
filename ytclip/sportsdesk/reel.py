@@ -30,7 +30,8 @@ from types import SimpleNamespace
 from typing import Callable
 
 from .. import sports
-from ..ffmpeg import pick_encoder, probe, run, run_with_progress
+from ..ffmpeg import discard, ffmpeg_exe, pick_encoder, probe, run, run_with_progress, video_args
+from ..rendering import filtergraph
 from . import framing, montage, overlays, scoreboard, sound
 
 Log = Callable[[str], None]
@@ -93,20 +94,16 @@ def render_follow(src: Path, media, seg: montage.Segment, dest: Path, progress=N
 
 
 def render_fit(src: Path, seg: montage.Segment, dest: Path, encoder: str) -> dict:
-    from ..creator.compositor import intermediate_args
-
     vf = (f"fps={FPS},split[a][b];[a]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
           f"boxblur=30:2,eq=brightness=-0.10:saturation=1.1[bg];[b]scale={W}:-2[fg];"
           f"[bg][fg]overlay=(W-w)/2:(H-h)/2,setsar=1,format=yuv420p")
     run(_ff() + ["-y", "-v", "error", "-ss", f"{seg.start:.3f}", "-i", str(src), "-t", f"{seg.length:.3f}", "-an",
-                 "-filter_complex", f"[0:v]{vf}[v]", "-map", "[v]", *intermediate_args(encoder), "-pix_fmt", "yuv420p",
+                 "-filter_complex", f"[0:v]{vf}[v]", "-map", "[v]", *video_args(encoder, purpose="intermediate"), "-pix_fmt", "yuv420p",
                  str(dest)])
     return {"framing": "fit"}
 
 
 def _ff() -> list[str]:
-    from ..ffmpeg import ffmpeg_exe
-
     return [ffmpeg_exe()]
 
 
@@ -114,38 +111,33 @@ def _ff() -> list[str]:
 
 
 def video_graph(reel: montage.Reel, ass: bool, fontsdir: str) -> str:
-    parts = [f"[{i}:v]settb=AVTB,fps={FPS},setsar=1,format=yuv420p[s{i}]" for i in range(len(reel.segments))]
-    last = "s0"
-    starts = reel.starts()
+    """The plays joined (a white flash out of the opening, then the transition style's wipes and slides), with
+    the graphics burnt in (rendering/filtergraph.py builds it)."""
+    names: list[str] = []
+    style = STYLES.get(getattr(reel, "style", "mix"), TRANSITIONS)
     k = 0
     for i in range(1, len(reel.segments)):
         if reel.segments[i - 1].kind == "teaser":
-            name = OPENING_FLASH
+            names.append(OPENING_FLASH)
         else:
-            names = STYLES.get(getattr(reel, "style", "mix"), TRANSITIONS)
-            name = names[k % len(names)]
+            names.append(style[k % len(style)])
             k += 1
-        parts.append(f"[{last}][s{i}]xfade=transition={name}:duration={reel.transition:.3f}:offset={starts[i]:.3f}"
-                     f"[x{i}]")
-        last = f"x{i}"
-    chain = [f"subtitles=reel.ass{fontsdir}"] if ass else []
-    chain.append("format=yuv420p")
-    parts.append(f"[{last}]{','.join(chain)}[vout]")
-    return ";".join(parts)
+    starts = reel.starts()
+    graph, _ = filtergraph.video_graph(len(reel.segments), names, reel.transition, starts[1:], fps=FPS,
+                                       finish=filtergraph.burn_in(["reel.ass"], fontsdir) if ass else [])
+    return graph
 
 
 def assemble(clips: list[Path], reel: montage.Reel, audio: Path, dest: Path, work: Path, s, *, ass: bool,
              fontsdir: str, progress: Callable[[float], None] | None = None) -> None:
-    from ..creator.compositor import codec_args
-
     cmd = _ff() + ["-y", "-v", "error"]
     for c in clips:
         cmd += ["-i", str(Path(c).resolve())]
     cmd += ["-i", str(Path(audio).resolve()), "-filter_complex", video_graph(reel, ass, fontsdir),
             "-map", "[vout]", "-map", f"{len(clips)}:a"]
     encoder = pick_encoder(getattr(s, "encoder", "auto") or "auto")
-    cmd += codec_args(encoder, min(int(getattr(s, "video_quality", 20) or 20), 21)) + ["-pix_fmt", "yuv420p",
-                                                                                       "-r", str(FPS)]
+    cmd += video_args(encoder, min(int(getattr(s, "video_quality", 20) or 20), 21), "delivery", FPS)
+    cmd += ["-pix_fmt", "yuv420p", "-r", str(FPS)]
     cmd += ["-c:a", "copy", "-t", f"{reel.duration:.3f}", "-movflags", "+faststart", str(Path(dest).resolve())]
     run_with_progress(cmd, reel.duration, progress, cwd=work)
 
@@ -231,118 +223,130 @@ def make(p, game: dict, highlights: list[dict], s, out_root: Path, *, ids: list[
     work = work or Path(s.cache_path) / "reels" / f"{game.get('id') or p.video.id}-{int(t0)}"
     shutil.rmtree(work, ignore_errors=True)
     work.mkdir(parents=True, exist_ok=True)
-    warnings: list[str] = list(reel.notes)
-    info: dict = {"story_by": reel.story.written_by}
+    try:
+        warnings: list[str] = list(reel.notes)
+        info: dict = {"story_by": reel.story.written_by}
 
-    # The score at the start and the end of each play.
-    scores: dict[str, tuple] = {}
-    if scoreboard.can_read(s):
-        progress("Reading the scoreboard", None)
-        times = []
-        for seg in reel.plays:
-            times += [seg.start + 0.3, min(seg.end - 0.3, seg.moment + 3.0)]
-        read, by = scoreboard.read(src, times, s, log=log, check=check)
-        for k, seg in enumerate(reel.plays):
-            scores[seg.hid] = (read[2 * k], read[2 * k + 1])
-        info["scoreboard"] = {"by": by, "read": sum(1 for x in read if x)}
-    check()
-    t1 = time.time()
-    timings["words"] = round(t1 - t0, 1)
-
-    # The narrator.
-    nar_path = None
-    if narrator and reel.story.opening:
-        from ..creator import voice_engine
-
-        progress("Recording the narrator", None)
-        try:
-            track = voice_engine.synthesize([SimpleNamespace(scene_id=1, speech_text=reel.story.opening)], s,
-                                            work / "narrator.wav", voice=voice, log=log, check=check)
-            nar_path = track.path
-            info["narrator"] = {"voice": track.voice, "engine": track.engine, "seconds": round(track.duration, 2),
-                                "text": reel.story.opening}
-        except voice_engine.VoiceError as exc:
-            warnings.append(f"The narrator couldn't be recorded ({exc}), so the reel has none.")
-            log(warnings[-1])
-    check()
-    t2 = time.time()
-    timings["narrator"] = round(t2 - t1, 1)
-
-    # Each stretch's picture.
-    encoder = pick_encoder(getattr(s, "encoder", "auto") or "auto")
-    clips: list[Path] = []
-    framed: list[dict] = []
-    n = len(reel.segments)
-    for i, seg in enumerate(reel.segments):
+        # The score at the start and the end of each play.
+        scores: dict[str, tuple] = {}
+        if scoreboard.can_read(s):
+            progress("Reading the scoreboard", None)
+            times = []
+            for seg in reel.plays:
+                times += [seg.start + 0.3, min(seg.end - 0.3, seg.moment + 3.0)]
+            read, by = scoreboard.read(src, times, s, log=log, check=check)
+            for k, seg in enumerate(reel.plays):
+                scores[seg.hid] = (read[2 * k], read[2 * k + 1])
+            info["scoreboard"] = {"by": by, "read": sum(1 for x in read if x)}
         check()
-        dest = work / f"seg{i:02d}.mp4"
-        what = "the opening" if seg.kind == "teaser" else f"play {i if reel.segments[0].kind == 'teaser' else i + 1} of {len(reel.plays)}"
+        t1 = time.time()
+        timings["words"] = round(t1 - t0, 1)
 
-        def step(f: float, i=i, what=what) -> None:
+        # The narrator.
+        nar_path = None
+        if narrator and reel.story.opening:
+            from ..creator import voice_engine
+
+            progress("Recording the narrator", None)
+            try:
+                track = voice_engine.synthesize([SimpleNamespace(scene_id=1, speech_text=reel.story.opening)], s,
+                                                work / "narrator.wav", voice=voice, log=log, check=check)
+                nar_path = track.path
+                info["narrator"] = {"voice": track.voice, "engine": track.engine, "seconds": round(track.duration, 2),
+                                    "text": reel.story.opening}
+            except voice_engine.VoiceError as exc:
+                warnings.append(f"The narrator couldn't be recorded ({exc}), so the reel has none.")
+                log(warnings[-1])
+        check()
+        t2 = time.time()
+        timings["narrator"] = round(t2 - t1, 1)
+
+        # Each stretch's picture.
+        encoder = pick_encoder(getattr(s, "encoder", "auto") or "auto")
+        clips: list[Path] = []
+        framed: list[dict] = []
+        n = len(reel.segments)
+        for i, seg in enumerate(reel.segments):
             check()
-            progress(f"Framing {what}", (i + f) / n * 0.6)
+            dest = work / f"seg{i:02d}.mp4"
+            what = "the opening" if seg.kind == "teaser" else f"play {i if reel.segments[0].kind == 'teaser' else i + 1} of {len(reel.plays)}"
 
-        step(0.0)
-        if framing_mode == "fit":
-            framed.append(render_fit(src, seg, dest, "libx264"))
-        else:
-            framed.append(render_follow(src, media, seg, dest, step))
-        got = probe(dest).duration
-        if got and abs(got - seg.length) > 0.5 / FPS:
-            seg.end = round(seg.start + got, 4)  # what was really written: the joins follow it
-        clips.append(dest)
-    info["framing"] = framed
-    t3 = time.time()
-    timings["picture"] = round(t3 - t2, 1)
+            def step(f: float, i=i, what=what) -> None:
+                check()
+                progress(f"Framing {what}", (i + f) / n * 0.6)
 
-    # The sound and the graphics.
-    from ..creator import sfx_library, soundbed
+            step(0.0)
+            if framing_mode == "fit":
+                try:
+                    framed.append(render_fit(src, seg, dest, encoder))
+                except RuntimeError as exc:
+                    if encoder == "libx264":
+                        raise
+                    log(f"The graphics card's encoder ({encoder}) couldn't take a play ({str(exc)[-120:]}); "
+                        "the processor encodes the rest.")
+                    encoder = "libx264"
+                    framed.append(render_fit(src, seg, dest, encoder))
+            else:
+                framed.append(render_follow(src, media, seg, dest, step))
+            got = probe(dest).duration
+            if got and abs(got - seg.length) > 0.5 / FPS:
+                seg.end = round(seg.start + got, 4)  # what was really written: the joins follow it
+            clips.append(dest)
+        info["framing"] = framed
+        t3 = time.time()
+        timings["picture"] = round(t3 - t2, 1)
 
-    folder_fx = getattr(s, "creator_sfx_folder", "") or ""
-    snd = sound.Sound(src=src, has_audio=media.has_audio, narrator=nar_path)
-    snd.effects = sound.effects_for(reel, sfx_library.sound_for("whoosh", folder_fx, game.get("id", "")),
-                                    sfx_library.sound_for("impact", folder_fx, game.get("id", "")))
-    music, where = soundbed.music_for(s, "Epic", reel.duration + 2, work, seed=game.get("id", ""))
-    snd.music = music
-    info["music"] = where
-    progress("Mixing the sound", 0.62)
-    info["mix"] = sound.mix(reel, snd, work / "sound.m4a",
-                            lambda msg, f: progress(msg, 0.62 + 0.08 * (f or 0)),
-                            bitrate=max(160, int(getattr(s, "audio_bitrate", 192) or 192)))
-    check()
-    font = getattr(s, "banner_font", "") or "TikTok Sans Black"
-    accent = getattr(s, "caption_highlight", "") or "#FFD400"
-    teams = scoreboard.teams_for(game)
-    for seg in reel.plays:
-        seg.badge = reel.story.badges.get(seg.hid, "")
-    ass = overlays.build(reel, scores, teams=teams, matchup=game.get("matchup") or "", font=font, accent=accent)
-    (work / "reel.ass").write_text(ass, encoding="utf-8")
-    from ..fonts import stage
+        # The sound and the graphics.
+        from ..creator import sfx_library, soundbed
 
-    fontsdir = ":fontsdir=fonts" if stage([font], work) else ""
-    t4 = time.time()
-    timings["sound"] = round(t4 - t3, 1)
+        folder_fx = getattr(s, "creator_sfx_folder", "") or ""
+        snd = sound.Sound(src=src, has_audio=media.has_audio, narrator=nar_path)
+        snd.effects = sound.effects_for(reel, sfx_library.sound_for("whoosh", folder_fx, game.get("id", "")),
+                                        sfx_library.sound_for("impact", folder_fx, game.get("id", "")))
+        music, where = soundbed.music_for(s, "Epic", reel.duration + 2, work, seed=game.get("id", ""))
+        snd.music = music
+        info["music"] = where
+        progress("Mixing the sound", 0.62)
+        info["mix"] = sound.mix(reel, snd, work / "sound.m4a",
+                                lambda msg, f: progress(msg, 0.62 + 0.08 * (f or 0)),
+                                bitrate=max(160, int(getattr(s, "audio_bitrate", 192) or 192)))
+        check()
+        font = getattr(s, "banner_font", "") or "TikTok Sans Black"
+        accent = getattr(s, "caption_highlight", "") or "#FFD400"
+        teams = scoreboard.teams_for(game)
+        for seg in reel.plays:
+            seg.badge = reel.story.badges.get(seg.hid, "")
+        ass = overlays.build(reel, scores, teams=teams, matchup=game.get("matchup") or "", font=font, accent=accent)
+        (work / "reel.ass").write_text(ass, encoding="utf-8")
+        from ..fonts import stage
 
-    # Together.
-    stamp = time.strftime("%Y-%m-%d %H.%M")
-    matchup = game.get("matchup") or game.get("title") or "Game"
-    folder = Path(out_root) / safe_name(f"{stamp} {matchup} reel", 80)
-    folder.mkdir(parents=True, exist_ok=True)
-    out = work / "reel.mp4"
-    progress("Putting the reel together", 0.72)
-    assemble(clips, reel, work / "sound.m4a", out, work, s, ass=True, fontsdir=fontsdir,
-             progress=lambda f: (check(), progress("Putting the reel together", 0.72 + 0.26 * f)))
-    timings["assemble"] = round(time.time() - t4, 1)
-    result_checks = checks(out)
-    if not result_checks.get("rewards"):
-        warnings.append(f"The reel is {result_checks.get('length', 0):.0f} s: under a minute, so not for Creator "
-                        "Rewards.")
-    if result_checks.get("lufs") is not None and abs(result_checks["lufs"] + 14) > 1.0:
-        warnings.append(f"Its sound came out at {result_checks['lufs']} LUFS, not -14.")
-    info["timings"] = timings
-    res = _deliver(p, game, reel, out, folder, s, category, sport, result_checks, info, warnings, bool(nar_path))
-    shutil.rmtree(work, ignore_errors=True)
-    return res
+        fontsdir = ":fontsdir=fonts" if stage([font], work) else ""
+        t4 = time.time()
+        timings["sound"] = round(t4 - t3, 1)
+
+        # Together.
+        stamp = time.strftime("%Y-%m-%d %H.%M")
+        matchup = game.get("matchup") or game.get("title") or "Game"
+        folder = Path(out_root) / safe_name(f"{stamp} {matchup} reel", 80)
+        folder.mkdir(parents=True, exist_ok=True)
+        out = work / "reel.mp4"
+        progress("Putting the reel together", 0.72)
+        try:
+            assemble(clips, reel, work / "sound.m4a", out, work, s, ass=True, fontsdir=fontsdir,
+                     progress=lambda f: (check(), progress("Putting the reel together", 0.72 + 0.26 * f)))
+        finally:  # the framed plays, the mix and the narrator are in the reel now: free their space at once
+            discard(*clips, work / "sound.m4a", nar_path)
+        timings["assemble"] = round(time.time() - t4, 1)
+        result_checks = checks(out)
+        if not result_checks.get("rewards"):
+            warnings.append(f"The reel is {result_checks.get('length', 0):.0f} s: under a minute, so not for Creator "
+                            "Rewards.")
+        if result_checks.get("lufs") is not None and abs(result_checks["lufs"] + 14) > 1.0:
+            warnings.append(f"Its sound came out at {result_checks['lufs']} LUFS, not -14.")
+        info["timings"] = timings
+        return _deliver(p, game, reel, out, folder, s, category, sport, result_checks, info, warnings, bool(nar_path))
+    finally:  # stopped, failed or done: the work folder (framed plays, sound, graphics) goes either way
+        shutil.rmtree(work, ignore_errors=True)
 
 
 def _deliver(p, game: dict, reel: montage.Reel, video: Path, folder: Path, s, category, sport, result_checks: dict,

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import sys
 
-from PySide6.QtCore import QObject, Qt, Signal
+from PySide6.QtCore import QObject, Signal
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QFrame, QHBoxLayout, QLabel, QMenu, QMessageBox, QPushButton, QSystemTrayIcon, \
     QVBoxLayout, QWidget
@@ -179,7 +179,7 @@ class PCLink(QObject):
     def refresh(self) -> None:
         if self.session is None:
             return
-        self.session.refresh_status()
+        self.session.retry_now()  # (Try again: at once, and back to the usual pace)
         self.session.refresh_videos()
         page = self.nav.currentWidget()
         if page in self.pages and hasattr(page, "load"):

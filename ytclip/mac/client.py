@@ -90,8 +90,18 @@ def _context() -> ssl.SSLContext:
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
     ctx.check_hostname = False
     ctx.verify_mode = ssl.CERT_NONE  # checked by fingerprint instead (Client._connect)
-    ctx.minimum_version = ssl.TLSVersion.TLSv1_2
+    protocol.harden(ctx)
     return ctx
+
+
+def _content_range(header: str) -> tuple[int, int]:
+    """'bytes 100-199/1000' → (100, 1000); (-1, 0) when it isn't one."""
+    import re
+
+    m = re.fullmatch(r"\s*bytes\s+(\d+)-(\d+)/(\d+|\*)\s*", header or "")
+    if not m:
+        return -1, 0
+    return int(m.group(1)), int(m.group(3)) if m.group(3) != "*" else 0
 
 
 class Client:
@@ -152,7 +162,10 @@ class Client:
         return h
 
     def _send(self, method: str, path: str, body: bytes | None, headers: dict, timeout: float | None):
-        """Send on this thread's connection (a new one when it's gone stale); the response, unread."""
+        """Send on this thread's connection (a new one when it's gone stale); the response, unread. The Mac's
+        key only ever goes to a PC whose certificate was pinned: never over a connection nothing was checked on."""
+        if "Authorization" in headers and not self.fp:
+            raise WrongPC("This Mac hasn't checked this PC's ID yet, so it won't send it its key. Link it again.")
         for attempt in (0, 1):
             conn = getattr(self._local, "conn", None)
             fresh = conn is None or timeout is not None
@@ -224,26 +237,49 @@ class Client:
             getattr(resp, "_one_off", None) and resp._one_off.close()
 
     def download(self, path: str, dest: Path, progress: Callable[[int, int], None] | None = None,
-                 cancelled: Callable[[], bool] | None = None) -> Path:
-        """Save a file from the PC to `dest` (whole or not at all: a .part file until it's all there)."""
-        resp = self.raw(path, timeout=120.0)
+                 cancelled: Callable[[], bool] | None = None, *, resume: bool = False, expect: int = 0) -> Path:
+        """Save a file from the PC to `dest` (whole or not at all: a .part file until it's all there).
+
+        With `resume`, a connection lost part way keeps the .part, and the next call asks only for the rest
+        (an HTTP Range): a PC that drops off during a batch of clips costs the bytes still to come, not the
+        file again. `expect` (the size the PC listed) guards that: a .part from another version of the file,
+        or a PC that sends the whole file anyway, starts again from the beginning."""
         tmp = dest.with_name(dest.name + ".part")
+        have = tmp.stat().st_size if resume and tmp.is_file() else 0
+        if have and expect and have >= expect:
+            have = 0  # (as big as the whole file or more: not a part of this one)
+        headers = {"Range": f"bytes={have}-"} if have else None
+        resp = self.raw(path, headers=headers, timeout=120.0)
+        keep = False
         try:
+            if resp.status == 416 and have:  # the .part isn't a part of what the PC has now
+                tmp.unlink(missing_ok=True)
+                raise Offline("The file changed on the PC; it's fetched again from the start.")
             if resp.status >= 400:
                 try:
                     msg = json.loads(resp.read(4096) or b"{}").get("error")
                 except (ValueError, AttributeError, http.client.HTTPException, OSError):
                     msg = ""
                 raise ApiError(resp.status, msg or f"The PC said {resp.status}.")
-            total = int(resp.getheader("Content-Length") or 0)
-            got = 0
-            with open(tmp, "wb") as f:
+            length = int(resp.getheader("Content-Length") or 0)
+            start = 0
+            if resp.status == 206:
+                start, total = _content_range(resp.getheader("Content-Range") or "")
+                if start != have or (expect and total != expect):
+                    raise Offline("The PC sent a different part of the file than was asked for; it's fetched "
+                                  "again from the start.")
+            else:  # 200: the whole file
+                total = length
+            total = total or (start + length)
+            got = start
+            with open(tmp, "ab" if start else "wb") as f:
                 while True:
                     if cancelled and cancelled():
                         raise ApiError(499, "Stopped.")
                     try:
                         chunk = resp.read(256 * 1024)
                     except (http.client.HTTPException, OSError) as exc:
+                        keep = resume
                         raise Offline(f"The file stopped arriving part way ({self._why(exc)})") from exc
                     if not chunk:
                         break
@@ -252,11 +288,13 @@ class Client:
                     if progress:
                         progress(got, total)
             if total and got != total:
+                keep = resume and got < total
                 raise Offline("The file stopped arriving part way. It's fetched again when the PC is back.")
             os.replace(tmp, dest)
             return dest
         except BaseException:
-            tmp.unlink(missing_ok=True)
+            if not keep:
+                tmp.unlink(missing_ok=True)
             raise
         finally:
             getattr(resp, "_one_off", None) and resp._one_off.close()

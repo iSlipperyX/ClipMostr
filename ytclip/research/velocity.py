@@ -15,7 +15,8 @@ A scan (research/__init__.py) scores how well a video would cut (clipability.py)
 * **Badges**: Hot Arbitrage (breaking out, long-form, few short clips yet), High Retention (viewers rewatch
   clear moments), Oversaturated (short clips of it are already everywhere), Rising (breaking out; saturation
   not checked).
-* **Niches**: the same numbers rolled up per category, and for a set of ready-made niches matched by title.
+* **Roll-ups**: the same numbers per category (the pills' badges), and for a set of ready-made topics matched
+  by title (topic_report).
 """
 
 from __future__ import annotations
@@ -47,8 +48,8 @@ BADGE_HELP = {
     RISING: "Rising well above its channel's normal. Saturation wasn't checked.",
 }
 
-# Ready-made niches: (name, words any of which in the title puts a video in it)
-NICHES: dict[str, tuple[str, tuple[str, ...]]] = {
+# Ready-made topics: (name, words any of which in the title puts a video in it)
+TOPICS: dict[str, tuple[str, tuple[str, ...]]] = {
     "soccer-refs": ("Soccer referee calls", ("var", "red card", "penalty", "offside", "referee", "sent off", "handball")),
     "soccer-goals": ("Soccer goals & late winners", ("goal", "winner", "stoppage", "hat-trick", "hat trick", "free kick")),
     "nba-drama": ("NBA drama", ("ejected", "technical", "flagrant", "scuffle", "trash talk", "heated", "altercation")),
@@ -75,7 +76,7 @@ class Pace:
     opportunity: float = 0.0  # 0-100
     badge: str = ""
     why: str = ""
-    niches: list[str] = field(default_factory=list)
+    topics: list[str] = field(default_factory=list)  # TOPICS keys its title matches
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -180,9 +181,9 @@ def opportunity(v: TrendingVideo, p: Pace) -> float:
     return round(100 * min(1.0, base), 1)
 
 
-def niches_of(title: str) -> list[str]:
+def topics_of(title: str) -> list[str]:
     low = " " + re.sub(r"[^a-z0-9' -]", " ", title.lower()) + " "
-    return [key for key, (_name, words) in NICHES.items() if any(f" {w} " in low or f" {w}s " in low for w in words)]
+    return [key for key, (_name, words) in TOPICS.items() if any(f" {w} " in low or f" {w}s " in low for w in words)]
 
 
 def annotate(videos: list[TrendingVideo], history: History, now: float, *, api_key: str = "", checks: int = 0,
@@ -193,7 +194,7 @@ def annotate(videos: list[TrendingVideo], history: History, now: float, *, api_k
     paces: dict[str, Pace] = {}
     for v in videos:
         p = measure(v, by_channel, videos)
-        p.niches = niches_of(v.title)
+        p.topics = topics_of(v.title)
         with history.lock:
             old = (history.videos.get(v.id) or {}).get("saturation")
         if isinstance(old, dict) and now - old.get("checked", 0) <= SATURATION_FRESH:
@@ -234,7 +235,9 @@ def annotate(videos: list[TrendingVideo], history: History, now: float, *, api_k
 
 
 @dataclass
-class Niche:
+class Rollup:
+    """A category's or a topic's videos in this scan, summed up for its pill."""
+
     key: str
     name: str
     videos: int = 0
@@ -248,8 +251,8 @@ class Niche:
         return asdict(self)
 
 
-def _roll_up(key: str, name: str, vids: list[TrendingVideo]) -> Niche:
-    n = Niche(key, name, len(vids))
+def _roll_up(key: str, name: str, vids: list[TrendingVideo]) -> Rollup:
+    n = Rollup(key, name, len(vids))
     if not vids:
         return n
     deltas = [(v.pace or {}).get("delta", 0.0) for v in vids if (v.pace or {}).get("delta")]
@@ -269,16 +272,21 @@ def _roll_up(key: str, name: str, vids: list[TrendingVideo]) -> Niche:
     return n
 
 
-def by_category(videos: list[TrendingVideo], names: dict[str, str]) -> dict[str, Niche]:
+def by_category(videos: list[TrendingVideo], names: dict[str, str]) -> dict[str, Rollup]:
     """category id -> its roll-up, for the category pills' opportunity badges (`names`: id -> name)."""
     return {cid: _roll_up(cid, name, [v for v in videos if v.category_id == cid]) for cid, name in names.items()}
 
 
-def niche_report(videos: list[TrendingVideo]) -> list[Niche]:
-    """The ready-made niches that have videos in this scan, best opportunity first."""
+def _topics(v: TrendingVideo) -> list[str]:
+    pace = v.pace or {}
+    return pace.get("topics") or pace.get("niches") or []  # ("niches" in scans saved by 3.7.0 dev builds)
+
+
+def topic_report(videos: list[TrendingVideo]) -> list[Rollup]:
+    """The ready-made topics that have videos in this scan, best opportunity first."""
     out = []
-    for key, (name, _words) in NICHES.items():
-        vids = [v for v in videos if key in ((v.pace or {}).get("niches") or [])]
+    for key, (name, _words) in TOPICS.items():
+        vids = [v for v in videos if key in _topics(v)]
         if vids:
             out.append(_roll_up(key, name, vids))
     return sorted(out, key=lambda n: n.opportunity, reverse=True)
