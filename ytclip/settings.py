@@ -352,6 +352,10 @@ class Settings:
     telegram_app: bool = True
     telegram_app_url: str = ""
     telegram_app_port: int = 47330
+    # The minimums a video made for a Telegram request must meet (compliance/requirements.py): the shortest it
+    # may be, in seconds (61 = over a minute, what Creator Rewards pays for; 0 = no check). One that falls short
+    # is held for an OK, not posted.
+    telegram_min_seconds: float = 61.0
     # The Mac app (remote/): automation's HTTPS server for ClipMonster for Mac. The Macs it answers are in
     # remote.json, not here.
     remote_on: bool = False
@@ -1326,6 +1330,13 @@ SCHEMA: list[Field] = [
     Field("telegram_app_port", "Mini App port on this PC", "Telegram", "int", lo=1024, hi=65535,
           help="Where the Mini App listens on this PC (only this PC can connect to it; the address above leads "
                "here). Change it only if another program uses 47330"),
+    Field("telegram_min_seconds", "Shortest video a Telegram request hands over (s)", "Telegram", "float", lo=0,
+          hi=80,
+          help="Every video made for a request from Telegram is checked before it's handed over: longer than this "
+               "(61 = over a minute, the length TikTok's Creator Rewards pays for), upright 9:16 at 720 x 1280 or "
+               "more, with sound. One that falls short is kept and held for your OK with the reason beside it, "
+               "never posted by itself. Sports requests make a recap reel (65-85 s) for this reason: a single play "
+               "is 15-40 s. 0 turns the check off"),
     Field("remote_on", "Let my Mac run ClipMonster", "Mac app", "bool",
           help="Automation answers ClipMonster on your Mac: it shows what automation is doing, plays the videos "
                "waiting to post so you can OK or delete them, asks for videos, clips and requests, and lends the "

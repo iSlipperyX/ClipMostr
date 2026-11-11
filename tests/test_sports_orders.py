@@ -136,9 +136,14 @@ def test_an_order_is_done_from_the_search_to_the_clips_and_the_reel(desk, worker
     assert run(worker) == 1  # then its reel
     o = desk.orders()[0]
     assert o["status"] == "done" and o["error"] == "" and o["finished"]
-    assert o["message"] == ("Made 3 clips from Lakers at Celtics, for Hoops; "
-                            "Made a 71 s reel of Lakers at Celtics's top 5 plays, for Hoops")
+    assert o["message"] == ("Made 3 clips from Lakers at Celtics, for Hoops (all held for your OK: 24 s (needs over "
+                            "60 s)); Made a 71 s reel of the top 5 plays of Lakers at Celtics, for Hoops")
     clips, reel = o["steps"][1], o["steps"][2]
+    # a request from Telegram is checked against the minimums: the single plays fall short, the reel passes
+    assert clips["review"] == {"checked": 3, "passed": 0, "held": 3, "why": ["24 s (needs over 60 s)"]}
+    assert reel["review"] == {"checked": 1, "passed": 1, "held": 0, "why": [], "passed_as": "71 s"}
+    assert o["review"] == {"checked": 4, "passed": 1, "held": 3, "why": ["24 s (needs over 60 s)"]}
+    assert o["requires"]["min_seconds"] == 61.0
     assert clips["status"] == "done" and clips["clips"] == 3 and "Highlights" in Path(clips["folder"]).parts
     assert reel["status"] == "done" and reel["file"].endswith("01 - reel.mp4") and Path(reel["folder"]).parent.name == "Reels"
     p = next(e.exported for e in FakeEngine.made[::-1] if hasattr(e, "exported"))
@@ -146,7 +151,9 @@ def test_an_order_is_done_from_the_search_to_the_clips_and_the_reel(desk, worker
     auto = p.meta["automation"]
     assert auto["permission"] == "Asked for by Sam from Telegram" and auto["origins"] == ["sports", "telegram"]
     assert auto["category_id"] == "h1"
+    assert auto["requires"]["min_seconds"] == 61.0  # written into clips.json, so posting holds what falls short
     assert reels[0]["category"].name == "Hoops" and reels[0]["voice"] == "en_storyteller"
+    assert reels[0]["requires"]["min_seconds"] == 61.0 and reels[0]["asked_by"] == "Sam"
     assert any("Sports request done (Lakers vs Celtics" in t for _, t in worker.news)
     assert desk.game("a1")["status"] == "ready"
     assert not worker.step()

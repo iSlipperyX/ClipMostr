@@ -175,12 +175,32 @@ textarea:focus, select:focus { border-color: var(--btn); }
 .small { font-size: 13px; color: var(--hint); margin-top: 8px; }
 .field { margin-top: 12px; }
 .field:first-of-type { margin-top: 0; }
-.field > label { display: block; font-size: 13px; color: var(--hint); margin-bottom: 6px; }
+.field > label, .field > .lbl { display: block; font-size: 13px; color: var(--hint); margin-bottom: 6px; }
 .picks { display: flex; gap: 6px; flex-wrap: wrap; }
 .pick { padding: 8px 13px; border-radius: 999px; border: 1px solid var(--line); background: transparent; color: var(--text);
   font-size: 14px; min-height: 36px; }
 .pick.on { background: var(--btn); border-color: var(--btn); color: var(--btn-text); font-weight: 600; }
 input[type=text]:focus { border-color: var(--btn); }
+.field.pair { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+.field.pair label { display: block; font-size: 13px; color: var(--hint); margin-bottom: 6px; }
+.picks.two { margin-bottom: 14px; }
+.picks.two .pick { flex: 1; text-align: center; }
+.textbtn.inl { float: right; padding: 0 2px; }
+.games { display: flex; flex-direction: column; border: 1px solid var(--line); border-radius: 11px; overflow: hidden; }
+.game { display: flex; gap: 10px; align-items: center; padding: 10px 12px; text-align: left; background: transparent;
+  border-top: 1px solid var(--line); min-height: 48px; width: 100%; }
+.game:first-child { border-top: 0; }
+.game .em { flex: none; width: 22px; text-align: center; }
+.game .col { flex: 1; min-width: 0; display: flex; flex-direction: column; }
+.game .line { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.game .lg { font-size: 12px; color: var(--hint); }
+.game .when { flex: none; font-size: 12px; color: var(--hint); max-width: 38%; text-align: right; }
+.game .when.live { color: var(--danger); font-weight: 600; }
+.game.wait { opacity: .55; }
+.game.on { background: color-mix(in srgb, var(--btn) 14%, transparent); box-shadow: inset 3px 0 0 var(--btn); }
+.warnline { color: var(--warn); }
+.notes { margin: 8px 0 0 18px; font-size: 13px; color: var(--hint); }
+.top .meter { margin-top: 6px; }
 .order { padding: 12px 0; border-top: 1px solid var(--line); }
 .order:first-of-type { border-top: 0; padding-top: 0; }
 .order:last-child { padding-bottom: 0; }
@@ -235,7 +255,9 @@ var tg = (window.Telegram && window.Telegram.WebApp) || null;
 var S = { token: '', media: '', me: null, people: [], pc: '', videos: null, posted: null, status: null, activity: null,
           cats: null, tab: 'videos', filter: 'review', who: 'all', open: null, busy: false, invite: null,
           draft: {}, idea: '', cat: '', last: {}, make: 'video', sports: null,
-          sp: { sport: '', league: '', teams: '', since: 'week', want: 'both', games: 1, plays: 5, cat: '' } };
+          sp: { sport: '', league: '', teams: '', since: 'week', want: 'reel', games: 1, plays: 5, cat: '',
+                how: 'pick', psport: '', pleague: '', game: '', all: false },
+          played: null, playedAt: 0, playedBusy: false };
 var app = document.getElementById('app');
 var sheet = null;       // the open video's screen
 var timer = null;
@@ -376,11 +398,29 @@ function refresh() {
               api('GET', 'api/status').then(function (d) { S.status = d; })];
   if (S.tab === 'activity') jobs.push(api('GET', 'api/activity').then(function (d) { S.activity = d; }));
   if (S.tab === 'people') jobs.push(api('GET', 'api/me').then(takeMe));
-  if (S.tab === 'make' && S.make === 'sports') jobs.push(api('GET', 'api/sports').then(function (d) { S.sports = d; }));
+  if (S.tab === 'make' && S.make === 'sports') {
+    jobs.push(api('GET', 'api/sports').then(function (d) { S.sports = d; }));
+    loadPlayed(false);
+  }
   if (S.tab === 'videos' && S.filter === 'posted') jobs.push(api('GET', 'api/posted').then(function (d) { S.posted = d.items || []; }));
   return Promise.all(jobs).then(function () { paint(); }, function (e) {
     if (e.status === 401) locked(e);
     else if (!S.videos) problem(e.message);
+  });
+}
+
+// The games of the last 24 hours (the PC reads the scoreboards): asked for when the sports form opens, and again
+// every few minutes while it stays open, so a game that just ended can be picked.
+function loadPlayed(force) {
+  if (S.playedBusy || (!force && S.played && Date.now() - S.playedAt < 180000)) return;
+  S.playedBusy = true;
+  api('GET', 'api/sports/played').then(function (d) {
+    S.played = d; S.playedAt = Date.now(); S.playedBusy = false; paint();
+  }, function (e) {
+    S.playedBusy = false;
+    if (e.status === 401) return locked(e);
+    if (!S.played) { S.played = { games: [], leagues: [], problems: [e.message || 'The scoreboards couldn’t be read.'], covered: true }; S.playedAt = Date.now(); }
+    paint();
   });
 }
 
@@ -408,7 +448,7 @@ function paint(force) {
   if (!S.me || !S.videos) return;
   var key = [S.tab, S.filter, S.who, S.busy, S.invite, S.videos, S.status, S.people, S.me,
              S.tab === 'activity' ? S.activity : 0, S.filter === 'posted' ? S.posted : 0, S.cats,
-             S.tab === 'make' ? [S.make, S.sports, S.sp] : 0];
+             S.tab === 'make' ? [S.make, S.sports, S.sp, S.played, S.playedBusy] : 0];
   // Someone typing isn't interrupted by news from the PC: the screen catches up when they're done.
   var el = document.activeElement;
   var typing = !!el && app.contains(el) && /^(TEXTAREA|SELECT|INPUT)$/.test(el.tagName);
@@ -426,7 +466,10 @@ function top() {
   var st = S.status || {}, what, dot = 'dot';
   if (st.paused) { what = 'Paused: nothing new is clipped or made'; dot += ' paused'; }
   else if (st.job) what = (st.job.making ? 'Making “' : 'Clipping “') + clip(st.job.title, 60) + '”' + (st.job.stage ? ' · ' + st.job.stage : '');
+  else if (st.sports) what = sportsNow(st.sports, 44);
+  else if (st.sports_waiting) what = plural(st.sports_waiting, 'sports job') + ' waiting to start';
   else { what = st.doing || 'Nothing being made right now'; dot += ' idle'; }
+  var frac = !st.paused && !st.job && st.sports && st.sports.frac != null ? st.sports.frac : null;
   return h('div', { class: 'top' },
     h('div', { class: 'top-row' }, h('h1', { text: 'ClipMonster' }),
       h('div', { class: 'faces', title: S.people.map(function (p) { return p.first; }).join(' and ') },
@@ -436,7 +479,17 @@ function top() {
         if (st.paused) act(api('POST', 'api/pause', { paused: false }));
         else ask('Pause automation? Nothing new is clipped or made until one of you resumes. Posting carries on.',
                  function () { act(api('POST', 'api/pause', { paused: true })); });
-      } })));
+      } })),
+    frac != null ? meter(frac) : null);
+}
+function sportsNow(d, n) {
+  var pct = d.frac != null && String(d.stage || '').indexOf('%') < 0 ? ' · ' + Math.round(d.frac * 100) + '%' : '';
+  return (d.emoji ? d.emoji + ' ' : '') + d.what + ' “' + clip(d.title, n) + '”' + (d.stage ? ' · ' + d.stage : '') + pct;
+}
+function meter(frac) {
+  var pct = Math.max(0, Math.min(100, Math.round(frac * 100)));
+  return h('div', { class: 'meter', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': pct },
+    h('i', { style: 'width:' + pct + '%' }));
 }
 function nav() {
   var review = videosIn('review').length;
@@ -660,54 +713,142 @@ function picks(label, options, value, set) {
                          onclick: function () { set(o[0]); paint(true); } }, o[1]);
   })));
 }
+function onPC() {
+  var st = S.status || {}, d = st.sports;
+  if (!d && !st.sports_waiting) return null;
+  return h('div', { class: 'block' }, h('h3', { text: 'On the PC now' }),
+    d ? h('p', { text: sportsNow(d, 80) }) : h('p', { text: plural(st.sports_waiting, 'sports job') + ' waiting to start' }),
+    d && d.frac != null ? meter(d.frac) : null,
+    d && (d.by || d.waiting) ? h('p', { class: 'sub', text: [d.by ? d.by + ' asked for it' : '', d.waiting ? plural(d.waiting, 'more job') + ' waiting' : ''].filter(Boolean).join(' · ') }) : null);
+}
+function wantPicks(d, f) {
+  var need = (d.requires || {}).min_seconds;
+  return [picks('Make', [['reel', 'A recap reel'], ['both', 'Reel and single plays'], ['clips', 'Single plays']], f.want, function (v) { f.want = v; }),
+    f.want !== 'reel' && need ? h('p', { class: 'small warnline', text: 'Single plays run 15 to 40 seconds, and a request’s videos have to be over ' + Math.round(need - 1) + ' s: they’ll wait for an OK instead of posting.' }) : null];
+}
+function catPick(d, f, sportId) {
+  var cats = d.categories || [];
+  var own = sportId ? cats.filter(function (c) { return c.sport === sportId; }) : [];
+  var pickCat = h('select', { 'aria-label': 'Category', onchange: function () { f.cat = pickCat.value; } },
+    h('option', { value: '', text: own.length === 1 ? 'Automatic: ' + own[0].name : 'No category (kept in the Library)' }),
+    cats.map(function (c) { return h('option', { value: c.id, selected: f.cat === c.id, text: (c.sport ? '🏆 ' : '') + c.name + (c.account ? ' · ' + c.account : ' (no account)') }); }));
+  return h('div', { class: 'field' }, h('label', { text: 'For' }), pickCat);
+}
 function sportsForm() {
   var d = S.sports, f = S.sp;
   if (!d) return [h('div', { class: 'empty' }, h('div', { class: 'spin', style: 'margin:0 auto' }))];
+  var open = (d.orders || []).filter(function (o) { return o.status === 'queued' || o.status === 'searching' || o.status === 'working'; });
+  var full = open.length >= ((d.most || {}).open || 4);
+  var how = h('div', { class: 'picks two', role: 'tablist' }, [['pick', 'Pick a game'], ['say', 'Describe it']].map(function (k) {
+    return h('button', { class: 'pick' + (f.how === k[0] ? ' on' : ''), role: 'tab', 'aria-selected': f.how === k[0], onclick: function () { f.how = k[0]; paint(true); } }, k[1]);
+  }));
+  var form = f.how === 'pick' ? pickForm(d, f, full) : sayForm(d, f, full);
+  var orders = d.orders || [];
+  return [onPC(), h('div', { class: 'block' }, how, form,
+      full ? h('p', { class: 'small', text: plural(open.length, 'request') + ' are waiting or under way: wait for one to finish, or cancel one.' }) : null,
+      h('p', { class: 'small', text: 'Automation finds the game’s highlights on YouTube, picks its best plays and makes them on the PC, with your name on the request. What it makes is checked before it’s handed over: over a minute, upright, with sound. League footage often gets copyright claims on TikTok.' })),
+    orders.length ? h('div', { class: 'block' }, h('h3', { text: 'Sports requests' }), orders.map(orderRow)) : null];
+}
+// Pick a game: the last 24 hours from the scoreboards, by drop-down or from the list under it.
+function pickForm(d, f, full) {
+  var p = S.played;
+  if (!p) return h('div', { class: 'empty' }, h('div', { class: 'spin', style: 'margin:0 auto 10px' }), 'Reading the scoreboards…');
+  var all = p.games || [];
+  var sportsIn = (d.sports || []).filter(function (x) { return all.some(function (g) { return g.sport === x.id; }); });
+  if (f.psport && !sportsIn.some(function (x) { return x.id === f.psport; })) f.psport = '';
+  var bySport = all.filter(function (g) { return !f.psport || g.sport === f.psport; });
+  var leagues = (p.leagues || []).filter(function (r) { return !f.psport || r.sport === f.psport; });
+  if (f.pleague && !leagues.some(function (r) { return r.league === f.pleague; })) f.pleague = '';
+  var games = bySport.filter(function (g) { return !f.pleague || g.league === f.pleague; });
+  var chosen = all.filter(function (g) { return g.id === f.game && g.ready; })[0] || null;
+  if (chosen && games.indexOf(chosen) < 0) chosen = null;
+  if (!chosen) f.game = '';
+  var pickSport = h('select', { 'aria-label': 'Sport', onchange: function () { f.psport = pickSport.value; f.pleague = ''; paint(true); } },
+    h('option', { value: '', text: 'All sports' }),
+    sportsIn.map(function (x) { return h('option', { value: x.id, selected: f.psport === x.id, text: x.emoji + '  ' + x.label }); }));
+  var pickLeague = h('select', { 'aria-label': 'League', onchange: function () { f.pleague = pickLeague.value; paint(true); } },
+    h('option', { value: '', text: 'All leagues' }),
+    leagues.map(function (r) { return h('option', { value: r.league, selected: f.pleague === r.league, text: r.league + ' (' + r.games + ')' }); }));
+  var pickGame = h('select', { 'aria-label': 'Game', onchange: function () { f.game = pickGame.value; paint(true); } },
+    h('option', { value: '', text: games.length ? 'Pick a game…' : 'No games here in the last 24 hours' }),
+    games.map(function (g) {
+      return h('option', { value: g.id, selected: f.game === g.id, disabled: !g.ready,
+                           text: (f.pleague ? '' : g.league + ': ') + g.line + ' · ' + g.when });
+    }));
+  var shown = f.all ? games : games.slice(0, 12);
+  var list = h('div', { class: 'games', role: 'listbox', 'aria-label': 'Games played in the last 24 hours' }, shown.map(function (g) {
+    return h('button', { class: 'game' + (f.game === g.id ? ' on' : '') + (g.ready ? '' : ' wait'), role: 'option', 'aria-selected': f.game === g.id ? 'true' : 'false',
+                         disabled: !g.ready, onclick: function () { f.game = f.game === g.id ? '' : g.id; paint(true); } },
+      h('span', { class: 'em', text: g.emoji }),
+      h('span', { class: 'col' }, h('span', { class: 'line', text: g.line }), h('span', { class: 'lg', text: g.league })),
+      h('span', { class: 'when' + (g.state === 'live' ? ' live' : ''), text: g.when }));
+  }));
+  var go = h('button', { class: 'btn primary wide', text: chosen ? (f.want === 'clips' ? 'Make its best plays' : 'Make its reel') : 'Pick a game first',
+                         disabled: S.busy || full || !chosen, onclick: function () {
+    var body = { game: f.game, want: f.want, plays: f.plays };
+    if (f.cat) body.category = f.cat;
+    act(api('POST', 'api/sports/order', body), function () { f.game = ''; });
+  } });
+  var finals = games.filter(function (g) { return g.ready; }).length;
+  return h('div', {},
+    h('div', { class: 'field pair' },
+      h('div', {}, h('label', { text: 'Sport' }), pickSport), h('div', {}, h('label', { text: 'League' }), pickLeague)),
+    h('div', { class: 'field' }, h('label', { text: 'Game' }), pickGame),
+    h('div', { class: 'field' },
+      h('div', { class: 'lbl' }, 'All games, last 24 hours · ' + plural(finals, 'finished game'),
+        h('button', { class: 'textbtn inl', text: S.playedBusy ? 'Loading…' : 'Refresh', disabled: S.playedBusy, onclick: function () { loadPlayed(true); paint(true); } })),
+      games.length ? list : h('p', { class: 'sub', text: all.length ? 'None for this sport and league.' : p.covered === false ? 'The scoreboards don’t list this sport.' : 'No games on the scoreboards in the last 24 hours.' }),
+      games.length > shown.length ? h('button', { class: 'textbtn', text: 'Show all ' + games.length, onclick: function () { f.all = true; paint(true); } }) : null,
+      (p.problems || []).length ? h('p', { class: 'small warnline', text: 'Not read: ' + p.problems.slice(0, 3).join(' ') }) : null),
+    wantPicks(d, f),
+    f.want !== 'reel' ? picks('Single plays', [3, 5, 7].map(function (n) { return [n, 'Top ' + n]; }), f.plays, function (v) { f.plays = v; }) : null,
+    catPick(d, f, chosen ? chosen.sport : f.psport),
+    h('div', { class: 'gap' }), go,
+    h('p', { class: 'small', text: 'A game still being played can be picked once it’s over. The scoreboards cover soccer, basketball, American football, hockey and baseball; for anything else, describe it.' }));
+}
+// Describe it: any sport, any league, an older game.
+function sayForm(d, f, full) {
   var sport = d.sports.filter(function (x) { return x.id === f.sport; })[0] || null;
   var pickSport = h('select', { 'aria-label': 'Sport', onchange: function () { f.sport = pickSport.value; f.league = ''; paint(true); } },
     h('option', { value: '', text: 'Any sport' }),
     d.sports.filter(function (x) { return x.id !== 'any'; }).map(function (x) {
       return h('option', { value: x.id, selected: f.sport === x.id, text: x.emoji + '  ' + x.label });
     }));
-  var league = h('input', { type: 'text', maxlength: 60, placeholder: sport && sport.leagues.length ? sport.leagues[0] : 'NBA, Premier League…',
-                            'aria-label': 'League', autocomplete: 'off', oninput: function () { f.league = league.value; ready(); } });
+  var known = sport ? sport.leagues : [];
+  var custom = !!f.league && known.indexOf(f.league) < 0;
+  var pickLeague = h('select', { 'aria-label': 'League', onchange: function () {
+      if (pickLeague.value === '+') { f.league = ''; f.other = true; } else { f.league = pickLeague.value; f.other = false; }
+      paint(true);
+    } },
+    h('option', { value: '', text: 'Any league' }),
+    known.map(function (name) { return h('option', { value: name, selected: f.league === name, text: name }); }),
+    h('option', { value: '+', selected: !!f.other || custom, text: 'Another…' }));
+  var league = h('input', { type: 'text', maxlength: 60, placeholder: 'The league or the event', 'aria-label': 'League', autocomplete: 'off',
+                            oninput: function () { f.league = league.value; ready(); } });
   league.value = f.league;
   var teams = h('input', { type: 'text', maxlength: 200, placeholder: 'Lakers vs Celtics', 'aria-label': 'Teams', autocomplete: 'off',
                            oninput: function () { f.teams = teams.value; ready(); } });
   teams.value = f.teams;
-  var cats = d.categories || [];
-  var own = sport ? cats.filter(function (c) { return c.sport === sport.id; }) : [];
-  var pickCat = h('select', { 'aria-label': 'Category', onchange: function () { f.cat = pickCat.value; } },
-    h('option', { value: '', text: own.length === 1 ? 'Automatic: ' + own[0].name : 'No category (kept in the Library)' }),
-    cats.map(function (c) { return h('option', { value: c.id, selected: f.cat === c.id, text: (c.sport ? '🏆 ' : '') + c.name + (c.account ? ' · ' + c.account : ' (no account)') }); }));
-  var open = (d.orders || []).filter(function (o) { return o.status === 'queued' || o.status === 'searching' || o.status === 'working'; });
-  var full = open.length >= ((d.most || {}).open || 4);
   function can() { return !S.busy && !full && !!(f.sport || f.league.trim() || f.teams.trim()); }
   function ready() { go.disabled = !can(); }
-  var go = h('button', { class: 'btn primary wide', text: 'Make these highlights', disabled: !can(), onclick: function () {
+  var go = h('button', { class: 'btn primary wide', text: f.want === 'clips' ? 'Make the best plays' : 'Make the reel', disabled: !can(), onclick: function () {
     var body = { sport: f.sport, league: f.league.trim(), teams: f.teams.trim(), since: f.since, want: f.want, games: f.games, plays: f.plays };
     if (f.cat) body.category = f.cat;
     act(api('POST', 'api/sports/order', body), function () { f.teams = ''; });
     teams.blur(); league.blur();
   } });
   var most = d.most || { games: 3, plays: 7 };
-  var form = h('div', { class: 'block' }, h('h3', { text: 'A game’s best plays' }),
-    h('div', { class: 'field' }, h('label', { text: 'Sport' }), pickSport),
-    h('div', { class: 'field' }, h('label', { text: 'League' }), league,
-      sport && sport.leagues.length ? h('div', { class: 'hints' }, sport.leagues.slice(0, 8).map(function (name) {
-        return h('button', { class: 'hint', text: name, onclick: function () { f.league = name; paint(true); } });
-      })) : null),
+  return h('div', {},
+    h('div', { class: 'field pair' },
+      h('div', {}, h('label', { text: 'Sport' }), pickSport), h('div', {}, h('label', { text: 'League' }), pickLeague)),
+    f.other || custom || !known.length ? h('div', { class: 'field' }, h('label', { text: 'League or event' }), league) : null,
     h('div', { class: 'field' }, h('label', { text: 'Teams (leave empty for the newest games)' }), teams),
     picks('Played in the last', (d.since || []).filter(function (x) { return x.id !== 'any'; }).map(function (x) { return [x.id, x.label]; }), f.since, function (v) { f.since = v; }),
-    picks('Make', [['both', 'Clips and a reel'], ['clips', 'Clips'], ['reel', 'A recap reel']], f.want, function (v) { f.want = v; }),
-    f.want !== 'reel' ? picks('Clips per game', [3, 5, 7].filter(function (n) { return n <= most.plays; }).map(function (n) { return [n, 'Top ' + n]; }), f.plays, function (v) { f.plays = v; }) : null,
+    wantPicks(d, f),
+    f.want !== 'reel' ? picks('Single plays per game', [3, 5, 7].filter(function (n) { return n <= most.plays; }).map(function (n) { return [n, 'Top ' + n]; }), f.plays, function (v) { f.plays = v; }) : null,
     picks('Games', [1, 2, 3].filter(function (n) { return n <= most.games; }).map(function (n) { return [n, n === 1 ? 'The newest' : 'Newest ' + n]; }), f.games, function (v) { f.games = v; }),
-    h('div', { class: 'field' }, h('label', { text: 'For' }), pickCat),
-    h('div', { class: 'gap' }), go,
-    full ? h('p', { class: 'small', text: plural(open.length, 'request') + ' are waiting or under way: wait for one to finish, or cancel one.' }) : null,
-    h('p', { class: 'small', text: 'Automation looks for each game’s highlights on YouTube, finds its best plays and makes them on the PC, with your name on the request. They show up under Videos. League footage often gets copyright claims on TikTok.' }));
-  var orders = d.orders || [];
-  return [form, orders.length ? h('div', { class: 'block' }, h('h3', { text: 'Sports requests' }), orders.map(orderRow)) : null];
+    catPick(d, f, sport ? sport.id : ''),
+    h('div', { class: 'gap' }), go);
 }
 function orderRow(o) {
   var open = o.status === 'queued' || o.status === 'searching' || o.status === 'working';
@@ -716,16 +857,22 @@ function orderRow(o) {
     : o.status === 'done' ? h('div', { class: 'now good' }, made.length ? ['Ready under Videos', h('ul', {}, made.map(function (s) { return h('li', { text: s.said || s.kind }); }))] : (o.message || 'Done'))
     : o.status === 'cancelled' ? h('div', { class: 'now', text: 'Cancelled' })
     : h('div', { class: 'now bad', text: 'Couldn’t be done: ' + (o.error || 'it failed') });
+  var rv = o.review || {}, check = null;
+  if (o.status === 'done' && rv.checked) {
+    check = rv.held ? h('div', { class: 'now warnline', text: '⏸ ' + (rv.held === 1 ? '1 video is' : rv.held + ' videos are') + ' under the minimums and ' + (rv.held === 1 ? 'waits' : 'wait') + ' for an OK: ' + (rv.why || []).join('; ') })
+      : h('div', { class: 'now good', text: '✓ Checked: ' + (rv.checked === 1 ? 'it meets' : 'all ' + rv.checked + ' meet') + ' the minimums' });
+  }
   return h('div', { class: 'order' },
     h('div', { class: 'head' }, face({ id: o.by_id, first: o.by || '?' }, 'sm'), h('div', { class: 'col' },
       h('div', { class: 'title', text: (o.emoji ? o.emoji + ' ' : '') + o.title }),
-      h('div', { class: 'who', text: nameOf(o.by_id, o.by || 'Someone') + ' · ' + ago(o.created) + (o.category ? ' · for ' + o.category : '') })),
+      h('div', { class: 'who', text: (o.line ? o.line + ' · ' : '') + nameOf(o.by_id, o.by || 'Someone') + ' · ' + ago(o.created) + (o.category ? ' · for ' + o.category : '') })),
       open ? h('button', { class: 'btn danger slim', text: 'Cancel', disabled: S.busy, onclick: function () {
         ask('Stop “' + clip(o.title, 70) + '”?', function () { act(api('POST', 'api/sports/orders/' + o.id + '/cancel')); });
       } }) : null),
     now,
-    open && o.frac != null ? h('div', { class: 'meter', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': Math.round(o.frac * 100) },
-      h('i', { style: 'width:' + Math.round(o.frac * 100) + '%' })) : null,
+    open && o.frac != null ? meter(o.frac) : null,
+    check,
+    open && (o.notes || []).length ? h('ul', { class: 'notes' }, o.notes.map(function (n) { return h('li', { text: n }); })) : null,
     o.status === 'done' && o.error ? h('div', { class: 'now bad', text: o.error }) : null);
 }
 function videoForm() {
@@ -746,7 +893,7 @@ function videoForm() {
   return [h('div', { class: 'block' }, h('h3', { text: 'A new video' }), idea, h('div', { class: 'gap' }), pick, h('div', { class: 'gap' }), go,
     h('p', { class: 'small', text: 'The AI writes it, voices it and cuts it on the PC. It shows up under Videos with your name on it.' })),
     h('div', { class: 'block' }, h('h3', { text: 'On the PC now' }),
-      h('p', { text: st.job ? (st.job.making ? 'Making “' : 'Clipping “') + clip(st.job.title, 80) + '”' : st.paused ? 'Paused' : 'Nothing right now' }),
+      h('p', { text: st.job ? (st.job.making ? 'Making “' : 'Clipping “') + clip(st.job.title, 80) + '”' : st.paused ? 'Paused' : st.sports ? sportsNow(st.sports, 80) : 'Nothing right now' }),
       st.job && st.job.stage ? h('p', { class: 'sub', text: st.job.stage }) : null,
       h('p', { class: 'sub', text: plural(q.to_make || 0, 'video') + ' to make · ' + plural(q.to_clip || 0, 'video') + ' to clip' }),
       next.length ? h('p', { class: 'sub', text: 'Next: ' + next.slice(0, 3).map(function (j) { return '“' + clip(j.title, 40) + '”'; }).join(', ') }) : null)];

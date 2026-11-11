@@ -38,6 +38,7 @@ POLL_MS = 1500  # how often the page asks how things are going while it's showin
 SLOW_POLL_MS = 6000  # ... while nothing is being worked on
 EDIT_HOLD = 4.0  # s after you change the filter before the PC's copy of it is shown in its place
 PICTURES_KEPT = 400
+PLAYED_STALE = 180.0  # s before the games played are read from the scoreboards again while they're showing
 
 SINCE_SHORT = {"day": "24 h", "3days": "3 days", "week": "Week", "month": "Month", "any": "Any"}
 STATUS_WORDS = {"found": "", "queued": "Waiting", "analysing": "Finding highlights", "making": "Making",
@@ -1256,6 +1257,287 @@ class GamePanel(QFrame):
 # ---------------------------------------------------------------- the page
 
 
+# ---------------------------------------------------------------- the games played (the last 24 hours)
+
+
+class PlayedRow(QFrame):
+    """One game from the scoreboards: who played, the score, its league, and whether it's over."""
+
+    ROW_H = 50
+
+    def __init__(self, g: dict, parent=None):
+        super().__init__(parent)
+        self.setObjectName("vrow")
+        h = QHBoxLayout(self)
+        h.setContentsMargins(10, 5, 10, 5)
+        h.setSpacing(10)
+        mark = QLabel(g.get("emoji") or "🏆")
+        mark.setFixedWidth(22)
+        mark.setAlignment(Qt.AlignCenter)
+        h.addWidget(mark)
+        col = QVBoxLayout()
+        col.setSpacing(1)
+        line = Elided(g.get("line") or g.get("label") or "")
+        line.setStyleSheet("font-weight: 600;")
+        sub = Elided(g.get("league") or "")
+        sub.setObjectName("muted")
+        col.addWidget(line)
+        col.addWidget(sub)
+        h.addLayout(col, 1)
+        state = g.get("state")
+        h.addWidget(chip(g.get("when") or "", theme.BAD if state == "live" else theme.GOOD if state == "final"
+                         else theme.MUTED))
+        if not g.get("ready"):
+            line.setStyleSheet(f"font-weight: 600; color: {theme.MUTED};")
+
+
+class PlayedPanel(QWidget):
+    """Every game of the last 24 hours (the scoreboards), to pick by drop-down (sport, league, game) or from the
+    list under them. `find` looks for the picked game's footage, so its plays can be gone through by hand;
+    `order` asks for its recap reel, hands-off."""
+
+    find = Signal(dict)
+    order = Signal(str, str)  # the game's id on the list, what to make
+
+    def __init__(self, backend: Backend, parent=None):
+        super().__init__(parent)
+        self.backend = backend
+        self.data: dict | None = None
+        self.loaded_at = 0.0
+        self.chosen = ""
+        self.error = ""
+        self._asking = False
+        self._filling = False
+        v = QVBoxLayout(self)
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(8)
+        form = QFormLayout()
+        form.setContentsMargins(0, 0, 0, 0)
+        form.setHorizontalSpacing(10)
+        form.setVerticalSpacing(6)
+        form.setFieldGrowthPolicy(QFormLayout.AllNonFixedFieldsGrow)
+        pair = QHBoxLayout()
+        pair.setSpacing(8)
+        self.sport = QComboBox()
+        self.sport.setToolTip("Only this sport's games")
+        self.league = QComboBox()
+        self.league.setToolTip("Only this league's games")
+        pair.addWidget(self.sport, 1)
+        pair.addWidget(self.league, 1)
+        form.addRow("Sport", pair)
+        self.game = QComboBox()
+        self.game.setToolTip("Every game of the last 24 hours. One still being played can be picked once it's over.")
+        self.game.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.game.setMinimumContentsLength(18)
+        form.addRow("Game", self.game)
+        v.addLayout(form)
+        self.note = muted("", wrap=True)
+        v.addWidget(self.note)
+        self.list = QListWidget()
+        self.list.setVerticalScrollMode(QAbstractItemView.ScrollPerPixel)
+        self.list.setFrameShape(QFrame.NoFrame)
+        v.addWidget(self.list, 1)
+        self.empty = muted("Reading the scoreboards…")
+        self.empty.setAlignment(Qt.AlignCenter)
+        v.addWidget(self.empty, 1)
+        self.hint = muted("", wrap=True)
+        v.addWidget(self.hint)
+        foot = QHBoxLayout()
+        foot.setSpacing(6)
+        self.refresh_btn = QPushButton("Refresh")
+        self.refresh_btn.setObjectName("flat")
+        self.refresh_btn.setToolTip("Read the scoreboards again")
+        self.refresh_btn.clicked.connect(lambda: self.load(force=True))
+        self.find_btn = QPushButton("Find its footage")
+        self.find_btn.setToolTip("Look for this game's highlights and full game on YouTube: they join the Games "
+                                 "list, where you tick the plays yourself")
+        self.find_btn.clicked.connect(self._find)
+        self.reel_btn = QPushButton("Make its reel")
+        self.reel_btn.setObjectName("primary")
+        self.reel_btn.setToolTip(f"Hands-off: its highlights are found, its best plays ranked and a recap reel "
+                                 f"made on {backend.where} (65-85 s, over a minute)")
+        self.reel_btn.clicked.connect(lambda: self.chosen and self.order.emit(self.chosen, "reel"))
+        foot.addWidget(self.refresh_btn)
+        foot.addStretch(1)
+        foot.addWidget(self.find_btn)
+        foot.addWidget(self.reel_btn)
+        v.addLayout(foot)
+        self.sport.currentIndexChanged.connect(lambda _i: self._narrowed("sport"))
+        self.league.currentIndexChanged.connect(lambda _i: self._narrowed("league"))
+        self.game.currentIndexChanged.connect(lambda _i: self._choose(self.game.currentData() or "", "game"))
+        self.list.currentItemChanged.connect(
+            lambda cur, _prev=None: self._choose(cur.data(Qt.UserRole) if cur is not None else "", "list"))
+        self._fill()
+
+    # --- reading the scoreboards ----------------------------------------------------------------------------
+
+    def load(self, force: bool = False) -> None:
+        """Ask for the games (on the backend's threads), unless they were read a moment ago."""
+        if self._asking or not self.backend.available():
+            return
+        if not force and self.data is not None and time.monotonic() - self.loaded_at < PLAYED_STALE:
+            return
+        self._asking = True
+        self.refresh_btn.setEnabled(False)
+        self.refresh_btn.setText("Reading…")
+
+        def done() -> None:
+            self._asking = False
+            self.loaded_at = time.monotonic()
+            self.refresh_btn.setEnabled(True)
+            self.refresh_btn.setText("Refresh")
+
+        def ok(d: dict) -> None:
+            done()
+            self.error = ""
+            self.data = d if isinstance(d, dict) else {}
+            self._fill()
+
+        def fail(exc: Exception) -> None:
+            done()
+            self.error = error_text(exc)
+            if self.data is None:
+                self.data = {}
+            self._fill()
+
+        self.backend.call("played", "any", "", ok=ok, fail=fail)
+
+    def games(self) -> list[dict]:
+        """The games the two narrowing drop-downs leave."""
+        sport, league = self.sport.currentData() or "", self.league.currentData() or ""
+        return [g for g in (self.data or {}).get("games") or []
+                if (not sport or g.get("sport") == sport) and (not league or g.get("league") == league)]
+
+    def picked(self) -> dict | None:
+        return next((g for g in (self.data or {}).get("games") or [] if g.get("id") == self.chosen), None)
+
+    # --- showing them ---------------------------------------------------------------------------------------
+
+    def _fill(self) -> None:
+        d = self.data or {}
+        every = d.get("games") or []
+        self._filling = True
+        try:
+            sport = self.sport.currentData() or ""
+            self.sport.clear()
+            self.sport.addItem("All sports", "")
+            for sid in dict.fromkeys(g.get("sport") for g in every):
+                info = sports.get(sid or "")
+                self.sport.addItem(f"{info.emoji}  {info.label}" if info else str(sid), sid)
+            self.sport.setCurrentIndex(max(0, self.sport.findData(sport)))
+            self._fill_leagues()
+            self._fill_games()
+        finally:
+            self._filling = False
+        self._sync()
+
+    def _fill_leagues(self) -> None:
+        sport, league = self.sport.currentData() or "", self.league.currentData() or ""
+        self.league.clear()
+        self.league.addItem("All leagues", "")
+        for r in (self.data or {}).get("leagues") or []:
+            if r.get("games") and (not sport or r.get("sport") == sport):
+                self.league.addItem(f"{r['league']} ({r['games']})", r["league"])
+        self.league.setCurrentIndex(max(0, self.league.findData(league)))
+
+    def _fill_games(self) -> None:
+        games = self.games()
+        if not any(g["id"] == self.chosen for g in games):
+            self.chosen = ""
+        one_league = bool(self.league.currentData())
+        self.game.clear()
+        self.game.addItem("Pick a game…" if games else "No games here in the last 24 hours", "")
+        for g in games:
+            self.game.addItem(("" if one_league else f"{g['league']}: ") + f"{g['line']}  ·  {g['when']}", g["id"])
+            if not g.get("ready"):  # still being played, or yet to start: listed, not to pick
+                item = self.game.model().item(self.game.count() - 1)
+                if item is not None:
+                    item.setEnabled(False)
+        self.game.setCurrentIndex(max(0, self.game.findData(self.chosen)))
+        self.list.clear()
+        for g in games:
+            it = QListWidgetItem()
+            it.setData(Qt.UserRole, g["id"])
+            it.setSizeHint(QSize(100, PlayedRow.ROW_H))
+            self.list.addItem(it)
+            self.list.setItemWidget(it, PlayedRow(g))
+            if g["id"] == self.chosen:
+                self.list.setCurrentItem(it)
+
+    def _narrowed(self, which: str) -> None:
+        if self._filling:
+            return
+        self._filling = True
+        try:
+            if which == "sport":
+                self._fill_leagues()
+            self._fill_games()
+        finally:
+            self._filling = False
+        self._sync()
+
+    def _choose(self, game_id: str, source: str) -> None:
+        if self._filling:
+            return
+        self.chosen = game_id
+        self._filling = True
+        try:
+            if source != "game":
+                self.game.setCurrentIndex(max(0, self.game.findData(game_id)))
+            if source != "list":
+                row = next((i for i in range(self.list.count())
+                            if self.list.item(i).data(Qt.UserRole) == game_id), -1)
+                self.list.setCurrentRow(row)
+        finally:
+            self._filling = False
+        self._sync()
+
+    def _find(self) -> None:
+        g = self.picked()
+        if g is not None:
+            self.find.emit(g)
+
+    def said(self, text: str) -> None:
+        """What came of the last thing asked, under the list."""
+        self.hint.setText(text)
+        self.hint.setVisible(bool(text))
+
+    def _sync(self) -> None:
+        d = self.data
+        games = self.games() if d is not None else []
+        g = self.picked()
+        ready = bool(g and g.get("ready"))
+        self.find_btn.setEnabled(bool(g))
+        self.reel_btn.setEnabled(ready)
+        self.list.setVisible(bool(games))
+        self.empty.setVisible(not games)
+        every = (d or {}).get("games") or []
+        if d is None:
+            self.empty.setText("Reading the scoreboards…")
+        elif self.error and not every:
+            self.empty.setText(f"The games couldn't be read: {self.error}")
+        elif not every:
+            self.empty.setText("No games on the scoreboards in the last 24 hours.\nThe filter on the left looks for "
+                               "any game, of any sport, by name.")
+        else:
+            self.empty.setText("None for this sport and league.")
+        over = sum(1 for x in games if x.get("ready"))
+        live = sum(1 for x in games if x.get("state") == "live")
+        bits = [_plural(len(games), "game"), f"{over} finished"] + ([f"{live} being played"] if live else [])
+        note = " · ".join(bits) if games else ""
+        problems = list((d or {}).get("problems") or []) + ([self.error] if self.error and every else [])
+        if problems:
+            note += ("\n" if note else "") + "Not read: " + " ".join(problems[:3])
+        self.note.setText(note)
+        self.note.setVisible(bool(note))
+        if g and not ready:
+            self.said("It's still being played: its highlights go up after it ends." if g.get("state") == "live"
+                      else "It hasn't been played yet.")
+        elif self.hint.text().startswith(("It's still being played", "It hasn't been played")):
+            self.said("")
+        self.hint.setVisible(bool(self.hint.text()))
+
+
 class SportsView(QWidget):
     notice = Signal(str)  # a line for the window's status
     open_studio = Signal(str, str, list)  # a video's link, its title and the plays to open in the Studio
@@ -1308,6 +1590,12 @@ class SportsView(QWidget):
         top.addWidget(self.ai_chip)
         outer.addLayout(top)
 
+        self.now_line = Elided()  # what's being worked on right now: the game, the step and how far
+        self.now_line.setStyleSheet(f"color: {theme.ACCENT}; font-weight: 600;")
+        self.now_line.setIndent(2)
+        self.now_line.hide()
+        outer.addWidget(self.now_line)
+
         self.banner = QFrame()
         self.banner.setObjectName("banner")
         bh = QHBoxLayout(self.banner)
@@ -1345,7 +1633,7 @@ class SportsView(QWidget):
         sh.setSpacing(2)
         self.view_buttons: dict[str, QPushButton] = {}
         group = QButtonGroup(self)
-        for key, label in (("all", "All"), ("picked", "Picked"), ("ready", "Ready")):
+        for key, label in (("all", "All"), ("picked", "Picked"), ("ready", "Ready"), ("played", "Last 24 hours")):
             b = QPushButton(label)
             b.setObjectName("seg")
             b.setCheckable(True)
@@ -1353,6 +1641,8 @@ class SportsView(QWidget):
             group.addButton(b)
             sh.addWidget(b)
             self.view_buttons[key] = b
+        self.view_buttons["played"].setToolTip("Every game played in the last 24 hours, from the scoreboards: pick "
+                                               "one by sport, league and game, and make its reel")
         self.view_buttons["all"].setChecked(True)
         mh.addWidget(seg)
         mv.addLayout(mh)
@@ -1364,7 +1654,14 @@ class SportsView(QWidget):
         self.list_empty = muted("")
         self.list_empty.setAlignment(Qt.AlignCenter)
         mv.addWidget(self.list_empty, 1)
-        mf = QHBoxLayout()
+        self.played = PlayedPanel(backend)
+        self.played.find.connect(self._find_footage)
+        self.played.order.connect(self._order_game)
+        self.played.hide()
+        mv.addWidget(self.played, 1)
+        self.list_foot = QWidget()
+        mf = QHBoxLayout(self.list_foot)
+        mf.setContentsMargins(0, 0, 0, 0)
         mf.setSpacing(6)
         self.clear_btn = QPushButton("Clear the rest")
         self.clear_btn.setObjectName("flat")
@@ -1380,7 +1677,7 @@ class SportsView(QWidget):
         mf.addWidget(self.remove_btn)
         mf.addStretch(1)
         mf.addWidget(self.analyse_btn)
-        mv.addLayout(mf)
+        mv.addWidget(self.list_foot)
         split.addWidget(mid)
 
         self.panel = GamePanel(backend, self.pictures)
@@ -1507,8 +1804,13 @@ class SportsView(QWidget):
         n_ready = sum(1 for g in gs if g.get("highlights"))
         self.count.setText(f"{_plural(len(gs), 'game')}" + (f" · {st.get('picked', 0)} picked" if st.get("picked")
                                                             else "") + (f" · {n_ready} ready" if n_ready else ""))
-        self.list.setVisible(bool(shown))
-        self.list_empty.setVisible(not shown)
+        played = self.view == "played"
+        self.played.setVisible(played)
+        self.list_foot.setVisible(not played)
+        self.list.setVisible(bool(shown) and not played)
+        self.list_empty.setVisible(not shown and not played)
+        if played:
+            self.played.load()  # (again once what it has is a few minutes old)
         if not gs:
             self.list_empty.setText("No games yet.\nSet the filter on the left and press Find games.")
         elif not shown:
@@ -1516,6 +1818,8 @@ class SportsView(QWidget):
                                      "ready": "No game's highlights are ready yet."}.get(self.view, ""))
 
     def _shows(self, g: dict) -> bool:
+        if self.view == "played":
+            return False  # the middle shows the scoreboards' games instead
         if self.view == "picked":
             return bool(g.get("picked"))
         if self.view == "ready":
@@ -1543,6 +1847,9 @@ class SportsView(QWidget):
             set_chip(self.worker_chip, f"{waiting} waiting", theme.WARN)
         else:
             set_chip(self.worker_chip, "")
+        doing = st.get("doing") or ""
+        self.now_line.setText(("Now: " + doing) if doing else "")
+        self.now_line.setVisible(bool(doing))
         yt = "" if st.get("youtube") == "api" else (
             "No YouTube Data API key: searching YouTube's own results (free; upload dates are less exact). A key "
             "in Settings → Research makes searches by date exact.")
@@ -1595,6 +1902,30 @@ class SportsView(QWidget):
     def _remove(self) -> None:
         if self.current:
             self.ask("remove", ([self.current],))
+
+    def _find_footage(self, g: dict) -> None:
+        """A game picked from the last 24 hours: look for its highlights and full game, into the Games list."""
+        f = {**self.filter.values(), "sport": g.get("sport") or "any", "league": g.get("league") or "",
+             "teams": f"{g.get('away', '')}, {g.get('home', '')}".strip(", "), "since": "3days"}
+        self.ask("find_games", (f,))
+        self.view_buttons["all"].click()
+
+    def _order_game(self, game_id: str, want: str) -> None:
+        """Its recap reel, hands-off: the desk finds the footage, ranks the plays and makes it."""
+        def ok(result) -> None:
+            msg = result.get("message") if isinstance(result, dict) else ""
+            notes = result.get("notes") if isinstance(result, dict) else None
+            self.played.said(" ".join([msg or "Asked for."] + [str(n) for n in notes or []]))
+            if msg:
+                self.notice.emit(msg)
+            self.refresh(force=True)
+
+        def fail(exc: Exception) -> None:
+            text = error_text(exc)
+            self.played.said(text)
+            self.notice.emit(text)
+
+        self.backend.call("order_game", game_id, want, ok=ok, fail=fail)
 
     def _studio(self, game: dict, hl: list[dict]) -> None:
         clips = [{"start": h["start"], "end": h["end"], "score": h.get("score") or 0, "title": h.get("title") or "",

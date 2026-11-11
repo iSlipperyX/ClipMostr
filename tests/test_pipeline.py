@@ -458,6 +458,32 @@ def test_tick_scans_then_clips_then_waits(tmp_path):
     assert r.db.meta("state") == "Waiting for the next check at " + datetime.fromtimestamp(NOW + 1800).strftime("%H:%M")
 
 
+def test_the_state_says_what_the_sports_worker_is_on(tmp_path):
+    from types import SimpleNamespace
+
+    doing = {"text": "Finding the best plays of Lakers at Celtics: Downloading the game (40%)", "waiting": 2}
+    clock = Clock()
+    r = _runner(tmp_path, scan=lambda *a, **k: _scan_result("a"), clock=clock)
+    r.sports = SimpleNamespace(busy=True, desk=SimpleNamespace(doing=lambda: doing))
+    assert r.tick() == 5.0  # a video is waiting to clip: the game comes first, and the state follows it
+    assert r.db.get("a").status != "done"
+    assert r.db.meta("state") == ("Sports: Finding the best plays of Lakers at Celtics: Downloading the game (40%) "
+                                  "(2 more waiting)")
+    doing.update(text="Making a reel of Lakers at Celtics: Rendering (71%)", waiting=0)
+    assert r.tick() == 5.0 and r.db.meta("state") == "Sports: Making a reel of Lakers at Celtics: Rendering (71%)"
+    r.sports.busy = False
+    assert r.tick() == 1.0 and r.db.get("a").status == "done"
+    # with nothing waiting to clip, the state still says what Sports is on, not "Waiting for the next check"
+    r.sports.busy = True
+    assert r.tick() == 5.0 and r.db.meta("state").startswith("Sports: Making a reel of Lakers at Celtics")
+    r.sports.desk = SimpleNamespace(doing=lambda: None)  # between two tasks
+    r.tick()
+    assert r.db.meta("state") == "Waiting: working on the games you picked in Sports"
+    r.sports.busy = False
+    r.tick()
+    assert r.db.meta("state").startswith("Waiting for the next check at ")
+
+
 def test_a_check_that_picks_nothing_says_why(tmp_path):
     scans = []
 

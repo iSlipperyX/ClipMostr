@@ -35,6 +35,7 @@ REEL_AIM = 72.0  # what the plays are sized to: the middle of the range, leaning
 MIN_PLAYS, MAX_PLAYS = 4, 7
 PLAY_MIN, PLAY_MAX = 8.0, 14.0  # seconds each play gets
 PLAY_STRETCH = 17.0  # at most, when a short game has too few plays to reach a minute otherwise
+PLAY_LONG = 24.0  # and with only three plays to show: each gets its whole build-up and its reaction
 TEASER = 3.2  # the opening: the best play up to just before its moment
 TEASER_STOP = 0.35  # seconds before the moment the opening cuts away (the payoff is kept for the end)
 TRANSITION = 0.25  # each change of play: a quick whip, flash or slide (and a whoosh)
@@ -237,9 +238,11 @@ def plan(game: dict, highlights: list[dict], *, crowd: np.ndarray | None, cues=(
     while len(plays) > MIN_PLAYS and fixed() + len(plays) * PLAY_MIN > REEL_MAX:
         plays.pop()
 
-    want = each(PLAY_MAX)
+    want, longest = each(PLAY_MAX), PLAY_STRETCH
     if fixed() + want * len(plays) < REEL_MIN:
         want = each(PLAY_STRETCH)
+    if fixed() + want * len(plays) < REEL_MIN:  # three plays (or two): longer still, so the reel passes a minute
+        want, longest = each(PLAY_LONG), PLAY_LONG
 
     spans: dict[str, tuple[float, float, float]] = {}
     for h in plays:
@@ -257,14 +260,14 @@ def plan(game: dict, highlights: list[dict], *, crowd: np.ndarray | None, cues=(
         short = REEL_AIM - total()
         if short <= 0.3:
             break
-        growable = [h for h in plays if spans[h["id"]][1] - spans[h["id"]][0] < PLAY_STRETCH - 0.2]
+        growable = [h for h in plays if spans[h["id"]][1] - spans[h["id"]][0] < longest - 0.2]
         if not growable:
             break
         extra = short / len(growable)
         for h in growable:
             a, b, m = spans[h["id"]]
             lo, hi = room(h)
-            a2, b2 = cut_around(m, min(PLAY_STRETCH, b - a + extra), lo, hi, replays)
+            a2, b2 = cut_around(m, min(longest, b - a + extra), lo, hi, replays)
             spans[h["id"]] = (a2, b2, m)
     while total() > REEL_MAX and len(plays) > MIN_PLAYS:
         spans.pop(plays.pop()["id"])

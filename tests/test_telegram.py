@@ -882,8 +882,9 @@ def test_settings_and_the_bot_agree():
     assert [k for k, _ in TELEGRAM_SENDS] == list(botmod.SENDS)
     fields = {f.name: f for f in SCHEMA if f.group == "Telegram"}
     assert set(fields) == {"telegram_on", "telegram_token", "telegram_send", "telegram_app", "telegram_app_url",
-                           "telegram_app_port"}
+                           "telegram_app_port", "telegram_min_seconds"}
     assert fields["telegram_token"].kind == "secret"
+    assert Settings().telegram_min_seconds == 61.0  # over a minute, the length Creator Rewards pays for
     assert {k.strip() for k in Settings().telegram_send.split(",")} == set(botmod.SENDS)
     assert Settings().apply({"telegram_token": f"  {TOKEN} "}).telegram_token == TOKEN
 

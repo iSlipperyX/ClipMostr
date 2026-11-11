@@ -466,7 +466,7 @@ class Runner:
                 self.state("Waiting: making clips your Mac asked for")
                 return 5.0
             if self.working_on_sports():  # so do the games you picked in Sports: you're waiting for them
-                self.state("Waiting: working on the games you picked in Sports")
+                self.state(self.sports_state())
                 return 5.0
             self.process(job, s)
             if self.poster is not None:  # the new clips go to their account's queue now, not in a few minutes
@@ -480,6 +480,9 @@ class Runner:
             self.state(self.wait_reason(s, now)[1])
         elif self.db.next_due(now) is not None:  # only paused categories' videos are waiting
             self.state("Waiting: the categories with videos waiting are paused")
+        elif self.working_on_sports():  # nothing else to do: say what the Sports worker is on, as it goes
+            self.state(self.sports_state())
+            return max(1.0, min(scan_wait, 5.0))
         else:
             self.state(self.idle_text(s, next_scan, upcoming))
         return max(1.0, min(scan_wait, (upcoming - now) if upcoming else IDLE, IDLE))
@@ -490,6 +493,17 @@ class Runner:
             return self.remote is not None and self.remote.host.studio.busy()
         except Exception:  # noqa: BLE001
             return False
+
+    def sports_state(self) -> str:
+        """What the Sports section's worker is on, for the Automation tab: the game, the step and how far."""
+        try:
+            d = self.sports.desk.doing()
+        except Exception:  # noqa: BLE001 - sports.db busy for a moment: the plain line will do
+            d = None
+        if not d:
+            return "Waiting: working on the games you picked in Sports"
+        more = f" ({d['waiting']} more waiting)" if d.get("waiting") else ""
+        return f"Sports: {d['text']}{more}"
 
     def working_on_sports(self) -> bool:
         """The Sports section's worker is finding a game's highlights or making its clips (sportsdesk/desk.py)."""

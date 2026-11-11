@@ -69,8 +69,20 @@ def read_folder_index(folder: Path) -> dict[str, dict]:
             # ClipMonster 3.10: made again from a critique of another video; it waits for an OK too
             "fix_of": str((data.get("creator") or {}).get("revises") or ""),
             "hashtags": " ".join(f"#{str(h).lstrip('#')}" for h in clip.get("hashtags") or [] if str(h).strip("# ")),
+            # ClipMonster 3.11: made for a Telegram request, to minimums (compliance/requirements.py); one that
+            # falls short waits for an OK, with why
+            "hold": _hold(auto.get("requires"), clip),
         }
     return out
+
+
+def _hold(need, clip: dict) -> str:
+    try:
+        from ..compliance import requirements
+
+        return requirements.hold_reason(need, clip)
+    except Exception:  # noqa: BLE001 - a clips.json nobody expected: the clip comes in as any other
+        return ""
 
 
 def creator_story(folder: Path, data: dict | None = None) -> dict:
