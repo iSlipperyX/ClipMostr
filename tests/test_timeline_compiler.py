@@ -466,6 +466,18 @@ def test_a_first_picture_one_frame_long_is_kept(tmp_path):
     render(tl, tmp_path, "clip.mp4")
     f = frames(tmp_path / "clip.mp4")
     assert len(f) == 31 and near(f[0, 100, 90], RED) and near(f[1, 100, 90], BLUE)
+    # With a transition later on: the join that takes the spare frame off must hand on a frame rate and a
+    # time base like every other stream, or ffmpeg 7 refuses the transition after it and nothing renders.
+    for name, first in (("gap", []), ("clip", [T.VideoClip("z", "blue", 0.0, 1 / 30)])):
+        tl = T.standard("one", T.Canvas(W, H, 30, background="#14EB14"), 91 / 30)
+        colours(tl, red=RED, blue=BLUE)
+        tl.track(T.VIDEO_BASE).clips += [*first, T.VideoClip("a", "red", 1 / 30, 1.0), T.VideoClip("b", "blue", 31 / 30, 1.0),
+                                         T.VideoClip("c", "red", 61 / 30, 1.0, transition_in=T.Transition("crossfade", 0.4))]
+        render(tl, tmp_path, f"then-{name}.mp4")
+        f = frames(tmp_path / f"then-{name}.mp4")
+        assert len(f) == 91 and near(f[0, 100, 90], BLUE if first else GREEN) and near(f[1, 100, 90], RED)
+        assert near(f[31, 100, 90], BLUE) and near(f[50, 100, 90], BLUE) and near(f[75, 100, 90], RED)
+        assert not near(f[61, 100, 90], BLUE) and not near(f[61, 100, 90], RED)  # mid-crossfade at the cut
 
 
 def test_inputs_are_named_from_the_work_folder_when_that_is_shorter(tmp_path):

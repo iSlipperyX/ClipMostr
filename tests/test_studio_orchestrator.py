@@ -3,6 +3,7 @@ the page reader and the voice, textures for pictures. One test renders for real;
 with a marker file so they stay quick."""
 
 import json
+import time
 from pathlib import Path
 from types import SimpleNamespace as NS
 
@@ -688,11 +689,40 @@ def test_an_edit_saved_anywhere_else_is_not_called_listed_and_never_slips_into_t
     clips = json.loads((folder / "clips.json").read_text(encoding="utf-8"))["clips"]
     assert [c["file"] for c in clips] == ["01 - Title.mp4"]  # no record posting can't match
     assert not any("waits there for your OK" in m for m in log)
-    assert any("isn't listed with the video" in m and "no AI-generated label" in m for m in log)
+    # What the render says is what posting does: one folder down, an unlisted video is left alone.
+    (said,) = log
+    assert "isn't listed with the video" in said and "Posting leaves an unlisted video there alone" in said
+    assert "no AI-generated label" not in said and said.endswith("the edit is listed, labelled and held.")
     assert O.list_edit(folder, folder / "edits" / "v2.mp4") == ""
-    # Automation leaves an unlisted video inside an AI-generated video's folder alone, one folder down too.
     took = Store(tmp_path / "library.json").add_paths([root], watched=True, now=1e12)
     assert [Path(i.path).name for i in took] == ["01 - Title.mp4"]
+    # Further down, or anywhere else, a watched folder takes it for an ordinary video, and the render says that.
+    for place in (folder / "edits" / "old" / "v3.mp4", root / "History" / "Clips" / "v4.mp4"):
+        log.clear()
+        O.render_timeline(folder, place, settings=Settings(), log=log.append)
+        (said,) = log
+        assert "no AI-generated label and no wait for your OK" in said and "leaves an unlisted" not in said
+        assert said.endswith("the edit is listed, labelled and held.")
+        took = [i for i in Store(tmp_path / f"{place.stem}.json").add_paths([root], watched=True, now=1e12)
+                if Path(i.path).name == place.name]
+        assert len(took) == 1 and not took[0].ai_generated and took[0].review != "waiting"
+        place.unlink()
+    assert [c["file"] for c in json.loads((folder / "clips.json").read_text(encoding="utf-8"))["clips"]] \
+        == ["01 - Title.mp4"]  # asking what would happen listed nothing
+    # A timeline written by hand, in a folder that's nobody's creation: leaving the place out lists nothing
+    # either, so nothing is promised.
+    own = tmp_path / "mine"
+    own.mkdir()
+    tl = T.standard("Mine", duration=2)
+    tl.assets["c"] = T.Asset("color", color="#101010")
+    tl.track(T.VIDEO_BASE).clips.append(T.VideoClip("a", "c", 0, 2))
+    tl.dump(own / "timeline.json")
+    log.clear()
+    O.render_timeline(own, tmp_path / "elsewhere" / "mine.mp4", settings=Settings(), log=log.append)
+    assert not any("listed, labelled and held" in m for m in log)
+    log.clear()
+    O.render_timeline(own, settings=Settings(), log=log.append)
+    assert log == []
     # An ordinary clips folder one level under another is still taken in as before.
     plain = root / "History" / "Clips" / "more"
     plain.mkdir(parents=True)
@@ -718,8 +748,71 @@ def test_rendering_over_an_edit_says_what_posting_will_do_with_it(tmp_path, monk
     log.clear()
     O.render_timeline(folder, settings=Settings(), log=log.append)
     assert not any("joins the queue" in m for m in log)
-    assert any("replaces the edit made before" in m and "add it in the Queue tab" in m for m in log)
+    (said,) = log
+    assert "replaces the edit made before" in said and "Queue tab" not in said  # no button there adds a video
+    assert "render it under a new name" in said and '"title" in timeline.json' in said and "--out" in said
     assert store.add_paths([root], watched=True, now=1e12) == []  # as the log said
+    # And the way it gives works, both ways: a new name beside the video is listed, taken in and held.
+    log.clear()
+    O.render_timeline(folder, folder / "Title, shorter.mp4", settings=Settings(), log=log.append)
+    assert any("joins the queue" in m for m in log)
+    data = json.loads((folder / "timeline.json").read_text(encoding="utf-8"))
+    data["title"] = "Title two"
+    (folder / "timeline.json").write_text(json.dumps(data), encoding="utf-8")
+    O.render_timeline(folder, settings=Settings(), log=log.append)
+    took = {Path(i.path).name: i for i in store.add_paths([root], watched=True, now=1e12)}
+    assert sorted(took) == ["Title two (edit).mp4", "Title, shorter.mp4"]
+    assert all(i.ai_generated and i.review == "waiting" for i in took.values())
+
+
+def test_an_edit_rendered_again_after_the_last_one_posted_and_was_cleared_is_queued(tmp_path, monkeypatch):
+    """With "delete after posting" on (the default), the edit that posted keeps its entry and its path. The next
+    render under the same name was promised the queue and never taken in: the path counted as known."""
+    from ytclip.posting import records
+    from ytclip.posting.accounts import Accounts
+    from ytclip.posting.config import Settings as Posting
+    from ytclip.posting.store import Store, TikTokVideo
+
+    accs = Accounts.load()
+    a = accs.add("")
+    a.username, a.logged_in = "history", True
+    accs.save()
+    root = tmp_path / "Automation"
+    folder = creation(root / "History" / "Created" / "v1")
+    fake_render(monkeypatch)
+    log = []
+    O.render_timeline(folder, settings=Settings(), log=log.append)
+    store = Store(tmp_path / "library.json")
+    took = {Path(i.path).name: i for i in store.add_paths([root], watched=True, now=1e12)}
+    edit, now = took["Title (edit).mp4"], time.time()
+    edit.account, edit.review = a.id, ""
+    edit.status, edit.posted_at, edit.posted_via = "posted", now - 7200, "browser"
+    edit.queue_pos = edit.planned_at = None
+    store.update_tiktok_videos(a.id, [TikTokVideo(id="7009", description="A caption", create_time=now - 7100,
+                                                  views=10, url="https://www.tiktok.com/@history/video/7009")])
+    edit.tiktok_id, edit.tiktok_url = "7009", "https://www.tiktok.com/@history/video/7009"
+    done = records.finish(store, accs, Posting(records_folder=str(tmp_path / "Records")), [root], now=now)
+    assert done.cleaned == 1 and not done.failed and edit.cleaned_at
+    assert not (folder / "Title (edit).mp4").exists() and (folder / "timeline.json").exists()
+    assert store.add_paths([root], watched=True, now=1e12) == []
+    log.clear()
+    O.render_timeline(folder, settings=Settings(), log=log.append)
+    assert any("joins the queue" in m for m in log)
+    (again,) = store.add_paths([root], watched=True, now=1e12)  # as the log said
+    assert Path(again.path).name == "Title (edit).mp4" and again.id != edit.id
+    assert again.ai_generated and again.review == "waiting" and again.status != "posted"
+    assert store.add_paths([root], watched=True, now=1e12) == []  # once
+    # Only an edit comes back under a name that posted: the same clip exported again isn't posted twice.
+    plain = root / "History" / "Clips"
+    plain.mkdir(parents=True)
+    (plain / "a clip.mp4").write_bytes(b"x")
+    (clip,) = store.add_paths([plain], watched=True, now=1e12)
+    clip.status, clip.cleaned_at = "posted", now
+    assert store.add_paths([plain], watched=True, now=1e12) == []
+    # And one you took out of the queue stays out, edit or not.
+    store.remove([again.id])
+    O.render_timeline(folder, settings=Settings(), log=log.append)
+    assert store.add_paths([root], watched=True, now=1e12) == []
 
 
 def test_the_marker_arrives_before_the_stock_clips(tmp_path, monkeypatch):

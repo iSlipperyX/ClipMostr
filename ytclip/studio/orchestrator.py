@@ -633,7 +633,7 @@ def _render_folder(folder: Path):
         return work_folder("timeline-")
 
 
-def list_edit(folder: Path, video: Path) -> str:
+def list_edit(folder: Path, video: Path, write: bool = True) -> str:
     """Add a re-rendered video to its folder's clips.json, as an edit of the video the Studio made there: it
     then carries the same AI-generated label, caption, hashtags and category when posting takes it in, always
     waits for your OK in the queue (posting/store.py), and counts as something left to post, so Clean up
@@ -642,7 +642,8 @@ def list_edit(folder: Path, video: Path) -> str:
     "new" when it was added, "listed" when a video of that name was listed already (rendered again over the
     last edit), "" when it isn't listed: not a creation's folder, or the video isn't right in it (posting
     looks a file up in the clips.json of the file's own folder, so a record for one anywhere else would
-    promise a label and a hold that never come)."""
+    promise a label and a hold that never come). With `write` off nothing is added: the answer says what
+    would happen."""
     index = folder / "clips.json"
     try:
         data = json.loads(index.read_text(encoding="utf-8"))
@@ -659,6 +660,8 @@ def list_edit(folder: Path, video: Path) -> str:
         return ""
     if any(isinstance(c, dict) and c.get("file") == name for c in clips):
         return "listed"
+    if not write:
+        return "new"
     first = originals[0]
     clips.append({**first, "rank": max((int(c.get("rank") or 0) for c in clips if isinstance(c, dict)), default=0) + 1,
                   "file": name, "title": f"{first.get('title') or video.stem} (edit)", "edit_of": first["file"]})
@@ -669,6 +672,32 @@ def list_edit(folder: Path, video: Path) -> str:
     except OSError:
         return ""
     return "new"
+
+
+def _unlisted(folder: Path, dest: Path) -> str:
+    """What to say about an edit saved somewhere other than its timeline's folder, from the facts posting's
+    intake goes by (posting/store.py): an unlisted video in an AI-generated video's folder, or one folder
+    inside it, is left alone; anywhere else a watched folder takes it for an ordinary video."""
+    from ..posting.clipsjson import read_folder_index
+
+    def made_here(d: Path) -> bool:
+        try:
+            return any(m.get("ai_generated") for m in read_folder_index(d).values())
+        except Exception:  # noqa: BLE001 - an index that can't be read lists nothing
+            return False
+
+    home = dest.resolve().parent
+    if made_here(home) or made_here(home.parent):
+        said = (f"{dest.name} was saved in a folder of its own, so it isn't listed with the video. Posting leaves "
+                "an unlisted video there alone: it won't be queued.")
+    else:
+        said = (f"{dest.name} was saved outside its video's folder, so it isn't listed with the video. A folder "
+                "posting watches would take it in as an ordinary video: no AI-generated label and no wait for "
+                "your OK.")
+    if list_edit(folder, folder / dest.name, write=False):
+        # Only where leaving the place out would do it: a video the Studio or the Creator made.
+        said += " Leave out the place to save it and the edit is listed, labelled and held."
+    return said
 
 
 def render_timeline(path: str | Path, out: str | Path | None = None, *, settings=None, log=None, progress=None,
@@ -721,10 +750,11 @@ def render_timeline(path: str | Path, out: str | Path | None = None, *, settings
             "queue labelled AI-generated and waits there for your OK. Remove the one you don't want posted.")
     elif listed:
         log(f"{dest.name} replaces the edit made before. If that one is still in the queue, this is now what it "
-            "posts (after your OK). If you removed it from the queue, or it has posted, posting won't pick this "
-            "one up by itself: add it in the Queue tab.")
+            "posts (after your OK). If you took it out of the queue, or it has already posted, posting won't "
+            "take this one in under the same name (and Clean up clears a posted video's file, whichever "
+            "render it is). To post this one, render it under a new name: "
+            "change \"title\" in timeline.json and render again, or on the command line add "
+            f"--out \"{folder / 'a new name.mp4'}\".")
     elif out and dest.resolve().parent != folder.resolve():
-        log(f"{dest.name} was saved outside its video's folder, so it isn't listed with the video. A folder "
-            "posting watches would take it in as an ordinary video: no AI-generated label and no wait for your "
-            "OK. Leave out the place to save it and the edit is listed, labelled and held.")
+        log(_unlisted(folder, dest))
     return report

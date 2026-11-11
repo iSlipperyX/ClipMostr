@@ -341,7 +341,7 @@ def test_the_subscribers_part_is_cut_before_any_reader_sees_the_page():
     for name, _ in S.EXTRACTORS:
         text, _how = S.extract(marked, URL, name)
         assert "bioacoustician" not in text and len(text.split()) < 80, name
-    with pytest.raises(S.ScrapeError):  # what's left isn't an article
+    with pytest.raises(S.ScrapeError, match="subscribers only"):  # what's left isn't an article, and why is said
         S.article_from(marked, URL)
     # A free opening and a marked rest: only the opening is read.
     teaser = page(PARAS[:1], extra=f'<div class="article-rest subscriber-only"><div>{gated}</div></div><p>Free footer '
@@ -357,6 +357,47 @@ def test_the_subscribers_part_is_cut_before_any_reader_sees_the_page():
     assert S.ungated("<body class='paywall-active'><p>keep</p></body>") == "<body class='paywall-active'><p>keep</p></body>"
     plain = page(PARAS)
     assert S.ungated(plain) is plain  # an ordinary page isn't touched
+
+
+def test_a_mark_never_takes_a_free_article_with_it():
+    """Pages leave end tags out (<li>, <p>): a marked menu item nothing closed took the rest of the page with
+    it. And a blog's own labels look like marks: a free story about paywalls is tagged "tag-paywall"."""
+    body = "".join(f"<p>{p}</p>" for p in PARAS)
+    menu = ('<nav><ul><li><a href=/>Home</a><li class="menu-item members-only"><a href=/members>Members</a>'
+            f'<li><a href=/about>About</a></ul></nav><article>{body}</article>')
+    assert S.ungated(menu) == f'<nav><ul><li><a href=/>Home</a><li><a href=/about>About</a></ul></nav><article>{body}</article>'
+    hint = f'<div class=top><p class=paywall-hint>Subscribe for more<p>Free today</div><article>{body}</article>'
+    assert S.ungated(hint) == f'<div class=top><p>Free today</div><article>{body}</article>'
+    assert S.ungated("<div><span class=paywall>no</div><p>keep") == "<div></div><p>keep"  # its parent's end ends it
+    assert S.ungated("<table><tr><td class=regwall>no<td>yes</table>") == "<table><tr><td>yes</table>"
+    assert S.ungated("<table><tr class=regwall><td>no<p>no<tr><td>yes</table>") == "<table><tr><td>yes</table>"
+    assert S.ungated("<ul><li class=paywall><p>no<li>yes</ul>") == "<ul><li>yes</ul>"  # through the open <p>
+    assert S.ungated("<dl><dt class=paywall>no<dd>yes</dl><p>keep") == "<dl><dd>yes</dl><p>keep"
+    # A list inside the marked item doesn't end it: its own items do nothing to the one they sit in.
+    assert S.ungated("<ul><li class=paywall>no<ul><li>no<li>no</ul>no<li>yes</ul>") == "<ul><li>yes</ul>"
+    assert S.ungated("<div class=paywall><p>no<p>no<div>no</div>no</div><p>yes") == "<p>yes"
+    # A misplaced </a> doesn't end the block opened inside the link, so nothing after it slips out.
+    assert S.ungated("<a href=x><div class=paywall>no</a>no</div><p>yes") == "<a href=x><p>yes"
+    assert S.ungated("<p>yes <span class=paywall>no</p>yes") == "<p>yes </p>yes"
+    for doc in (menu, hint):
+        for name, _ in S.EXTRACTORS:
+            text, _how = S.extract(f"<html><body>{doc}</body></html>", URL, name)
+            assert not text or "bioacoustician" in text or len(text.split()) > 150, name
+        assert len(S.article_from(f"<html><head><title>T</title></head><body>{doc}</body></html>", URL).text.split()) > 150
+    # Labels and their opposites aren't marks; the real thing beside them still is.
+    for free in ('class="post type-post category-media tag-paywall"', 'class="story category-piano-lessons"',
+                 'class="article no-paywall"', 'class="article paywall-free"', 'id="content" class="paywall_off"',
+                 'id="not_paywalled" class="story"'):
+        doc = f"<html><head><title>T</title></head><body><article {free}>{body}</article></body></html>"
+        assert S.ungated(doc) == doc, free
+        assert len(S.article_from(doc, URL).text.split()) > 150, free
+    for gated in ('class="tag-news paywall"', 'class="post premium-content"', 'id="piano-inline"',
+                  'class="content subscriber_only"', 'class="post category-members-only"',
+                  'class="post-paywall"', 'class="paywall-free-trial"', 'class="no-paywall paywall-open"',
+                  'class="tag-subscribers-only"', 'role="paywall"'):
+        doc = f"<html><body><article><p>{PARAS[0]}</p><div {gated}>{body}</div></article></body></html>"
+        assert "bioacoustician" not in S.ungated(doc), gated
+        assert "bioacoustician" not in S.builtin_text(doc), gated
 
 
 def test_robots_is_asked_again_wherever_a_redirect_leads():

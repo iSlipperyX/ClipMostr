@@ -470,7 +470,9 @@ class _Builder:
                 self.parts.append(f"[{last}][{lab}]xfade=transition={name}:duration={_t(2 * seg.lead)}:"
                                   f"offset={_t(seg.start - seg.lead)}[{out}]")
             else:
-                spare = ",trim=start_frame=1,setpts=PTS-STARTPTS" if doubled and i == 0 else ""
+                # (After setpts the stream ends like every other one: ffmpeg 7 leaves the frame rate unsaid
+                # there, and a transition further on refuses a stream without one.)
+                spare = ",trim=start_frame=1,setpts=PTS-STARTPTS," + ",".join(self.same) if doubled and i == 0 else ""
                 self.parts.append(f"[{last}][{lab}]concat=n=2:v=1:a=0{spare}[{out}]")
             last = out
         ends: list[str] = []

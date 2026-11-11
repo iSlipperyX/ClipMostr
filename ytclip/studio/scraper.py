@@ -394,7 +394,28 @@ _NOISE = re.compile(r"(?i)\b(?:cookie|newsletter|sign up|subscribe|all rights re
                     r"share this|follow us|read more:|related:|click here|terms of (?:use|service)|privacy policy)\b")
 _BOILER = re.compile(r"(?i)comment|sidebar|footer|related|promo|newsletter|share|social|cookie|banner|popup|modal|"
                      r"breadcrumb|advert|sponsor|subscribe|paywall|menu|\bnav")
-_GATED = re.compile(r"(?i)paywall|premium[-_ ]?content|subscriber[-_ ]?only|members?[-_ ]?only|piano-|regwall")
+_GATED = re.compile(r"(?i)paywall|premium[-_ ]?content|subscribers?[-_ ]?only|members?[-_ ]?only|piano-|regwall")
+# Class names that only look like a mark. A blog labels each post with its tags and categories, so a free story
+# about paywalls carries "tag-paywall" and a music site "category-piano-lessons": on a label only the words that
+# say who may read count ("category-members-only"). And some names say the opposite ("no-paywall").
+_LABEL = re.compile(r"(?i)^(?:tags?|category|categories|cat|term|topic)[-_]")
+_LABEL_GATED = re.compile(r"(?i)premium[-_]?content|subscribers?[-_]?only|members?[-_]?only")
+_UNGATED = re.compile(r"(?i)^(?:no|non|not|without)[-_]?(?:paywall|regwall)|"
+                      r"(?:paywall|regwall)[-_]?(?:off|free|false|disabled|none|exempt|inactive)$")
+
+
+def _gated(tag: str, a: dict) -> bool:
+    """Whether an element is marked as being for subscribers (its class, id or role says paywall,
+    subscriber-only, members-only...). Never the page's own <body> or <html>."""
+    if tag in ("body", "html"):
+        return False
+    names = str(a.get("class") or "").split() + [str(a.get(k)) for k in ("id", "role") if a.get(k)]
+    for name in names:
+        if _UNGATED.search(name):
+            continue
+        if (_LABEL_GATED if _LABEL.match(name) else _GATED).search(name):
+            return True
+    return False
 
 
 class _Reader(HTMLParser):
@@ -429,7 +450,7 @@ class _Reader(HTMLParser):
         skipped = tag in _SKIP or (self.strict and bool(_BOILER.search(marks))
                                    and tag not in ("body", "html", "main", "article"))
         # The part of a page marked as being for subscribers is never read, however the page is laid out.
-        skipped = skipped or (bool(_GATED.search(marks)) and tag not in ("body", "html"))
+        skipped = skipped or _gated(tag, a)
         hidden = "hidden" in a or "display:none" in (a.get("style") or "").replace(" ", "").lower() \
             or a.get("aria-hidden") == "true"
         skipped = skipped or hidden
@@ -537,38 +558,87 @@ def _read_blocks(doc: str, strict: bool) -> str:
     return "\n\n".join(out)
 
 
+# Elements whose end tag pages leave out, and the start tags that end them.
+_BLOCK_STARTS = {"p", "div", "ul", "ol", "dl", "table", "section", "article", "aside", "header", "footer", "nav",
+                 "main", "figure", "blockquote", "pre", "form", "hr", "h1", "h2", "h3", "h4", "h5", "h6",
+                 "address", "details", "fieldset", "figcaption", "menu"}
+_ROWS = {"tr", "tbody", "thead", "tfoot"}
+_ENDED_BY = {"li": {"li"}, "p": _BLOCK_STARTS | {"li", "dt", "dd"}, "dt": {"dt", "dd"}, "dd": {"dt", "dd"},
+             "td": {"td", "th"} | _ROWS, "th": {"td", "th"} | _ROWS, "tr": _ROWS, "tbody": _ROWS - {"tr"},
+             "thead": _ROWS - {"tr"}, "tfoot": _ROWS - {"tr"}, "option": {"option", "optgroup"},
+             "optgroup": {"optgroup"}}
+# What a start tag never reaches past when it looks for the element it ends: a new <li> ends the open <li> of
+# its own list, not the one a nested list sits in.
+_WALLS = {"ul", "ol", "dl", "table", "select", "section", "article", "aside", "nav", "header", "footer", "main",
+          "blockquote", "figure", "form", "fieldset", "details", "td", "th", "caption", "button", "object",
+          "template", "body", "html"}
+
+
+# Elements that sit inside a line of text. Their end tag never closes a block: in "<a><div>one</a>two</div>" a
+# browser keeps "two" in the <div>.
+_INLINE = {"a", "span", "b", "i", "em", "strong", "small", "u", "s", "font", "label", "code", "sup", "sub", "mark",
+           "time", "abbr", "cite", "q", "strike", "big", "tt", "nobr", "kbd", "var", "samp", "dfn", "bdi", "bdo"}
+
+
+def _ends(stack: list[str], tag: str) -> int:
+    """How far down the open elements a start tag reaches: the index of the lowest one it ends (everything
+    above goes with it), or len(stack) when it ends none."""
+    walls = {"table"} if tag in _ROWS or tag in ("td", "th") else _WALLS
+    cut = len(stack)
+    for i in range(len(stack) - 1, -1, -1):
+        if tag in _ENDED_BY.get(stack[i], ()):
+            cut = i  # and the one under it too, when the tag ends that as well (<tr> ends the cell, then the row)
+        elif cut < len(stack) or stack[i] in walls:
+            break
+    return cut
+
+
 class _Gates(HTMLParser):
-    """Where a page's subscriber-marked elements start and end, as (line, column) pairs."""
+    """Where a page's subscriber-marked elements start and end: (start, end, whole) with each a (line,
+    column) and `whole` saying whether the tag at `end` is the element's own end tag (and goes with it) or
+    the tag that ended it (and stays). `end` is None for one that nothing ever closes."""
 
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.spans: list[tuple[tuple[int, int], tuple[int, int] | None]] = []
-        self.inside = ""  # the tag of the marked element being passed over
-        self.depth = 0
+        self.spans: list[tuple[tuple[int, int], tuple[int, int] | None, bool]] = []
+        self.stack: list[str] = []  # the open elements
+        self.gate: int | None = None  # where in the stack the marked element being passed over is
         self.began = (0, 0)
 
+    def _end(self, whole: bool) -> None:
+        self.spans.append((self.began, self.getpos(), whole))
+        self.gate = None
+
     def handle_starttag(self, tag, attrs):
-        if self.inside:
-            self.depth += tag == self.inside
+        if tag in _VOID:
             return
-        if tag in _VOID or tag in ("body", "html"):
-            return
-        a = dict(attrs)
-        if _GATED.search(f"{a.get('class') or ''} {a.get('id') or ''} {a.get('role') or ''}"):
-            self.inside, self.depth, self.began = tag, 1, self.getpos()
+        # An element whose end tag was left out ends where its next sibling starts (<li> by <li>, <p> by a block).
+        cut = _ends(self.stack, tag)
+        if cut < len(self.stack):
+            del self.stack[cut:]
+            if self.gate is not None and self.gate >= cut:
+                self._end(False)
+        if self.gate is None and _gated(tag, dict(attrs)):
+            self.gate, self.began = len(self.stack), self.getpos()
+        self.stack.append(tag)
 
     def handle_endtag(self, tag):
-        if self.inside and tag == self.inside:
-            self.depth -= 1
-            if self.depth == 0:
-                self.spans.append((self.began, self.getpos()))
-                self.inside = ""
+        if tag in _VOID:
+            return
+        for i in range(len(self.stack) - 1, -1, -1):
+            if self.stack[i] == tag:  # closes back to its match, as pages that leave <p> and <li> open need
+                if tag in _INLINE and any(e not in _INLINE for e in self.stack[i + 1:]):
+                    break  # misplaced: a block opened since, and it stays open
+                if self.gate is not None and i <= self.gate:
+                    self._end(i == self.gate)  # its own end tag, or its parent's
+                del self.stack[i:]
+                break
 
     def close(self):
         super().close()
-        if self.inside:  # never closed: nothing after it is read
-            self.spans.append((self.began, None))
-            self.inside = ""
+        if self.gate is not None:  # nothing around it ever closes: nothing after it is read
+            self.spans.append((self.began, None, True))
+            self.gate = None
 
 
 def ungated(doc: str) -> str:
@@ -590,7 +660,7 @@ def ungated(doc: str) -> str:
         at = doc.find("\n", at + 1)
     offset = lambda pos: starts[pos[0] - 1] + pos[1]  # noqa: E731
     out, at = [], 0
-    for began, ended in gates.spans:
+    for began, ended, whole in gates.spans:
         a = offset(began)
         if a < at:
             continue
@@ -598,8 +668,10 @@ def ungated(doc: str) -> str:
         if ended is None:
             at = len(doc)
             break
-        close = doc.find(">", offset(ended))
-        at = len(doc) if close == -1 else close + 1
+        at = offset(ended)
+        if whole:
+            close = doc.find(">", at)
+            at = len(doc) if close == -1 else close + 1
     out.append(doc[at:])
     return "".join(out)
 
@@ -677,7 +749,9 @@ def article_from(doc: str, url: str, asked: str = "", only: str = "") -> Article
     if facts["paid"]:  # the page says so itself, whether or not its text happens to be in the HTML
         raise paid
     if words < MIN_WORDS:
-        if PAYWALL.search(web.clean(doc)[:20000]):
+        # Too little to retell, and either the page speaks of subscribing or a part marked as the
+        # subscribers' was left unread: say that, not "no article".
+        if PAYWALL.search(web.clean(doc)[:20000]) or ungated(doc) != doc:
             raise paid
         raise ScrapeError(f"No article text was found at {host} ({words} words). The page may be a video, a list of "
                           "links, or drawn by JavaScript. Paste its text as a prompt or script instead.")

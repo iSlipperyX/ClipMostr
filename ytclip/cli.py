@@ -1603,6 +1603,15 @@ def run_studio(argv: list[str]) -> int:
     p.add_argument("--schema", action="store_true", help="print the timeline's JSON Schema")
     p.add_argument("--check", action="store_true", help="what's ready on this PC: AI, voices, pictures, stock keys")
     args = p.parse_args(argv)
+    if args.storyboard_only:
+        # It writes a storyboard (to a file, often) and nothing else: with a choice that does something else
+        # the file would get that choice's text, or a video would be queued that nobody asked for.
+        other = next((flag for flag, on in (("--schedule", args.schedule), ("--timeline", args.timeline),
+                                            ("--check", args.check), ("--schema", args.schema)) if on), "")
+        if other:
+            Console(stderr=True).print(f"[red]✗ --storyboard-only writes a storyboard and nothing else; {other} "
+                                       "does something different. Give one or the other.[/]")
+            return 2
     if args.schema:
         console.print(_json.dumps(timeline_schema.JSON_SCHEMA, indent=2), markup=False, highlight=False)
         return 0
@@ -1682,7 +1691,7 @@ def run_studio(argv: list[str]) -> int:
             said.print(f"[red]✗ {escape(str(file))} can't be read as a {what}: {escape(why)}[/]")
             return 1
     if not (args.prompt.strip() or args.url.strip() or script or board is not None):
-        p.print_help()
+        p.print_help(sys.stderr if args.storyboard_only else None)
         return 2
     category = orchestrator.find_category(s, args.category) if args.category else None
     if args.category and category is None:

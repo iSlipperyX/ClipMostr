@@ -386,7 +386,12 @@ class Store:
 
         now = time.time() if now is None else now
         with self.lock:
-            known = {_key(i.path) for i in self.items.values()}
+            holders: dict[str, list[VideoItem]] = {}
+            for i in self.items.values():
+                holders.setdefault(_key(i.path), []).append(i)
+            known = set(holders)
+            # Paths whose every entry has posted and had its file cleared: a file there now is a new one.
+            cleared = {k for k, its in holders.items() if all(i.status == "posted" and i.cleaned_at for i in its)}
             added: list[VideoItem] = []
             files: list[Path] = []
             for p in paths:
@@ -400,12 +405,17 @@ class Store:
             index_cache: dict[Path, dict] = {}
             for f in files:
                 key = _key(f)
-                if key in known or (watched and key in self.ignored):
+                if (key in known and key not in cleared) or (watched and key in self.ignored):
                     continue
                 if f.parent not in index_cache:
                     index_cache[f.parent] = read_folder_index(f.parent)
                 meta = index_cache[f.parent].get(f.name)
                 if meta and meta.get("rejected"):
+                    continue
+                if key in known and not (meta and meta.get("edit_of")):
+                    # A name that posted before comes back only for a Studio edit rendered again (the one
+                    # that posted is on TikTok and its file is gone; this is another video, held for your
+                    # OK below). A clip exported twice under one name is the same clip: not posted twice.
                     continue
                 if watched and not meta:
                     # A video beside one the Creator or the Studio made (or in a folder inside that video's

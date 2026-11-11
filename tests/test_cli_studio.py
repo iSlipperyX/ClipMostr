@@ -213,7 +213,20 @@ def test_with_storyboard_only_a_warning_or_a_failure_never_lands_in_the_file(fak
     assert cli.main(["studio", "--storyboard-only", "--script", str(tmp_path / "nope.txt")]) == 1
     got = capsys.readouterr()
     assert got.out == "" and "can't be read as a script" in " ".join(got.err.split())
+    # Nothing to make: the help is for the screen, not the file.
+    assert cli.main(["studio", "--storyboard-only"]) == 2
+    got = capsys.readouterr()
+    assert got.out == "" and "usage: ytclip studio" in got.err
+    # With a choice that does something else, nothing is queued, rendered or printed into the file.
+    made = len(FakeStudio.made)
+    for other in (["--schedule"], ["--timeline", str(tmp_path)], ["--check"], ["--schema"]):
+        assert cli.main(["studio", "The angle", "--storyboard-only", *other]) == 2, other
+        got = capsys.readouterr()
+        assert got.out == "" and f"{other[0]} does something different" in " ".join(got.err.split()), other
+    assert len(FakeStudio.made) == made
     # Without the flag everything is where it was: on the screen's own stream.
+    assert cli.main(["studio"]) == 2
+    assert "usage: ytclip studio" in capsys.readouterr().out
     assert cli.main(["studio", "fail"]) == 1
     assert "asks programs not to read that page" in " ".join(capsys.readouterr().out.split())
 
