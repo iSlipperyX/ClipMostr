@@ -1,13 +1,18 @@
 """telegram.json: which phones the bot answers, and what it remembers between restarts.
 
 * the bot the token belongs to (its id and @name), so a new token's bot starts with no phones linked;
-* the linked chats: only these can use the bot, and only private chats with a person can be linked;
+* the linked chats: only these can use the bot, and only private chats with a person can be linked. Two
+  people at most share a bot (MAX_PEOPLE). The one linked first is its owner: only the owner invites the
+  second person and can remove them; either can leave;
 * the pairing code the window shows (Settings → Telegram → Link a phone), for ten minutes, and the wrong
   codes each chat sent (five, and it's ignored for an hour);
 * where the bot is in Telegram's list of updates (offset), so nothing is handled twice;
 * the videos it showed you (to mark their messages when they're OK'd or deleted somewhere else), the ones
   it only counted in a message (noted), when it last looked for new ones (seen_at), and what you asked for
-  (a video to make, a link to clip, a request), to send you when it's done.
+  (a video to make, a link to clip, a request), to send you when it's done;
+* which chats' menu button (left of the message box) opens the Mini App, and at which address (menus);
+* the critiques people wrote of a video, each with who wrote it and the video made again from it, and the
+  last things each person did (activity), which the Mini App shows with their names.
 
 The window and automation both change it, so every change reads the file, changes it and writes it under
 its lock (edit()). telegram-status.json is the bot's heartbeat for the window: whether it's running in
@@ -34,6 +39,9 @@ STRIKE_PAUSE = 3600.0
 ASKED_KEEP = 3 * 86400.0  # what you asked for is followed this long at most
 SHOWN_KEEP = 14 * 86400.0
 STATUS_FRESH = 90.0  # a heartbeat older than this means the bot isn't running
+MAX_PEOPLE = 2  # how many people can share one bot
+CRITIQUES_KEEP = 60 * 86400.0
+ACTIVITY_MAX = 80
 
 
 def path() -> Path:
@@ -46,7 +54,7 @@ def status_path() -> Path:
 
 def empty() -> dict:
     return {"version": 1, "bot": {}, "chats": [], "pairing": {}, "strikes": {}, "offset": 0, "shown": {},
-            "asked": {}, "told": {}, "noted": {}, "seen_at": 0.0}
+            "asked": {}, "told": {}, "noted": {}, "seen_at": 0.0, "critiques": {}, "activity": [], "menus": {}}
 
 
 def load(where: Path | None = None) -> dict:
@@ -102,9 +110,48 @@ def link(data: dict, chat: dict, now: float) -> dict:
     return entry
 
 
+def people(data: dict) -> list[dict]:
+    """The linked chats, the owner (linked first) first."""
+    return sorted(data.get("chats", []), key=lambda c: float(c.get("linked_at") or 0))
+
+
+def owner(data: dict) -> dict | None:
+    linked = people(data)
+    return linked[0] if linked else None
+
+
+def is_owner(data: dict, chat_id: int) -> bool:
+    first = owner(data)
+    return first is not None and first["id"] == chat_id
+
+
+def full(data: dict) -> bool:
+    return len(data.get("chats", [])) >= MAX_PEOPLE
+
+
+def first_name(data: dict, chat_id: int) -> str:
+    """What to call a linked person in a line about what they did: 'Justyn', '@justyn' or 'someone'."""
+    c = next((c for c in data.get("chats", []) if c["id"] == chat_id), None)
+    if c is None:
+        return "someone"
+    return str(c.get("name") or "").split(" ")[0] or (f"@{c['username']}" if c.get("username") else "someone")
+
+
+def trim_people(data: dict) -> list[dict]:
+    """Keep the two people linked first (a telegram.json from before the limit may hold more). Returns the
+    chats that were unlinked."""
+    linked = people(data)
+    extra = linked[MAX_PEOPLE:]
+    for c in extra:
+        unlink(data, c["id"])
+    return extra
+
+
 def unlink(data: dict, chat_id: int) -> bool:
     before = len(data["chats"])
     data["chats"] = [c for c in data["chats"] if c["id"] != chat_id]
+    if (data.get("pairing") or {}).get("by") == chat_id:
+        data["pairing"] = {}  # an invite they made goes with them
     for d in (data.get("asked") or {}).values():
         if isinstance(d, dict) and d.get("chat") == chat_id:
             d["chat"] = 0
@@ -118,17 +165,25 @@ def set_bot(data: dict, me: dict) -> bool:
     changed = bool(old) and old != me.get("id")
     data["bot"] = {"id": me.get("id"), "username": me.get("username") or "", "name": me.get("first_name") or ""}
     if changed:
-        data.update(chats=[], offset=0, shown={}, asked={}, strikes={}, pairing={}, noted={}, seen_at=0.0)
+        data.update(chats=[], offset=0, shown={}, asked={}, strikes={}, pairing={}, noted={}, seen_at=0.0,
+                    menus={})
     return changed
 
 
 # --- pairing -----------------------------------------------------------------------------------------
 
 
-def new_code(data: dict, now: float) -> str:
+def new_code(data: dict, now: float, by: int = 0) -> str:
+    """A fresh code. `by` is the linked chat that asked for it as an invite (0 = the window on the PC)."""
     code = "".join(secrets.choice(CODE_CHARS) for _ in range(CODE_LENGTH))
-    data["pairing"] = {"code": code, "until": now + CODE_LIFE}
+    data["pairing"] = {"code": code, "until": now + CODE_LIFE, "by": int(by)}
     return code
+
+
+def live_code(data: dict, now: float) -> str:
+    """The code that is up right now, if one is."""
+    pairing = data.get("pairing") or {}
+    return str(pairing.get("code") or "") if now <= float(pairing.get("until") or 0) else ""
 
 
 def clean_code(text: str) -> str:
@@ -184,6 +239,38 @@ def tidy(data: dict, now: float) -> None:
                        if isinstance(v, list) and len(v) == 2 and now < float(v[1] or 0)}
     for key in ("told", "noted"):
         data[key] = {k: v for k, v in data.get(key, {}).items() if isinstance(v, (int, float)) and now - v < SHOWN_KEEP}
+    data["critiques"] = {k: v for k, v in data.get("critiques", {}).items()
+                         if isinstance(v, dict) and now - float(v.get("at") or 0) < CRITIQUES_KEEP}
+    data["activity"] = [a for a in data.get("activity", []) if isinstance(a, dict)][-ACTIVITY_MAX:]
+
+
+# --- who did what ---------------------------------------------------------------------------------------
+
+
+def note_activity(data: dict, chat_id: int, what: str, title: str, now: float, item: str = "",
+                  text: str = "") -> dict:
+    """Remember that a linked person did something ("ok", "delete", "post_now", "critique", "make", "pause",
+    "resume", "invite", "join", "leave", "remove"), for the other one to see."""
+    entry = {"at": now, "by": int(chat_id), "name": first_name(data, chat_id), "what": what,
+             "title": " ".join(str(title or "").split())[:120], "item": item,
+             "text": " ".join(str(text or "").split())[:300]}
+    data["activity"] = [*data.get("activity", []), entry][-ACTIVITY_MAX:]
+    return entry
+
+
+def add_critique(data: dict, chat_id: int, item: str, title: str, text: str, job: str, now: float) -> dict:
+    cid = secrets.token_hex(5)
+    entry = {"id": cid, "item": item, "title": " ".join(str(title or "").split())[:120], "text": text,
+             "by": int(chat_id), "name": first_name(data, chat_id), "at": now, "job": job, "status": "queued",
+             "error": "", "fixed": ""}
+    data.setdefault("critiques", {})[cid] = entry
+    return entry
+
+
+def critiques_of(data: dict, item: str) -> list[dict]:
+    """What was said about a video (or about the video it was made again from), oldest first."""
+    found = [c for c in (data.get("critiques") or {}).values() if c.get("item") == item or c.get("fixed") == item]
+    return sorted(found, key=lambda c: float(c.get("at") or 0))
 
 
 # --- the heartbeat ------------------------------------------------------------------------------------

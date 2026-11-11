@@ -461,18 +461,27 @@ class _Builder:
         # (One frame is too short to carry a transition, so that join is always end to end.)
         doubled = len(segs) > 1 and round(segs[0].length * self.fps) == 1 and segs[1].lead <= 0
         if doubled:
+            # (Two more and then a count of two, each a frame after the last: a picture placed over the
+            # background ends on the time it started, and one frame cloned there is stamped with that time.)
             last = self.label("two")
-            self.parts.append(f"[{labels[0]}]tpad=stop=1:stop_mode=clone[{last}]")
+            self.parts.append(f"[{labels[0]}]tpad=stop=2:stop_mode=clone,fps={self.fps},trim=end_frame=2[{last}]")
         for i, (seg, lab) in enumerate(zip(segs[1:], labels[1:])):
             out = self.label("j")
             if seg.lead > 0:
                 name = M.TRANSITION_XFADE.get(seg.transition.type, "fade")
+                # The transition starts on the first frame at or after `offset`, so the time is written a
+                # millisecond early: 26/30 s written to four places is 0.8667, just after its own frame,
+                # and the transition, the clip and every cut after it came a frame late (one in three did).
                 self.parts.append(f"[{last}][{lab}]xfade=transition={name}:duration={_t(2 * seg.lead)}:"
-                                  f"offset={_t(seg.start - seg.lead)}[{out}]")
+                                  f"offset={_t(seg.start - seg.lead - 0.001)}[{out}]")
             else:
                 # (After setpts the stream ends like every other one: ffmpeg 7 leaves the frame rate unsaid
-                # there, and a transition further on refuses a stream without one.)
-                spare = ",trim=start_frame=1,setpts=PTS-STARTPTS," + ",".join(self.same) if doubled and i == 0 else ""
+                # there, and a transition further on refuses a stream without one. And it ends on a count of
+                # frames with one to spare: ffmpeg 7.1's fps filter drops the last frame of a clip placed
+                # over the background, which made this join a frame short and every cut after it early.)
+                spare = (",tpad=stop=1:stop_mode=clone,trim=start_frame=1,setpts=PTS-STARTPTS,"
+                         f"fps={self.fps},trim=end_frame={1 + round(seg.length * self.fps)},"
+                         + ",".join(self.same[1:])) if doubled and i == 0 else ""
                 self.parts.append(f"[{last}][{lab}]concat=n=2:v=1:a=0{spare}[{out}]")
             last = out
         ends: list[str] = []

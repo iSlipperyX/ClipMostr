@@ -73,6 +73,10 @@ class CreateRequest:
     storyboard: dict | None = None  # an (edited) storyboard to make as it is
     post: bool = True  # into the Automation folder (queued for posting); False = Output/Created
     search: str = ""  # what to look up online ("" = from the prompt); the schedule's trending topics set it
+    # A video made again from what someone said about it (creator/critique.py): `storyboard` is the one it was
+    # made from, the AI rewrites it to answer `critique`, and `revises` is that video's title.
+    critique: str = ""
+    revises: str = ""
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -188,6 +192,15 @@ class VideoCreatorOrchestrator:
         report("Writing the script", None)
         if req.storyboard:
             given = director.Storyboard.from_json(req.storyboard)
+            if req.critique.strip():
+                from . import critique
+
+                report("Writing the script: answering the critique", None)
+                try:
+                    given = critique.revise(self.s, given, req.critique, log=self.log, check=self.check)
+                except critique.CritiqueError as exc:
+                    raise CreatorError(str(exc)) from exc
+                self.revision = {"revises": req.revises or given.title, "critique": critique.clean(req.critique)}
             board = director.normalise(given, director.get_style(style), hook_words=40,
                                        max_scenes=self.scene_limit(2 * len(given.scenes) + 1))
             board.written_by = board.written_by or "you (edited)"
@@ -519,7 +532,7 @@ class VideoCreatorOrchestrator:
               "to_check": sum(1 for c in board.factcheck.get("claims", [])
                               if c.get("verdict") != "supported" and not c.get("changed"))}
              if board.factcheck else {}),
-        } | self.creator_extra()
+        } | self.creator_extra() | getattr(self, "revision", {})
         video_meta = Video(id=cid, title=board.title, channel="ClipMonster Video Creator", upload_date=time.strftime("%Y%m%d"),
                            duration=checks.get("length") or duration, url="", path=folder / name)
         details = [{"qc": checks, "ai_generated": True, "caption": board.caption, "hashtags": board.hashtags,

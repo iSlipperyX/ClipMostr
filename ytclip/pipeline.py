@@ -1369,6 +1369,13 @@ class Runner:
         except Exception as exc:  # noqa: BLE001 - automation runs without it
             self.log(f"⚠ The Telegram bot couldn't start: {type(exc).__name__}: {exc}")
             return None
+        try:  # the bot as an app inside Telegram (telegram/webapp.py): it waits quietly until it's wanted
+            from .telegram.webapp import WebApp
+
+            bot.webapp = WebApp(bot)
+            bot.webapp.start()
+        except Exception as exc:  # noqa: BLE001 - the bot works from the chat without it
+            self.log(f"⚠ The Telegram Mini App couldn't start: {type(exc).__name__}: {exc}")
         return bot
 
     def start_sports(self):

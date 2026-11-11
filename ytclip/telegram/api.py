@@ -129,11 +129,23 @@ def multipart(fields: dict, files: dict[str, Path]) -> tuple[bytes, str]:
     return bytes(out), f"multipart/form-data; boundary={boundary}"
 
 
+APP = "app:"  # (label, APP + "https://…") is a button that opens that address as a Mini App inside Telegram
+
+
+def app_button(label: str, url: str) -> tuple[str, str]:
+    return label, APP + url
+
+
 def inline(rows: list[list[tuple[str, str]]]) -> dict:
-    """Buttons under a message: rows of (label, callback data), or (label, "https://…") for a link."""
-    return {"inline_keyboard": [[{"text": label, "url": data} if data.startswith(("https://", "http://"))
-                                 else {"text": label, "callback_data": data} for label, data in row]
-                                for row in rows if row]}
+    """Buttons under a message: rows of (label, callback data), (label, "https://…") for a link, or
+    app_button(label, "https://…") for one that opens a Mini App."""
+    def button(label: str, data: str) -> dict:
+        if data.startswith(APP):
+            return {"text": label, "web_app": {"url": data[len(APP):]}}
+        if data.startswith(("https://", "http://")):
+            return {"text": label, "url": data}
+        return {"text": label, "callback_data": data}
+    return {"inline_keyboard": [[button(label, data) for label, data in row] for row in rows if row]}
 
 
 def keyboard(rows: list[list[str]]) -> dict:
@@ -191,9 +203,11 @@ class Api:
                                        "allowed_updates": ["message", "callback_query"]}, timeout=timeout + 15)
         return got if isinstance(got, list) else []
 
-    def send(self, chat: int, text: str, buttons: dict | None = None, preview: bool = False) -> dict:
+    def send(self, chat: int, text: str, buttons: dict | None = None, preview: bool = False,
+             quiet: bool = False) -> dict:
+        """`quiet`: it arrives without a sound (what the other person did isn't worth a buzz)."""
         return self.call("sendMessage", {"chat_id": chat, "text": clip_text(text, TEXT_LIMIT), "parse_mode": "HTML",
-                                         "reply_markup": buttons,
+                                         "reply_markup": buttons, "disable_notification": True if quiet else None,
                                          "link_preview_options": None if preview else {"is_disabled": True}})
 
     def edit(self, chat: int, message: int, text: str, buttons: dict | None = None) -> dict | None:
@@ -242,6 +256,12 @@ class Api:
 
     def set_commands(self, commands: list[tuple[str, str]]) -> None:
         self.call("setMyCommands", {"commands": [{"command": c, "description": d} for c, d in commands]})
+
+    def set_menu_button(self, chat: int, url: str = "", text: str = "ClipMonster") -> None:
+        """The button left of a chat's message box: it opens the Mini App at `url`, or (no url) lists the
+        commands, as it does for any bot."""
+        button = {"type": "web_app", "text": text, "web_app": {"url": url}} if url else {"type": "commands"}
+        self.call("setChatMenuButton", {"chat_id": chat, "menu_button": button})
 
     def delete(self, chat: int, message: int) -> None:
         try:

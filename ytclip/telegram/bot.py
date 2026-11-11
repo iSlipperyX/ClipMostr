@@ -9,7 +9,16 @@ on with a bot token, and only answers the phones linked to it (state.py). From t
 * ask for things: a Video Creator video (/make an idea), clips of a YouTube link (/clip, or just send the
   link), or a request for clips (/request 10 30-45s Gaming funny reactions). Each is sent back to you
   when it's done;
-* pause and resume automation, and read the past week's report (/week).
+* pause and resume automation, and read the past week's report (/week);
+* say what's wrong with a video the Creator or the Studio made, and the AI makes it again with that fixed
+  (fix, creator/critique.py);
+* ask for a game's best plays as clips and a recap reel (/sports NBA Lakers vs Celtics): automation looks for
+  the game, finds its plays and makes them, with nobody picking along the way (sportsdesk/desk.py: an order);
+* share the bot with one other person (/people): two people at most, each told what the other did.
+
+With Settings → Telegram → Mini App on, all of that is an app inside Telegram instead (webapp.py): the button
+left of the message box opens it, the bot's messages carry a button into it, and videos are watched there
+rather than sent into the chat.
 
 And it tells you, as Settings → Telegram → Send me says: a video that waits for your OK (with the video),
 new clips and videos queued to post, each post as it goes up, milestones, problems that need you (a TikTok
@@ -36,7 +45,7 @@ from typing import Callable
 
 from . import api as tg
 from . import preview, state
-from .api import ApiError, NetworkError, inline
+from .api import ApiError, NetworkError, app_button, inline
 
 POLL_TIMEOUT = 25  # seconds a long poll waits for a message
 CHECK_EVERY = 15.0  # seconds between looks for videos to show and asks that are done
@@ -65,10 +74,13 @@ COMMANDS = [
     ("clip", "Clip a YouTube video"),
     ("request", "Ask for clips: /request 10 30-45s Gaming"),
     ("requests", "Your requests and how far along they are"),
+    ("sports", "A game's best plays and a recap reel: /sports NBA Lakers vs Celtics"),
     ("pause", "Pause automation"),
     ("resume", "Carry on"),
     ("week", "The past week on TikTok"),
     ("dashboard", "A status message that keeps itself up to date"),
+    ("app", "Open ClipMonster as an app in Telegram"),
+    ("people", "Who shares this bot: invite, remove, leave"),
     ("help", "What the bot can do"),
 ]
 
@@ -112,19 +124,41 @@ def pc_name() -> str:
         return "this PC"
 
 
-def help_html() -> str:
+class Refused(Exception):
+    """Why something a person asked for isn't done, in words for them. `status` is the Mini App's HTTP answer."""
+
+    def __init__(self, message: str, status: int = 409):
+        super().__init__(message)
+        self.status = status
+
+
+B_APP = "📱 Open ClipMonster"
+
+
+def help_html(app: bool = False) -> str:
+    if app:
+        return (f"<b>ClipMonster on {esc(pc_name())}</b>\n\n"
+                "Everything is in the app: watch the videos waiting to post, OK or delete them, say what's wrong "
+                "with one so the AI makes it again, ask for new ones (a video about an idea, or a game's best "
+                "plays and a recap reel), and see who did what. Open it with the "
+                "<b>ClipMonster</b> button left of the message box, or the button below.\n\n"
+                "I'll still message you here when a video waits for your OK, when something you asked for is "
+                "ready, and when something needs you. /people is who shares this bot.")
     return (f"<b>ClipMonster on {esc(pc_name())}</b>\n\n"
             f"{B_VIDEOS}: watch what's waiting to post, OK it, post it now or delete it from the PC\n"
             f"{B_MAKE}: /make the real story of the Bermuda Triangle\n"
             f"{B_CLIP}: send a YouTube link and pick its category\n"
             f"{B_REQUESTS}: /request 10 30-45s Gaming funny reactions only\n"
-            f"{B_STATUS}, {B_PAUSE}, {B_WEEK}\n\n"
+            f"{B_STATUS}, {B_PAUSE}, {B_WEEK}\n"
+            "🛠 Under a video the AI made: say what's wrong with it, and it's made again\n"
+            "🏆 /sports NBA Lakers vs Celtics: the game's best plays as clips, and a recap reel\n"
+            "👥 /people: share this bot with one other person\n\n"
             "I'll message you when a video waits for your OK, when something you asked for is ready, and when "
             "something needs you. What I send is set in ClipMonster → Settings → Telegram.")
 
 
-def welcome_html() -> str:
-    return f"✅ <b>Linked.</b> This chat now runs ClipMonster on {esc(pc_name())}.\n\n" + help_html()
+def welcome_html(app: bool = False) -> str:
+    return f"✅ <b>Linked.</b> This chat now runs ClipMonster on {esc(pc_name())}.\n\n" + help_html(app)
 
 
 def unlinked_html() -> str:
@@ -137,22 +171,53 @@ STRANGER_REPLIES = {
              "new each time).",
     "expired": "That code has run out. Press <b>Link a phone</b> in ClipMonster again for a new one.",
     "none": unlinked_html(),
+    "full": "Two people already share this ClipMonster bot, which is as many as it takes. One of them has to "
+            "leave (or be removed, in /people) before someone else can join.",
 }
+
+# What the other person is told when one of the two does something: {name} did it, {title} is what to
+ACTIVITY = {
+    "ok": "✅ <b>{name}</b> OK'd “{title}” to post.",
+    "delete": "🗑 <b>{name}</b> deleted “{title}”.",
+    "post_now": "🚀 <b>{name}</b> is posting “{title}” now.",
+    "retry": "🔁 <b>{name}</b> queued “{title}” to post again.",
+    "critique": "🛠 <b>{name}</b> asked for “{title}” to be made again:\n<i>“{text}”</i>",
+    "make": "✨ <b>{name}</b> asked for a video about “{title}”.",
+    "clip": "✂️ <b>{name}</b> asked to clip {title}.",
+    "request": "📋 <b>{name}</b> asked for {title}.",
+    "sports": "🏆 <b>{name}</b> asked for sports highlights: {title}.",
+    "cancel": "✖ <b>{name}</b> cancelled the request for {title}.",
+    "pause": "⏸ <b>{name}</b> paused automation.",
+    "resume": "▶ <b>{name}</b> resumed automation.",
+    "join": "👋 <b>{name}</b> now shares this bot with you. You both see every video, and I'll tell each of "
+            "you what the other did.",
+    "leave": "👋 <b>{name}</b> left: they can't use this bot any more.",
+    "remove": "👋 <b>{name}</b> removed {title} from this bot.",
+}
+
+
+def activity_html(entry: dict) -> str:
+    line = ACTIVITY.get(entry.get("what") or "", "")
+    return line.format(name=esc(entry.get("name") or "Someone"), title=esc(trim(entry.get("title") or "", 100)),
+                       text=esc(trim(entry.get("text") or "", 300))) if line else ""
 
 
 def stranger(data: dict, chat: dict, text: str, now: float) -> str:
     """A message from a chat that isn't linked, tried as the pairing code. What to answer: "linked", "wrong",
-    "expired", "none" (how to link), "quiet" (told how to link a moment ago) or "blocked" (too many wrong
-    codes: nothing). Links the chat when the code is right."""
+    "expired", "none" (how to link), "full" (two people share the bot already), "quiet" (told a moment ago) or
+    "blocked" (too many wrong codes: nothing). Links the chat when the code is right."""
     chat_id = int(chat["id"])
     if not text:
         return "quiet"
-    said = state.try_code(data, chat_id, text, now) if state.looks_like_code(text) else "none"
+    if state.looks_like_code(text) and state.full(data):
+        said = "full"  # the code isn't tried (or used up), and no wrong one is counted
+    else:
+        said = state.try_code(data, chat_id, text, now) if state.looks_like_code(text) else "none"
     if said == "linked":
         state.link(data, chat, now)
         return said
     told = float(data["told"].get(str(chat_id)) or 0)
-    if said == "none" and now - told < NO_ANSWER_EVERY:
+    if said in ("none", "full") and now - told < NO_ANSWER_EVERY:
         return "quiet"
     if said in STRANGER_REPLIES:
         data["told"][str(chat_id)] = now
@@ -166,6 +231,65 @@ def split_command(text: str) -> tuple[str, str]:
         return "", t
     head, _, rest = t.partition(" ")
     return head[1:].split("@", 1)[0].lower(), rest.strip()
+
+
+SPORT_WORDS = {"hoops": "basketball", "ice hockey": "hockey", "mma": "combat", "fights": "combat",
+               "racing": "motorsport", "american football": "football"}
+LEAGUE_WORDS = {"f1": ("Formula 1", "motorsport"), "epl": ("Premier League", "soccer"),
+                "ucl": ("Champions League", "soccer"), "laliga": ("La Liga", "soccer")}
+SPORTS_FILLER = re.compile(r"\b(?:highlights?|best|top|of|the|and|a|an|from|for|with|only|just|please|games?|"
+                           r"match(?:es)?|fights?|races?|clips?|plays?|reels?|recaps?|montages?|both|newest|latest|"
+                           r"last|this|week|month|today|tonight|night|yesterday|me|make|get|want|i)\b", re.I)
+SPORTS_HELP = ("Say the game like <i>NBA Lakers vs Celtics</i>, <i>Premier League 2 games, reel only</i> or "
+               "<i>UFC 3 clips</i>: the league or sport, the teams if you have them, and what you'd like.")
+
+
+def parse_sports(text: str) -> dict:
+    """'NBA Lakers vs Celtics 3 clips' → what sportsdesk's Desk.order takes: {sport, league, teams, since, want,
+    games, plays}. ValueError (in words for the person) when it names no sport, league or team."""
+    from .. import sports
+    from ..sportsdesk import games as G
+
+    rest = " " + " ".join(str(text or "").replace("’", "'").split()) + " "
+    out: dict = {"want": "both"}
+
+    def take(pattern: str) -> re.Match | None:
+        nonlocal rest
+        m = re.search(pattern, rest, re.I)
+        if m:
+            rest = rest[:m.start()] + " " + rest[m.end():]
+        return m
+
+    for sport_id, names in G.LEAGUES.items():
+        for name in sorted(names, key=len, reverse=True):
+            if "league" not in out and take(rf"(?<![\w-]){re.escape(name)}(?![\w-])"):
+                out["league"], out["sport"] = name, sport_id
+    for word, (name, sport_id) in LEAGUE_WORDS.items():
+        if "league" not in out and take(rf"(?<![\w-]){re.escape(word)}(?![\w-])"):
+            out["league"], out["sport"] = name, sport_id
+    words = {sp.id: sp.id for sp in sports.SPORTS.values() if sp.id != "any"} | SPORT_WORDS
+    for word in sorted(words, key=len, reverse=True):
+        if take(rf"(?<![\w-]){re.escape(word)}(?![\w-])"):
+            out.setdefault("sport", words[word])
+    m = take(r"\b(\d{1,2})\s*(?:clips?|plays?)\b")
+    if m:
+        out["plays"] = int(m.group(1))
+    m = take(r"\b(\d{1,2})\s*(?:games?|match(?:es)?|fights?|races?)\b")
+    if m:
+        out["games"] = int(m.group(1))
+    low = rest.lower()
+    reel = bool(re.search(r"\b(?:reels?|recaps?|montages?)\b", low))
+    clips = "plays" in out or bool(re.search(r"\b(?:clips?|plays?)\b", low)) or (reel and "highlight" in low)
+    out["want"] = "reel" if reel and not clips else "clips" if clips and not reel else "both"
+    out["since"] = ("3days" if re.search(r"\b(?:today|tonight|last night|yesterday)\b", low) else
+                    "month" if re.search(r"\bmonth\b", low) else "week")
+    teams = re.sub(r"\s+(?:vs?\.?|versus|at|@)\s+", " , ", " " + SPORTS_FILLER.sub(" ", rest) + " ", flags=re.I)
+    teams = ", ".join(t for t in (" ".join(x.split()).strip(" .!?:-") for x in re.split(r"[,;]+", teams)) if t)
+    if teams:
+        out["teams"] = teams
+    if not (out.get("sport") or out.get("league") or out.get("teams")):
+        raise ValueError("Which game? " + SPORTS_HELP)
+    return out
 
 
 def parse_request(text: str, cats: list) -> dict:
@@ -237,6 +361,15 @@ class Bot:
         self._last = {"check": 0.0, "status": 0.0, "prune": 0.0, "dashboard": 0.0}
         self._conflict_said = False
         self._retry_at, self._retry_wait = 0.0, 15.0
+        # The Mini App (webapp.py tells the bot its public address, or that it has none)
+        self.app_url = ""
+        self.app_error = ""
+        self.app_known = False  # whether webapp.py has said yet: until then the chats' menu buttons are left alone
+        self.fixing: dict[int, str] = {}  # chat -> the video whose critique it's about to send
+        self.webapp = None  # the Mini App's server, when automation runs one (pipeline.start_telegram)
+        self._menus_at = 0.0
+        self._desk = None  # the Sports section's state (sportsdesk/desk.py), opened when it's first asked of
+        self._fix_lock = threading.Lock()  # one critique at a time: the chat and the app can both send one
 
     # --- running ---------------------------------------------------------------------------------------
 
@@ -251,8 +384,22 @@ class Bot:
                 self._uploader = t
 
     def stop(self, timeout: float = 5.0) -> None:
+        if self.webapp is not None:
+            try:
+                self.webapp.stop()
+                if self.app_url:  # its address goes with it: the chats' app buttons go back to the plain menu
+                    self.app_url, self._menus_at = "", 0.0
+                    self.sync_menus()
+            except Exception:  # noqa: BLE001 - the bot still stops
+                pass
         self.stop_event.set()
         self.wake.set()
+        if self._desk is not None:
+            try:
+                self._desk.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._desk = None
         for t in self._threads:
             t.join(timeout)
         self._threads = []
@@ -304,6 +451,10 @@ class Bot:
             if state.set_bot(data, me):
                 self.log("The token is for a different bot than before: link your phone again (Settings → "
                          "Telegram).")
+            extra = state.trim_people(data)
+        for c in extra:
+            self.log(f"Two people at most share the bot now: {state.chat_name(c)} was unlinked (the two linked "
+                     "first stay).")
         self.me, self.api, self.error = me, api, ""
         try:
             api.set_commands(COMMANDS)
@@ -393,6 +544,7 @@ class Bot:
             if now - self._last["dashboard"] >= DASHBOARD_EVERY:
                 self._last["dashboard"] = now
                 self.update_dashboards()
+            self.sync_menus()
         if now - self._last["prune"] >= PRUNE_EVERY:
             self._last["prune"] = now
             self.prune(now)
@@ -406,7 +558,8 @@ class Bot:
         import os
 
         state.write_status({"pid": os.getpid(), "at": now, "polling": self._polling if polling is None else polling,
-                            "bot": self.me.get("username", ""), "bot_id": self.me.get("id"), "error": self.error},
+                            "bot": self.me.get("username", ""), "bot_id": self.me.get("id"), "error": self.error,
+                            "app": self.app_url, "app_error": self.app_error, "app_on": self.webapp is not None},
                            self.status_file)
 
     # --- what others tell it ------------------------------------------------------------------------------
@@ -448,9 +601,9 @@ class Bot:
                 sent += 1
         return sent
 
-    def say(self, chat: int, text: str, buttons: dict | None = None) -> dict | None:
+    def say(self, chat: int, text: str, buttons: dict | None = None, quiet: bool = False) -> dict | None:
         try:
-            return self.api.send(chat, text, buttons)
+            return self.api.send(chat, text, buttons, quiet=quiet)
         except ApiError as exc:
             if exc.code == 403:
                 self._blocked(chat)
@@ -529,6 +682,8 @@ class Bot:
             cmd, arg = BUTTONS[text], ""
         if cmd:
             self.modes.pop(chat_id, None)
+            if cmd != "fix":
+                self.fixing.pop(chat_id, None)
         elif chat_id in self.modes:
             mode, until = self.modes.pop(chat_id)
             if now < until:
@@ -537,7 +692,8 @@ class Bot:
                    "videos": self.cmd_videos, "make": self.cmd_make, "clip": self.cmd_clip,
                    "request": self.cmd_request, "requests": self.cmd_requests, "pause": self.cmd_pause,
                    "resume": self.cmd_resume, "toggle": self.cmd_toggle, "week": self.cmd_week,
-                   "dashboard": self.cmd_dashboard}.get(cmd)
+                   "dashboard": self.cmd_dashboard, "app": self.cmd_app, "people": self.cmd_people,
+                   "fix": self.cmd_fix, "sports": self.cmd_sports}.get(cmd)
         try:
             if handler is not None:
                 handler(chat_id, arg)
@@ -562,9 +718,15 @@ class Bot:
         chat_id = int(chat["id"])
         with self.lock, state.edit(self.state_file) as data:
             said = stranger(data, chat, text, now)
+            if said == "linked" and self.app_url:
+                for c in data["chats"]:
+                    if c["id"] == chat_id:
+                        c["app_told"] = True  # the welcome has the button into the app already
         if said == "linked":
             self.log(f"Linked {state.chat_name(chat)}'s chat.")
-            self.say(chat_id, welcome_html(), tg.keyboard(MENU))
+            self.say(chat_id, welcome_html(bool(self.app_url)), self.menu())
+            self.did(chat_id, "join")
+            self.wake.set()  # its menu button
         elif said in STRANGER_REPLIES:
             self.say(chat_id, STRANGER_REPLIES[said])
 
@@ -586,7 +748,7 @@ class Bot:
                    "mk": self.press_make, "cl": self.press_clip, "rq": self.press_request, "idea": self.press_idea,
                    "x": self.press_nothing, "cancel": self.press_cancel, "CANCEL": self.press_cancelled,
                    "job": self.press_job, "week": self.press_week, "pin": self.press_pin,
-                   "reqs": self.press_requests}.get(kind)
+                   "reqs": self.press_requests, "fix": self.press_fix, "ppl": self.press_people}.get(kind)
         if handler is None:
             self.api.answer(q.get("id", ""), "That button is from an older version: send /help.")
             return
@@ -654,7 +816,7 @@ class Bot:
     # --- commands --------------------------------------------------------------------------------------------
 
     def cmd_help(self, chat: int, arg: str = "") -> None:
-        self.say(chat, help_html(), tg.keyboard(MENU))
+        self.say(chat, help_html(bool(self.app_url)), self.menu())
 
     def cmd_status(self, chat: int, arg: str = "") -> None:
         self.say(chat, self.status_html(), self.status_buttons())
@@ -751,6 +913,11 @@ class Bot:
         items = self.videos()
         if not items:
             return "Nothing is waiting to post. New clips show up here once automation makes them.", None
+        if self.app_url:  # they're watched in the Mini App, not listed here
+            held = sum(1 for i in items if i.review == "waiting" and i.status == "queued")
+            return (f"<b>🎬 {plural(len(items), 'video')}</b> waiting to post"
+                    + (f"\n⏸ {plural(held, 'waits', 'wait')} for an OK" if held else ""),
+                    inline([[self.app_row("🎬 Watch them in the app")]]))
         _store, accounts, _svc = self.posting()
         pages = max(1, -(-len(items) // PAGE))
         page = max(0, min(page, pages - 1))
@@ -801,6 +968,12 @@ class Bot:
                  self._category_buttons("mk", token, cats))
 
     def make(self, chat: int, idea: str, cat) -> str:
+        text = self.queue_make(chat, idea, cat)[1]
+        self.say(chat, text)
+        return text
+
+    def queue_make(self, chat: int, idea: str, cat) -> tuple[str, str]:
+        """Queue a Creator video `chat` asked for: (the job's id, what to tell them, as HTML)."""
         from ..creator.orchestrator import CreateRequest, queue as queue_creation
 
         db = self.runner.db
@@ -808,13 +981,14 @@ class Bot:
         job_id = queue_creation(db, req, cat.id if cat else "", self.now(), origins=["creator", "telegram"])
         self._remember(f"job:{job_id}", chat, req.label(), "make")
         db.set_meta("nudge", "1")
-        self.log(f"Asked for a video about “{trim(idea, 80)}”" + (f" for {cat.name}" if cat else "") + ".")
+        self.log(f"{self.name(chat)} asked for a video about “{trim(idea, 80)}”"
+                 + (f" for {cat.name}" if cat else "") + ".")
         when = self._when(cat)
         text = (f"✨ Got it: a video about “{esc(trim(idea, 200))}”" + (f" for {esc(cat.name)}" if cat else "")
                 + f". {when} I'll send it here when it's made" + (", for your OK before it posts."
                                                                   if self._held(cat) else "."))
-        self.say(chat, text)
-        return text
+        self.did(chat, "make", idea)
+        return job_id, text
 
     def _held(self, cat) -> bool:
         """Will the video wait for your OK (Settings → Creator → Check videos before they post)?"""
@@ -886,7 +1060,9 @@ class Bot:
                 bad.append(url)
         if added:
             self.runner.db.set_meta("nudge", "1")
-            self.log(f"Asked to clip {plural(len(added), 'video')}" + (f" for {cat.name}" if cat else "") + ".")
+            self.log(f"{self.name(chat)} asked to clip {plural(len(added), 'video')}"
+                     + (f" for {cat.name}" if cat else "") + ".")
+            self.did(chat, "clip", plural(len(added), "video") + (f" for {cat.name}" if cat else ""))
         lines = []
         if added:
             lines.append(f"✂️ Queued {plural(len(added), 'video')} to clip" + (f" for {esc(cat.name)}" if cat else "")
@@ -954,6 +1130,7 @@ class Bot:
             return text
         order = self.runner.place(order)
         self._remember(f"order:{order.id}", chat, order.title(cat.name if cat else ""), "request")
+        self.did(chat, "request", order.title(cat.name if cat else ""))
         lines = [f"📋 Asked for {self._request_line({**want, 'length': length}, cat)}. I'll tell you when they're "
                  "ready."]
         if want["notes"] and not pipeline.has_ai_key(s):
@@ -993,14 +1170,16 @@ class Bot:
 
     def cmd_pause(self, chat: int, arg: str = "") -> None:
         self.runner.db.set_meta("paused", "1")
-        self.log("Paused from Telegram.")
+        self.log(f"{self.name(chat)} paused automation from Telegram.")
+        self.did(chat, "pause")
         self.say(chat, "⏸ Paused. Nothing new is clipped or made until you /resume (a video already being made "
                        "finishes). Posting carries on.", inline([[("▶ Resume", "resume")]]))
 
     def cmd_resume(self, chat: int, arg: str = "") -> None:
         self.runner.db.set_meta("paused", "0")
         self.runner.db.set_meta("nudge", "1")
-        self.log("Resumed from Telegram.")
+        self.log(f"{self.name(chat)} resumed automation from Telegram.")
+        self.did(chat, "resume")
         self.say(chat, "▶ Carrying on.", inline([[("📊 Status", "st")]]))
 
     def cmd_toggle(self, chat: int, arg: str = "") -> None:
@@ -1080,14 +1259,16 @@ class Bot:
 
     def press_pause(self, chat, mid, arg, video) -> str:
         self.runner.db.set_meta("paused", "1")
-        self.log("Paused from Telegram.")
+        self.log(f"{self.name(chat)} paused automation from Telegram.")
+        self.did(chat, "pause")
         self.press_status(chat, mid, "", video)
         return "Paused"
 
     def press_resume(self, chat, mid, arg, video) -> str:
         self.runner.db.set_meta("paused", "0")
         self.runner.db.set_meta("nudge", "1")
-        self.log("Resumed from Telegram.")
+        self.log(f"{self.name(chat)} resumed automation from Telegram.")
+        self.did(chat, "resume")
         if mid and not video:
             self.press_status(chat, mid, "", video)
         return "Carrying on"
@@ -1125,9 +1306,10 @@ class Bot:
             self.refresh_card(chat, mid, it, video)
             return "It didn't need an OK"
         self.save(store)
-        self.log(f"OK'd “{trim(it.headline, 80)}” to post.")
+        self.log(f"{self.name(chat)} OK'd “{trim(it.headline, 80)}” to post.")
         self.refresh_card(chat, mid, it, video)
         self.settle(it.id, skip=(chat, mid))
+        self.did(chat, "ok", it.headline, it.id)
         return "OK: it posts when its time comes"
 
     def press_delete(self, chat, mid, arg, video) -> str:
@@ -1178,15 +1360,17 @@ class Bot:
 
         freed = f" ({size_text(r.freed)} freed)" if r.freed else ""
         if missing:
-            self.log(f"🗑 Took “{trim(it.headline, 80)}” off the list (its file was gone already).")
+            self.log(f"🗑 {self.name(chat)} took “{trim(it.headline, 80)}” off the list (its file was gone "
+                     "already).")
             note = "🗑 <b>Taken off the list</b> (its file was gone from the PC already)."
         else:
-            self.log(f"🗑 Deleted “{trim(it.headline, 80)}”{freed}.")
+            self.log(f"🗑 {self.name(chat)} deleted “{trim(it.headline, 80)}”{freed}.")
             note = f"🗑 <b>Deleted from the PC</b>{esc(freed)}."
         if r.failed:
             note += f"\n⚠ {plural(len(r.failed), 'file')} couldn't go: {esc(trim(r.failed[0][1], 100))}"
         self._mark(chat, mid, it, note, video)
         self.settle(it.id, skip=(chat, mid), gone=note)
+        self.did(chat, "delete", it.headline, it.id)
         return "Deleted"
 
     def press_now(self, chat, mid, arg, video) -> str:
@@ -1205,9 +1389,10 @@ class Bot:
             self.save(store)
         svc.actions.submit("post_now", account=a.id, item=it.id)
         svc.wake.set()
-        self.log(f"Asked to post “{trim(it.headline, 80)}” to {a.handle} now.")
+        self.log(f"{self.name(chat)} asked to post “{trim(it.headline, 80)}” to {a.handle} now.")
         self._mark(chat, mid, it, f"🚀 Posting it to {esc(a.handle)} now…", video)
         self.settle(it.id, skip=(chat, mid))  # its other cards, and this one stays until the upload starts
+        self.did(chat, "post_now", it.headline, it.id)
         return "Posting now"
 
     def press_again(self, chat, mid, arg, video) -> str:
@@ -1224,6 +1409,7 @@ class Bot:
         self.save(store)
         self.refresh_card(chat, mid, it, video)
         self.settle(it.id, skip=(chat, mid))
+        self.did(chat, "retry", it.headline, it.id)
         return "It's queued again"
 
     def press_make(self, chat, mid, arg, video) -> str:
@@ -1306,7 +1492,8 @@ class Bot:
         n = self.runner.cancel(o.id)
         with self.lock, state.edit(self.state_file) as data:
             data["asked"].pop(f"order:{o.id}", None)
-        self.log(f"Cancelled a request from Telegram ({o.title()}).")
+        self.log(f"{self.name(chat)} cancelled a request from Telegram ({o.title()}).")
+        self.did(chat, "cancel", o.title())
         try:
             self.api.edit(chat, mid, f"✖ Cancelled. {plural(n, 'waiting video')} left the queue.")
         except ApiError:
@@ -1317,7 +1504,7 @@ class Bot:
         items = self._items_of_job(arg)
         if not items:
             return "Those clips aren't in the library any more"
-        text, buttons = digest_html("✂️ The clips", items, self.posting()[1], self.now())
+        text, buttons = digest_html("✂️ The clips", items, self.posting()[1], self.now(), self.app_url)
         self.say(chat, text, buttons)
         return ""
 
@@ -1333,11 +1520,572 @@ class Bot:
         except Exception:  # noqa: BLE001
             return False
 
+    # --- the Mini App ------------------------------------------------------------------------------------------
+
+    def name(self, chat: int) -> str:
+        """What to call a linked person in a line about what they did."""
+        with self.lock:
+            return state.first_name(state.load(self.state_file), chat)
+
+    def menu(self) -> dict:
+        """What goes under a help message: the button into the Mini App, or the chat's own menu of buttons."""
+        return inline([[self.app_row(B_APP)]]) if self.app_url else tg.keyboard(MENU)
+
+    def app_row(self, label: str, item: str = "") -> tuple[str, str]:
+        """A button that opens the Mini App (at one video, with `item`)."""
+        return app_button(label, app_link(self.app_url, item))
+
+    def set_app_url(self, url: str, error: str = "") -> None:
+        """webapp.py says where the Mini App can be reached from a phone ("" = nowhere right now, and why)."""
+        if url != self.app_url:
+            self.log(f"The Mini App is at {url}." if url else "The Mini App has no address right now"
+                     + (f": {error}" if error else "."))
+        self.app_url, self.app_error, self.app_known = url, error, True
+        self._menus_at = 0.0
+        self._last["status"] = 0.0  # the window's Telegram page reads it from the heartbeat
+        self.wake.set()
+
+    def sync_menus(self) -> None:
+        """Point each linked chat's menu button (left of the message box) at the Mini App, and give a chat that
+        was unlinked its plain one back. The first time a chat gets the app, it's told."""
+        now = self.now()
+        if not self.app_known or self.api is None or now < self._menus_at:
+            return
+        with self.lock:
+            data = state.load(self.state_file)
+        linked = {c["id"]: c for c in data["chats"]}
+        menus = data["menus"]
+        todo = [(cid, self.app_url) for cid, c in linked.items()
+                if not c.get("blocked") and str(menus.get(str(cid)) or "") != self.app_url]
+        todo += [(int(k), "") for k in menus if k.lstrip("-").isdigit() and int(k) not in linked]
+        for chat, url in todo:
+            gone = False
+            try:
+                self.api.set_menu_button(chat, app_link(url) if url else "")
+            except ApiError as exc:
+                if chat in linked:
+                    if exc.code == 403:
+                        self._blocked(chat)
+                    else:
+                        self.log(f"⚠ Couldn't set the chat's app button: {exc}")
+                        self._menus_at = now + 300.0  # not on every look
+                    continue
+                gone = True  # an unlinked chat that can't be reached: nothing to put back
+            except NetworkError:
+                self._menus_at = now + 30.0
+                return
+            first = False
+            with self.lock, state.edit(self.state_file) as d:
+                if chat in linked:
+                    d["menus"][str(chat)] = url
+                    for c in d["chats"]:
+                        if c["id"] == chat and url and not c.get("app_told"):
+                            c["app_told"] = first = True
+                elif not url or gone:
+                    d["menus"].pop(str(chat), None)
+            if first:
+                self.say(chat, "📱 <b>ClipMonster is an app inside Telegram now.</b> Watch the videos, OK or delete "
+                               "them, and say what's wrong with one so the AI makes it again.",
+                         {"remove_keyboard": True})
+                self.say(chat, "Open it with the <b>ClipMonster</b> button left of the message box (it always has "
+                               "the right address), or here:", inline([[self.app_row(B_APP)]]))
+
+    def cmd_app(self, chat: int, arg: str = "") -> None:
+        if self.app_url:
+            self.say(chat, "📱 ClipMonster opens inside Telegram. The <b>ClipMonster</b> button left of the message "
+                           "box always has the right address; this one works until the PC restarts.",
+                     inline([[self.app_row(B_APP)]]))
+            return
+        s = self.settings()
+        if not getattr(s, "telegram_app", True):
+            why = "It's turned off: ClipMonster on the PC → Settings → Telegram → Mini App."
+        elif self.app_error:
+            why = self.app_error
+        else:
+            why = "It's starting: its address isn't up yet. Try again in a minute."
+        self.say(chat, f"📱 The app can't be opened right now. {esc(why)}\nEverything still works from this chat: "
+                       "/help.")
+
+    def seen(self, chat: int, user: dict) -> None:
+        """The Mini App saw this linked person: keep their name as Telegram has it now."""
+        name = " ".join(str(user.get(k) or "") for k in ("first_name", "last_name")).strip()
+        with self.lock:
+            c = next((c for c in state.load(self.state_file)["chats"] if c["id"] == chat), None)
+        if c is None or (c.get("name") == name and c.get("username") == str(user.get("username") or "")):
+            return
+        with self.lock, state.edit(self.state_file) as data:
+            for c in data["chats"]:
+                if c["id"] == chat:
+                    c["name"], c["username"] = name or c.get("name") or "", str(user.get("username") or "")
+
+    # --- who did what ------------------------------------------------------------------------------------------
+
+    def did(self, chat: int, what: str, title: str = "", item: str = "", text: str = "") -> None:
+        """Remember that a linked person did something, and tell the other one (without a sound)."""
+        with self.lock, state.edit(self.state_file) as data:
+            if not state.is_linked(data, chat):
+                return
+            entry = state.note_activity(data, chat, what, title, self.now(), item, text)
+            others = [c["id"] for c in data["chats"] if c["id"] != chat and not c.get("blocked")]
+        line = activity_html(entry)
+        if line and self.api is not None:
+            for other in others:
+                self.say(other, line, quiet=True)
+
+    # --- sharing the bot ---------------------------------------------------------------------------------------
+
+    def cmd_people(self, chat: int, arg: str = "") -> None:
+        text, buttons = self.people_html(chat)
+        self.say(chat, text, buttons)
+
+    def people_html(self, chat: int) -> tuple[str, dict]:
+        with self.lock:
+            data = state.load(self.state_file)
+        mine = state.is_owner(data, chat)
+        lines = ["<b>👥 Who shares this bot</b>"]
+        rows = []
+        for c in state.people(data):
+            lines.append(f"• {esc(state.chat_name(c))}" + (" (you)" if c["id"] == chat else "")
+                         + (" · linked first: invites and removes" if state.is_owner(data, c["id"]) else ""))
+            if mine and c["id"] != chat:
+                rows.append([(trim(f"✖ Remove {state.first_name(data, c['id'])}", 40), f"ppl:remove:{c['id']}")])
+        lines.append("")
+        lines.append(f"{state.MAX_PEOPLE} people at most. You both see every video; what each of you asks for, "
+                     "says about a video and does carries your name, and the other is told.")
+        if mine and not state.full(data):
+            rows.insert(0, [("➕ Invite someone", "ppl:invite")])
+        elif not mine and not state.full(data):
+            lines.append("Only the person linked first can invite.")
+        rows.append([("🚪 Leave", "ppl:leave")])
+        return "\n".join(lines), inline(rows)
+
+    def press_people(self, chat, mid, arg, video) -> str:
+        what, _, who = arg.partition(":")
+        try:
+            if what == "invite":
+                r = self.invite(chat)
+                self.say(chat, "➕ <b>An invite for one person.</b> Send them this link; it works once, for "
+                               f"{int(state.CODE_LIFE // 60)} minutes:\n{esc(r['link'])}\n\nOr they open "
+                               f"@{esc(self.me.get('username', ''))} and send it this code: <code>{esc(r['code'])}</code>")
+                return ""
+            if what == "remove":
+                with self.lock:
+                    data = state.load(self.state_file)
+                other = next((c for c in data["chats"] if str(c["id"]) == who), None)
+                if other is None:
+                    return "They don't share this bot any more"
+                self.say(chat, f"Remove {esc(state.chat_name(other))}? They can't use this bot until they're invited "
+                               "again.", inline([[("✖ Yes, remove", f"ppl:REMOVE:{who}"), ("↩ Keep", "x:-")]]))
+                return ""
+            if what == "REMOVE":
+                r = self.remove(chat, int(who or 0))
+                self._replace(chat, mid, esc(r["message"]))
+                return "Removed"
+            if what == "leave":
+                self.say(chat, "Leave this bot? You'll need a new invite, or the code from the PC, to use it again.",
+                         inline([[("🚪 Yes, leave", "ppl:LEAVE"), ("↩ Stay", "x:-")]]))
+                return ""
+            if what == "LEAVE":
+                r = self.leave(chat)
+                self._replace(chat, mid, esc(r["message"]))
+                return "You left"
+        except (Refused, ValueError) as exc:
+            return trim(str(exc), 180)
+        return ""
+
+    def _replace(self, chat: int, mid: int, text: str) -> None:
+        try:
+            self.api.edit(chat, mid, text)
+        except ApiError:
+            self.say(chat, text)
+
+    def invite(self, chat: int) -> dict:
+        """A code (and link) that links one more person, asked for by the bot's owner. Raises Refused."""
+        from .pair import start_link
+
+        now = self.now()
+        with self.lock, state.edit(self.state_file) as data:
+            if not state.is_linked(data, chat):
+                raise Refused("This chat isn't linked to ClipMonster.", 403)
+            if not state.is_owner(data, chat):
+                first = state.owner(data)
+                raise Refused(f"Only {state.first_name(data, first['id']) if first else 'the first person'} can "
+                              "invite someone (they were linked first).", 403)
+            if state.full(data):
+                raise Refused(f"{state.MAX_PEOPLE} people already share this bot. Remove one to invite someone else.")
+            code = state.new_code(data, now, by=chat)
+            until = data["pairing"]["until"]
+        self.log(f"{self.name(chat)} made an invite for one more person (good for "
+                 f"{int(state.CODE_LIFE // 60)} minutes).")
+        return {"code": code, "link": start_link(self.me.get("username") or "", code), "until": until,
+                "minutes": int(state.CODE_LIFE // 60), "bot": self.me.get("username") or ""}
+
+    def leave(self, chat: int) -> dict:
+        """Unlink the chat that asks. The other person (if there is one) is told, and owns the bot from then."""
+        now = self.now()
+        with self.lock, state.edit(self.state_file) as data:
+            if not state.is_linked(data, chat):
+                raise Refused("This chat isn't linked to ClipMonster.", 403)
+            was_owner = state.is_owner(data, chat)
+            who = state.chat_name(next(c for c in data["chats"] if c["id"] == chat))
+            entry = state.note_activity(data, chat, "leave", "", now)
+            state.unlink(data, chat)
+            others = [c["id"] for c in data["chats"] if not c.get("blocked")]
+        self.modes.pop(chat, None)
+        self.fixing.pop(chat, None)
+        self.log(f"{who} left the bot.")
+        for other in others:
+            self.say(other, activity_html(entry) + (" You invite and remove people now." if was_owner else ""))
+        self.wake.set()  # its menu button goes back
+        return {"message": "You left. To use this bot again you need a new invite, or the code from ClipMonster on "
+                           "the PC (Settings → Telegram → Link a phone)."}
+
+    def remove(self, chat: int, other: int) -> dict:
+        """The owner unlinks the other person. Raises Refused."""
+        now = self.now()
+        with self.lock, state.edit(self.state_file) as data:
+            if not state.is_owner(data, chat):
+                raise Refused("Only the person linked first can remove someone.", 403)
+            them = next((c for c in data["chats"] if c["id"] == other), None)
+            if them is None or other == chat:
+                raise Refused("They don't share this bot any more.", 404)
+            who, mine = state.chat_name(them), state.first_name(data, chat)
+            state.note_activity(data, chat, "remove", who, now)
+            state.unlink(data, other)
+        self.modes.pop(other, None)
+        self.fixing.pop(other, None)
+        self.log(f"{mine} removed {who} from the bot.")
+        if self.api is not None:
+            self.say(other, f"You no longer share ClipMonster on {esc(pc_name())}: {esc(mine)} removed this chat.",
+                     {"remove_keyboard": True})
+        self.wake.set()
+        return {"message": f"{who} can't use this bot any more."}
+
+
+    # --- sports: a game's best plays and a recap reel, asked for in one go -------------------------------------
+
+    @property
+    def desk(self):
+        """The Sports section's state (the same sports.db the PC's window shows)."""
+        if self._desk is None:
+            from ..sportsdesk.desk import Desk
+
+            self._desk = Desk(settings=self.settings, now=self.now)
+        return self._desk
+
+    def cmd_sports(self, chat: int, text: str = "") -> None:
+        text = text.strip()
+        if text.lower() in ("cancel", "stop"):
+            mine = [o for o in self.desk.orders(40) if o["status"] in ("queued", "searching", "working")]
+            o = next((o for o in mine if o.get("by_id") == chat), mine[0] if mine else None)
+            if o is None:
+                self.say(chat, "No sports request is waiting or under way.")
+                return
+            try:
+                self.say(chat, "✖ " + esc(self.sports_cancel(chat, o["id"])["message"]))
+            except Refused as exc:
+                self.say(chat, f"⚠ {esc(exc)}")
+            return
+        if not text:
+            self.modes[chat] = ("sports", self.now() + MODE_LIFE)
+            going = [o for o in self.desk.orders(12) if o["status"] in ("queued", "searching", "working")]
+            lines = ["🏆 <b>Which game?</b> " + SPORTS_HELP, "",
+                     "I look for the game's highlights on YouTube, pick its best plays and make them into clips "
+                     "and a recap reel, on the PC. League footage often gets copyright claims on TikTok."]
+            if going:
+                lines += ["", "<b>Under way</b>"] + [f"• {esc(o['title'])} ({esc(o['by'] or 'someone')}): "
+                                                    f"{esc(o['doing'] or 'waiting')}" for o in going]
+                lines.append("/sports cancel stops the newest of yours.")
+            self.say(chat, "\n".join(lines))
+            return
+        try:
+            r = self.sports_order(chat, parse_sports(text))
+        except ValueError as exc:
+            self.modes[chat] = ("sports", self.now() + MODE_LIFE)
+            self.say(chat, f"⚠ {exc}")
+            return
+        except Refused as exc:
+            self.say(chat, f"⚠ {esc(exc)}")
+            return
+        self.say(chat, "🏆 " + esc(r["message"]), inline([[self.app_row("📱 Follow it in the app")]])
+                 if self.app_url else None)
+
+    def sports_order(self, chat: int, values: dict) -> dict:
+        """Ask automation for a game's best plays as clips, a recap reel or both (sportsdesk's Desk.order), in
+        `chat`'s name. Raises Refused."""
+        from ..sportsdesk.desk import DeskError
+
+        try:
+            r = self.desk.order(values if isinstance(values, dict) else {}, by=self.name(chat), by_id=chat)
+        except DeskError as exc:
+            raise Refused(exc.message, exc.status) from exc
+        o = r["order"]
+        self._remember(f"sports:{o['id']}", chat, o["title"], "sports")
+        self.log(f"{self.name(chat)} asked for sports highlights: {o['title']}.")
+        self.did(chat, "sports", o["title"])
+        where = f" for {o['category']}" if o.get("category") else ""
+        return {"order": o, "message": f"Got it: {o['title']}{where}. Automation looks for the game, finds its best "
+                                       "plays and makes them; they show up under Videos, and I'll tell you when "
+                                       "they're ready."}
+
+    def sports_cancel(self, chat: int, order_id: str) -> dict:
+        from ..sportsdesk.desk import DeskError
+
+        try:
+            r = self.desk.cancel_order(str(order_id))
+        except DeskError as exc:
+            raise Refused(exc.message, exc.status) from exc
+        with self.lock, state.edit(self.state_file) as data:
+            data["asked"].pop(f"sports:{order_id}", None)
+        self.log(f"{self.name(chat)} cancelled a sports request ({r['order']['title']}).")
+        self.did(chat, "cancel", r["order"]["title"])
+        return r
+
+    def sports_report(self, o: dict, items: int, made: bool) -> str:
+        """How a finished sports order went, as HTML with {whose} left for who's told ("Your sports request")."""
+        title = esc(trim(o.get("title") or "", 160)).replace("{", "(").replace("}", ")")
+        said = [esc(trim(st.get("said") or "", 200)).replace("{", "(").replace("}", ")")
+                for st in o.get("steps") or [] if st.get("kind") in ("clips", "reel") and st.get("status") == "done"]
+        if o.get("status") == "failed":
+            why = esc(trim(o.get("error") or "It failed.", 300)).replace("{", "(").replace("}", ")")
+            return f"✖ <b>{{whose}} couldn't be done</b> ({title}): {why}"
+        from ..sportsdesk.games import GameFilter
+
+        emoji = GameFilter.from_json(o.get("filter")).sport_info.emoji
+        lines = [f"{emoji} <b>{{whose}} is ready</b>: {title}"] + [f"• {s}" for s in said]
+        if not said:
+            lines.append(esc(trim(o.get("message") or "", 300)).replace("{", "(").replace("}", ")"))
+        if o.get("error"):
+            lines.append("⚠ " + esc(trim(o["error"], 300)).replace("{", "(").replace("}", ")"))
+        if made and not items:
+            lines.append("They're in the Library on the PC (not queued to post: its category has no TikTok "
+                         "account?).")
+        return "\n".join(lines)
+
+    def sports_json(self) -> dict:
+        """What the app's sports form offers, and the sports requests so far."""
+        from .. import sports
+        from ..sportsdesk import desk as D
+        from ..sportsdesk import games as G
+
+        s = self.settings()
+        return {"sports": [{"id": sp.id, "label": sp.label, "emoji": sp.emoji,
+                            "leagues": list(G.LEAGUES.get(sp.id, ()))} for sp in sports.SPORTS.values()],
+                "since": [{"id": k, "label": label} for k, label, _days in G.SINCE],
+                "wants": [{"id": k, "label": v} for k, v in D.ORDER_WANTS.items()],
+                "categories": [{"id": c["id"], "name": c["name"], "sport": c["sport"], "account": c["account"]}
+                               for c in D.category_list(s)],
+                "most": {"games": D.ORDER_GAMES, "plays": D.ORDER_PLAYS, "open": D.MAX_OPEN_ORDERS},
+                "orders": self.desk.orders(12)}
+
+    # --- a critique: make it again -------------------------------------------------------------------------------
+
+    def fixable(self, it) -> bool:
+        """Can this video be made again from a critique? One the Creator or the Studio made, not posted yet,
+        with its storyboard still beside it."""
+        if isinstance(it, str):
+            it = self.posting()[0].get(it)
+        if it is None or not it.ai_generated or it.status in ("posted", "uploading") or not it.path:
+            return False
+        return (Path(it.path).parent / "storyboard.json").is_file()
+
+    def press_fix(self, chat, mid, arg, video) -> str:
+        it = self.posting()[0].get(arg)
+        if it is None:
+            return "It isn't in the library any more"
+        if not self.fixable(it):
+            return "Only a video the AI made, not posted yet, can be made again"
+        self.fixing[chat] = it.id
+        self.modes[chat] = ("fix", self.now() + MODE_LIFE)
+        self.say(chat, f"🛠 What should be different about “{esc(trim(it.headline, 80))}”? Say it in your own words, "
+                       "like <i>the hook is flat, open with the twist</i> or <i>the third picture doesn't fit what's "
+                       "said</i>. The AI makes it again with that fixed and keeps the rest.")
+        return ""
+
+    def cmd_fix(self, chat: int, text: str = "") -> None:
+        item = self.fixing.pop(chat, "")
+        if not item:
+            self.say(chat, "Open a video the AI made (/videos) and tap <b>🛠 Say what to fix</b> under it"
+                           + (", or use the app." if self.app_url else "."))
+            return
+        if not text.strip():
+            self.fixing[chat] = item
+            self.modes[chat] = ("fix", self.now() + MODE_LIFE)
+            self.say(chat, "Say what should be different, in a sentence or two.")
+            return
+        try:
+            r = self.fix(chat, item, text)
+        except Refused as exc:
+            self.say(chat, f"⚠ {esc(exc)}")
+            return
+        self.say(chat, "🛠 " + esc(r["message"]))
+
+    def fix(self, chat: int, item_id: str, text: str) -> dict:
+        """Queue a video to be made again with `text` (what `chat` says is wrong with it) answered. The one it
+        replaces is held meanwhile, so it doesn't post as it is. Raises Refused."""
+        with self._fix_lock:  # two people sending one about the same video: the second is told it's under way
+            return self._fix(chat, item_id, text)
+
+    def _fix(self, chat: int, item_id: str, text: str) -> dict:
+        from ..creator import critique, director
+        from ..creator.orchestrator import CreateRequest, queue as queue_creation
+
+        text = critique.clean(text)
+        if len(text) < 3:
+            raise Refused("Say what should be different about the video.", 400)
+        now = self.now()
+        s = self.settings()
+        store, _accounts, _svc = self.posting()
+        it = store.get(item_id)
+        if it is None:
+            raise Refused("That video isn't in the library any more.", 404)
+        if it.status in ("posted", "uploading"):
+            raise Refused("It's on TikTok already (or going up right now), so it can't be made again from here.")
+        if not it.ai_generated:
+            raise Refused("Only a video the Creator or the Studio made can be made again from a critique. A clip is "
+                          "cut from someone's video as it is: delete it if it's no good.")
+        board = critique.storyboard_of(Path(it.path)) if it.path else None
+        if board is None:
+            raise Refused("Its storyboard isn't beside it on the PC any more, so it can't be made again.")
+        if not director.script_writers(s):
+            raise Refused(director.no_writer_text(s))
+        with self.lock:
+            data = state.load(self.state_file)
+        if any(c.get("item") == it.id and c.get("status") in ("queued", "working")
+               for c in data["critiques"].values()):
+            raise Refused("It's being made again already. Wait for that version, then say what's still wrong.")
+        made = _made(Path(it.path).parent)
+        common = dict(prompt=board.prompt, title=board.title, category=it.category_id or it.category_name,
+                      style=str(made.get("style") or ""), storyboard=board.to_json(), critique=text,
+                      revises=it.headline)
+        if isinstance(made.get("studio"), dict):  # the Studio made it: the same shape of picture again
+            from ..studio.orchestrator import StudioRequest
+
+            req = StudioRequest(**common, orientation=_shape(str(made["studio"].get("canvas") or "")))
+        else:
+            req = CreateRequest(**common)
+        db = self.runner.db
+        job_id = queue_creation(db, req, it.category_id, now, origins=["creator", "telegram", "critique"])
+        held = ""
+        with store.lock:
+            if it.status == "queued" and it.review != "waiting":
+                held, it.review = it.review or "-", "waiting"  # it doesn't post as it is meanwhile
+        if held:
+            self.save(store)
+        with self.lock, state.edit(self.state_file) as d:
+            entry = state.add_critique(d, chat, it.id, it.headline, text, job_id, now)
+            entry["held"] = held
+        self._remember(f"job:{job_id}", chat, it.headline, "fix")
+        db.set_meta("nudge", "1")
+        self.log(f"{self.name(chat)} asked for “{trim(it.headline, 80)}” to be made again: “{trim(text, 120)}”")
+        self.settle(it.id)
+        self.did(chat, "critique", it.headline, it.id, text)
+        cat = next((c for c in self._categories(s) if c.id == it.category_id), None)
+        return {"critique": self.critique_json(entry), "job": job_id, "held": bool(held),
+                "message": "Got it: the AI makes it again with that fixed. " + html.unescape(self._when(cat))
+                           + " The new version waits for an OK beside this one"
+                           + (", and this one is held meanwhile so it doesn't post as it is." if held else ".")}
+
+    def critique_json(self, c: dict) -> dict:
+        return {"id": c.get("id") or "", "item": c.get("item") or "", "title": c.get("title") or "",
+                "text": c.get("text") or "", "by": c.get("by") or 0, "name": c.get("name") or "Someone",
+                "at": c.get("at") or 0, "status": c.get("status") or "", "stage": c.get("stage") or "",
+                "error": c.get("error") or "", "fixed": c.get("fixed") or ""}
+
+    def sync_critiques(self) -> None:
+        """Bring each critique still being answered up to date from its job: being made, made (and which video
+        it became), or why not. One that failed gives the first version back the way it was."""
+        with self.lock:
+            data = state.load(self.state_file)
+        going = [c for c in data["critiques"].values() if c.get("status") in ("queued", "working")]
+        if not going:
+            return
+        db = self.runner.db
+        store = self.posting()[0]
+        now = self.now()
+        changes: dict[str, dict] = {}
+        for c in going:
+            job = db.get(str(c.get("job") or ""))
+            if job is None:
+                new = {"status": "failed", "error": "It was taken out of the queue.", "stage": ""}
+            elif job.status == "failed":
+                new = {"status": "failed", "error": trim(job.error, 300), "stage": ""}
+            elif job.status == "done":
+                items = self._items_of_job(job.id, store)
+                if items:
+                    new = {"status": "done", "fixed": items[0].id, "stage": ""}
+                elif now - float(job.updated or now) > 15 * 60:
+                    new = {"status": "failed", "stage": "",
+                           "error": "It was made, but the new video didn't come into the library."}
+                else:
+                    new = {"status": "working", "stage": "Bringing it into the library"}
+            elif job.status == "working":
+                new = {"status": "working", "stage": trim(job.stage, 80)}
+            else:
+                new = {"status": "queued", "stage": ""}
+            if any(c.get(k) != v for k, v in new.items()):
+                changes[c["id"]] = new
+        if not changes:
+            return
+        failed = []
+        with self.lock, state.edit(self.state_file) as d:
+            for cid, new in changes.items():
+                if cid in d["critiques"]:
+                    d["critiques"][cid].update(new)
+                    if new["status"] == "failed":
+                        failed.append(dict(d["critiques"][cid]))
+        for c in failed:  # the hold put on the first version comes off
+            it = store.get(c.get("item") or "")
+            if it is not None and c.get("held") and it.review == "waiting" and it.status == "queued":
+                with store.lock:
+                    it.review = "" if c["held"] == "-" else c["held"]
+                self.save(store)
+                self.settle(it.id)
+
+    def app_make(self, chat: int, idea: str, category_id: str = "") -> dict:
+        """The Mini App's "make a video": queued like /make, answered in the app. Raises Refused."""
+        idea = " ".join(str(idea or "").split())
+        if not idea:
+            raise Refused("Say what the video should be about.", 400)
+        if len(idea) > 1000:
+            raise Refused("That idea is too long: keep it under 1,000 characters.", 400)
+        cat = None
+        if category_id:
+            cat = next((c for c in self._categories() if c.id == category_id), None)
+            if cat is None:
+                raise Refused("That category isn't there any more.", 400)
+        job_id, _text = self.queue_make(chat, idea, cat)
+        return {"job": job_id, "held": self._held(cat),
+                "message": f"Got it: a video about “{trim(idea, 120)}”" + (f" for {cat.name}" if cat else "") + ". "
+                           + html.unescape(self._when(cat)) + " It shows up under Videos when it's made"
+                           + (", and waits for an OK before it posts." if self._held(cat) else ".")}
+
     # --- a video's card ----------------------------------------------------------------------------------------
 
     def card(self, it) -> tuple[str, dict | None]:
         store, accounts, svc = self.posting()
-        return card_html(it, accounts, self.now()), card_buttons(it, accounts, svc)
+        return self.card_text(it, accounts), self.buttons_for(it, accounts, svc)
+
+    def card_text(self, it, accounts) -> str:
+        """The card's words, with what was said about the video and by whom."""
+        text = card_html(it, accounts, self.now())
+        with self.lock:
+            said = state.critiques_of(state.load(self.state_file), it.id)
+        for c in said[-3:]:
+            if c.get("fixed") == it.id:
+                text += (f"\n🛠 Made again from <b>{esc(c.get('name') or 'someone')}</b>'s critique of the first "
+                         f"version: <i>“{esc(trim(c.get('text'), 160))}”</i>")
+            else:
+                text += f"\n🛠 <b>{esc(c.get('name') or 'Someone')}</b>: <i>“{esc(trim(c.get('text'), 160))}”</i> · "
+                text += {"queued": "waiting to be made again", "working": "being made again now",
+                         "done": "made again: the new version waits for an OK",
+                         "failed": "couldn't be made again"}.get(c.get("status") or "", "")
+        return text
+
+    def buttons_for(self, it, accounts, svc) -> dict | None:
+        if self.app_url and it.status not in ("posted", "uploading"):
+            return inline([[self.app_row("▶ Watch it in the app", it.id)]])
+        return card_buttons(it, accounts, svc, fixable=self.fixable(it))
 
     def show(self, chat: int, it, note: str = "") -> dict | None:
         """Send the video itself with its card (its caption and buttons). Remembered, so the card follows when
@@ -1346,6 +2094,8 @@ class Bot:
         text, buttons = self.card(it)
         if note:
             text = f"{note}\n\n{text}"
+        if self.app_url and it.exists():  # watched in the Mini App: no upload into the chat
+            return self._shown(it, chat, self.say(chat, text, buttons), video=False)
         if not it.exists():
             sent = self.say(chat, "⚠ The video file isn't on the PC any more.\n\n" + text,
                             inline([[("🗑 Take it off the list", f"DEL:{it.id}")]]))
@@ -1452,7 +2202,7 @@ class Bot:
 
     def _mark(self, chat: int, mid: int, it, note: str, video: bool) -> None:
         """The card with a line on what just happened, and no buttons."""
-        text = card_html(it, self.posting()[1], self.now()) + f"\n\n{note}"
+        text = self.card_text(it, self.posting()[1]) + f"\n\n{note}"
         try:
             if video:
                 self.api.edit_caption(chat, mid, text, None)
@@ -1476,7 +2226,7 @@ class Bot:
             if it is None or gone:
                 text, buttons = gone or "🗑 Gone from the library.", None
             else:
-                text, buttons = card_html(it, accounts, self.now()), card_buttons(it, accounts, svc)
+                text, buttons = self.card_text(it, accounts), self.buttons_for(it, accounts, svc)
             try:
                 if video:
                     self.api.edit_caption(chat, mid, text, buttons)
@@ -1503,6 +2253,7 @@ class Bot:
                     d["seen_at"], d["noted"] = 0.0, {}
             return
         store, accounts, _svc = self.posting()
+        self.sync_critiques()
         answered = self.check_asked(data, store, accounts, now)
         sends = self.sends()
         with store.lock:
@@ -1524,11 +2275,11 @@ class Bot:
         if new and "new" in sends:
             groups = group_new(new)
             if len(groups) > NEW_GROUPS_MAX:  # a lot came in at once (automation was off a while): one message
-                text, buttons = catch_up_html(new)
+                text, buttons = catch_up_html(new, self.app_url)
                 self.broadcast(text, buttons)
             else:
                 for title, group in groups:
-                    text, buttons = digest_html(title, group, accounts, now)
+                    text, buttons = digest_html(title, group, accounts, now, self.app_url)
                     self.broadcast(text, buttons)
         newest = float(max([seen_at] + [i.added_at for i in items if i.added_at > seen_at]))
         if newest != seen_at:
@@ -1552,7 +2303,9 @@ class Bot:
             self.broadcast(f"⏸ <b>{plural(len(waiting), 'video waits', 'videos wait')} for your OK</b> before "
                            f"{'it posts' if len(waiting) == 1 else 'they post'}. Tap to watch "
                            f"{'it' if len(waiting) == 1 else 'them'}, then OK or delete.",
-                           inline([[("🎬 Watch them" if len(waiting) > 1 else "🎬 Watch it", "list:0")]]))
+                           inline([[self.app_row("🎬 Watch them" if len(waiting) > 1 else "🎬 Watch it")
+                                    if self.app_url else
+                                    ("🎬 Watch them" if len(waiting) > 1 else "🎬 Watch it", "list:0")]]))
 
     def show_all(self, it, note: str = "") -> None:
         with self.lock:
@@ -1571,12 +2324,15 @@ class Bot:
             text, buttons, items = "", None, []
             if kind == "job":
                 job = db.get(ident)
+                fix = ask.get("kind") == "fix"
                 if job is None:
-                    text = f"“{esc(trim(ask.get('title', ''), 80))}” was taken out of the queue."
+                    text = (f"“{esc(trim(ask.get('title', ''), 80))}” was taken out of the queue"
+                            + (" before it was made again. The first version is as it was." if fix else "."))
                 elif job.status == "failed":
                     what = "make" if job.is_creation else "clip"
-                    text = (f"✖ Couldn't {what} “{esc(trim(job.title or ask.get('title', ''), 80))}”: "
-                            f"{esc(trim(job.error, 300))}")
+                    text = (f"✖ Couldn't {what} “{esc(trim(ask.get('title', '') if fix else job.title or ask.get('title', ''), 80))}”"
+                            f"{' again' if fix else ''}: {esc(trim(job.error, 300))}"
+                            + ("\nThe first version is as it was." if fix else ""))
                 elif job.status == "done":
                     items = self._items_of_job(ident, store)
                     if not items and now - float(job.updated or now) < 15 * 60:
@@ -1599,20 +2355,55 @@ class Bot:
                 mark = "✅" if o.status == "done" else "⚠"
                 text = f"{mark} Your request for {esc(ask.get('title') or o.title())}: {esc(o.message)}."
                 if items:
-                    buttons = digest_html("", items, accounts, now)[1]
+                    buttons = digest_html("", items, accounts, now, self.app_url)[1]
+            elif kind == "sports":
+                o = self.desk.find_order(ident)
+                if o is None or o.get("status") == "cancelled":
+                    done.append(key)
+                    continue
+                if o.get("status") not in ("done", "failed"):
+                    continue
+                folders = [st["folder"] for st in o.get("steps") or [] if st.get("folder")]
+                items = [i for f in dict.fromkeys(folders) for i in _items_in(store, Path(f))]
+                if folders and not items and now - float(o.get("finished") or now) < 15 * 60:
+                    continue  # posting brings them in within a couple of minutes
+                text = self.sports_report(o, len(items), bool(folders))
+                if items:
+                    buttons = digest_html("", items, accounts, now, self.app_url)[1]
             done.append(key)
             if not chat:
                 continue
+            who = esc(state.first_name(data, chat))
+            others = [c["id"] for c in data["chats"] if c["id"] != chat and not c.get("blocked")]
             if items and kind == "job" and len(items) == 1:
                 it = items[0]
-                note = ("✨ <b>Here's the video you asked for.</b>" if it.ai_generated else "✂️ <b>Your clip is ready.</b>")
-                if it.review == "waiting":
-                    note += " It waits for your OK before it posts."
+                wait = " It waits for your OK before it posts." if it.review == "waiting" else ""
+                if ask.get("kind") == "fix":
+                    note = (f"🛠 <b>Here's “{esc(trim(ask.get('title', ''), 80))}” made again from your critique.</b> "
+                            "Both versions wait for an OK: keep the one you like and delete the other.")
+                    theirs = (f"🛠 <b>“{esc(trim(ask.get('title', ''), 80))}” was made again from {who}'s "
+                              "critique.</b> Both versions wait for an OK.")
+                else:
+                    note = ("✨ <b>Here's the video you asked for.</b>" if it.ai_generated
+                            else "✂️ <b>Your clip is ready.</b>") + wait
+                    theirs = (f"✨ <b>The video {who} asked for is made.</b>" if it.ai_generated
+                              else f"✂️ <b>The clip {who} asked for is ready.</b>") + wait.replace("your OK", "an OK")
                 self.show_later(chat, it, note)
+                for other in others:  # both people see every video
+                    self.show_later(other, it, theirs)
             elif items and kind == "job":
-                t, b = digest_html(f"✂️ Your {plural(len(items), 'clip')} from “{trim(items[0].facts.get('source_title') or ask.get('title', ''), 60)}”",
-                                   items, accounts, now)
+                src = trim(items[0].facts.get("source_title") or ask.get("title", ""), 60)
+                t, b = digest_html(f"✂️ Your {plural(len(items), 'clip')} from “{src}”", items, accounts, now,
+                                   self.app_url)
                 self.say(chat, t, b)
+                t, b = digest_html(f"✂️ {plural(len(items), 'clip')} {state.first_name(data, chat)} asked for, from "
+                                   f"“{src}”", items, accounts, now, self.app_url)
+                for other in others:
+                    self.say(other, t, b)
+            elif text and kind == "sports":
+                self.say(chat, text.format(whose="Your sports request"), buttons)
+                for other in others:  # both people see every video
+                    self.say(other, text.format(whose=f"{who}'s sports request"), buttons)
             elif text:
                 self.say(chat, text, buttons)
             answered.update(i.id for i in items)
@@ -1663,6 +2454,32 @@ def _items_in(store, folder: Path) -> list:
     with store.lock:
         found = [i for i in store.items.values() if i.path and i.status != "posted" and inside(i.path)]
     return sorted(found, key=lambda i: (i.part or 0, i.path))
+
+
+def _made(folder: Path) -> dict:
+    """How the Creator or the Studio made the video in `folder` (its clips.json's "creator"), or {}."""
+    import json
+
+    try:
+        made = json.loads((folder / "clips.json").read_text(encoding="utf-8")).get("creator")
+    except (OSError, ValueError, AttributeError):
+        return {}
+    return made if isinstance(made, dict) else {}
+
+
+def app_link(url: str, item: str = "") -> str:
+    """The Mini App's address as a button opens it (at one video, with `item`). It ends in "/" so the page's
+    own files are found beside it, also when the address has a folder in it."""
+    return f"{url.rstrip('/')}/" + (f"?v={item}" if item else "")
+
+
+def _shape(canvas: str) -> str:
+    """'1080x1920' → 'vertical' (the Studio's name for a picture's shape; '' when it can't be read)."""
+    m = re.fullmatch(r"\s*(\d+)\s*x\s*(\d+)\s*", canvas or "")
+    if not m:
+        return ""
+    w, h = int(m.group(1)), int(m.group(2))
+    return "vertical" if w < h else "square" if w == h else "landscape"
 
 
 def card_state(it) -> str:
@@ -1720,7 +2537,8 @@ def card_html(it, accounts, now: float) -> str:
     return "\n".join(lines)
 
 
-def card_buttons(it, accounts, service) -> dict | None:
+def card_buttons(it, accounts, service, fixable: bool = False) -> dict | None:
+    """The buttons under a video's card. `fixable`: it can be made again from a critique (Bot.fixable)."""
     from ..posting.store import INTERRUPTED
 
     rows = []
@@ -1744,6 +2562,8 @@ def card_buttons(it, accounts, service) -> dict | None:
         if can_post:
             row.insert(0, ("🚀 Post it now", f"now:{it.id}"))
         rows.append(row)
+    if fixable:
+        rows.append([("🛠 Say what to fix", f"fix:{it.id}")])
     rows.append([("🎬 All videos", "list:0")])
     return inline(rows)
 
@@ -1765,17 +2585,21 @@ def group_new(items: list) -> list[tuple[str, list]]:
     return out
 
 
-def catch_up_html(items: list) -> tuple[str, dict]:
+def catch_up_html(items: list, app_url: str = "") -> tuple[str, dict]:
     """Lots of new videos at once, as one message."""
     made = sum(1 for i in items if i.ai_generated)
     clips = len(items) - made
     bits = ([plural(clips, "new clip")] if clips else []) + ([plural(made, "new Creator video")] if made else [])
     sources = len({str(Path(i.path).parent) for i in items if not i.ai_generated})
     text = f"<b>📥 {' and '.join(bits)}</b>" + (f" from {plural(sources, 'video')}" if clips and sources > 1 else "")
+    if app_url:
+        return text + ".", inline([[app_button("🎬 Watch them in the app", app_link(app_url))]])
     return text + ". /videos lists them.", inline([[("🎬 All videos", "list:0")]])
 
 
-def digest_html(title: str, items: list, accounts, now: float) -> tuple[str, dict]:
+def digest_html(title: str, items: list, accounts, now: float, app_url: str = "") -> tuple[str, dict]:
+    """A message listing some videos. With the Mini App's address, one button opens them there; else a button
+    each sends the video into the chat."""
     from ..posting import schedule
 
     lines = [f"<b>{esc(title)}</b>"] if title else []
@@ -1786,6 +2610,12 @@ def digest_html(title: str, items: list, accounts, now: float) -> tuple[str, dic
         bits = [a.handle if a else "not queued", when, length_text(it.duration)]
         lines.append(f"{n}. {esc(trim(it.headline, 80))}\n    {esc(' · '.join(b for b in bits if b))}")
         rows.append([(trim(f"▶ {n}. {it.headline}", 60), f"v:{it.id}")])
+    if app_url:
+        if len(items) > DIGEST_MAX:
+            lines.append(f"…and {len(items) - DIGEST_MAX} more in the app")
+        first = app_link(app_url, items[0].id if len(items) == 1 else "")
+        return "\n".join(lines), inline([[app_button("▶ Watch it in the app" if len(items) == 1 else
+                                                     "🎬 Watch them in the app", first)]])
     if len(items) > DIGEST_MAX:
         lines.append(f"…and {len(items) - DIGEST_MAX} more in /videos")
     rows.append([("🎬 All videos", "list:0")])

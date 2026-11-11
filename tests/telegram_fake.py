@@ -41,6 +41,7 @@ class FakeTelegram:
         self._update = 1
         self._message = 100
         self.poll_wait = 0.02  # an empty long poll waits a moment, as Telegram's does
+        self.menus: dict[int, dict] = {}  # each chat's menu button (left of the message box)
 
     # --- the HTTP side ------------------------------------------------------------------------------
     def transport(self, url, body, headers, timeout):
@@ -108,6 +109,10 @@ class FakeTelegram:
     def m_answerCallbackQuery(self, p):
         return True
 
+    def m_setChatMenuButton(self, p):
+        self.menus[int(p["chat_id"])] = p["menu_button"]
+        return True
+
     m_setMyCommands = m_sendChatAction = m_pinChatMessage = m_deleteMessage = m_answerCallbackQuery
 
     # --- for the tests ----------------------------------------------------------------------------------
@@ -141,5 +146,5 @@ def buttons(markup) -> list[tuple[str, str]]:
     """Every inline button in a reply_markup: (label, callback data or url)."""
     if isinstance(markup, str):
         markup = json.loads(markup)
-    return [(b["text"], b.get("callback_data") or b.get("url", "")) for row in (markup or {}).get("inline_keyboard", [])
-            for b in row]
+    return [(b["text"], b.get("callback_data") or b.get("url") or (b.get("web_app") or {}).get("url", ""))
+            for row in (markup or {}).get("inline_keyboard", []) for b in row]

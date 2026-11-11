@@ -240,7 +240,8 @@ def test_the_code_from_the_window_links_a_phone(world):
     with state.edit(world.state_file) as data:
         code = state.new_code(data, world.clock[0])
     assert "isn't right" in world.say("ZZZZZZ", STRANGER)["text"]
-    reply = world.say(f"/start {code}", STRANGER)
+    world.say(f"/start {code}", STRANGER)
+    reply = [m for m in world.fake.sent("sendMessage") if m["chat_id"] == STRANGER["id"]][-1]
     assert "Linked" in reply["text"] and reply["reply_markup"]["keyboard"][0][0]["text"] == botmod.B_STATUS
     assert set(state.chat_ids(state.load(world.state_file))) == {JUSTYN["id"], STRANGER["id"]}
     assert world.say("/status", STRANGER)["text"].startswith("<b>ClipMonster</b>")
@@ -495,7 +496,7 @@ def test_delete_asks_first_then_clears_the_files(world):
     disk = Store(world.store.path)
     assert disk.get(one.id) is None and disk.get(other.id) is None and disk.get(two.id) is not None
     assert "Deleted from the PC" in world.fake.messages[(JUSTYN["id"], mid)]["caption"]
-    assert any("🗑 Deleted “Hook number 1”" in line for line in world.logs)
+    assert any("🗑 Justyn deleted “Hook number 1”" in line for line in world.logs)
     assert world.take() == []  # automation doesn't bring it back
 
 
@@ -880,7 +881,8 @@ def test_checking_the_token_and_sending_a_test():
 def test_settings_and_the_bot_agree():
     assert [k for k, _ in TELEGRAM_SENDS] == list(botmod.SENDS)
     fields = {f.name: f for f in SCHEMA if f.group == "Telegram"}
-    assert set(fields) == {"telegram_on", "telegram_token", "telegram_send"}
+    assert set(fields) == {"telegram_on", "telegram_token", "telegram_send", "telegram_app", "telegram_app_url",
+                           "telegram_app_port"}
     assert fields["telegram_token"].kind == "secret"
     assert {k.strip() for k in Settings().telegram_send.split(",")} == set(botmod.SENDS)
     assert Settings().apply({"telegram_token": f"  {TOKEN} "}).telegram_token == TOKEN

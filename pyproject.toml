@@ -55,7 +55,8 @@ build = ["pyinstaller>=6.10"]
 # its key for each PC go in the Keychain, and Deno (for YouTube) comes with it; whisper.cpp stands in for
 # faster-whisper, and Playwright (posting, on the PC) isn't used.
 mac = ["keyring>=24", "deno>=2.4"]
-test = ["pytest>=8.2"]
+# (html5lib builds the tree a browser builds: the Studio's article reader is checked against it.)
+test = ["pytest>=8.2", "html5lib>=1.1"]
 
 [project.scripts]
 ytclip = "ytclip.cli:main"

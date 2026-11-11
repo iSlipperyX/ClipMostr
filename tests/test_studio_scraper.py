@@ -368,17 +368,23 @@ def test_a_mark_never_takes_a_free_article_with_it():
     assert S.ungated(menu) == f'<nav><ul><li><a href=/>Home</a><li><a href=/about>About</a></ul></nav><article>{body}</article>'
     hint = f'<div class=top><p class=paywall-hint>Subscribe for more<p>Free today</div><article>{body}</article>'
     assert S.ungated(hint) == f'<div class=top><p>Free today</div><article>{body}</article>'
-    assert S.ungated("<div><span class=paywall>no</div><p>keep") == "<div></div><p>keep"  # its parent's end ends it
     assert S.ungated("<table><tr><td class=regwall>no<td>yes</table>") == "<table><tr><td>yes</table>"
     assert S.ungated("<table><tr class=regwall><td>no<p>no<tr><td>yes</table>") == "<table><tr><td>yes</table>"
     assert S.ungated("<ul><li class=paywall><p>no<li>yes</ul>") == "<ul><li>yes</ul>"  # through the open <p>
     assert S.ungated("<dl><dt class=paywall>no<dd>yes</dl><p>keep") == "<dl><dd>yes</dl><p>keep"
     # A list inside the marked item doesn't end it: its own items do nothing to the one they sit in.
     assert S.ungated("<ul><li class=paywall>no<ul><li>no<li>no</ul>no<li>yes</ul>") == "<ul><li>yes</ul>"
+    # Nor does a heading or a block that came and went inside it stop the next item from ending it.
+    assert S.ungated("<ul><li class=paywall>no<h3>no</h3>no<li>yes</ul>yes") == "<ul><li>yes</ul>yes"
+    assert S.ungated("<ul><li class=paywall>no<div>no</div>no</ul>yes") == "<ul></ul>yes"
+    assert S.ungated("<p class=paywall-hint>Subscribe <a href=x>here<p>Free") == "<p>Free"
     assert S.ungated("<div class=paywall><p>no<p>no<div>no</div>no</div><p>yes") == "<p>yes"
     # A misplaced </a> doesn't end the block opened inside the link, so nothing after it slips out.
     assert S.ungated("<a href=x><div class=paywall>no</a>no</div><p>yes") == "<a href=x><p>yes"
-    assert S.ungated("<p>yes <span class=paywall>no</p>yes") == "<p>yes </p>yes"
+    # A marked link closed out of order (a browser lets </a> through the heading) ends at its </a>.
+    cta = '<article><a class="paywall-cta" href=/join><h3>Subscribe</a></h3><p>free one</p></article><p>free two'
+    assert S.ungated(cta) == "<article></h3><p>free one</p></article><p>free two"
+    assert S.ungated("<p>yes <a class=paywall href=x>no<p>no</a>yes") == "<p>yes yes"
     for doc in (menu, hint):
         for name, _ in S.EXTRACTORS:
             text, _how = S.extract(f"<html><body>{doc}</body></html>", URL, name)
@@ -398,6 +404,149 @@ def test_a_mark_never_takes_a_free_article_with_it():
         doc = f"<html><body><article><p>{PARAS[0]}</p><div {gated}>{body}</div></article></body></html>"
         assert "bioacoustician" not in S.ungated(doc), gated
         assert "bioacoustician" not in S.builtin_text(doc), gated
+
+
+def test_a_cut_takes_more_than_the_marked_part_never_less():
+    """What's left after the cut is read, so wherever a broken page leaves it unsure where a marked element
+    ends, the cut goes on. Each of these let marked text through; a browser shows every "no" inside the mark."""
+    for doc, left in [
+        # A class may be written as two words.
+        ('<div class="premium content"><p>no</p></div><p>yes', "<p>yes"),
+        ('<div class="members only">no</div>yes', "yes"),
+        ('<div class="story subscriber only">no</div>yes', "yes"),
+        # An end tag in a table, a second </form>, a made-up tag's end tag across a block, a </span> across
+        # one, a </div> in a list of choices: none of them ends the marked element.
+        ("<div class=paywall><table><tr><td>no</div>no</td></tr></table>no</div>yes", "yes"),
+        ("<div class=paywall><form>no</form></form>no</div>yes", "yes"),
+        ("<x-wall class=paywall><div>no</x-wall>no</div>no</x-wall>yes", "yes"),
+        ("<span class=paywall>no<div>no</span>no</div>no</span>yes", "yes"),
+        ("<div class=paywall><select><option>no</div>no</select>no</div>yes", "yes"),
+        ("<ul><li class=paywall>no<table><tr><td>no</ul>no</li>no</table>no</li>yes</ul>", "<ul>yes</ul>"),
+        # A <p> that an <hr> or a <center> ended isn't the one the next </p> ends.
+        ("<div class=paywall><p>no<hr><p>no</p>no</div>yes", "yes"),
+        ("<div class=paywall><p>no<center>no</center><p>no</p>no</div>yes", "yes"),
+        # A heading's end tag ends the heading opened last, whatever its number.
+        ("<h3 class=paywall>no<h2>no</h3>no</h2>yes", "yes"),
+        # A </form> leaves open what was open inside the form, and that is still inside it.
+        ("<form class=paywall><div>no</form>no</div>yes", "yes"),
+        ("<i>yes<form class=paywall>no</form>no", "<i>yes"),
+        # A marked <b> left open in a marked block is opened again by a browser in what follows.
+        ("<div class=paywall>no<b class=paywall>no</div>no</b>yes", "yes"),
+        ("<div class=paywall>no<i class=paywall><i>no</i></div>no</i>yes", "yes"),
+        # Where a browser may not read a tag as a tag (a list of choices), nothing ends the cut.
+        ("<select><option class=paywall>no</option></select>no", "<select>"),
+        ("<div class=paywall><select><option>no<input>no</div>no", ""),
+        # An element nothing closes takes the rest, even when its parent's end tag follows.
+        ("<div><span class=paywall>no</div><p>no", "<div>"),
+        ("<p>yes <span class=paywall>no</p>no", "<p>yes "),
+    ]:
+        assert S.ungated(doc) == left, doc
+    # Words that only look like the two-word marks aren't marks.
+    for free in ('<div class="premium story content">yes</div>', '<div class="only members">yes</div>'):
+        assert S.ungated(free) == free, free
+    # A very deep page inside a marked element isn't followed for ever: the cut takes the rest.
+    deep = "<p>yes</p><div class=paywall>" + "<x-y>" * 5000 + "</span>" * 5000 + "</div>no"
+    assert S.ungated(deep) == "<p>yes</p>"
+
+
+def _soup(rng, n: int) -> str:
+    """A page of tags opened, closed, left open and closed out of order, with numbered words between."""
+    flow = ["div", "p", "section", "article", "ul", "li", "span", "a", "b", "h2", "blockquote", "form", "dl", "dt",
+            "dd", "em", "aside", "main", "x-gate", "ol", "pre", "figure", "button", "strong", "table", "h3", "nav",
+            "header", "footer", "label", "i", "details", "summary", "center", "select", "option", "fieldset"]
+    marks = [' class="paywall"', ' class="x members-only"', ' id="regwall"', " class=paywall",
+             ' CLASS="Premium-Content y"', ' class="premium content"']
+    out, opened, words, marked = [], [], 0, 0
+    for _ in range(n):
+        r, top = rng.random(), opened[-1] if opened else ""
+        if r < 0.42:
+            if top in ("table", "tbody"):
+                tag = "tr" if top == "tbody" else rng.choice(["tr", "tr", "tbody"])
+            elif top == "tr":
+                tag = rng.choice(["td", "td", "th"])
+            elif top in ("ul", "ol") and rng.random() < 0.8:
+                tag = "li"
+            elif top == "dl" and rng.random() < 0.8:
+                tag = rng.choice(["dt", "dd"])
+            else:
+                tag = rng.choice(flow)
+            mark = ""
+            if rng.random() < 0.18 and marked < 2:
+                mark, marked = rng.choice(marks), marked + 1
+            out.append(f"<{tag}{mark}>")
+            opened.append(tag)
+        elif r < 0.72:
+            if top not in ("table", "tbody", "tr"):
+                words += 1
+                out.append(f"W{words} ")
+        elif r < 0.9 and opened:
+            how = rng.random()
+            if how < 0.7:
+                out.append(f"</{opened.pop()}>")
+            elif how < 0.85:
+                opened.pop()  # an end tag left out
+            else:
+                out.append(f"</{opened.pop(rng.randrange(len(opened)))}>")  # one closed out of order
+        elif r < 0.93:
+            out.append(rng.choice(["<br>", "<hr>", "<img src=x>", "\n", "\r\n", "<!-- c -->", "</p>", "</div>",
+                                   "</span>", "</a>", "</li>", "<input>"]))
+    return "".join(out) + "".join(f"</{tag}>" for tag in reversed(opened) if rng.random() < 0.7)
+
+
+def test_no_marked_word_survives_the_cut_on_thousands_of_broken_pages():
+    """The measure of the cut is a browser's reading of the page. html5lib builds the tree a browser builds;
+    every word it puts inside a marked element must be gone from what the cut leaves, on pages of tags left
+    open and closed out of order. (And the cut isn't allowed to pass by taking everything.)"""
+    import random
+    import re
+
+    html5lib = pytest.importorskip("html5lib")
+
+    def inside_marks(doc: str) -> set[str]:
+        found: set[str] = set()
+
+        def walk(el, within: bool) -> None:
+            tag = el.tag if isinstance(el.tag, str) else ""
+            within = within or bool(tag) and S._gated(tag.lower(), {k.lower(): v for k, v in el.attrib.items()})
+            if within and tag:
+                found.update(re.findall(r"W\d+", el.text or ""))
+            for child in el:
+                walk(child, within)
+                if within:
+                    found.update(re.findall(r"W\d+", child.tail or ""))
+
+        walk(html5lib.parse(doc, treebuilder="etree", namespaceHTMLElements=False), False)
+        return found
+
+    pages = free = lost = 0
+    for seed in range(6000):
+        rng = random.Random(seed)
+        doc = _soup(rng, rng.randint(6, 30))
+        marked = inside_marks(doc)
+        if not marked and S.ungated(doc) == doc:
+            continue
+        pages += 1
+        kept = set(re.findall(r"W\d+", S.ungated(doc)))
+        assert not marked & kept, (seed, doc)
+        unmarked = set(re.findall(r"W\d+", doc)) - marked
+        free, lost = free + len(unmarked), lost + len(unmarked - kept)
+    assert pages > 3000
+    assert lost < 0.12 * free, (lost, free)  # (about 8% today, on pages far more broken than real ones)
+
+
+def test_a_short_page_is_only_called_paid_when_what_was_cut_could_have_been_the_article():
+    """A page drawn by JavaScript with a "Members" item in its menu, or with an empty box for the paywall
+    script to fill, was reported as subscribers only. It's a page with no article in it."""
+    shell = lambda extra: f"<html><head><title>T</title></head><body>{extra}<div id=root></div></body></html>"  # noqa: E731
+    for extra in ('<nav><ul><li><a href=/>Home</a></li><li class="menu-item members-only"><a href=/m>Members</a>'
+                  "</li></ul></nav>", '<div id="piano-inline"></div>', '<span class="paywall-badge">Plus</span>'):
+        with pytest.raises(S.ScrapeError, match="No article text was found"):
+            S.article_from(shell(extra), URL)
+    body = "".join(f"<p>{p}</p>" for p in PARAS)
+    with pytest.raises(S.ScrapeError, match="subscribers only"):
+        S.article_from(shell(f'<div class="premium content">{body}</div>'), URL)
+    with pytest.raises(S.ScrapeError, match="subscribers only"):  # the page says so in words
+        S.article_from(shell("<p>Subscribe to continue reading this story.</p>"), URL)
 
 
 def test_robots_is_asked_again_wherever_a_redirect_leads():
