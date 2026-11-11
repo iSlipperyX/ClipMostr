@@ -12,6 +12,8 @@ on with a bot token, and only answers the phones linked to it (state.py). From t
 * pause and resume automation, and read the past week's report (/week);
 * say what's wrong with a video the Creator or the Studio made, and the AI makes it again with that fixed
   (fix, creator/critique.py);
+* ask for a game's best plays as clips and a recap reel (/sports NBA Lakers vs Celtics): automation looks for
+  the game, finds its plays and makes them, with nobody picking along the way (sportsdesk/desk.py: an order);
 * share the bot with one other person (/people): two people at most, each told what the other did.
 
 With Settings → Telegram → Mini App on, all of that is an app inside Telegram instead (webapp.py): the button
@@ -72,6 +74,7 @@ COMMANDS = [
     ("clip", "Clip a YouTube video"),
     ("request", "Ask for clips: /request 10 30-45s Gaming"),
     ("requests", "Your requests and how far along they are"),
+    ("sports", "A game's best plays and a recap reel: /sports NBA Lakers vs Celtics"),
     ("pause", "Pause automation"),
     ("resume", "Carry on"),
     ("week", "The past week on TikTok"),
@@ -136,7 +139,8 @@ def help_html(app: bool = False) -> str:
     if app:
         return (f"<b>ClipMonster on {esc(pc_name())}</b>\n\n"
                 "Everything is in the app: watch the videos waiting to post, OK or delete them, say what's wrong "
-                "with one so the AI makes it again, ask for new ones, and see who did what. Open it with the "
+                "with one so the AI makes it again, ask for new ones (a video about an idea, or a game's best "
+                "plays and a recap reel), and see who did what. Open it with the "
                 "<b>ClipMonster</b> button left of the message box, or the button below.\n\n"
                 "I'll still message you here when a video waits for your OK, when something you asked for is "
                 "ready, and when something needs you. /people is who shares this bot.")
@@ -147,6 +151,7 @@ def help_html(app: bool = False) -> str:
             f"{B_REQUESTS}: /request 10 30-45s Gaming funny reactions only\n"
             f"{B_STATUS}, {B_PAUSE}, {B_WEEK}\n"
             "🛠 Under a video the AI made: say what's wrong with it, and it's made again\n"
+            "🏆 /sports NBA Lakers vs Celtics: the game's best plays as clips, and a recap reel\n"
             "👥 /people: share this bot with one other person\n\n"
             "I'll message you when a video waits for your OK, when something you asked for is ready, and when "
             "something needs you. What I send is set in ClipMonster → Settings → Telegram.")
@@ -180,6 +185,7 @@ ACTIVITY = {
     "make": "✨ <b>{name}</b> asked for a video about “{title}”.",
     "clip": "✂️ <b>{name}</b> asked to clip {title}.",
     "request": "📋 <b>{name}</b> asked for {title}.",
+    "sports": "🏆 <b>{name}</b> asked for sports highlights: {title}.",
     "cancel": "✖ <b>{name}</b> cancelled the request for {title}.",
     "pause": "⏸ <b>{name}</b> paused automation.",
     "resume": "▶ <b>{name}</b> resumed automation.",
@@ -225,6 +231,65 @@ def split_command(text: str) -> tuple[str, str]:
         return "", t
     head, _, rest = t.partition(" ")
     return head[1:].split("@", 1)[0].lower(), rest.strip()
+
+
+SPORT_WORDS = {"hoops": "basketball", "ice hockey": "hockey", "mma": "combat", "fights": "combat",
+               "racing": "motorsport", "american football": "football"}
+LEAGUE_WORDS = {"f1": ("Formula 1", "motorsport"), "epl": ("Premier League", "soccer"),
+                "ucl": ("Champions League", "soccer"), "laliga": ("La Liga", "soccer")}
+SPORTS_FILLER = re.compile(r"\b(?:highlights?|best|top|of|the|and|a|an|from|for|with|only|just|please|games?|"
+                           r"match(?:es)?|fights?|races?|clips?|plays?|reels?|recaps?|montages?|both|newest|latest|"
+                           r"last|this|week|month|today|tonight|night|yesterday|me|make|get|want|i)\b", re.I)
+SPORTS_HELP = ("Say the game like <i>NBA Lakers vs Celtics</i>, <i>Premier League 2 games, reel only</i> or "
+               "<i>UFC 3 clips</i>: the league or sport, the teams if you have them, and what you'd like.")
+
+
+def parse_sports(text: str) -> dict:
+    """'NBA Lakers vs Celtics 3 clips' → what sportsdesk's Desk.order takes: {sport, league, teams, since, want,
+    games, plays}. ValueError (in words for the person) when it names no sport, league or team."""
+    from .. import sports
+    from ..sportsdesk import games as G
+
+    rest = " " + " ".join(str(text or "").replace("’", "'").split()) + " "
+    out: dict = {"want": "both"}
+
+    def take(pattern: str) -> re.Match | None:
+        nonlocal rest
+        m = re.search(pattern, rest, re.I)
+        if m:
+            rest = rest[:m.start()] + " " + rest[m.end():]
+        return m
+
+    for sport_id, names in G.LEAGUES.items():
+        for name in sorted(names, key=len, reverse=True):
+            if "league" not in out and take(rf"(?<![\w-]){re.escape(name)}(?![\w-])"):
+                out["league"], out["sport"] = name, sport_id
+    for word, (name, sport_id) in LEAGUE_WORDS.items():
+        if "league" not in out and take(rf"(?<![\w-]){re.escape(word)}(?![\w-])"):
+            out["league"], out["sport"] = name, sport_id
+    words = {sp.id: sp.id for sp in sports.SPORTS.values() if sp.id != "any"} | SPORT_WORDS
+    for word in sorted(words, key=len, reverse=True):
+        if take(rf"(?<![\w-]){re.escape(word)}(?![\w-])"):
+            out.setdefault("sport", words[word])
+    m = take(r"\b(\d{1,2})\s*(?:clips?|plays?)\b")
+    if m:
+        out["plays"] = int(m.group(1))
+    m = take(r"\b(\d{1,2})\s*(?:games?|match(?:es)?|fights?|races?)\b")
+    if m:
+        out["games"] = int(m.group(1))
+    low = rest.lower()
+    reel = bool(re.search(r"\b(?:reels?|recaps?|montages?)\b", low))
+    clips = "plays" in out or bool(re.search(r"\b(?:clips?|plays?)\b", low)) or (reel and "highlight" in low)
+    out["want"] = "reel" if reel and not clips else "clips" if clips and not reel else "both"
+    out["since"] = ("3days" if re.search(r"\b(?:today|tonight|last night|yesterday)\b", low) else
+                    "month" if re.search(r"\bmonth\b", low) else "week")
+    teams = re.sub(r"\s+(?:vs?\.?|versus|at|@)\s+", " , ", " " + SPORTS_FILLER.sub(" ", rest) + " ", flags=re.I)
+    teams = ", ".join(t for t in (" ".join(x.split()).strip(" .!?:-") for x in re.split(r"[,;]+", teams)) if t)
+    if teams:
+        out["teams"] = teams
+    if not (out.get("sport") or out.get("league") or out.get("teams")):
+        raise ValueError("Which game? " + SPORTS_HELP)
+    return out
 
 
 def parse_request(text: str, cats: list) -> dict:
@@ -303,6 +368,7 @@ class Bot:
         self.fixing: dict[int, str] = {}  # chat -> the video whose critique it's about to send
         self.webapp = None  # the Mini App's server, when automation runs one (pipeline.start_telegram)
         self._menus_at = 0.0
+        self._desk = None  # the Sports section's state (sportsdesk/desk.py), opened when it's first asked of
         self._fix_lock = threading.Lock()  # one critique at a time: the chat and the app can both send one
 
     # --- running ---------------------------------------------------------------------------------------
@@ -328,6 +394,12 @@ class Bot:
                 pass
         self.stop_event.set()
         self.wake.set()
+        if self._desk is not None:
+            try:
+                self._desk.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self._desk = None
         for t in self._threads:
             t.join(timeout)
         self._threads = []
@@ -621,7 +693,7 @@ class Bot:
                    "request": self.cmd_request, "requests": self.cmd_requests, "pause": self.cmd_pause,
                    "resume": self.cmd_resume, "toggle": self.cmd_toggle, "week": self.cmd_week,
                    "dashboard": self.cmd_dashboard, "app": self.cmd_app, "people": self.cmd_people,
-                   "fix": self.cmd_fix}.get(cmd)
+                   "fix": self.cmd_fix, "sports": self.cmd_sports}.get(cmd)
         try:
             if handler is not None:
                 handler(chat_id, arg)
@@ -1689,6 +1761,123 @@ class Bot:
         self.wake.set()
         return {"message": f"{who} can't use this bot any more."}
 
+
+    # --- sports: a game's best plays and a recap reel, asked for in one go -------------------------------------
+
+    @property
+    def desk(self):
+        """The Sports section's state (the same sports.db the PC's window shows)."""
+        if self._desk is None:
+            from ..sportsdesk.desk import Desk
+
+            self._desk = Desk(settings=self.settings, now=self.now)
+        return self._desk
+
+    def cmd_sports(self, chat: int, text: str = "") -> None:
+        text = text.strip()
+        if text.lower() in ("cancel", "stop"):
+            mine = [o for o in self.desk.orders(40) if o["status"] in ("queued", "searching", "working")]
+            o = next((o for o in mine if o.get("by_id") == chat), mine[0] if mine else None)
+            if o is None:
+                self.say(chat, "No sports request is waiting or under way.")
+                return
+            try:
+                self.say(chat, "✖ " + esc(self.sports_cancel(chat, o["id"])["message"]))
+            except Refused as exc:
+                self.say(chat, f"⚠ {esc(exc)}")
+            return
+        if not text:
+            self.modes[chat] = ("sports", self.now() + MODE_LIFE)
+            going = [o for o in self.desk.orders(12) if o["status"] in ("queued", "searching", "working")]
+            lines = ["🏆 <b>Which game?</b> " + SPORTS_HELP, "",
+                     "I look for the game's highlights on YouTube, pick its best plays and make them into clips "
+                     "and a recap reel, on the PC. League footage often gets copyright claims on TikTok."]
+            if going:
+                lines += ["", "<b>Under way</b>"] + [f"• {esc(o['title'])} ({esc(o['by'] or 'someone')}): "
+                                                    f"{esc(o['doing'] or 'waiting')}" for o in going]
+                lines.append("/sports cancel stops the newest of yours.")
+            self.say(chat, "\n".join(lines))
+            return
+        try:
+            r = self.sports_order(chat, parse_sports(text))
+        except ValueError as exc:
+            self.modes[chat] = ("sports", self.now() + MODE_LIFE)
+            self.say(chat, f"⚠ {exc}")
+            return
+        except Refused as exc:
+            self.say(chat, f"⚠ {esc(exc)}")
+            return
+        self.say(chat, "🏆 " + esc(r["message"]), inline([[self.app_row("📱 Follow it in the app")]])
+                 if self.app_url else None)
+
+    def sports_order(self, chat: int, values: dict) -> dict:
+        """Ask automation for a game's best plays as clips, a recap reel or both (sportsdesk's Desk.order), in
+        `chat`'s name. Raises Refused."""
+        from ..sportsdesk.desk import DeskError
+
+        try:
+            r = self.desk.order(values if isinstance(values, dict) else {}, by=self.name(chat), by_id=chat)
+        except DeskError as exc:
+            raise Refused(exc.message, exc.status) from exc
+        o = r["order"]
+        self._remember(f"sports:{o['id']}", chat, o["title"], "sports")
+        self.log(f"{self.name(chat)} asked for sports highlights: {o['title']}.")
+        self.did(chat, "sports", o["title"])
+        where = f" for {o['category']}" if o.get("category") else ""
+        return {"order": o, "message": f"Got it: {o['title']}{where}. Automation looks for the game, finds its best "
+                                       "plays and makes them; they show up under Videos, and I'll tell you when "
+                                       "they're ready."}
+
+    def sports_cancel(self, chat: int, order_id: str) -> dict:
+        from ..sportsdesk.desk import DeskError
+
+        try:
+            r = self.desk.cancel_order(str(order_id))
+        except DeskError as exc:
+            raise Refused(exc.message, exc.status) from exc
+        with self.lock, state.edit(self.state_file) as data:
+            data["asked"].pop(f"sports:{order_id}", None)
+        self.log(f"{self.name(chat)} cancelled a sports request ({r['order']['title']}).")
+        self.did(chat, "cancel", r["order"]["title"])
+        return r
+
+    def sports_report(self, o: dict, items: int, made: bool) -> str:
+        """How a finished sports order went, as HTML with {whose} left for who's told ("Your sports request")."""
+        title = esc(trim(o.get("title") or "", 160)).replace("{", "(").replace("}", ")")
+        said = [esc(trim(st.get("said") or "", 200)).replace("{", "(").replace("}", ")")
+                for st in o.get("steps") or [] if st.get("kind") in ("clips", "reel") and st.get("status") == "done"]
+        if o.get("status") == "failed":
+            why = esc(trim(o.get("error") or "It failed.", 300)).replace("{", "(").replace("}", ")")
+            return f"✖ <b>{{whose}} couldn't be done</b> ({title}): {why}"
+        from ..sportsdesk.games import GameFilter
+
+        emoji = GameFilter.from_json(o.get("filter")).sport_info.emoji
+        lines = [f"{emoji} <b>{{whose}} is ready</b>: {title}"] + [f"• {s}" for s in said]
+        if not said:
+            lines.append(esc(trim(o.get("message") or "", 300)).replace("{", "(").replace("}", ")"))
+        if o.get("error"):
+            lines.append("⚠ " + esc(trim(o["error"], 300)).replace("{", "(").replace("}", ")"))
+        if made and not items:
+            lines.append("They're in the Library on the PC (not queued to post: its category has no TikTok "
+                         "account?).")
+        return "\n".join(lines)
+
+    def sports_json(self) -> dict:
+        """What the app's sports form offers, and the sports requests so far."""
+        from .. import sports
+        from ..sportsdesk import desk as D
+        from ..sportsdesk import games as G
+
+        s = self.settings()
+        return {"sports": [{"id": sp.id, "label": sp.label, "emoji": sp.emoji,
+                            "leagues": list(G.LEAGUES.get(sp.id, ()))} for sp in sports.SPORTS.values()],
+                "since": [{"id": k, "label": label} for k, label, _days in G.SINCE],
+                "wants": [{"id": k, "label": v} for k, v in D.ORDER_WANTS.items()],
+                "categories": [{"id": c["id"], "name": c["name"], "sport": c["sport"], "account": c["account"]}
+                               for c in D.category_list(s)],
+                "most": {"games": D.ORDER_GAMES, "plays": D.ORDER_PLAYS, "open": D.MAX_OPEN_ORDERS},
+                "orders": self.desk.orders(12)}
+
     # --- a critique: make it again -------------------------------------------------------------------------------
 
     def fixable(self, it) -> bool:
@@ -2167,6 +2356,20 @@ class Bot:
                 text = f"{mark} Your request for {esc(ask.get('title') or o.title())}: {esc(o.message)}."
                 if items:
                     buttons = digest_html("", items, accounts, now, self.app_url)[1]
+            elif kind == "sports":
+                o = self.desk.find_order(ident)
+                if o is None or o.get("status") == "cancelled":
+                    done.append(key)
+                    continue
+                if o.get("status") not in ("done", "failed"):
+                    continue
+                folders = [st["folder"] for st in o.get("steps") or [] if st.get("folder")]
+                items = [i for f in dict.fromkeys(folders) for i in _items_in(store, Path(f))]
+                if folders and not items and now - float(o.get("finished") or now) < 15 * 60:
+                    continue  # posting brings them in within a couple of minutes
+                text = self.sports_report(o, len(items), bool(folders))
+                if items:
+                    buttons = digest_html("", items, accounts, now, self.app_url)[1]
             done.append(key)
             if not chat:
                 continue
@@ -2197,6 +2400,10 @@ class Bot:
                                    f"“{src}”", items, accounts, now, self.app_url)
                 for other in others:
                     self.say(other, t, b)
+            elif text and kind == "sports":
+                self.say(chat, text.format(whose="Your sports request"), buttons)
+                for other in others:  # both people see every video
+                    self.say(other, text.format(whose=f"{who}'s sports request"), buttons)
             elif text:
                 self.say(chat, text, buttons)
             answered.update(i.id for i in items)

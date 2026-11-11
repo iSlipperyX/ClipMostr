@@ -14,6 +14,12 @@ measurements are cached, so that's quick).
 
 Every method the window and the Mac use (state, set_filter, find_games, analyse, choose, make, ...) answers with
 plain data, which remote/host.py hands the Mac as JSON. A problem the person can fix is a DeskError.
+
+An order is a whole request done without anyone picking along the way (the Telegram app asks for them, from a
+phone): "the Lakers game, its five best plays as clips and a recap reel". It has its own filter, so the Sports
+page's stays as it was. Its work is the same tasks, each carrying the order's id: the order's own task looks for
+the games and picks the best matches, then each game's highlights are found, then its clips and its reel are
+made. When a task ends the order hears (order_step), queues what comes next, and closes once nothing is left.
 """
 
 from __future__ import annotations
@@ -40,8 +46,16 @@ POLL = 2.0  # s between looks for work when there's none
 STAGE_EVERY = 1.0  # s between progress writes
 WAIT_RETRY = 600.0  # s before a task waiting out YouTube's sign-in pause is looked at again
 KEEP_TASKS = 7 * 86400.0  # finished tasks are forgotten after this long
-KINDS = ("search", "highlights", "make", "reel", "events")
+KINDS = ("search", "highlights", "make", "reel", "events", "order")
 BUSY = ("queued", "analysing", "making")  # a game's statuses while work is waiting or under way
+ORDER_WANTS = {"clips": "clips of the best plays", "reel": "a recap reel", "both": "clips and a recap reel"}
+ORDER_OPEN = ("queued", "searching", "working")  # an order's statuses until it's done, failed or cancelled
+ORDER_ENDED = ("done", "failed", "skipped", "cancelled")  # a step's statuses once nothing more happens to it
+ORDER_GAMES = 3  # games one order works on, at most
+ORDER_PLAYS = 7  # plays of a game one order makes into clips, at most
+MAX_OPEN_ORDERS = 4  # orders waiting or under way at once
+KEEP_ORDERS = 40  # finished orders remembered
+ORDER_ORPHAN = 90.0  # s an open order with no task left is given before it's closed
 
 
 class DeskError(Exception):
@@ -103,6 +117,8 @@ class Desk:
             con.execute("CREATE TABLE IF NOT EXISTS tasks (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, game TEXT,"
                         " payload TEXT, status TEXT, owner TEXT, lease REAL, next_try REAL, created REAL,"
                         " updated REAL, error TEXT, said TEXT)")
+            con.execute("CREATE TABLE IF NOT EXISTS orders (id TEXT PRIMARY KEY, data TEXT NOT NULL, created REAL,"
+                        " updated REAL)")
 
     def close(self) -> None:
         with self.lock:
@@ -489,17 +505,393 @@ class Desk:
                     "said) VALUES(?, ?, ?, 'queued', '', 0, 0, ?, ?, '', '')",
                     (kind, game_id, json.dumps(payload), now, now))
 
+
+    # ------------------------------------------------------------ orders: a whole request, nobody picking
+
+    def _load_order(self, con, order_id: str) -> dict | None:
+        row = con.execute("SELECT data FROM orders WHERE id=?", (str(order_id),)).fetchone()
+        if row is None:
+            return None
+        try:
+            return json.loads(row["data"])
+        except ValueError:
+            return None
+
+    def _put_order(self, con, o: dict) -> None:
+        o["updated"] = self.now()
+        con.execute("INSERT INTO orders(id, data, created, updated) VALUES(?, ?, ?, ?) ON CONFLICT(id) DO UPDATE SET "
+                    "data=excluded.data, updated=excluded.updated",
+                    (o["id"], json.dumps(o), o.get("created") or o["updated"], o["updated"]))
+
+    def _order_tasks(self, con, order_id: str, live_only: bool = True) -> list[dict]:
+        """The tasks that carry this order's id (those waiting or under way, unless `live_only` is off)."""
+        where = "WHERE status IN ('queued', 'working', 'cancel')" if live_only else ""
+        out = []
+        for r in con.execute(f"SELECT id, kind, game, status, payload FROM tasks {where} ORDER BY id").fetchall():
+            try:
+                pay = json.loads(r["payload"] or "{}")
+            except ValueError:
+                continue
+            if pay.get("order") == order_id:
+                out.append(dict(r))
+        return out
+
+    def order(self, values: dict, by: str = "", by_id: int | str = 0) -> dict:
+        """Ask for a game's (or a few games') best plays as clips, a recap reel, or both, without picking anything
+        along the way. `values`: sport, league, teams ("Lakers vs Celtics" or a list with commas), since, want
+        (ORDER_WANTS), games (how many, the newest that match), plays (clips per game), category. `by` and
+        `by_id` say who asked (the Telegram app tells them, and the other person, how it went)."""
+        if not isinstance(values, dict):
+            raise DeskError("That request couldn't be read.")
+        want = str(values.get("want") or "both").strip().lower()
+        if want not in ORDER_WANTS:
+            raise DeskError("Say what to make: clips, a reel, or both.")
+
+        def number(key: str, default: int, most: int) -> int:
+            try:
+                return max(1, min(most, int(values.get(key) or default)))
+            except (TypeError, ValueError):
+                return default
+
+        games, plays = number("games", 1, ORDER_GAMES), number("plays", 5, ORDER_PLAYS)
+        teams = re.sub(r"\s+(?:vs?\.?|versus|at|@)\s+", ", ", " " + str(values.get("teams") or "") + " ", flags=re.I)
+        page = self.filter()  # the reel's voice, framing and order are the Sports page's
+        f = G.GameFilter.from_json({
+            "sport": values.get("sport"), "league": values.get("league"), "teams": teams,
+            "since": values.get("since") or "week", "kinds": ["extended", "highlights"],
+            "category_id": values.get("category") if "category" in values else values.get("category_id"),
+            "per_game": plays, "reel_voice": page.reel_voice, "reel_framing": page.reel_framing,
+            "reel_order": page.reel_order})
+        if f.sport == "any" and not f.league and not f.team_list:
+            raise DeskError("Say which sport, league or teams to look for.")
+        s = self.settings()
+        cats = category_list(s)
+        if f.category_id:
+            if not any(c["id"] == f.category_id for c in cats):
+                raise DeskError("That category isn't there any more. Pick another.")
+        else:  # the one category that's for this sport, when there's just one
+            mine = [c for c in cats if c["sport"] and c["sport"] == f.sport]
+            if len(mine) == 1:
+                f.category_id = mine[0]["id"]
+        cat = next((c for c in cats if c["id"] == f.category_id), None)
+        now = self.now()
+        o = {"id": "o" + os.urandom(5).hex(), "by": " ".join(str(by or "").split())[:60], "by_id": by_id,
+             "filter": f.to_json(), "want": want, "games": games, "plays": plays,
+             "category": cat["name"] if cat else "", "status": "queued", "stage": "Waiting to look for the games",
+             "error": "", "message": "", "created": now, "updated": now, "finished": 0.0, "searched": {},
+             "steps": []}
+        o["title"] = order_title(o)
+        with self._tx() as con:
+            live = sum(1 for r in con.execute("SELECT data FROM orders").fetchall()
+                       if json.loads(r["data"]).get("status") in ORDER_OPEN)
+            if live >= MAX_OPEN_ORDERS:
+                raise DeskError(f"{live} sports requests are waiting or under way already. Wait for one to finish, "
+                                "or cancel one.", 409)
+            self._put_order(con, o)
+            self._add_task(con, "order", "", {"order": o["id"]})
+            old = [r["id"] for r in con.execute("SELECT id, data FROM orders ORDER BY created DESC").fetchall()
+                   if json.loads(r["data"]).get("status") not in ORDER_OPEN][KEEP_ORDERS:]
+            for oid in old:
+                con.execute("DELETE FROM orders WHERE id=?", (oid,))
+            self._bump(con)
+        return {"id": o["id"], "order": self._order_public(o, {}),
+                "message": f"Looking for {order_who(o)}: {order_what(o)}."}
+
+    def find_order(self, order_id: str) -> dict | None:
+        """An order as it's kept (None when there's no such order)."""
+        with self.lock:
+            return self._load_order(self.con, order_id)
+
+    def orders(self, limit: int = 20) -> list[dict]:
+        """The orders, newest first, each with what's being done for it right now."""
+        with self.lock:
+            rows = self.con.execute("SELECT data FROM orders ORDER BY created DESC LIMIT ?", (int(limit),)).fetchall()
+            games = {g["id"]: g for g in self._games(self.con)}
+        out = []
+        for r in rows:
+            try:
+                out.append(self._order_public(json.loads(r["data"]), games))
+            except ValueError:
+                continue
+        return out
+
+    def _order_public(self, o: dict, games: dict[str, dict]) -> dict:
+        out = {k: o.get(k) for k in ("id", "by", "by_id", "title", "want", "games", "plays", "category", "status",
+                                     "stage", "error", "message", "created", "updated", "finished")}
+        f = G.GameFilter.from_json(o.get("filter"))
+        out["sport"], out["emoji"] = f.sport, f.sport_info.emoji
+        out["steps"] = [{k: st.get(k) for k in ("game", "matchup", "kind", "status", "said", "folder", "file",
+                                                "clips")} for st in o.get("steps") or []]
+        out["doing"], out["frac"] = o.get("stage") or "", None
+        if o.get("status") == "working":
+            ids = list(dict.fromkeys(st["game"] for st in o.get("steps") or [] if st.get("status") not in ORDER_ENDED))
+            now = next((games[i] for i in ids if i in games and games[i].get("status") in ("analysing", "making")),
+                       None)
+            if now is not None:
+                out["doing"] = f"{now.get('matchup') or now.get('title')}: {now.get('stage') or 'Working'}"
+                out["frac"] = now.get("frac")
+            else:
+                out["doing"] = "Waiting its turn on the PC"
+        return out
+
+    def order_stage(self, order_id: str, stage: str, status: str | None = None) -> None:
+        with self._tx() as con:
+            o = self._load_order(con, order_id)
+            if o is None or o.get("status") not in ORDER_OPEN:
+                return
+            o["stage"] = stage
+            if status:
+                o["status"] = status
+            self._put_order(con, o)
+            self._bump(con)
+
+    def add_games(self, new_games: list[dict]) -> list[str]:
+        """Games an order's search found, into the list (as save_search does, without touching what the Sports
+        page says about its own last search). Returns each one's id in the list, best version first."""
+        with self._tx() as con:
+            gs, _added = G.merge(self._games(con), new_games)
+            by_video = {ver["video"]: g["id"] for g in gs for ver in g.get("versions") or [{"video": g["video"]}]}
+            want = list(dict.fromkeys(by_video[n["video"]] for n in new_games if n["video"] in by_video))
+            keep = G.trim(gs)
+            for g in gs:
+                if g["id"] in want and g not in keep:
+                    keep.append(g)
+            kept = {g["id"] for g in keep}
+            con.execute("DELETE FROM games")
+            for g in keep:
+                self._put(con, g)
+            self._bump(con)
+        for g in gs:
+            if g["id"] not in kept:
+                self._drop_media(g["id"])
+        return want
+
+    def start_order(self, order_id: str, game_ids: list[str], searched: dict) -> list[str]:
+        """The order's search is done: pick its games (those naming every team asked for first, then the newest
+        not made yet), and queue the work on each. Returns the games picked; none closes the order as failed."""
+        with self._tx() as con:
+            o = self._load_order(con, order_id)
+            if o is None or o.get("status") not in ORDER_OPEN:
+                return []
+            f = G.GameFilter.from_json(o.get("filter"))
+            found = []
+            for gid in game_ids:
+                row = con.execute("SELECT data FROM games WHERE id=?", (gid,)).fetchone()
+                if row is not None:
+                    found.append(json.loads(row["data"]))
+            teams = f.team_list
+
+            def both(g: dict) -> bool:
+                text = f"{g.get('title', '')} {g.get('home', '')} {g.get('away', '')}"
+                return len(teams) > 1 and all(G.mentions(text, [t]) for t in teams[:2])
+
+            def made(g: dict) -> bool:
+                return bool(g.get("made") or g.get("reels"))
+
+            free = [g for g in found if g.get("status") not in BUSY]
+            free.sort(key=lambda g: (not both(g), made(g), -(g.get("published") or g.get("found") or 0),
+                                     -(g.get("views") or 0)))
+            picked = free[:int(o.get("games") or 1)]
+            o["searched"] = {k: searched.get(k) for k in ("searched", "fits", "left_out", "queries", "by", "note",
+                                                          "problems")}
+            if not picked:
+                left = searched.get("left_out") or {}
+                why = ", ".join(f"{n} {k}" for k, n in sorted(left.items(), key=lambda kv: -kv[1])[:3])
+                n = int(searched.get("searched") or 0)
+                o.update(status="failed", stage="", finished=self.now(), error=(
+                    "Those games are being worked on already." if found else
+                    f"No game matched ({_plural(n, 'video')} looked at" + (f": {why})." if why else ").")
+                    if n else "YouTube had nothing for that search."))
+                self._put_order(con, o)
+                self._bump(con)
+                return []
+            o.update(status="working", stage="", steps=[])
+            for g in picked:
+                name = g.get("matchup") or g.get("title") or g["id"]
+                ready = any(h.get("origin") != "event" for h in g.get("highlights") or [])
+                if not ready:
+                    o["steps"].append({"game": g["id"], "matchup": name, "kind": "highlights", "status": "queued"})
+                for kind in (("clips",) if o["want"] == "clips" else ("reel",) if o["want"] == "reel"
+                             else ("clips", "reel")):
+                    o["steps"].append({"game": g["id"], "matchup": name, "kind": kind, "status": "queued"})
+                g.update(picked=True, new=False)
+                if ready:
+                    self._order_next(con, o, g)
+                else:
+                    g.update(status="queued", stage="Waiting to start", frac=None, error="")
+                    self._add_task(con, "highlights", g["id"], {"video": g["video"], "order": o["id"]})
+                self._put(con, g)
+            self._close_order(con, o)
+            self._put_order(con, o)
+            self._bump(con)
+        return [g["id"] for g in picked]
+
+    def _order_next(self, con, o: dict, g: dict) -> None:
+        """A game's highlights are there: queue the order's clips and reel of it (`g` is changed, not saved)."""
+        hl = sorted((h for h in g.get("highlights") or [] if h.get("origin") != "event"),
+                    key=lambda h: h.get("rank") or 99)
+        cat_id = (o.get("filter") or {}).get("category_id", "")
+        queued = []
+        for st in o["steps"]:
+            if st["game"] != g["id"] or st["status"] != "queued" or st["kind"] not in ("clips", "reel"):
+                continue
+            if st["kind"] == "clips":
+                ids = [h["id"] for h in hl if not h.get("made")][:int(o.get("plays") or 5)]
+                if not ids:
+                    st.update(status="skipped", said="Its best plays were made into clips already." if hl
+                              else "No plays stood out in it.")
+                    continue
+                self._add_task(con, "make", g["id"], {"ids": ids, "category_id": cat_id, "order": o["id"]})
+                queued.append(_plural(len(ids), "clip"))
+            else:
+                if g.get("reels"):
+                    st.update(status="skipped", said="It has a recap reel already.")
+                    continue
+                if len(hl) < 2:
+                    st.update(status="skipped", said="Too few plays stood out in it for a reel.")
+                    continue
+                self._add_task(con, "reel", g["id"], {"ids": [], "category_id": cat_id, "events": False,
+                                                      "order": o["id"]})
+                queued.append("the reel")
+        if queued:
+            g.update(status="queued", stage="Waiting to make " + " and ".join(queued), frac=None, error="")
+
+    def _close_order(self, con, o: dict) -> bool:
+        """Close the order when every step has ended (`o` is changed, not saved). True when it closed."""
+        steps = o.get("steps") or []
+        if o.get("status") not in ORDER_OPEN or any(st["status"] not in ORDER_ENDED for st in steps):
+            return False
+        made = [st for st in steps if st["kind"] in ("clips", "reel") and st["status"] == "done"]
+        failed = [st for st in steps if st["status"] == "failed"]
+        if made or not failed:
+            o["status"] = "done"
+            o["message"] = ("; ".join(st.get("said") or "" for st in made) if made else
+                            "Nothing new to make: " + " ".join(dict.fromkeys(st.get("said") or "" for st in steps)))
+            o["error"] = "; ".join(f"{st['matchup']}: {st.get('said') or 'failed'}" for st in failed)
+        else:
+            o["status"] = "failed"
+            o["error"] = "; ".join(dict.fromkeys(st.get("said") or "It failed." for st in failed))
+        o.update(stage="", finished=self.now())
+        return True
+
+    def order_step(self, order_id: str, game_id: str, kind: str, status: str, said: str = "",
+                   out: dict | None = None) -> dict | None:
+        """A task of an order ended (`kind`: highlights, make or reel; `status`: done or failed). Queues what
+        comes next for the game. Returns the order when this closed it, else None."""
+        step_kind = "clips" if kind == "make" else kind
+        with self._tx() as con:
+            o = self._load_order(con, order_id)
+            if o is None or o.get("status") not in ORDER_OPEN:
+                return None
+            st = next((x for x in o.get("steps") or [] if x["game"] == game_id and x["kind"] == step_kind
+                       and x["status"] not in ORDER_ENDED), None)
+            if st is None:
+                return None
+            st.update(status=status, said=said)
+            for k in ("folder", "file", "clips", "length"):
+                if out and out.get(k) is not None:
+                    st[k] = out[k]
+            if step_kind != "highlights":
+                left = [x["kind"] for x in o["steps"] if x["game"] == game_id and x["status"] == "queued"]
+                row = con.execute("SELECT data FROM games WHERE id=?", (game_id,)).fetchone() if left else None
+                if row is not None:  # its reel is still to come: the game isn't free to be asked of meanwhile
+                    g = json.loads(row["data"])
+                    g.update(status="queued", stage="Waiting to make " + ("the reel" if left == ["reel"] else "the rest"),
+                             frac=None)
+                    self._put(con, g)
+            if step_kind == "highlights":
+                rest = [x for x in o["steps"] if x["game"] == game_id and x["status"] == "queued"]
+                if status == "done":
+                    row = con.execute("SELECT data FROM games WHERE id=?", (game_id,)).fetchone()
+                    if row is not None:
+                        g = json.loads(row["data"])
+                        self._order_next(con, o, g)
+                        self._put(con, g)
+                    else:
+                        for x in rest:
+                            x.update(status="failed", said="The game was taken off the list.")
+                else:
+                    for x in rest:
+                        x.update(status="skipped", said="Its highlights couldn't be found.")
+            closed = self._close_order(con, o)
+            self._put_order(con, o)
+            self._bump(con)
+        return o if closed else None
+
+    def fail_order(self, order_id: str, why: str) -> dict | None:
+        """The order can't go on (its search failed). Returns it when this closed it."""
+        with self._tx() as con:
+            o = self._load_order(con, order_id)
+            if o is None or o.get("status") not in ORDER_OPEN:
+                return None
+            for st in o.get("steps") or []:
+                if st["status"] not in ORDER_ENDED:
+                    st.update(status="failed", said=why)
+            o.update(status="failed", error=why, stage="", finished=self.now())
+            self._put_order(con, o)
+            self._bump(con)
+        return o
+
+    def cancel_order(self, order_id: str) -> dict:
+        """Stop an order: what's waiting leaves the queue, and what's under way is told to stop."""
+        with self._tx() as con:
+            o = self._load_order(con, order_id)
+            if o is None:
+                raise DeskError("That request isn't there any more.", 404)
+            if o.get("status") not in ORDER_OPEN:
+                raise DeskError("That request has finished already.", 409)
+            tasks = self._order_tasks(con, o["id"])
+            for t in tasks:
+                con.execute("UPDATE tasks SET status=?, updated=? WHERE id=?",
+                            ("cancelled" if t["status"] == "queued" else "cancel", self.now(), t["id"]))
+            working = {t["game"] for t in tasks if t["status"] != "queued"}
+            for gid in {t["game"] for t in tasks if t["game"]} - working:
+                row = con.execute("SELECT data FROM games WHERE id=?", (gid,)).fetchone()
+                if row is not None:
+                    g = json.loads(row["data"])
+                    g.update(status="ready" if g.get("highlights") else "found", stage="", frac=None)
+                    self._put(con, g)
+            for st in o.get("steps") or []:
+                if st["status"] not in ORDER_ENDED:
+                    st.update(status="cancelled", said="")
+            o.update(status="cancelled", stage="", finished=self.now())
+            self._put_order(con, o)
+            self._bump(con)
+        return {"order": self._order_public(o, {}), "message": f"Stopped: {o.get('title')}."}
+
+    def settle_orders(self) -> list[dict]:
+        """Close the open orders that have no task left (a game taken off the list on the PC, a worker that
+        died between two steps). Returns the ones closed."""
+        closed = []
+        with self._tx() as con:
+            for r in con.execute("SELECT data FROM orders").fetchall():
+                o = json.loads(r["data"])
+                if o.get("status") not in ORDER_OPEN or self.now() - float(o.get("updated") or 0) < ORDER_ORPHAN:
+                    continue
+                if self._order_tasks(con, o["id"]):
+                    continue
+                for st in o.get("steps") or []:
+                    if st["status"] not in ORDER_ENDED:
+                        st.update(status="failed", said="It was stopped or taken off the list on the PC.")
+                if not self._close_order(con, o):  # (no steps yet: its search never ran)
+                    o.update(status="failed", error="It was stopped on the PC.", stage="", finished=self.now())
+                self._put_order(con, o)
+                closed.append(o)
+            if closed:
+                self._bump(con)
+        return closed
+
     # ------------------------------------------------------------ the worker's side
 
     def claim(self, owner: str) -> dict | None:
-        """The next task for `owner` to do (a search first, then the oldest), or None. A task whose worker stopped
-        renewing its lease is taken over."""
+        """The next task for `owner` to do (a search first, the page's or an order's, then the oldest), or None.
+        A task whose worker stopped renewing its lease is taken over."""
         now = self.now()
         with self._tx() as con:
             con.execute("UPDATE tasks SET status='cancelled' WHERE status='cancel' AND lease<?", (now,))
             row = con.execute(
                 "SELECT * FROM tasks WHERE (status='queued' AND next_try<=?) OR (status='working' AND lease<?) "
-                "ORDER BY (kind='search') DESC, id LIMIT 1", (now, now)).fetchone()
+                "ORDER BY (kind IN ('search', 'order')) DESC, id LIMIT 1", (now, now)).fetchone()
             if row is None:
                 return None
             con.execute("UPDATE tasks SET status='working', owner=?, lease=?, updated=? WHERE id=?",
@@ -641,6 +1033,29 @@ def ai_state(s) -> dict:
             "why": "" if order else ai.missing_key(s)}
 
 
+def order_who(o: dict) -> str:
+    """'Lakers vs Celtics', 'Premier League', 'NBA basketball': whose games an order is for."""
+    f = G.GameFilter.from_json(o.get("filter"))
+    teams = f.team_list
+    if teams:
+        return (" vs ".join(teams) if len(teams) == 2 else ", ".join(teams[:4])) + (f" ({f.league})" if f.league else "")
+    sp = f.sport_info
+    return f.league or sp.label.split(" (")[0]
+
+
+def order_what(o: dict) -> str:
+    """'the top 5 plays as clips and a recap reel, of the 2 newest games'"""
+    n = int(o.get("plays") or 5)
+    clips = f"the top {n} plays as clips" if n > 1 else "the best play as a clip"
+    what = {"clips": clips, "reel": "a recap reel", "both": f"{clips} and a recap reel"}[o.get("want") or "both"]
+    games = int(o.get("games") or 1)
+    return what + (f", of the {games} newest games" if games > 1 else "")
+
+
+def order_title(o: dict) -> str:
+    return f"{order_who(o)}: {order_what(o)}"
+
+
 def category_list(s) -> list[dict]:
     from .. import categories
 
@@ -679,6 +1094,7 @@ class DeskWorker:
         self._thread: threading.Thread | None = None
         self.current: dict | None = None
         self._status = "working"
+        self._settled = 0.0  # when the orders were last looked over (time.monotonic)
 
     # --- running ----------------------------------------------------------------------------------------------
 
@@ -714,6 +1130,10 @@ class DeskWorker:
             return False
         task = self.desk.claim(self.owner)
         if task is None:
+            if time.monotonic() - self._settled >= 30.0:
+                self._settled = time.monotonic()
+                for o in self.desk.settle_orders():
+                    self._order_news(o)
             return False
         self.run(task)
         return True
@@ -729,27 +1149,44 @@ class DeskWorker:
 
         keeper = threading.Thread(target=renew_loop, name="sports-lease", daemon=True)
         keeper.start()
+        order = str(task["payload"].get("order") or "")  # the request this task is part of ("" = none)
         try:
             said = {"search": self.do_search, "highlights": self.do_highlights, "make": self.do_make,
-                    "reel": self.do_reel, "events": self.do_events}[task["kind"]](task)
+                    "reel": self.do_reel, "events": self.do_events, "order": self.do_order}[task["kind"]](task)
             self.desk.finish(task, "done", said=said or "")
+            if order and task["kind"] != "order":
+                self._order_news(self.desk.order_step(order, task["game"], task["kind"], "done", said or "",
+                                                      task.get("out")))
         except Stopping:
             self.desk.finish(task, "queued", said="Stopped; starts again later")
             self._settle(task, "Stopped; starts again")
+            if order:
+                self.desk.order_stage(order, "Stopped; starts again when automation does")
         except Called:
             self.desk.finish(task, "cancelled")
             self._settle(task, "")
             self.log("Sports: stopped, as you asked.")
+            if order:  # (an order that was cancelled itself is closed already, and hears nothing)
+                self._order_news(self.desk.fail_order(order, "Stopped on the PC.") if task["kind"] == "order" else
+                                 self.desk.order_step(order, task["game"], task["kind"], "failed",
+                                                      "Stopped on the PC."))
         except Wait as w:
             self.desk.finish(task, "queued", said=w.why, next_try=w.until)
             if task["game"]:
                 self.desk.stage(task["game"], w.why, None, "queued")
-            else:
+            elif task["kind"] == "search":
                 self.desk.search_stage(w.why)
+            if order:
+                self.desk.order_stage(order, w.why)
         except Exception as exc:  # noqa: BLE001 - the task failed: say why on its game
             why = getattr(exc, "message", None) or str(exc) or exc.__class__.__name__
             self.desk.finish(task, "failed", error=why)
-            if task["game"]:
+            if order:
+                self._order_news(self.desk.fail_order(order, why) if task["kind"] == "order" else
+                                 self.desk.order_step(order, task["game"], task["kind"], "failed", why))
+            if task["kind"] == "order":
+                pass  # (the Sports page's own search isn't this one)
+            elif task["game"]:
                 def fn(g):
                     g.update(status="failed" if not g.get("highlights") or task["kind"] == "highlights" else "ready",
                              stage="", frac=None, error=why)
@@ -764,10 +1201,29 @@ class DeskWorker:
             renewing.set()
             self.current = None
 
+    def _order_news(self, o: dict | None) -> None:
+        """Say how an order that just closed went (the Telegram bot tells whoever asked, from the order itself)."""
+        if o is None:
+            return
+        if o.get("status") == "done":
+            text = f"Sports request done ({o.get('title')}): {o.get('message')}"
+            self.log(f"Sports: {text}" + (f" ⚠ {o['error']}" if o.get("error") else ""))
+        else:
+            text = f"Sports request couldn't be done ({o.get('title')}): {o.get('error')}"
+            self.log(f"✗ Sports: {text}")
+        self.events("sports", f"{G.GameFilter.from_json(o.get('filter')).sport_info.emoji} {text}")
+
+    def _filter(self, task: dict) -> G.GameFilter:
+        """The filter a task works to: its order's own (a request made from a phone), else the Sports page's."""
+        order = str(task["payload"].get("order") or "")
+        o = self.desk.find_order(order) if order else None
+        return G.GameFilter.from_json(o.get("filter")) if o else self.desk.filter()
+
     def _settle(self, task: dict, stage: str) -> None:
         """A game's status after its task stopped part-way."""
         if not task["game"]:
-            self.desk.search_stage("")
+            if task["kind"] == "search":
+                self.desk.search_stage("")
             return
 
         def fn(g):
@@ -838,14 +1294,50 @@ class DeskWorker:
     # --- the tasks ------------------------------------------------------------------------------------------------
 
     def do_search(self, task: dict) -> str:
+        f = self.desk.filter()
+        result, new, searched = self._search(f, self._progress("", ""))
+        added = self.desk.save_search(result, new)
+        said = (f"Found {_plural(added, 'new game')}" if added else
+                "No new games" if new else "No games matched") + f" ({_plural(searched, 'video')} searched)"
+        self.log(f"Sports: {said}.")
+        if added:
+            self.events("sports", f"{f.sport_info.emoji} {said}")
+        return said
+
+    def do_order(self, task: dict) -> str:
+        """An order's first step: look for its games, pick the best matches and queue the work on each."""
+        oid = str(task["payload"].get("order") or "")
+        o = self.desk.find_order(oid)
+        if o is None or o.get("status") not in ("queued", "searching"):
+            return ""  # gone, closed, or its games are picked already (this task was taken over from a dead worker)
+        f = G.GameFilter.from_json(o.get("filter"))
+        self.desk.order_stage(oid, "Looking for the games", "searching")
+
+        def progress(msg: str, frac: float | None = None) -> None:
+            self.check()
+            self.desk.order_stage(oid, msg)
+
+        result, new, _searched = self._search(f, progress)
+        self.check()
+        picked = self.desk.start_order(oid, self.desk.add_games(new), result)
+        o = self.desk.find_order(oid) or o
+        if not picked:
+            self._order_news(o)
+            return o.get("error") or "No game matched"
+        if o.get("status") not in ORDER_OPEN:  # nothing new to make of those games
+            self._order_news(o)
+        said = f"{o.get('title')}: " + ", ".join(dict.fromkeys(st["matchup"] for st in o.get("steps") or []))
+        self.log(f"Sports: {o.get('by') or 'Someone'} asked for {said}.")
+        return said
+
+    def _search(self, f: G.GameFilter, progress) -> tuple[dict, list[dict], int]:
+        """Search YouTube for the games `f` asks for: (what the search did, the games that fit, videos seen)."""
         from .. import ai
 
         s = self.settings()
-        f = self.desk.filter()
         now = time.time()
         key = _youtube_key(s)
         qs = G.queries(f)
-        progress = self._progress("", "")
         found: dict[str, G.Found] = {}
         problems: list[str] = []
         for i, q in enumerate(qs, 1):
@@ -887,13 +1379,7 @@ class DeskWorker:
         result = {"at": time.time(), "queries": qs, "searched": len(found), "fits": len(new),
                   "left_out": left, "by": model, "note": ai_note, "problems": problems,
                   "quota": len(qs) * 101 if key else 0, "error": "", "describe": f.describe()}
-        added = self.desk.save_search(result, new)
-        said = (f"Found {_plural(added, 'new game')}" if added else
-                "No new games" if new else "No games matched") + f" ({_plural(len(found), 'video')} searched)"
-        self.log(f"Sports: {said}.")
-        if added:
-            self.events("sports", f"{f.sport_info.emoji} {said}")
-        return said
+        return result, new, len(found)
 
     def _settings_for(self, s, category_id: str, video_id: str, url: str):
         """The settings a game is clipped with: its category's (folder, look, account), as automation's."""
@@ -912,7 +1398,7 @@ class DeskWorker:
 
         g = self.desk.game(task["game"])
         s = self.settings()
-        f = self.desk.filter()
+        f = self._filter(task)
         sport = sports.get(g.get("sport", "")) or f.sport_info
         base, _label, _cat = self._settings_for(s, f.category_id, g["video"], g["url"])
         lo, hi = sport.lengths
@@ -1108,7 +1594,10 @@ class DeskWorker:
         engine, Cancelled = self._engine(es, progress)
         p = Project(g["url"])
         hl.sort(key=lambda h: h.get("rank") or 99)
-        p.meta = {"automation": {"permission": "Picked by you in Sports", "origins": ["sports"], "how": "manual",
+        asked = self.desk.find_order(str(task["payload"].get("order") or "")) if task["payload"].get("order") else None
+        p.meta = {"automation": {"permission": (f"Asked for by {asked.get('by') or 'you'} from Telegram" if asked
+                                                else "Picked by you in Sports"),
+                                 "origins": ["sports"] + (["telegram"] if asked else []), "how": "manual",
                                  "recipe": label, "picked_at": time.time()},
                   "sports": {"matchup": g.get("matchup"), "league": g.get("league"), "sport": sport.id,
                              "highlights": [{k: h.get(k) for k in ("id", "play", "players", "ai", "signal")}
@@ -1150,6 +1639,7 @@ class DeskWorker:
 
         self.desk.change(g["id"], fn)
         n = len(files) - rejected
+        task["out"] = {"folder": str(folder), "clips": n}
         said = (f"Made {_plural(n, 'clip')} from {g.get('matchup') or g.get('title')}"
                 + (f" ({rejected} rejected by the quality check)" if rejected else "")
                 + (f", for {cat.name}" if cat else ""))
@@ -1171,7 +1661,7 @@ class DeskWorker:
             raise DeskError("This game's highlights aren't there any more: find them again.")
         hl = [h for h in hl if h.get("origin") != "event"] or hl  # a recap is of the game's plays
         s = self.settings()
-        f = self.desk.filter()
+        f = self._filter(task)
         sport = sports.get(g.get("sport", "")) or sports.SPORTS["any"]
         base, _label, cat = self._settings_for(s, task["payload"].get("category_id", ""), g["video"], g["url"])
         root = (s.auto_output_path / cat.folder if cat else s.auto_output_path / "Sports") / "Reels"
@@ -1211,6 +1701,7 @@ class DeskWorker:
             x.update(status="ready", stage="", frac=None, error="")
 
         self.desk.change(g["id"], fn)
+        task["out"] = {"folder": str(res.folder), "file": str(res.file), "clips": 1, "length": round(length, 1)}
         what = (f"{_plural(len(res.reel.plays), 'found moment')} in {g.get('matchup') or g.get('title')}" if hits else
                 f"{g.get('matchup') or g.get('title')}'s top {len(res.reel.plays)} plays")
         said = (f"Made a {length:.0f} s reel of {what}" + (f", for {cat.name}" if cat else "")

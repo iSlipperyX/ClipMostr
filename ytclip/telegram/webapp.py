@@ -20,6 +20,9 @@ header, so they carry a second token in their address that opens videos and pict
   POST /api/videos/<id>/critique {text}   make it again with this fixed (creator/critique.py)
   GET  /api/status                        POST /api/pause {paused}
   GET  /api/categories                    POST /api/make {idea, category}
+  GET  /api/sports                        the sports form's choices, and the sports requests so far
+  POST /api/sports/order {sport, league, teams, since, want, games, plays, category}
+  POST /api/sports/orders/<id>/cancel     a game's best plays and a recap reel, made without anyone picking
   GET  /api/activity                      who did what, lately
   POST /api/people/invite | leave         POST /api/people/remove {id}
 """
@@ -309,6 +312,16 @@ class WebApp:
                               for c in host.categories()["items"] if c.get("enabled", True)]}
         if path == "/api/make" and method == "POST":
             return bot.app_make(me, str(body.get("idea") or ""), str(body.get("category") or ""))
+        if path == "/api/sports" and method == "GET":
+            out = bot.sports_json()
+            for o in out["orders"]:
+                o["mine"] = o.get("by_id") == me
+            return out
+        if path == "/api/sports/order" and method == "POST":
+            return bot.sports_order(me, body)
+        m = re.fullmatch(r"/api/sports/orders/([a-z0-9]{1,24})/cancel", path)
+        if m and method == "POST":
+            return bot.sports_cancel(me, m.group(1))
         if path == "/api/activity" and method == "GET":
             data = state.load(bot.state_file)
             going = [bot.critique_json(c) for c in data["critiques"].values()

@@ -561,7 +561,8 @@ The **ClipMonster** button left of the message box opens ClipMonster as a Telegr
 
 - **Videos**: what's waiting for an OK, the queue, the library and what's posted. Tap one to watch it full size, **OK to post**, **Post now** or **Delete**, and step to the next.
 - **What should be different?** Under a video the Creator or the Studio made, write what's wrong with it in your own words ("the hook is flat, open with the twist"). The AI that writes your scripts gets the video's storyboard and your critique, rewrites what you named and keeps the rest, and the video is made again. The new version **always waits for an OK** beside the first, each showing what was said and by whom; the first is held meanwhile so it doesn't post as it is. If it can't be made again, the first goes back the way it was and you're told why. A clip of someone else's video can't be rewritten: delete it if it's no good.
-- **Make**: ask for a new video (the idea, the category).
+- **Make → A video**: ask for a new video (the idea, the category).
+- **Make → Sports highlights**: ask for a game's best plays in one go. Pick the sport, the league or the teams ("Lakers vs Celtics"), how recent, and what to make: the top 3, 5 or 7 plays as clips, a recap reel, or both, of the newest game or the newest two or three. Automation looks for each game's highlights upload on YouTube, picks the games that match best, finds and ranks the plays (with your AI when there is one) and makes them for the sport's category, with nobody picking along the way. Each request shows who asked and what the PC is doing for it right now, and either of you can cancel it. What's made shows up under Videos, and both of you are told when it's ready or why it couldn't be done. It's the same Sports section as on the PC: the games it works on show there too, a game already looked at isn't looked at again, and plays already made aren't made twice. It works from highlights uploads (the full game, hours long, is for the Sports tab on the PC). League footage often gets copyright claims on TikTok.
 - **Activity**: who did what, for everyone or one person, and what's being made again right now.
 - **People**: who shares the bot, with **Make an invite**, **Remove** and **Leave**.
 
@@ -586,6 +587,7 @@ Without the app (or beside it), the buttons under the message box do the same as
 | 📅 **This week** · `/week` | The [weekly report](#the-overnight-report-and-the-health-check) for the past 7 days. |
 | 🛠 **Say what to fix**, under a video the AI made | Send what should be different, and it's made again, as in the app. |
 | 👥 `/people` | Who shares the bot: invite one more person, remove them, or leave. |
+| 🏆 `/sports NBA Lakers vs Celtics` | A game's best plays as clips and a recap reel, made without picking anything: say the league or sport, the teams if you have them, and what you'd like (`/sports Premier League 2 games, reel only`, `/sports UFC 3 clips`). `/sports` alone asks which game and lists the requests under way; `/sports cancel` stops the newest of yours. |
 | 📱 `/app` | A button into the app, or why it can't be opened right now. |
 
 Anything else you type gets two buttons: make a video about it, or ask for clips about it.

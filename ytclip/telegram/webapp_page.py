@@ -173,6 +173,27 @@ textarea:focus, select:focus { border-color: var(--btn); }
 .hint { flex: none; font-size: 13px; padding: 6px 11px; border-radius: 999px; border: 1px solid var(--line);
   color: var(--text); background: transparent; }
 .small { font-size: 13px; color: var(--hint); margin-top: 8px; }
+.field { margin-top: 12px; }
+.field:first-of-type { margin-top: 0; }
+.field > label { display: block; font-size: 13px; color: var(--hint); margin-bottom: 6px; }
+.picks { display: flex; gap: 6px; flex-wrap: wrap; }
+.pick { padding: 8px 13px; border-radius: 999px; border: 1px solid var(--line); background: transparent; color: var(--text);
+  font-size: 14px; min-height: 36px; }
+.pick.on { background: var(--btn); border-color: var(--btn); color: var(--btn-text); font-weight: 600; }
+input[type=text]:focus { border-color: var(--btn); }
+.order { padding: 12px 0; border-top: 1px solid var(--line); }
+.order:first-of-type { border-top: 0; padding-top: 0; }
+.order:last-child { padding-bottom: 0; }
+.order .head { display: flex; gap: 10px; align-items: flex-start; }
+.order .head .col { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.order .title { font-weight: 600; font-size: 15px; }
+.order .who { color: var(--hint); font-size: 12px; margin-top: 1px; }
+.order .now { font-size: 14px; margin-top: 6px; overflow-wrap: anywhere; }
+.order .now.good { color: var(--good); }
+.order .now.bad { color: var(--danger); }
+.order ul { margin: 6px 0 0 18px; padding: 0; font-size: 14px; }
+.meter { height: 4px; border-radius: 2px; background: var(--line); margin-top: 8px; overflow: hidden; }
+.meter > i { display: block; height: 100%; background: var(--btn); border-radius: 2px; }
 .count { float: right; }
 .said { display: flex; gap: 10px; padding: 10px 0; border-top: 1px solid var(--line); }
 .said:first-of-type { border-top: 0; padding-top: 0; }
@@ -213,7 +234,8 @@ JS = r"""(function () {
 var tg = (window.Telegram && window.Telegram.WebApp) || null;
 var S = { token: '', media: '', me: null, people: [], pc: '', videos: null, posted: null, status: null, activity: null,
           cats: null, tab: 'videos', filter: 'review', who: 'all', open: null, busy: false, invite: null,
-          draft: {}, idea: '', cat: '', last: {} };
+          draft: {}, idea: '', cat: '', last: {}, make: 'video', sports: null,
+          sp: { sport: '', league: '', teams: '', since: 'week', want: 'both', games: 1, plays: 5, cat: '' } };
 var app = document.getElementById('app');
 var sheet = null;       // the open video's screen
 var timer = null;
@@ -354,8 +376,9 @@ function refresh() {
               api('GET', 'api/status').then(function (d) { S.status = d; })];
   if (S.tab === 'activity') jobs.push(api('GET', 'api/activity').then(function (d) { S.activity = d; }));
   if (S.tab === 'people') jobs.push(api('GET', 'api/me').then(takeMe));
+  if (S.tab === 'make' && S.make === 'sports') jobs.push(api('GET', 'api/sports').then(function (d) { S.sports = d; }));
   if (S.tab === 'videos' && S.filter === 'posted') jobs.push(api('GET', 'api/posted').then(function (d) { S.posted = d.items || []; }));
-  return Promise.all(jobs).then(paint, function (e) {
+  return Promise.all(jobs).then(function () { paint(); }, function (e) {
     if (e.status === 401) locked(e);
     else if (!S.videos) problem(e.message);
   });
@@ -384,7 +407,8 @@ function videosIn(filter) {
 function paint(force) {
   if (!S.me || !S.videos) return;
   var key = [S.tab, S.filter, S.who, S.busy, S.invite, S.videos, S.status, S.people, S.me,
-             S.tab === 'activity' ? S.activity : 0, S.filter === 'posted' ? S.posted : 0, S.cats];
+             S.tab === 'activity' ? S.activity : 0, S.filter === 'posted' ? S.posted : 0, S.cats,
+             S.tab === 'make' ? [S.make, S.sports, S.sp] : 0];
   // Someone typing isn't interrupted by news from the PC: the screen catches up when they're done.
   var el = document.activeElement;
   var typing = !!el && app.contains(el) && /^(TEXTAREA|SELECT|INPUT)$/.test(el.tagName);
@@ -623,6 +647,88 @@ function paintThread(v) {
 
 // --- make --------------------------------------------------------------------------------------------
 function makeTab() {
+  var kinds = h('div', { class: 'seg', role: 'tablist' }, [['video', 'A video'], ['sports', 'Sports highlights']].map(function (k) {
+    return h('button', { class: 'chip' + (S.make === k[0] ? ' on' : ''), role: 'tab', 'aria-selected': S.make === k[0], onclick: function () {
+      S.make = k[0]; paint(true); if (k[0] === 'sports') refresh();
+    } }, k[1]);
+  }));
+  return [kinds].concat(S.make === 'sports' ? sportsForm() : videoForm());
+}
+function picks(label, options, value, set) {
+  return h('div', { class: 'field' }, h('label', { text: label }), h('div', { class: 'picks', role: 'group', 'aria-label': label }, options.map(function (o) {
+    return h('button', { class: 'pick' + (String(value) === String(o[0]) ? ' on' : ''), 'aria-pressed': String(value) === String(o[0]) ? 'true' : 'false',
+                         onclick: function () { set(o[0]); paint(true); } }, o[1]);
+  })));
+}
+function sportsForm() {
+  var d = S.sports, f = S.sp;
+  if (!d) return [h('div', { class: 'empty' }, h('div', { class: 'spin', style: 'margin:0 auto' }))];
+  var sport = d.sports.filter(function (x) { return x.id === f.sport; })[0] || null;
+  var pickSport = h('select', { 'aria-label': 'Sport', onchange: function () { f.sport = pickSport.value; f.league = ''; paint(true); } },
+    h('option', { value: '', text: 'Any sport' }),
+    d.sports.filter(function (x) { return x.id !== 'any'; }).map(function (x) {
+      return h('option', { value: x.id, selected: f.sport === x.id, text: x.emoji + '  ' + x.label });
+    }));
+  var league = h('input', { type: 'text', maxlength: 60, placeholder: sport && sport.leagues.length ? sport.leagues[0] : 'NBA, Premier League…',
+                            'aria-label': 'League', autocomplete: 'off', oninput: function () { f.league = league.value; ready(); } });
+  league.value = f.league;
+  var teams = h('input', { type: 'text', maxlength: 200, placeholder: 'Lakers vs Celtics', 'aria-label': 'Teams', autocomplete: 'off',
+                           oninput: function () { f.teams = teams.value; ready(); } });
+  teams.value = f.teams;
+  var cats = d.categories || [];
+  var own = sport ? cats.filter(function (c) { return c.sport === sport.id; }) : [];
+  var pickCat = h('select', { 'aria-label': 'Category', onchange: function () { f.cat = pickCat.value; } },
+    h('option', { value: '', text: own.length === 1 ? 'Automatic: ' + own[0].name : 'No category (kept in the Library)' }),
+    cats.map(function (c) { return h('option', { value: c.id, selected: f.cat === c.id, text: (c.sport ? '🏆 ' : '') + c.name + (c.account ? ' · ' + c.account : ' (no account)') }); }));
+  var open = (d.orders || []).filter(function (o) { return o.status === 'queued' || o.status === 'searching' || o.status === 'working'; });
+  var full = open.length >= ((d.most || {}).open || 4);
+  function can() { return !S.busy && !full && !!(f.sport || f.league.trim() || f.teams.trim()); }
+  function ready() { go.disabled = !can(); }
+  var go = h('button', { class: 'btn primary wide', text: 'Make these highlights', disabled: !can(), onclick: function () {
+    var body = { sport: f.sport, league: f.league.trim(), teams: f.teams.trim(), since: f.since, want: f.want, games: f.games, plays: f.plays };
+    if (f.cat) body.category = f.cat;
+    act(api('POST', 'api/sports/order', body), function () { f.teams = ''; });
+    teams.blur(); league.blur();
+  } });
+  var most = d.most || { games: 3, plays: 7 };
+  var form = h('div', { class: 'block' }, h('h3', { text: 'A game’s best plays' }),
+    h('div', { class: 'field' }, h('label', { text: 'Sport' }), pickSport),
+    h('div', { class: 'field' }, h('label', { text: 'League' }), league,
+      sport && sport.leagues.length ? h('div', { class: 'hints' }, sport.leagues.slice(0, 8).map(function (name) {
+        return h('button', { class: 'hint', text: name, onclick: function () { f.league = name; paint(true); } });
+      })) : null),
+    h('div', { class: 'field' }, h('label', { text: 'Teams (leave empty for the newest games)' }), teams),
+    picks('Played in the last', (d.since || []).filter(function (x) { return x.id !== 'any'; }).map(function (x) { return [x.id, x.label]; }), f.since, function (v) { f.since = v; }),
+    picks('Make', [['both', 'Clips and a reel'], ['clips', 'Clips'], ['reel', 'A recap reel']], f.want, function (v) { f.want = v; }),
+    f.want !== 'reel' ? picks('Clips per game', [3, 5, 7].filter(function (n) { return n <= most.plays; }).map(function (n) { return [n, 'Top ' + n]; }), f.plays, function (v) { f.plays = v; }) : null,
+    picks('Games', [1, 2, 3].filter(function (n) { return n <= most.games; }).map(function (n) { return [n, n === 1 ? 'The newest' : 'Newest ' + n]; }), f.games, function (v) { f.games = v; }),
+    h('div', { class: 'field' }, h('label', { text: 'For' }), pickCat),
+    h('div', { class: 'gap' }), go,
+    full ? h('p', { class: 'small', text: plural(open.length, 'request') + ' are waiting or under way: wait for one to finish, or cancel one.' }) : null,
+    h('p', { class: 'small', text: 'Automation looks for each game’s highlights on YouTube, finds its best plays and makes them on the PC, with your name on the request. They show up under Videos. League footage often gets copyright claims on TikTok.' }));
+  var orders = d.orders || [];
+  return [form, orders.length ? h('div', { class: 'block' }, h('h3', { text: 'Sports requests' }), orders.map(orderRow)) : null];
+}
+function orderRow(o) {
+  var open = o.status === 'queued' || o.status === 'searching' || o.status === 'working';
+  var made = (o.steps || []).filter(function (s) { return s.status === 'done' && s.kind !== 'highlights'; });
+  var now = open ? h('div', { class: 'now', text: o.doing || 'Waiting its turn on the PC' })
+    : o.status === 'done' ? h('div', { class: 'now good' }, made.length ? ['Ready under Videos', h('ul', {}, made.map(function (s) { return h('li', { text: s.said || s.kind }); }))] : (o.message || 'Done'))
+    : o.status === 'cancelled' ? h('div', { class: 'now', text: 'Cancelled' })
+    : h('div', { class: 'now bad', text: 'Couldn’t be done: ' + (o.error || 'it failed') });
+  return h('div', { class: 'order' },
+    h('div', { class: 'head' }, face({ id: o.by_id, first: o.by || '?' }, 'sm'), h('div', { class: 'col' },
+      h('div', { class: 'title', text: (o.emoji ? o.emoji + ' ' : '') + o.title }),
+      h('div', { class: 'who', text: nameOf(o.by_id, o.by || 'Someone') + ' · ' + ago(o.created) + (o.category ? ' · for ' + o.category : '') })),
+      open ? h('button', { class: 'btn danger slim', text: 'Cancel', disabled: S.busy, onclick: function () {
+        ask('Stop “' + clip(o.title, 70) + '”?', function () { act(api('POST', 'api/sports/orders/' + o.id + '/cancel')); });
+      } }) : null),
+    now,
+    open && o.frac != null ? h('div', { class: 'meter', role: 'progressbar', 'aria-valuemin': 0, 'aria-valuemax': 100, 'aria-valuenow': Math.round(o.frac * 100) },
+      h('i', { style: 'width:' + Math.round(o.frac * 100) + '%' })) : null,
+    o.status === 'done' && o.error ? h('div', { class: 'now bad', text: o.error }) : null);
+}
+function videoForm() {
   var st = S.status || {}, q = st.queue || {};
   var idea = h('textarea', { maxlength: 1000, placeholder: 'The real story of the Bermuda Triangle', 'aria-label': 'What the video is about',
                              oninput: function () { S.idea = idea.value; go.disabled = S.busy || !idea.value.trim(); } });
@@ -650,7 +756,7 @@ function makeTab() {
 var DID = {
   ok: ['OK’d', ' to post'], 'delete': ['deleted', ''], post_now: ['posted', ' right away'], retry: ['queued', ' to post again'],
   critique: ['asked for', ' to be made again'], make: ['asked for a video about', ''], clip: ['asked to clip', ''],
-  request: ['asked for', ''], cancel: ['cancelled the request for', ''], pause: ['paused automation', ''],
+  request: ['asked for', ''], sports: ['asked for sports highlights:', ''], cancel: ['cancelled the request for', ''], pause: ['paused automation', ''],
   resume: ['resumed automation', ''], join: ['joined', ''], leave: ['left', ''], remove: ['removed', '']
 };
 function activityTab() {
@@ -671,7 +777,7 @@ function activityTab() {
   })) : null,
   items.length ? h('div', { class: 'block', style: going.length ? '' : 'margin-top:0' }, items.map(function (x) {
     var d = DID[x.what] || [x.what, ''], title = x.title;
-    var quoted = title && ['clip', 'request', 'cancel', 'remove'].indexOf(x.what) < 0;
+    var quoted = title && ['clip', 'request', 'sports', 'cancel', 'remove'].indexOf(x.what) < 0;
     return h('div', { class: 'act' }, face({ id: x.by, first: x.name }, 'sm'), h('div', { class: 'col' },
       h('div', {}, h('b', { text: nameOf(x.by, x.name) }), ' ' + d[0] + (title ? ' ' + (quoted ? '“' + clip(title, 70) + '”' : title) : '') + d[1]),
       x.text ? h('div', { class: 'q', text: '“' + clip(x.text, 200) + '”' }) : null,
