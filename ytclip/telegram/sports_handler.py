@@ -44,8 +44,9 @@ SPORTS_FILLER = re.compile(r"\b(?:highlights?|best|top|of|the|and|a|an|from|for|
                            r"match(?:es)?|fights?|races?|clips?|plays?|reels?|recaps?|montages?|both|newest|latest|"
                            r"last|this|week|month|today|tonight|night|yesterday|me|make|get|want|i)\b", re.I)
 SPORTS_HELP = ("Say the game like <i>NBA Lakers vs Celtics</i>, <i>Premier League 2 games</i> or <i>UFC</i>: the "
-               "league or sport, and the teams if you have them. You get a recap reel (65-85 s); add "
-               "<i>3 clips</i> for single plays too.")
+               "league or sport, and the teams if you have them. You get a recap reel (65-85 s) to "
+               "download and edit; add <i>3 clips</i> for single plays too, or <i>post it</i> to queue it for "
+               "the category's TikTok account instead.")
 GAMES_SHOWN = 10  # games listed with a button each; more than this and the leagues are offered first
 
 
@@ -82,6 +83,11 @@ def parse_sports(text: str) -> dict:
     m = take(r"\b(\d{1,2})\s*(?:games?|match(?:es)?|fights?|races?)\b")
     if m:
         out["games"] = int(m.group(1))
+    # Made to download unless posting is asked for ("... and post it", "queue it")
+    if take(r"\b(?:and\s+)?(?:post|queue)(?:\s+(?:it|them))?(?:\s+to\s+tiktok)?\b"):
+        out["deliver"] = "post"
+    elif take(r"\b(?:to\s+|for\s+)?download(?:s|ing)?(?:\s+only)?\b"):
+        out["deliver"] = "download"
     low = rest.lower()
     # A recap reel unless single plays are asked for: a reel is over a minute, a play is 15-40 seconds.
     reel = bool(re.search(r"\b(?:reels?|recaps?|montages?)\b", low))
@@ -353,11 +359,14 @@ class SportsHandler:
         self._remember(f"sports:{o['id']}", chat, o["title"], "sports")
         self.log(f"{self.name(chat)} asked for sports highlights: {o['title']}.")
         self.did(chat, "sports", o["title"])
-        where = f" for {o['category']}" if o.get("category") else ""
+        download = o.get("deliver") == "download"
+        where = f" for {o['category']}" if o.get("category") and not download else ""
         checked = (" It's checked before it's handed over (over a minute, upright, with sound)."
                    if o.get("requires") else "")
         message = (f"Got it: {o['title']}{where}. Automation looks for the game, finds its best plays and makes "
-                   f"them; they show up under Videos, and I'll tell you when they're ready.{checked}")
+                   "them; they show up under Videos, "
+                   + ("yours to download and edit (not posted, no account tied to them), "
+                      if download else "") + f"and I'll tell you when they're ready.{checked}")
         notes = list(r.get("notes") or [])
         return {"order": o, "message": message, "notes": notes,
                 "html": esc(message) + "".join(f"\nℹ {esc(n)}" for n in notes)}
@@ -404,7 +413,10 @@ class SportsHandler:
                              f"{'itself' if rv['held'] == 1 else 'themselves'}: "
                              + esc("; ".join(rv["why"])).replace("{", "(").replace("}", ")") + "."
                              + (f" {plural(rv['passed'], 'other meets', 'others meet')} them." if rv["passed"] else ""))
-        if made and not items:
+        if o.get("deliver") == "download" and o.get("status") != "failed" and made:
+            lines.append("⬇ Made to download: nothing is queued to post and no account is tied to it. Save the "
+                         "file, edit it in the app, or queue it to post after all.")
+        elif made and not items:
             lines.append("They're in the Library on the PC (not queued to post: its category has no TikTok "
                          "account?).")
         return "\n".join(lines)
@@ -425,6 +437,7 @@ class SportsHandler:
                 "categories": [{"id": c["id"], "name": c["name"], "sport": c["sport"], "account": c["account"]}
                                for c in D.category_list(s)],
                 "most": {"games": D.ORDER_GAMES, "plays": D.ORDER_PLAYS, "open": D.MAX_OPEN_ORDERS},
+                "delivers": [{"id": k, "label": v} for k, v in D.DELIVERS.items()], "deliver": "download",
                 "want": "reel", "requires": requirements.rules(s), "scoreboards": list(slate.SPORTS),
                 "doing": self.desk.doing(), "orders": (orders := self.desk.orders(12)),
                 # for "Find a moment": the games on the Sports page (the page adds the last 24 hours' itself),
@@ -450,7 +463,8 @@ class SportsHandler:
         sport = sport if sports.get(sport) else "any"
         return slate.public(self.played(sport, " ".join(str(league or "").split())[:60]), self.now())
 
-    def sports_game(self, chat: int, game_id: str, want: str = "reel", plays=None, category: str = "") -> dict:
+    def sports_game(self, chat: int, game_id: str, want: str = "reel", plays=None, category: str = "",
+                    deliver: str = "") -> dict:
         """Ask for a listed game by its id (the app's drop-down and its Games played list). Raises Refused."""
         from ..sportsdesk import slate
 
@@ -461,7 +475,10 @@ class SportsHandler:
             plays = int(plays) if plays else None
         except (TypeError, ValueError):
             plays = None
-        return self.sports_order(chat, slate.order_values(g, want or "reel", plays, category))
+        values = slate.order_values(g, want or "reel", plays, category)
+        if deliver:
+            values["deliver"] = deliver
+        return self.sports_order(chat, values)
 
     # --- a moment, found by saying it ----------------------------------------------------------------------------
 
@@ -743,23 +760,25 @@ class SportsHandler:
         return "On it"
 
     def sports_moments(self, chat: int, game_id: str, ids: list[str], want: str = "clips",
-                       category: str | None = None) -> dict:
+                       category: str | None = None, deliver: str = "") -> dict:
         """Make found moments into videos (each a clip, or all one reel), in `chat`'s name. Raises Refused."""
         from ..sportsdesk.desk import DeskError
 
         try:
             r = self.desk.order_moments(str(game_id), list(ids or []), want, by=self.name(chat), by_id=chat,
-                                        category=category)
+                                        category=category, deliver=deliver)
         except DeskError as exc:
             raise Refused(exc.message, exc.status) from exc
         o = r["order"]
         self._remember(f"sports:{o['id']}", chat, o["title"], "sports")
         self.log(f"{self.name(chat)} asked for found moments to be made: {o['title']}.")
         self.did(chat, "sports", o["title"])
-        where = f" for {o['category']}" if o.get("category") else ""
-        message = f"Got it: {o['title']}{where}. I'll tell you when it's ready."
+        download = o.get("deliver") == "download"
+        where = f" for {o['category']}" if o.get("category") and not download else ""
+        message = (f"Got it: {o['title']}{where}. I'll tell you when it's ready"
+                   + (" to download." if download else "."))
         notes = list(r.get("notes") or [])
-        if want == "reel" and len(ids) < 3:
+        if want == "reel" and len(ids) < 3 and not download:
             notes.insert(0, f"A reel of {plural(len(ids), 'moment')} usually comes in under a minute, so it will "
                             "wait for your OK. Three or more moments make one that's over a minute.")
         return {"order": o, "message": message, "notes": notes,

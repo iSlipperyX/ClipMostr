@@ -30,9 +30,11 @@ SCORE_SWITCH = 1.6  # seconds after a play's moment the bug shows the score afte
 
 
 def build(reel: Reel, scores: dict[str, tuple] | None = None, *, teams: tuple[str, str] = ("", ""),
-          matchup: str = "", font: str = "TikTok Sans Black", accent: str = "#FFD400") -> str:
+          matchup: str = "", font: str = "TikTok Sans Black", accent: str = "#FFD400",
+          score_bug: bool = True) -> str:
     """The .ass file for the reel. `scores` maps a play's highlight id to (score at its start, after it), each a
-    scoreboard.Score or None; `teams` are the names for a bug without a score."""
+    scoreboard.Score or None; `teams` are the names for a bug without a score. `score_bug` False leaves the score
+    bug out (the editor's "Score bug" switch)."""
     scores = scores or {}
     safe = layout.safe_box(W, H)
     head = fonts.ass_size(font, 84)
@@ -94,7 +96,7 @@ def build(reel: Reel, scores: dict[str, tuple] | None = None, *, teams: tuple[st
         else:
             texts = [(a, b, before or after)]
         for j, (t0, t1, sc) in enumerate(texts):
-            if t1 - t0 < 0.2:
+            if t1 - t0 < 0.2 or not score_bug:
                 continue
             ev += _bug(t0, t1, sc, teams, font, bug, bug_small, acc, bug_y, m, fade_in=j == 0, fade_out=j == len(texts) - 1)
         # The countdown label: big, then a chip under the bug.

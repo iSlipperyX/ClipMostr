@@ -101,6 +101,9 @@ class VideoItem:
     record_at: float = 0.0  # when the record was last written
     snapshots: dict = field(default_factory=dict)  # "1h" / "24h" / "7d" -> [at, views, likes, comments, shares]
     keep_reason: str = ""  # why its files were kept after posting (e.g. not seen on the profile after 2 days)
+    # "download": made to be saved to someone's own device (a sports request from Telegram), not to post. It
+    # stays in the library, no account takes it, and it's queued only when someone says so (Host.to_queue).
+    keep: str = ""
 
     @property
     def total(self) -> float | None:
@@ -470,6 +473,7 @@ class Store:
                     if meta.get("hold"):
                         item.review = "waiting"
                         item.warnings.append(meta["hold"])
+                    item.keep = meta.get("keep") or ""
                 else:
                     item.source_group = str(f.parent)
                 self.items[item.id] = item
@@ -545,6 +549,7 @@ class Store:
                 if not it or it.status == "posted" or it.queue_pos is not None:
                     continue
                 it.queue_pos, it.status, it.last_error, it.account = nxt, "queued", "", account
+                it.keep = ""  # queued by hand: it isn't only a download any more
                 nxt += 1
             self._renumber()
 

@@ -98,7 +98,7 @@ def test_nothing_to_look_for_says_how_to_ask():
 
 def test_asking_in_the_chat_makes_the_highlights_and_tells_both(sports):
     w = sports
-    sent = w.say("/sports NBA Lakers vs Celtics 2 clips", SAM)
+    sent = w.say("/sports NBA Lakers vs Celtics 2 clips, post them", SAM)
     assert "Got it: Lakers vs Celtics (NBA): the top 2 plays as clips for Hoops" in sent["text"]
     assert "they show up under Videos" in sent["text"]
     assert to(w, JUSTYN)[-1]["text"] == ("🏆 <b>Sam</b> asked for sports highlights: Lakers vs Celtics (NBA): the top 2 "
@@ -132,7 +132,7 @@ def test_asking_in_the_chat_makes_the_highlights_and_tells_both(sports):
 
 def test_the_report_waits_for_posting_to_bring_the_clips_in(sports):
     w = sports
-    w.say("/sports NBA Lakers vs Celtics 2 clips")
+    w.say("/sports NBA Lakers vs Celtics 2 clips and post them")
     w.work()
     w.fake.clear()
     w.bot.check(w.clock[0])
@@ -159,7 +159,7 @@ def test_sports_by_itself_asks_which_game_and_can_cancel(sports):
     sent = w.say("/sports")
     assert "Which game?" in sent["text"] and "copyright claims" in sent["text"]
     sent = w.say("basketball, reel only")  # the next message is the answer
-    assert "Got it: Basketball: a recap reel for Hoops" in sent["text"]
+    assert "Got it: Basketball: a recap reel. Automation" in sent["text"] and "yours to download" in sent["text"]
     sent = w.say("/sports", SAM)
     assert "<b>Under way</b>" in sent["text"] and "Basketball: a recap reel (Justyn)" in sent["text"]
     sent = w.say("/sports the best highlights please")
@@ -191,7 +191,8 @@ def test_asking_from_the_app(served, monkeypatch):
     w.fake.clear()
     status, r, _ = w.call("POST", "/api/sports/order", {"sport": "basketball", "league": "NBA",
                                                          "teams": "Lakers vs Celtics", "want": "both", "plays": 3,
-                                                         "games": 1, "since": "3days"}, token=d["token"])
+                                                         "games": 1, "since": "3days", "deliver": "post"},
+                          token=d["token"])
     assert status == 200 and r["message"].startswith("Got it: Lakers vs Celtics (NBA): the top 3 plays as clips and a "
                                                      "recap reel for Hoops.")
     oid = r["order"]["id"]
@@ -274,18 +275,20 @@ def test_games_lists_the_last_24_hours_and_a_tap_asks_for_the_reel(sports, reels
     w.fake.clear()
     w.press("gg:nba-401", 1, SAM)
     said = to(w, SAM)[-1]
-    assert "Got it: Lakers at Celtics (NBA): a recap reel for Hoops" in said["text"]
-    assert "checked before it's handed over (over a minute, upright, with sound)" in said["text"]
+    # a tap asks for a download: no account, no queue, so none of TikTok's minimums are asked of it
+    assert "Got it: Lakers at Celtics (NBA): a recap reel. Automation" in said["text"]
+    assert "yours to download and edit (not posted, no account tied to them)" in said["text"]
+    assert "checked before it's handed over" not in said["text"]
     o = w.bot.desk.orders()[0]
     assert (o["by"], o["want"], o["line"], o["games"]) == ("Sam", "reel", "Lakers 108, Celtics 112", 1)
-    assert o["requires"]["min_seconds"] == 61.0
+    assert o["requires"] == {} and o["deliver"] == "download"
     assert (buttons(said["reply_markup"])[-1]) == ("✖ Cancel it", f"so:{o['id']}")
     assert "<b>Sam</b> asked for sports highlights: Lakers at Celtics (NBA): a recap reel." in to(w, JUSTYN)[-1]["text"]
     # the search looks for that game, and its reel is made and reviewed
     assert w.work() == 3
     o = w.bot.desk.orders()[0]
     assert o["status"] == "done" and [s["kind"] for s in o["steps"]] == ["highlights", "reel"]
-    assert o["review"] == {"checked": 1, "passed": 1, "held": 0, "why": []} and reels[0]["asked_by"] == "Sam"
+    assert o["review"] == {} and reels[0]["asked_by"] == "Sam" and reels[0]["keep"] is True
     # the Cancel button under the reply stops a request that's still open
     w.fake.clear()
     w.press("gg:nhl-501", 1, SAM)
@@ -328,16 +331,16 @@ def test_reel_in_words_and_reel_alone(sports):
     w = sports
     w.bot.slate_get = scoreboards(w.clock[0])
     sent = w.say("/reel NBA Lakers vs Celtics 3 clips")  # /reel means a reel, whatever else is said
-    assert "Got it: Lakers vs Celtics (NBA): a recap reel for Hoops" in sent["text"]
+    assert "Got it: Lakers vs Celtics (NBA): a recap reel. Automation" in sent["text"]
     assert w.bot.desk.orders()[0]["want"] == "reel"
     assert w.say("/reel")["text"].startswith("🏆 <b>Games played, last 24 hours</b>")
-    sent = w.say("/sports NBA Heat vs Knicks 3 clips")  # single plays: the reply says they'll be held
+    sent = w.say("/sports NBA Heat vs Knicks 3 clips post them")  # single plays, to post: they'll be held
     assert "ℹ Single plays run 15 to 40 seconds" in sent["text"] and "will wait for your OK" in sent["text"]
 
 
 def test_the_report_says_what_the_review_found(sports):
     w = sports
-    w.say("/sports NBA Lakers vs Celtics 2 clips", SAM)
+    w.say("/sports NBA Lakers vs Celtics 2 clips, post them", SAM)
     w.work()
     items = w.take()
     assert all(i.review == "waiting" for i in items)  # 24-second plays: under the minimum, held for an OK
@@ -386,12 +389,12 @@ def test_the_app_lists_the_games_and_orders_one(served, monkeypatch):
     _, form, _ = w.call("GET", "/api/sports", token=d["token"])
     assert form["want"] == "reel" and form["requires"]["min_seconds"] == 61.0 and "soccer" in form["scoreboards"]
     # one tap: the game's reel
-    status, r, _ = w.call("POST", "/api/sports/order", {"game": "nba-401"}, token=d["token"])
+    status, r, _ = w.call("POST", "/api/sports/order", {"game": "nba-401", "deliver": "post"}, token=d["token"])
     assert status == 200 and r["message"].startswith("Got it: Lakers at Celtics (NBA): a recap reel for Hoops.")
     assert r["order"]["want"] == "reel" and r["order"]["line"] == "Lakers 108, Celtics 112" and r["notes"] == []
     # single plays are allowed, and the answer says they'll wait for an OK
-    status, r, _ = w.call("POST", "/api/sports/order", {"game": "nhl-501", "want": "clips", "plays": 3},
-                          token=d["token"])
+    status, r, _ = w.call("POST", "/api/sports/order", {"game": "nhl-501", "want": "clips", "plays": 3,
+                                                         "deliver": "post"}, token=d["token"])
     assert status == 200 and r["order"]["want"] == "clips" and any("wait for your OK" in n for n in r["notes"])
     # a game still being played, one to come, and one that isn't listed
     status, err, _ = w.call("POST", "/api/sports/order", {"game": "nba-402"}, token=d["token"])

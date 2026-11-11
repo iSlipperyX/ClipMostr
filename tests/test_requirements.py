@@ -105,30 +105,35 @@ def test_posting_holds_what_falls_short(tmp_path):
 
 
 def test_a_request_is_told_what_it_will_get(desk, worker):  # noqa: F811
-    r = desk.order({"sport": "basketball", "teams": "Lakers vs Celtics", "want": "both"}, by="Sam", by_id=5002)
+    r = desk.order({"deliver": "post", "sport": "basketball", "teams": "Lakers vs Celtics", "want": "both"}, by="Sam", by_id=5002)
     assert r["notes"] == [
         "Single plays run 15 to 40 seconds, and a video from Telegram has to be over 60 s: the clips will wait for "
         "your OK, not post by themselves. The reel is the one that's over a minute.",
         "No AI is set up, so the plays are ranked by the crowd's noise alone."]
     assert r["order"]["notes"] == r["notes"] and r["order"]["requires"]["min_seconds"] == 61.0
-    r = desk.order({"sport": "basketball", "want": "reel"}, by="Sam", by_id=5002)
+    r = desk.order({"deliver": "post", "sport": "basketball", "want": "reel"}, by="Sam", by_id=5002)
     assert r["notes"] == ["No AI is set up, so the plays are ranked by the crowd's noise alone."]
-    r = desk.order({"sport": "soccer", "want": "clips"}, by="Sam", by_id=5002)
+    r = desk.order({"deliver": "post", "sport": "soccer", "want": "clips"}, by="Sam", by_id=5002)
     assert "Ask for a reel to get one that's over a minute." in r["notes"][0]
     assert r["notes"][1] == ("No category is set for this sport: what's made goes in the Sports folder and isn't "
                              "queued to post.")
     for o in desk.orders():
         desk.cancel_order(o["id"])
     worker.s.telegram_min_seconds = 0  # the check turned off: nothing is said or held
-    r = desk.order({"sport": "soccer", "want": "clips"}, by="Sam", by_id=5002)
+    r = desk.order({"deliver": "post", "sport": "soccer", "want": "clips"}, by="Sam", by_id=5002)
     assert r["order"]["requires"] == {} and not any("Single plays" in n for n in r["notes"])
     # the PC's own requests aren't Telegram's
     assert desk.order({"sport": "hockey", "want": "clips"})["order"]["requires"] == {}
+    # asked for from Telegram without "post it": a download, which has nothing to meet
+    r = desk.order({"sport": "hockey", "want": "reel"}, by="Sam", by_id=5002)
+    assert r["order"]["requires"] == {} and r["order"]["deliver"] == "download"
+    assert r["notes"][0] == ("It's made to download: it isn't queued to post and no TikTok account is tied to it. "
+                             "You can still queue it to post afterwards.")
 
 
 def test_a_category_without_an_account_is_said(desk, worker):  # noqa: F811
     worker.s.categories = [{"id": "h1", "name": "Hoops", "sport": "basketball"}]
-    r = desk.order({"sport": "basketball", "want": "reel"}, by="Sam", by_id=5002)
+    r = desk.order({"deliver": "post", "sport": "basketball", "want": "reel"}, by="Sam", by_id=5002)
     assert "Hoops has no TikTok account: what's made stays in the Library until it has one." in r["notes"]
 
 
@@ -145,7 +150,7 @@ def test_a_reel_under_a_minute_is_held_and_said(desk, worker, search, monkeypatc
                              {"length": 52.3, "width": 1080, "height": 1920, "sound": True, "rewards": False}, {}, [])
 
     monkeypatch.setattr(RR, "make", short_reel)
-    desk.order({"sport": "basketball", "teams": "Lakers vs Celtics", "want": "reel"}, by="Sam", by_id=5002)
+    desk.order({"deliver": "post", "sport": "basketball", "teams": "Lakers vs Celtics", "want": "reel"}, by="Sam", by_id=5002)
     run(worker)
     o = desk.orders()[0]
     assert o["status"] == "done"
@@ -155,7 +160,7 @@ def test_a_reel_under_a_minute_is_held_and_said(desk, worker, search, monkeypatc
 
 
 def test_a_reel_that_meets_them_says_so(desk, worker, search, reels):  # noqa: F811
-    desk.order({"sport": "basketball", "teams": "Lakers vs Celtics", "want": "reel"}, by="Sam", by_id=5002)
+    desk.order({"deliver": "post", "sport": "basketball", "teams": "Lakers vs Celtics", "want": "reel"}, by="Sam", by_id=5002)
     run(worker)
     o = desk.orders()[0]
     assert o["message"] == "Made a 71 s reel of the top 5 plays of Lakers at Celtics, for Hoops"
@@ -185,7 +190,7 @@ GAME = {"id": "nba-401", "sport": "basketball", "league": "NBA", "home": "Celtic
 
 
 def test_a_picked_game_becomes_a_request_for_its_reel(desk, worker, search, reels):  # noqa: F811
-    r = desk.order(slate.order_values(GAME, "reel"), by="Sam", by_id=5002)
+    r = desk.order(slate.order_values(GAME, "reel") | {"deliver": "post"}, by="Sam", by_id=5002)
     o = r["order"]
     assert o["title"] == "Lakers at Celtics (NBA): a recap reel" and o["line"] == "Lakers 108, Celtics 112"
     kept = desk.find_order(o["id"])
@@ -206,7 +211,7 @@ def test_a_game_is_matched_by_any_name_its_teams_go_by(desk, worker, monkeypatch
     game = {"id": "eng.1-601", "sport": "soccer", "league": "Premier League", "home": "Man City", "away": "Liverpool",
             "home_names": ["Man City", "Manchester City"], "away_names": ["Liverpool"], "state": "final",
             "label": "Man City v Liverpool", "line": "Man City 2-1 Liverpool"}
-    desk.order(slate.order_values(game, "reel"), by="Sam", by_id=5002)
+    desk.order(slate.order_values(game, "reel") | {"deliver": "post"}, by="Sam", by_id=5002)
     run(worker)
     o = desk.orders()[0]
     assert o["status"] == "done" and o["steps"][0]["game"] == "m1"  # "Manchester City" is "Man City"
@@ -214,7 +219,7 @@ def test_a_game_is_matched_by_any_name_its_teams_go_by(desk, worker, monkeypatch
 
 def test_a_game_still_being_played_cant_be_asked_for_yet(desk):  # noqa: F811
     with pytest.raises(D.DeskError, match="still being played") as exc:
-        desk.order(slate.order_values(dict(GAME, state="live"), "reel"), by="Sam", by_id=5002)
+        desk.order(slate.order_values(dict(GAME, state="live"), "reel") | {"deliver": "post"}, by="Sam", by_id=5002)
     assert exc.value.status == 409
     with pytest.raises(D.DeskError, match="hasn't been played yet"):
         desk.order(slate.order_values(dict(GAME, state="soon"), "reel"))
@@ -224,7 +229,7 @@ def test_a_game_still_being_played_cant_be_asked_for_yet(desk):  # noqa: F811
 @pytest.mark.parametrize("sport", ["soccer", "basketball", "football", "baseball", "hockey", "tennis", "combat",
                                    "golf", "cricket", "motorsport"])
 def test_every_sport_can_be_asked_for_as_a_reel(desk, sport):  # noqa: F811
-    o = desk.order({"sport": sport, "want": "reel"}, by="Sam", by_id=5002)["order"]
+    o = desk.order({"deliver": "post", "sport": sport, "want": "reel"}, by="Sam", by_id=5002)["order"]
     assert o["status"] == "queued" and o["want"] == "reel" and o["sport"] == sport
     assert o["title"].endswith(": a recap reel")
 
@@ -234,7 +239,7 @@ def test_every_sport_can_be_asked_for_as_a_reel(desk, sport):  # noqa: F811
 
 def test_what_is_being_worked_on_in_words(desk, worker, search, reels):  # noqa: F811
     assert desk.doing() is None
-    desk.order({"sport": "basketball", "teams": "Lakers vs Celtics", "want": "reel"}, by="Sam", by_id=5002)
+    desk.order({"deliver": "post", "sport": "basketball", "teams": "Lakers vs Celtics", "want": "reel"}, by="Sam", by_id=5002)
     assert desk.doing() is None  # waiting isn't doing
     task = desk.claim("test:1")
     d = desk.doing()

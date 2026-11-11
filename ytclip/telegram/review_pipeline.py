@@ -33,6 +33,7 @@ from pathlib import Path
 from . import state, streamer
 from .api import ApiError, NetworkError, app_button, inline
 from .common import DIGEST_MAX, MODE_LIFE, PAGE, Refused, app_link, attr, esc, length_text, plural, trim
+from .editor_handler import B_EDIT, B_FILE, B_QUEUE, FILE_NOTE
 
 
 B_FIX = "🛠 Critique / Regenerate"
@@ -414,8 +415,29 @@ class ReviewPipeline:
         now = self.now()
         changes: dict[str, dict] = {}
         for c in going:
-            job = db.get(str(c.get("job") or ""))
-            if job is None:
+            job = db.get(str(c.get("job") or "")) if not c.get("desk") else None
+            if c.get("desk"):  # the editor's: the Sports worker cuts it (sportsdesk/desk.py: do_edit)
+                e = self.edit_progress(str(c["desk"]))
+                if e is None or e["status"] == "cancelled":
+                    new = {"status": "failed", "error": "It was stopped on the PC before it was made.", "stage": ""}
+                elif e["status"] == "failed":
+                    new = {"status": "failed", "error": trim(e.get("error") or "It failed.", 300), "stage": ""}
+                elif e["status"] == "done":
+                    items = [i for i in _items_in(store, Path(e.get("folder") or "."))
+                             if Path(i.path).name == c.get("file")] if e.get("folder") else []
+                    seen = float(c.get("done_at") or 0)
+                    if items:
+                        new = {"status": "done", "fixed": items[0].id, "stage": ""}
+                    elif seen and now - seen > 15 * 60:
+                        new = {"status": "failed", "stage": "",
+                               "error": "It was made, but the new version didn't come into the library."}
+                    else:
+                        new = {"status": "working", "stage": "Bringing it into the library", "done_at": seen or now}
+                elif e["status"] == "working":
+                    new = {"status": "working", "stage": trim(e.get("stage") or "", 80)}
+                else:
+                    new = {"status": "queued", "stage": ""}
+            elif job is None:
                 new = {"status": "failed", "error": "It was taken out of the queue.", "stage": ""}
             elif job.status == "failed":
                 new = {"status": "failed", "error": trim(job.error, 300), "stage": ""}
@@ -479,7 +501,8 @@ class ReviewPipeline:
                 data = state.load(self.state_file)
         n = state.version_of(data, it.id)
         if n > 1:
-            return f"v{n} (Critique Applied)"
+            how = next((c.get("how") for c in data["critiques"].values() if c.get("fixed") == it.id), "")
+            return f"v{n} (Edited)" if how == "edit" else f"v{n} (Critique Applied)"
         return "v1" if len(state.family(data, it.id)) > 1 else ""
 
     def versions_json(self, it, data: dict | None = None, store=None) -> list[dict]:
@@ -490,6 +513,7 @@ class ReviewPipeline:
         for n, x in self.versions(it, data, store):
             said = next((c for c in data["critiques"].values() if c.get("fixed") == x.id), None)
             out.append({"id": x.id, "version": n, "label": self.version_label(x, data), "title": x.headline,
+                        "keep": bool(x.keep) and x.status == "new",
                         "critique": (said or {}).get("text") or "", "by": (said or {}).get("name") or "",
                         "how": (said or {}).get("how") or ""})
         return out
@@ -542,11 +566,16 @@ class ReviewPipeline:
                 self.settle(x.id, gone=f"🗑 <b>Deleted</b>: {esc(mine)} was picked to post instead.")
             if gone:
                 self.save(store)
-        self.log(f"{self.name(chat)} picked {mine} of “{trim(it.headline, 80)}” to post"
+        self.log(f"{self.name(chat)} picked {mine} of “{trim(it.headline, 80)}”"
                  + (f"; {', '.join(f'v{n}' for n in gone)} deleted." if gone else "."))
         self.settle(it.id, skip=skip)
-        self.did(chat, "approve", f"{mine} of “{trim(it.headline, 80)}”", it.id)
-        message = f"{mine} posts when its time comes." if mine != "this one" else "OK: it posts when its time comes."
+        self.did(chat, "keep" if it.keep and it.status == "new" else "approve",
+                 f"{mine} of “{trim(it.headline, 80)}”", it.id)
+        if it.keep and it.status == "new":
+            message = f"{mine} is the one kept." if mine != "this one" else "Kept."
+        else:
+            message = (f"{mine} posts when its time comes." if mine != "this one"
+                       else "OK: it posts when its time comes.")
         if gone:
             message += " " + ", ".join(f"v{n}" for n in gone) + (" was" if len(gone) == 1 else " were") + " deleted."
         if kept:
@@ -586,10 +615,16 @@ class ReviewPipeline:
         with self.lock:
             data = state.load(self.state_file)
         versions = [(n, x.id) for n, x in self.versions(it, data)]
+        download = bool(it.keep) and it.status == "new"
         if self.app_url and it.status not in ("posted", "uploading"):
             rows = [[self.app_row("▶ Watch it in the app", it.id)]]
             if versions:
-                rows.append([(f"✅ Approve v{n}", f"apv:{i}") for n, i in versions[-3:]])
+                rows.append([(f"✅ Keep v{n}" if download else f"✅ Approve v{n}", f"apv:{i}")
+                             for n, i in versions[-3:]])
+            if download:
+                rows.append([(B_FILE, f"dl:{it.id}"), (B_QUEUE, f"pq:{it.id}")])
+            if self.editable(it):
+                rows.append([self.app_row(B_EDIT, f"{it.id}&e=1")])
             if fixable:
                 rows.append([(B_FIX, f"fix:{it.id}")])
             return inline(rows)
@@ -686,6 +721,10 @@ class ReviewPipeline:
             except queue.Empty:
                 continue
             try:
+                if note == FILE_NOTE:  # the file itself, to save (editor_handler.py)
+                    if not self.stop_event.is_set():
+                        self.send_file_now(chat, item_id)
+                    continue
                 it = self.posting()[0].get(item_id)
                 if it is not None and not self.stop_event.is_set():
                     self.show(chat, it, note, live)
@@ -865,6 +904,8 @@ def card_html(it, accounts, now: float) -> str:
         lines.append("⏸ Waits for your OK before it posts")
     elif it.queue_pos is not None:
         lines.append(f"🕓 Posts {esc(schedule.fmt_when(it.planned_at, now))}" if it.planned_at else "🕓 In the queue")
+    elif it.keep:
+        lines.append("⬇ Yours to download: not queued to post, no account tied to it")
     else:
         lines.append("📚 In the library, not queued" + ("" if a else " (its category has no TikTok account)"))
     meta = [length_text(it.duration or float(it.facts.get("length") or 0))]
@@ -918,6 +959,11 @@ def card_buttons(it, accounts, service, fixable: bool = False, versions: list | 
         if it.last_error != INTERRUPTED:
             row.insert(0, ("🔁 Try again", f"again:{it.id}"))
         rows.append(row)
+    elif it.keep and it.status == "new":  # a download: the file, or the queue after all
+        if versions:
+            rows.append([(f"✅ Keep v{n}", f"apv:{i}") for n, i in versions[-3:]])
+        rows.append([(B_FILE, f"dl:{it.id}"), ("🗑 Delete", f"del:{it.id}")])
+        rows.append([(B_QUEUE, f"pq:{it.id}")])
     else:
         row = [("🗑 Delete", f"del:{it.id}")]
         if can_post:
@@ -968,9 +1014,10 @@ def digest_html(title: str, items: list, accounts, now: float, app_url: str = ""
     for n, it in enumerate(items[:DIGEST_MAX], 1):
         a = accounts.get(it.account) if it.account else None
         when = schedule.fmt_when(it.planned_at, now) if it.planned_at else ""
-        bits = [a.handle if a else "not queued", when, length_text(it.duration)]
+        bits = [a.handle if a else "to download" if it.keep else "not queued", when, length_text(it.duration)]
         lines.append(f"{n}. {esc(trim(it.headline, 80))}\n    {esc(' · '.join(b for b in bits if b))}")
-        rows.append([(trim(f"▶ {n}. {it.headline}", 60), f"v:{it.id}")])
+        rows.append([(trim(f"▶ {n}. {it.headline}", 60), f"v:{it.id}")]
+                    + ([("⬇ File", f"dl:{it.id}")] if it.keep and it.status == "new" else []))
     if app_url:
         if len(items) > DIGEST_MAX:
             lines.append(f"…and {len(items) - DIGEST_MAX} more in the app")

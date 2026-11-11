@@ -171,9 +171,18 @@ def make(p, game: dict, highlights: list[dict], s, out_root: Path, *, ids: list[
          category=None, voice: str = "en_storyteller", framing_mode: str = "follow", order: str = "countdown",
          log: Log | None = None, progress: Progress | None = None, check: Callable[[], None] | None = None,
          work: Path | None = None, events: list[dict] | None = None, events_title: str = "",
-         timeline: list[dict] | None = None, requires: dict | None = None, asked_by: str = "") -> ReelResult:
+         timeline: list[dict] | None = None, requires: dict | None = None, asked_by: str = "",
+         keep: bool = False, planned: montage.Reel | None = None, look: dict | None = None,
+         version: tuple[Path, str, str] | None = None) -> ReelResult:
     """Make the reel of `game` from `p` (opened and measured). Raises montage.ReelError for a game that can't
     make one, and whatever `check` raises to stop.
+
+    `keep`: it was asked for as a download, so its clips.json says it's kept in the library and queued for no
+    account. `planned` is a reel cut already, with its words (the editor's: sportsdesk/editor.py): nothing is
+    planned or written, it's made as it stands. `look` is the editor's too: {"music": "off" | "low" | "normal"
+    | "loud", "game": dB on the game's own sound, "bug": False for no score bug}. `version` (the folder, the
+    file there it's an edit of, the new file's name) saves it beside that file as another version of it,
+    instead of in a folder of its own.
 
     `events` (an event search's hits, semantic_search.EventHit as dicts) makes a reel of those moments instead
     of the game's best plays. `timeline` is the game's placed play-by-play (desk: game["timeline"]); with it a
@@ -200,7 +209,13 @@ def make(p, game: dict, highlights: list[dict], s, out_root: Path, *, ids: list[
     style = str(getattr(s, "reel_transitions", "mix") or "mix")
     seconds = float(getattr(s, "reel_transition_seconds", montage.TRANSITION) or montage.TRANSITION)
     narrator = bool(voice) and voice != "off"
-    if events:
+    look = dict(look or {})
+    if planned is not None:
+        reel = planned
+        quantize(reel)
+        if not narrator:
+            reel.story.opening = ""
+    elif events:
         reel = montage.plan_events(game, events, duration=media.duration or (p.video.duration or 0),
                                    scene_cuts=m.scene_cuts if m else [], order=order, title=events_title,
                                    transition=seconds, style=style)
@@ -229,7 +244,7 @@ def make(p, game: dict, highlights: list[dict], s, out_root: Path, *, ids: list[
 
         # The score at the start and the end of each play.
         scores: dict[str, tuple] = {}
-        if scoreboard.can_read(s):
+        if look.get("bug", True) and scoreboard.can_read(s):
             progress("Reading the scoreboard", None)
             times = []
             for seg in reel.plays:
@@ -303,8 +318,13 @@ def make(p, game: dict, highlights: list[dict], s, out_root: Path, *, ids: list[
         snd = sound.Sound(src=src, has_audio=media.has_audio, narrator=nar_path)
         snd.effects = sound.effects_for(reel, sfx_library.sound_for("whoosh", folder_fx, game.get("id", "")),
                                         sfx_library.sound_for("impact", folder_fx, game.get("id", "")))
-        music, where = soundbed.music_for(s, "Epic", reel.duration + 2, work, seed=game.get("id", ""))
+        if look.get("music") == "off":
+            music, where = None, "none (turned off in the editor)"
+        else:
+            music, where = soundbed.music_for(s, "Epic", reel.duration + 2, work, seed=game.get("id", ""))
+            snd.music_db = sound.MUSIC_DB + sound.MUSIC_STEPS.get(str(look.get("music") or "normal"), 0.0)
         snd.music = music
+        snd.game_gain_db = max(-12.0, min(6.0, float(look.get("game") or 0.0)))
         info["music"] = where
         progress("Mixing the sound", 0.62)
         info["mix"] = sound.mix(reel, snd, work / "sound.m4a",
@@ -316,7 +336,8 @@ def make(p, game: dict, highlights: list[dict], s, out_root: Path, *, ids: list[
         teams = scoreboard.teams_for(game)
         for seg in reel.plays:
             seg.badge = reel.story.badges.get(seg.hid, "")
-        ass = overlays.build(reel, scores, teams=teams, matchup=game.get("matchup") or "", font=font, accent=accent)
+        ass = overlays.build(reel, scores, teams=teams, matchup=game.get("matchup") or "", font=font, accent=accent,
+                             score_bug=bool(look.get("bug", True)))
         (work / "reel.ass").write_text(ass, encoding="utf-8")
         from ..fonts import stage
 
@@ -327,7 +348,7 @@ def make(p, game: dict, highlights: list[dict], s, out_root: Path, *, ids: list[
         # Together.
         stamp = time.strftime("%Y-%m-%d %H.%M")
         matchup = game.get("matchup") or game.get("title") or "Game"
-        folder = Path(out_root) / safe_name(f"{stamp} {matchup} reel", 80)
+        folder = Path(version[0]) if version else Path(out_root) / safe_name(f"{stamp} {matchup} reel", 80)
         folder.mkdir(parents=True, exist_ok=True)
         out = work / "reel.mp4"
         progress("Putting the reel together", 0.72)
@@ -338,21 +359,27 @@ def make(p, game: dict, highlights: list[dict], s, out_root: Path, *, ids: list[
             discard(*clips, work / "sound.m4a", nar_path)
         timings["assemble"] = round(time.time() - t4, 1)
         result_checks = checks(out)
-        if not result_checks.get("rewards"):
+        if not result_checks.get("rewards") and not keep:
             warnings.append(f"The reel is {result_checks.get('length', 0):.0f} s: under a minute, so not for Creator "
                             "Rewards.")
         if result_checks.get("lufs") is not None and abs(result_checks["lufs"] + 14) > 1.0:
             warnings.append(f"Its sound came out at {result_checks['lufs']} LUFS, not -14.")
         info["timings"] = timings
+        if look:
+            info["look"] = look
+        if version:
+            return _deliver_version(reel, out, folder, version[1], version[2], result_checks, info, warnings,
+                                    bool(nar_path), framing_mode, voice if narrator else "off")
         return _deliver(p, game, reel, out, folder, s, category, sport, result_checks, info, warnings, bool(nar_path),
-                        requires=requires, asked_by=asked_by)
+                        requires=requires, asked_by=asked_by, keep=keep, framing_mode=framing_mode,
+                        voice=voice if narrator else "off")
     finally:  # stopped, failed or done: the work folder (framed plays, sound, graphics) goes either way
         shutil.rmtree(work, ignore_errors=True)
 
 
 def _deliver(p, game: dict, reel: montage.Reel, video: Path, folder: Path, s, category, sport, result_checks: dict,
              info: dict, warnings: list[str], narrated: bool, requires: dict | None = None,
-             asked_by: str = "") -> ReelResult:
+             asked_by: str = "", keep: bool = False, framing_mode: str = "follow", voice: str = "") -> ReelResult:
     from ..analyze import Clip
     from ..download import Video
     from ..export import thumbnail
@@ -378,9 +405,13 @@ def _deliver(p, game: dict, reel: montage.Reel, video: Path, folder: Path, s, ca
                  "origins": ["sports", "telegram"]}
     if requires:  # the minimums it was made to: posting's intake holds it if it falls short
         auto["requires"] = dict(requires)
-    if category is not None:
+    if category is not None and keep:  # the category gave it its look; no account is tied to a download
+        auto |= {"category": category.name, "category_id": category.id}
+    elif category is not None:
         auto |= {"category": category.name, "category_id": category.id, "account": category.account,
                  "account_id": category.account_id}
+    if keep:
+        auto["keep"] = "download"
     v = p.video
     video_meta = Video(id=v.id, title=v.title, channel=v.channel, upload_date=v.upload_date, duration=v.duration,
                        url=v.url, path=folder / name, is_local=v.is_local, license=v.license)
@@ -391,8 +422,40 @@ def _deliver(p, game: dict, reel: montage.Reel, video: Path, folder: Path, s, ca
              "sports": {"matchup": game.get("matchup"), "league": game.get("league"), "sport": sport.id,
                         "reel": reel.to_json(), "made": info}}
     write_index(folder, video_meta, [clip], [name], ["Sports recap reel"], "sports", extra=extra, details=details)
-    (folder / "reel.json").write_text(json.dumps(reel.to_json(), indent=2, default=str), encoding="utf-8")
+    plan = reel.to_json() | {"made": {"framing": framing_mode, "voice": voice, **(info.get("look") or {})}}
+    (folder / "reel.json").write_text(json.dumps(plan, indent=2, default=str), encoding="utf-8")
     part = folder / (name + ".part")
     shutil.move(str(video), str(part))
     os.replace(part, folder / name)
     return ReelResult(folder, folder / name, reel, result_checks, info, warnings)
+
+
+def _deliver_version(reel: montage.Reel, video: Path, folder: Path, source: str, name: str, result_checks: dict,
+                     info: dict, warnings: list[str], narrated: bool, framing_mode: str, voice: str) -> ReelResult:
+    """An edited reel, saved beside the one it was edited from: "<title> (v2).mp4" with its own plan
+    ("<title> (v2).reel.json", which the next edit starts from), listed in the folder's clips.json as an edit
+    of `source`, so it comes into the library with the same category and the same way of being handed over."""
+    from . import editor
+
+    st = reel.story
+    dest = folder / name
+    plan = reel.to_json() | {"made": {"framing": framing_mode, "voice": voice, **(info.get("look") or {})}}
+    part = folder / (name + ".part")
+    shutil.move(str(video), str(part))
+    os.replace(part, dest)
+    own = editor.plan_file(folder, name)
+    try:
+        own.write_text(json.dumps(plan, indent=2, default=str), encoding="utf-8")
+        tags = " ".join(f"#{t}" for t in st.hashtags)
+        row = {"start": 0.0, "end": round(result_checks.get("length") or reel.duration, 2),
+               "length": round(result_checks.get("length") or reel.duration, 2), "qc": result_checks,
+               "caption": f"{st.caption} {tags}".strip(), "hashtags": list(st.hashtags), "reason": st.caption,
+               "hook": st.hook.title() if st.hook else "", "ai_generated": narrated, "reel": True}
+        if not editor.add_version(folder, source, name, row, "edited on the phone"):
+            raise OSError("the folder's clips.json couldn't take it")
+    except OSError as exc:
+        dest.unlink(missing_ok=True)
+        own.unlink(missing_ok=True)
+        raise montage.ReelError(f"The new version was made but couldn't be saved ({exc}). Nothing was "
+                                "changed.") from exc
+    return ReelResult(folder, dest, reel, result_checks, info, warnings)
