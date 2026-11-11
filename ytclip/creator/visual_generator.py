@@ -395,8 +395,10 @@ class Diffusers:
         _pipe, _pipe_key = pipe, key
         return pipe
 
-    def generate(self, prompt: str, negative: str, seed: int, dest: Path) -> Path:
+    def generate(self, prompt: str, negative: str, seed: int, dest: Path, landscape: bool = False) -> Path:
         repo, w, h, steps, guidance = DIFFUSERS_MODELS[self.key]
+        if landscape:  # the same picture area on its side, for a wide video
+            w, h = h, w
         if self.via_engine():
             engine = picture_engine.worker(self.log)
             if not engine.alive():
@@ -473,9 +475,10 @@ def order_for(choice: str, ready: dict[str, str], prefer_model: str = "sdxl_turb
 
 def make_all(board, s, folder: Path, *, choice: str = "", style=None, log: Log | None = None,
              progress: Progress | None = None, check: Callable[[], None] | None = None,
-             comfy: Comfy | None = None) -> list[SceneVisual]:
+             comfy: Comfy | None = None, landscape: bool = False) -> list[SceneVisual]:
     """A picture (or clip) for every scene of `board`, kept in `folder` as scene_NN.png. `choice` is a
-    BACKENDS key (default Settings → Creator → Pictures)."""
+    BACKENDS key (default Settings → Creator → Pictures). `landscape`: pictures for a wide video (16:9)
+    instead of a vertical one."""
     from .director import get_style
 
     log = log or (lambda m: None)
@@ -495,6 +498,8 @@ def make_all(board, s, folder: Path, *, choice: str = "", style=None, log: Log |
         except Exception:  # noqa: BLE001
             pass
     lib = broll_library(getattr(s, "broll_folder", "")) if "local_broll" in order else []
+    size = (2400, 1350) if landscape else (1350, 2400)  # the textures'
+    comfy_size = (1344, 768) if landscape else (768, 1344)
     used: dict[str, int] = {}
     failed: set[str] = set()
     out: list[SceneVisual] = []
@@ -519,7 +524,8 @@ def make_all(board, s, folder: Path, *, choice: str = "", style=None, log: Log |
                 continue
             try:
                 if key == "texture":
-                    made = SceneVisual(sc.scene_id, "image", texture(dest, style.palette, seed, words=sc.speech_text),
+                    made = SceneVisual(sc.scene_id, "image",
+                                       texture(dest, style.palette, seed, size=size, words=sc.speech_text),
                                        "texture", sc.visual_prompt)
                 elif key == "local_broll":
                     hit = match_broll(list(sc.keywords) + sc.speech_text.split(), lib, used)
@@ -531,12 +537,14 @@ def make_all(board, s, folder: Path, *, choice: str = "", style=None, log: Log |
                 elif key == "comfyui":
                     maker = makers.get(key) or comfy or Comfy(s, log, check)
                     makers[key] = maker
-                    made = SceneVisual(sc.scene_id, "image", maker.generate(sc.visual_prompt, style.negative, seed, dest),
+                    made = SceneVisual(sc.scene_id, "image",
+                                       maker.generate(sc.visual_prompt, style.negative, seed, dest, *comfy_size),
                                        key, sc.visual_prompt)
                 else:
                     maker = makers.get(key) or Diffusers(s, key, log, progress, check)
                     makers[key] = maker
-                    made = SceneVisual(sc.scene_id, "image", maker.generate(sc.visual_prompt, style.negative, seed, dest),
+                    made = SceneVisual(sc.scene_id, "image",
+                                       maker.generate(sc.visual_prompt, style.negative, seed, dest, landscape),
                                        key, sc.visual_prompt)
                 break
             except Exception as exc:  # noqa: BLE001 - one backend failing moves on to the next
@@ -546,7 +554,8 @@ def make_all(board, s, folder: Path, *, choice: str = "", style=None, log: Log |
                 log(f"{BACKEND_NAMES[key]} couldn't make the picture for scene {sc.scene_id} "
                     f"({type(exc).__name__}: {str(exc)[:200]}); using the next option from here on.")
         if made is None:  # textures never fail, but just in case
-            made = SceneVisual(sc.scene_id, "image", texture(dest, style.palette, seed), "texture", sc.visual_prompt)
+            made = SceneVisual(sc.scene_id, "image", texture(dest, style.palette, seed, size=size), "texture",
+                               sc.visual_prompt)
         out.append(made)
     progress("Making pictures", 1.0)
     unload()

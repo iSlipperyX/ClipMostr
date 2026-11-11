@@ -21,11 +21,14 @@ from PySide6.QtWidgets import (QAbstractItemView, QCheckBox, QComboBox, QFormLay
                                QScrollArea, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget)
 
 from .. import categories, steps
-from ..settings import CREATOR_STYLES, CREATOR_VISUALS, Settings, work_dir
+from ..settings import CREATOR_ENGINES, CREATOR_STYLES, CREATOR_VISUALS, STUDIO_CAPTIONS, Settings, work_dir
 from . import theme
 from .status_bars import LabeledBar, StepChips
+from .timeline_widget import TimelineWidget
 
 COLUMNS = ("#", "Narration", "Picture", "Camera", "Sound")
+SHAPES = (("", "Vertical 9:16"), ("landscape", "Wide 16:9"), ("square", "Square 1:1"))
+SECONDS_RANGE = {"creator": (20, 180), "studio": (8, 1200)}
 EXAMPLES = ("3 stoic habits that will change your life", "The unsolved mystery of the Voynich Manuscript",
             "Dark psychology tricks people use on you without you noticing")
 
@@ -117,10 +120,27 @@ class CreatorView(QWidget):
         self.script.setVisible(False)
         self.script.setMinimumHeight(150)
         v.addWidget(self.script)
+        self.url = QLineEdit()
+        self.url.setPlaceholderText("Or a public article's address to retell (made with the Studio)")
+        self.url.setToolTip("The page is read once and its story told in new words; its address is kept as the "
+                            "source. Pages behind a sign-in or a paywall, and pages that ask programs to stay "
+                            "away, aren't read. With an address, the box above is the angle to take (optional).")
+        self.url.setClearButtonEnabled(True)
+        self.url.textChanged.connect(lambda _t: self._engine_changed())
+        v.addWidget(self.url)
         form = QFormLayout()
         form.setLabelAlignment(Qt.AlignRight | Qt.AlignVCenter)
         form.setHorizontalSpacing(10)
         form.setVerticalSpacing(8)
+        self.engine = QComboBox()
+        for key, label in CREATOR_ENGINES:
+            self.engine.addItem(label, key)
+        self.engine.setToolTip("The Studio lays the video out as a timeline (timeline.json in its folder) that you "
+                               "can edit and render again, and can make wide and long videos")
+        self.engine.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.engine.setMinimumContentsLength(20)
+        self.engine.currentIndexChanged.connect(lambda _i: self._engine_changed())
+        form.addRow("Made with", self.engine)
         self.category = QComboBox()
         self.category.setToolTip("Its folder in Automation, and the TikTok account it's queued for")
         form.addRow("Category", self.category)
@@ -154,6 +174,21 @@ class CreatorView(QWidget):
         for key, label in CREATOR_VISUALS:
             self.visuals.addItem(label, key)
         form.addRow("Pictures", self.visuals)
+        self.shape = QComboBox()
+        for key, label in SHAPES:
+            self.shape.addItem(label, key)
+        self.shape.setToolTip("Vertical for TikTok, Shorts and Reels; wide for YouTube")
+        self.shape.currentIndexChanged.connect(lambda _i: self._engine_changed())
+        self.shape_label = QLabel("Shape")
+        form.addRow(self.shape_label, self.shape)
+        self.captions = QComboBox()
+        self.captions.addItem("As in Settings", "")
+        for key, label in STUDIO_CAPTIONS:
+            self.captions.addItem(label.split(":")[0], key)
+            self.captions.setItemData(self.captions.count() - 1, label, Qt.ToolTipRole)
+        self.captions.addItem("No captions", "off")
+        self.captions_label = QLabel("Captions")
+        form.addRow(self.captions_label, self.captions)
         v.addLayout(form)
         self.ready = QLabel()
         self.ready.setWordWrap(True)
@@ -178,7 +213,7 @@ class CreatorView(QWidget):
         v.addWidget(self.queue_btn)
         v.addStretch(1)
         # What's picked here sticks until the app restarts; untouched boxes follow Settings → Creator.
-        for w in (self.category, self.voice, self.style, self.visuals):
+        for w in (self.category, self.voice, self.style, self.visuals, self.engine):
             w.activated.connect(lambda _i, w=w: w.setProperty("touched", True))
         self.visuals.activated.connect(lambda _i: self._readiness())
         self.seconds.editingFinished.connect(lambda: self.seconds.setProperty("touched", True))
@@ -252,6 +287,14 @@ class CreatorView(QWidget):
         self.empty.setProperty("muted", True)
         v.addWidget(self.table, 3)
         v.addWidget(self.empty, 3)
+        self.timeline_view = TimelineWidget()
+        self.timeline_scroll = QScrollArea()
+        self.timeline_scroll.setWidgetResizable(True)
+        self.timeline_scroll.setFrameShape(QFrame.NoFrame)
+        self.timeline_scroll.setWidget(self.timeline_view)
+        self.timeline_scroll.setMaximumHeight(292)  # seven rows and the ruler without scrolling
+        self.timeline_scroll.setVisible(False)
+        v.addWidget(self.timeline_scroll, 0)
         self.done_panel = QFrame()
         self.done_panel.setObjectName("panel")
         dp = QHBoxLayout(self.done_panel)
@@ -263,9 +306,15 @@ class CreatorView(QWidget):
         self.play_btn.clicked.connect(self.play_result)
         self.folder_btn = QPushButton("Show in folder")
         self.folder_btn.clicked.connect(self.show_folder)
+        self.rerender_btn = QPushButton("Render timeline again")
+        self.rerender_btn.setToolTip("After you change timeline.json in the video's folder: renders it again, beside "
+                                     "the first video")
+        self.rerender_btn.clicked.connect(self.render_again)
+        self.rerender_btn.setVisible(False)
         dp.addWidget(self.done_text, 1)
         dp.addWidget(self.play_btn)
         dp.addWidget(self.folder_btn)
+        dp.addWidget(self.rerender_btn)
         self.done_panel.setVisible(False)
         v.addWidget(self.done_panel)
         self.log_box = QPlainTextEdit()
@@ -297,6 +346,10 @@ class CreatorView(QWidget):
             j = combo.findData(value)
             if j >= 0:
                 combo.setCurrentIndex(j)
+        if not self.engine.property("touched"):
+            j = self.engine.findData(getattr(s, "creator_engine", "creator"))
+            self.engine.setCurrentIndex(j if j >= 0 else 0)
+        self._engine_changed()
         if not self.seconds.property("touched"):
             self.seconds.setValue(int(s.creator_duration))
             self.rewards.setChecked(bool(s.creator_rewards_length))
@@ -326,6 +379,14 @@ class CreatorView(QWidget):
         if writer:
             bits.append("Facts: <b>" + ("looked up online first" if getattr(s, "creator_web", True) else
                                          "from the AI's memory") + "</b>")
+        if self.studio():
+            from ..studio.visual_sourcer import PROVIDER_NAMES, PROVIDERS, Stock
+
+            stock = Stock(s, Path("."))
+            have = [PROVIDER_NAMES[k] for k in PROVIDERS if stock.keys.get(k)]
+            bits.append("Stock footage: <b>" + (" and ".join(have) if have and not stock.missing() else
+                                                "off" if not getattr(s, "studio_stock", True) else
+                                                "add a free Pexels or Pixabay key in Settings") + "</b>")
         self.ready.setText(" · ".join(bits) + " · <a href='settings'>Creator settings</a>")
         self.ready.setToolTip("" if writer else director.no_writer_text(s))
 
@@ -403,27 +464,67 @@ class CreatorView(QWidget):
         self.prompt.setPlaceholderText("Optional: a word on what it's about (for the hashtags and the look)" if mine
                                        else "What's it about? For example:\n" + "\n".join(EXAMPLES))
         self.prompt.setFixedHeight(48 if mine else 92)
+        self.url.setVisible(not mine)
+        self._engine_changed()
 
     def _rewards_changed(self, on: bool) -> None:
         if on and not 62 <= self.seconds.value() <= 85:
             self.seconds.setValue(65)
 
+    def article(self) -> str:
+        """The article's address, when one is given and the AI is writing."""
+        return "" if self.mode_script.isChecked() else self.url.text().strip()
+
+    def studio(self) -> bool:
+        """True when this video is the Studio's: it's picked, or an article's address is given."""
+        return self.engine.currentData() == "studio" or bool(self.article())
+
+    def _engine_changed(self) -> None:
+        """Show what the engine in use can do: the Studio's shape and captions, and its longer videos."""
+        on = self.studio()
+        for w in (self.shape, self.shape_label, self.captions, self.captions_label):
+            w.setVisible(on)
+        lo, hi = SECONDS_RANGE["studio" if on else "creator"]
+        value = self.seconds.value()
+        self.seconds.setRange(lo, hi)
+        self.seconds.setValue(max(lo, min(hi, value)))
+        wide = on and bool(self.shape.currentData())
+        self.rewards.setEnabled(not wide)  # Creator Rewards is for upright videos
+        self.rewards.setToolTip("TikTok's Creator Rewards only pays for videos over one minute: kept at 62-85 s"
+                                + (" (upright videos only)" if wide else ""))
+        if hasattr(self, "ready"):
+            self._readiness()
+
     def request(self):
         from ..creator.orchestrator import CreateRequest
 
-        return CreateRequest(prompt=self.prompt.toPlainText().strip(),
-                             script=self.script.toPlainText() if self.mode_script.isChecked() else "",
-                             title=self.title.text().strip() if self.board is not None else "",
-                             category=self.category.currentData() or "", voice=self.voice.currentData() or "",
-                             seconds=float(self.seconds.value()), visuals=self.visuals.currentData() or "",
-                             style=self.style.currentData() or "", rewards=self.rewards.isChecked(),
-                             storyboard=self.board.to_json() if self.board is not None else None)
+        base = dict(prompt=self.prompt.toPlainText().strip(),
+                    script=self.script.toPlainText() if self.mode_script.isChecked() else "",
+                    title=self.title.text().strip() if self.board is not None else "",
+                    category=self.category.currentData() or "", voice=self.voice.currentData() or "",
+                    seconds=float(self.seconds.value()), visuals=self.visuals.currentData() or "",
+                    style=self.style.currentData() or "", rewards=self.rewards.isChecked(),
+                    storyboard=self.board.to_json() if self.board is not None else None)
+        if not self.studio():
+            return CreateRequest(**base)
+        from ..studio.orchestrator import StudioRequest
+
+        from ..creator import director
+        from ..studio import scriptwriter
+
+        shape = self.shape.currentData() or ""
+        # Creator Rewards' length is for an upright video of about a minute: on anything else the box doesn't
+        # apply and the length asked for is the length made (StudioOrchestrator.target has the same rule).
+        if shape or not director.REWARDS_RANGE[0] <= base["seconds"] < scriptwriter.LONG_FROM:
+            base["rewards"] = False
+        return StudioRequest(**base, url=self.article(), orientation=shape, captions=self.captions.currentData() or "")
 
     def _check_input(self) -> str:
         if self.mode_script.isChecked() and not self.script.toPlainText().strip() and self.board is None:
             return "Paste your script first."
-        if not self.mode_script.isChecked() and not self.prompt.toPlainText().strip() and self.board is None:
-            return "Say what the video is about first."
+        if not self.mode_script.isChecked() and not self.prompt.toPlainText().strip() and self.board is None \
+                and not self.article():
+            return "Say what the video is about first, or give an article's address."
         return ""
 
     # ------------------------------------------------------------ the storyboard table
@@ -538,12 +639,15 @@ class CreatorView(QWidget):
             self.bar.set_fraction(None if frac < 0 else frac)
         self.detail.setText(msg + (f" {frac:.0%}" if frac >= 0 and "%" not in msg else ""))
 
-    def _orchestrator(self, w: Worker):
+    def _orchestrator(self, w: Worker, studio: bool = False):
         from ..creator.orchestrator import VideoCreatorOrchestrator
 
-        return VideoCreatorOrchestrator(self._settings(), log=w.log.emit,
-                                        progress=lambda m, f: w.progress.emit(m, -1.0 if f is None else float(f)),
-                                        cancelled=lambda: w.cancel_requested)
+        maker = VideoCreatorOrchestrator
+        if studio:
+            from ..studio.orchestrator import StudioOrchestrator as maker  # noqa: N813
+        return maker(self._settings(), log=w.log.emit,
+                     progress=lambda m, f: w.progress.emit(m, -1.0 if f is None else float(f)),
+                     cancelled=lambda: w.cancel_requested)
 
     def write(self) -> None:
         if self.worker is not None and self.worker.isRunning():
@@ -554,9 +658,10 @@ class CreatorView(QWidget):
             self.notice.emit(problem)
             return
         req = self.request()
+        studio = self.studio()
 
         def run(w: Worker):
-            return self._orchestrator(w).storyboard(req)
+            return self._orchestrator(w, studio).storyboard(req)
 
         self._start(run, "✍ Writing the storyboard", ["script"])
         self.worker.done.connect(self._written)
@@ -575,9 +680,10 @@ class CreatorView(QWidget):
             self.notice.emit(problem)
             return
         req = self.request()
+        studio = self.studio()
 
         def run(w: Worker):
-            return self._orchestrator(w).create(req)
+            return self._orchestrator(w, studio).create(req)
 
         self._start(run, f"✨ Making {req.label()}", list(steps.CREATOR_PLAN))
         self.worker.done.connect(self._made)
@@ -595,6 +701,7 @@ class CreatorView(QWidget):
         self.folder_btn.setVisible(True)
         self.done_text.setText(f"<b>✓ {_esc(result.storyboard.title)}</b> · {result.duration:.0f} s · "
                                f"{c.get('lufs')} LUFS · {c.get('size_mb')} MB · {where}{warn}")
+        self.show_timeline(result.folder / "timeline.json")
         self.done_panel.setVisible(True)
         self.notice.emit(f"Made \"{result.storyboard.title}\" ({result.duration:.0f} s).")
 
@@ -634,6 +741,61 @@ class CreatorView(QWidget):
             db.close()
         self._log(f"Queued \"{req.label()}\" for automation to make.")
         self.notice.emit("Added to automation's queue: it's made in turn while automation runs.")
+
+    # ------------------------------------------------------------ the timeline
+    def show_timeline(self, path: Path | None) -> None:
+        """Draw a Studio video's timeline under the storyboard (hidden when there isn't one, or it can't be read)."""
+        tl = None
+        if path is not None and Path(path).is_file():
+            from ..studio.timeline_schema import Timeline
+
+            try:
+                tl = Timeline.load(path)
+            except Exception as exc:  # noqa: BLE001 - a half-edited file: say so, keep the tab working
+                self._log(f"timeline.json can't be shown: {exc}")
+        self.timeline_view.set_timeline(tl)
+        self.timeline_scroll.setVisible(tl is not None)
+        self.rerender_btn.setVisible(path is not None and Path(path).is_file())
+
+    def render_again(self) -> None:
+        """Render the video's timeline.json again, as it is on disk now."""
+        if self.result is None or (self.worker is not None and self.worker.isRunning()):
+            return
+        path = self.result.folder / "timeline.json"
+        self.show_timeline(path)
+        settings = self._settings()
+
+        def run(w: Worker):
+            from ..studio.orchestrator import render_timeline
+
+            def check() -> None:
+                if w.cancel_requested:
+                    from ..ffmpeg import Cancelled
+
+                    raise Cancelled()
+
+            return render_timeline(path, settings=settings, log=w.log.emit, check_cancel=check,
+                                   progress=lambda m, f: w.progress.emit(m, -1.0 if f is None else float(f)))
+
+        self._start(run, "🎬 Rendering the timeline again", ["render"])
+        self.worker.done.connect(self._rendered_again)
+        self.worker.failed.connect(self._rerender_failed)
+
+    def _rerender_failed(self, error: str) -> None:
+        """The video that was made is still there, and so is its timeline to fix and try again."""
+        self._failed(error)
+        if self.result is not None:
+            self.done_panel.setVisible(True)
+            self.show_timeline(self.result.folder / "timeline.json")
+
+    def _rendered_again(self, report) -> None:
+        self._finish()
+        self.done_panel.setVisible(True)
+        self._log(f"Rendered again: {report.path}")
+        for w in report.warnings:
+            self._log(f"⚠ {w}")
+        self.notice.emit(f"Rendered the timeline again: {Path(report.path).name}")
+        self._play(Path(report.path), True)
 
     # ------------------------------------------------------------ playing
     def _play(self, path: Path, video: bool) -> None:

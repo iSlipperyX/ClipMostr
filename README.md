@@ -459,6 +459,60 @@ pip install -e .[diffusion]        # SDXL-Turbo / FLUX.1-schnell in this Python 
 ytclip create --setup-pictures     # or the picture engine: its own Python and PyTorch for your card
 ```
 
+## Studio
+
+The **Studio** makes a finished video from a prompt *or a public article's address*, upright for TikTok, Shorts and Reels or wide for YouTube, from a few seconds to 20 minutes, and lays the whole edit out as a **timeline you can change and render again**. It's the Video Creator's pipeline with a new middle, so the rest is what you know: categories and their accounts, the posting queue, the AI-generated label, the fact check, the originality check, learning from results, review before posting.
+
+In the **Creator** tab, set *Made with* to **Studio** (or paste an article's address, which switches to it). On the command line it's `ytclip studio`:
+
+```
+ytclip studio "Why the Roman Empire really fell" --category History
+ytclip studio --url https://example.org/a-public-article --seconds 60 --captions karaoke
+ytclip studio "How lighthouses worked before electricity" --format long --seconds 480 --no-post
+ytclip studio "3 money habits that compound" --visuals stock --tts kokoro --voice deep_male --ai local_first
+ytclip studio "The angle to take" --url https://example.org/story --storyboard-only --out storyboard.json
+ytclip studio --storyboard storyboard.json            # make an (edited) storyboard as it is, however long
+ytclip studio --timeline "Videos\ClipMonster\Output\Created\2026-11-10 Lighthouses [c-1a2b3c4d]"
+ytclip studio --check                                 # what's ready: script writer, voices, pictures, stock keys
+ytclip studio --schema                                # the timeline's JSON Schema
+```
+
+`--format short` (the default) is vertical 9:16 at the Creator's length; `--format long` is wide 16:9, five minutes unless `--seconds` says otherwise; `--orientation vertical|landscape|square` picks the shape itself. An upright video of about a minute is kept at 62–85 s for Creator Rewards as before; ask for under a minute, a long one or a wide one and it's the length you asked for (a long or wide one even with the Rewards box ticked).
+
+The run is eight steps, shown as it goes; if it stops, it says in which:
+
+1. **Input.** The request is checked before anything is made.
+2. **Script.** With `--url`, the page is read once (see the rules below) and retold in **new words**: the script is compared with the article, asked for again when it lifts a run of the article's wording, and refused when the AI keeps copying. Without one, the topic is looked up online as the Creator does. Either way the script is written to **130–155 words a minute** for the length, as scenes with a role each (hook, setup, build, twist, payoff, call to action), a picture description, a stock-footage search, a camera move and a sound cue. A long video is planned as chapters first, then written a chapter at a time so nothing is told twice. The fact check then reads the script against the article (or the sources found).
+3. **Voice.** The Creator's local voices (Kokoro-82M, Piper, Windows' own, eSpeak NG), with Whisper lining every word up. **ElevenLabs** is used only when you pick it (`--tts elevenlabs` or *Settings → Creator → Voice engine*) with your own key: the script's text is sent to ElevenLabs, it costs money a character, and it's never an automatic fallback. Use voices you have the right to use; this app doesn't clone voices.
+4. **Pictures.** Each scene gets, in order: a clip or picture from **your B-roll folder** matched by its file and folder names; **stock footage** from Pexels and Pixabay; a **picture drawn on this PC** (ComfyUI, SDXL-Turbo, FLUX.1-schnell) in the video's shape; a built-in texture. A scene written as an illustration is drawn first when a picture model is ready. `--visuals stock` puts stock footage first for every scene.
+5. **Timeline.** Everything is laid out on tracks: pictures (each with its camera move as keyframes, a transition centred on every cut), the voice, the music, the sound effects, the captions and the hook's title, with markers on the hook, the twist, the payoff and each chapter.
+6. **Render.** One ffmpeg run draws, mixes and encodes the whole timeline: no intermediate video files, so nothing is encoded twice. The voice is high-passed, gently compressed and set to −14 LUFS; the music is **ducked about 16 dB under speech** by a sidechain compressor and comes back up in the pauses; the mix is mastered to −14 LUFS with peaks under −1 dBTP.
+7. **Check.** Size, length, sound, loudness, and wording too close to a video you made before.
+8. **Deliver.** The video's folder, queued for its category's account like any Creator video.
+
+**Captions** are kinetic: one to three words at a time inside the safe zone (clear of TikTok's buttons and caption), popping in (80% → 110% → 100% in 150 ms) with the spoken word lit. Money words turn green, warnings red, questions yellow, the script's emphasis words the style's second colour, and a small drawn icon pops in beside a word that has one. `--captions pop|bounce|karaoke|plain|off`.
+
+**The timeline** is `timeline.json` in the video's folder, beside `scenes/` (each scene's picture or clip) and `assets/` (the voice with every word's time, the music, the effects). It's plain JSON: clips with their start, length, keyframes (position, scale, rotation, opacity, with easing) and transitions; audio clips with levels and fades; every caption word with its time, colour and where it's drawn; the master's loudness target and ducking depth. Change it, then `ytclip studio --timeline <folder>` (or **Render timeline again** in the Creator tab) renders it as `<title> (edit).mp4`. A key it doesn't know (a misspelling: `transiton_in`) is passed over and said so, with the nearest real name; a value it can't use is refused with where it is. For captions, a render draws each word's own `text`, `color` and times in the style's preset, font, size, colours, outline and position: the style's `uppercase`, `max_words` and keyword colours were used when the captions were built, so change the words themselves. The Creator tab draws the timeline under the storyboard.
+
+The edit is rendered out of sight and put in place when it's whole, then **listed with its video**: in a folder posting watches it joins the queue with the same AI-generated label, caption and category, and **always waits for your OK** there (the original may be queued too: remove the one you don't want). Rendering again replaces the edit: if it's still in the queue, the new version is what posts after your OK. If you took it out of the queue it stays out, and one that has already posted isn't posted again under the same name, so to post the new version give it a new name: change `"title"` in `timeline.json` and render again, or use `--out "<the video's folder>/<a new name>.mp4"` (an edit beside its video is listed, labelled and held whatever it's called). Once an edit has posted and Clean up has cleared its file, the next render is taken in as a new edit by itself. An edit saved somewhere else with `--out` isn't listed: posting leaves it alone when it's one folder inside an AI-generated video's folder, and anywhere else a folder posting watches takes it for an ordinary video, with no label and no hold, as the render says. The scenes' stock clips and a video's other makings are never taken in as videos to post. While an edit is still to post, Clean up leaves the timeline and its files alone. *Settings → Creator → Keep each Studio video's timeline* turns the extra files off; Clean up removes them with the video once it's posted.
+
+**Reading an article: the rules it keeps.** Only `http(s)` pages anyone can open. A page behind a sign-in or a paywall isn't read, and nothing is done to get around one. The site's `robots.txt` is asked first, as "ClipMonster", and a "no" is respected: at the address you gave and wherever it redirects. A page that marks itself as paid-for isn't read even when its text is in the page, and a part of a page marked as the subscribers' (a "paywall" or "subscriber-only" block) is cut out before any reader sees it. Addresses on your own network are refused, and the connection is made to the address that was checked. The page is fetched once, under ClipMonster's own name. The article's address, title, site, author and date are kept as the video's first source in `README.md`, `clips.json`, `storyboard.json` and `timeline.json`: **credit the source when you post**. Facts aren't anyone's property but a writer's words are, which is why the script must retell rather than copy; you're still responsible for what you publish.
+
+**Stock footage: the rules it keeps.** Pexels and Pixabay are searched through their official APIs with **your own free keys** (*Settings → Creator*, or the `PEXELS_API_KEY` / `PIXABAY_API_KEY` environment variables): [pexels.com/api](https://www.pexels.com/api/), [pixabay.com/api/docs](https://pixabay.com/api/docs/). Only a scene's few search words are sent. Answers are kept for a day so the same search isn't sent twice; files are downloaded once, only from the sites' own addresses, with a size limit; a site that says "slow down", refuses the key, or turns down three searches in a row is left alone for the rest of the video. Each file's author, page and licence go into the README and the timeline. Both licences allow use in your own videos, including ones that earn money, but not selling the footage on its own or suggesting the people in it endorse something; Pexels asks for a link back where you can give one.
+
+Long videos need memory to render: about 40 MB a scene at 1080p, so a ten-minute video with 150 scenes wants around 6 GB free. The Studio says so before it starts (and before an edit is rendered again) when there isn't that much. Windows also limits how long a command may be: stills never count towards it, a sound used many times counts once, and a timeline with more video clips than fit is refused in plain words rather than failing halfway.
+
+```
+pip install -e ".[creator,whisper]"     # the Kokoro voice and Whisper's word times (the release build has both)
+pip install -e ".[studio]"              # better article reading: trafilatura and readability-lxml (optional)
+pip install -e ".[piper]"               # Piper voices (optional)
+pip install -e ".[diffusion]"           # SDXL-Turbo / FLUX.1-schnell in this Python (PyTorch for your card first)
+ytclip create --setup-pictures          # or the picture engine: its own Python and PyTorch for your card
+ytclip local-ai download                # the local AI that writes scripts (or add a Claude or Gemini key)
+```
+
+ffmpeg comes with the app (and with `pip install -e .`, through imageio-ffmpeg); version 6 or newer. From source on Linux or macOS, eSpeak NG (`apt install espeak-ng`, `brew install espeak-ng`) is only needed for the eSpeak voice.
+
 ## Posting to TikTok
 
 Posting runs inside automation's background process, so it keeps going with the window closed and starts with Windows. For every clip that passed the quality check, it:
@@ -704,6 +758,9 @@ ytclip create --file prompts.txt --category DailyFacts --schedule   # a video pe
 ytclip create --script story.txt --storyboard-only                  # check the storyboard first (JSON)
 ytclip create --check                           # what's ready here: script writer, voices, pictures
 ytclip create --setup-pictures                  # AI pictures on this PC's graphics card (about 10 GB, once)
+ytclip studio "Why the Roman Empire really fell" --category History   # the Studio: a video and its timeline
+ytclip studio --url https://example.org/article --format long --seconds 480   # retell a public article, wide
+ytclip studio --timeline "path\to\video folder"   # render an edited timeline.json again
 ytclip report --week                            # the weekly report: each TikTok account's past 7 days
 ytclip sports-find "red card or player ejection" "https://youtu.be/MATCH" --sport soccer
 ytclip sports-find "technical foul on bench" game7.mp4 --sport basketball --feed timeline.json --json
@@ -794,6 +851,8 @@ Run the tests with `pip install -e .[test]` and then `pytest`. They need no netw
 | `ytclip/analyze.py` | Signals, scoring and clip picking |
 | `ytclip/sports.py` | Sports categories: the crowd, commentary-call and replay signals, and cutting each clip as a whole play |
 | `ytclip/sportsdesk/` | The Sports tab: the filter and finding games (`games.py`), ranking a game's plays with the AI or the signals (`rank.py`), the shared work queue and its worker (`desk.py`), and recap reels: the cut and the words (`montage.py`), following the action (`framing.py`), reading the scoreboard (`scoreboard.py`), the graphics (`overlays.py`), the mix (`sound.py`) and the render (`reel.py`). The page is `gui/sports_view.py`, on the Mac `mac/sports_page.py` |
+| `ytclip/studio/` | The Studio: the timeline format and its validation (`timeline_schema.py`), reading a public article (`scraper.py`), writing the script to a word budget (`scriptwriter.py`), voices local and cloud (`voice_studio.py`), a picture for each scene from B-roll, stock sites or a model (`visual_sourcer.py`), laying it all out (`timeline_builder.py`) and the run as a state machine (`orchestrator.py`) |
+| `ytclip/editor/` | The Studio's editing: keyframes and camera moves (`motion_engine.py`), kinetic captions as .ass (`kinetic_subtitles.py`), the three-bus mix with ducking (`audio_mixer.py`) and the timeline rendered in one ffmpeg run (`timeline_compiler.py`). `gui/timeline_widget.py` draws a timeline |
 | `ytclip/ai.py` | AI clip finder, and the one place Claude and Gemini are called from (choosing the AI, falling back) |
 | `ytclip/intelligence/` | Local AI: hardware and free memory (`hardware.py`), the model catalogue and download, the model file's header (`gguf.py`), the layer split and memory length (`planner.py`), llama.cpp (`llama_engine.py`), the transcript parser; offline voice and sentiment signals |
 | `ytclip/diagnostics.py` | Graphics card failures that Whisper and the local AI worked around, written to `automation.log` |

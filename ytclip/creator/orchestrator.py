@@ -136,6 +136,8 @@ def output_folder(s: Settings, category: cats.Category | None, category_name: st
 class VideoCreatorOrchestrator:
     """Runs a creation. `cancelled()` returning True stops it at the next step (raises Cancelled)."""
 
+    permission = PERMISSION  # how the video was made, kept with it for posting
+
     def __init__(self, settings: Settings | None = None, log: Log | None = None, progress: Progress | None = None,
                  cancelled: Callable[[], bool] | None = None, register: bool = True, db=None):
         self.s = settings or Settings.load()
@@ -185,13 +187,17 @@ class VideoCreatorOrchestrator:
         report = self.stage("Writing the script")
         report("Writing the script", None)
         if req.storyboard:
-            board = director.normalise(director.Storyboard.from_json(req.storyboard), director.get_style(style),
-                                       hook_words=40)
+            given = director.Storyboard.from_json(req.storyboard)
+            board = director.normalise(given, director.get_style(style), hook_words=40,
+                                       max_scenes=self.scene_limit(2 * len(given.scenes) + 1))
             board.written_by = board.written_by or "you (edited)"
+            self.say_cut(board)
         elif req.script.strip():
             board = director.from_script(req.script, title=req.title, category=cat_name, style=style,
-                                         seconds=seconds, prompt=req.prompt)
+                                         seconds=seconds, prompt=req.prompt,
+                                         max_scenes=self.scene_limit(len(req.script.split()) + 1))
             self.log(f"Using your script: {len(board.scenes)} scenes, {board.word_count} words.")
+            self.say_cut(board)
         else:
             if not req.prompt.strip():
                 raise CreatorError("Say what the video is about, or paste a script.")
@@ -207,26 +213,7 @@ class VideoCreatorOrchestrator:
                                    instructions=category.instructions if category else "", seconds=seconds,
                                    wpm=wpm, style=style, avoid=originality.earlier_titles(req.prompt),
                                    facts=web.brief(found))
-            from .. import learn
-            from ..intelligence import learner
-
-            lessons = learn.for_settings(self.s)
-            if lessons is not None and not lessons.empty:
-                cid = category.id if category else ""
-                few = learner.guide(self.s, req.prompt, category_id=cid,
-                                    sport=category.sport if category else "", purpose="script")
-                brief.lessons = few or lessons.creator_text(cid)
-                if brief.lessons:
-                    n = sum(1 for o in lessons.outcomes if o.creator)
-                    self.log(f"Learning from how your earlier videos did ({n} Creator video{'s' if n != 1 else ''}"
-                             f" with results" + (", and your clips' hooks)." if "your TikTok clips" in brief.lessons
-                                                  else "; the openings closest to this one)." if few else ")."))
-                pace = learner.calibrate(lessons.outcomes, cid, default_wpm=wpm)
-                if pace.wpm:
-                    # The voice is sped up or slowed to land on the length (0.8-1.2x): aim where it can reach.
-                    brief.wpm = round(max(wpm * 0.85, min(wpm * 1.15, pace.wpm)), 1)
-                    brief.scene_seconds = pace.scene_seconds or 0.0
-                    self.log(pace.note)
+            brief.lessons, brief.wpm, brief.scene_seconds = self.lessons(req, category, wpm)
             entries = originality.load()
             try:
                 board = director.write(self.s, brief, log=self.log, check=self.check, progress=report,
@@ -248,6 +235,46 @@ class VideoCreatorOrchestrator:
         report("Writing the script", 1.0)
         return board
 
+    def lessons(self, req: CreateRequest, category, wpm: float) -> tuple[str, float, float]:
+        """(what earlier videos taught, as text for the writer; the pace to write for; seconds a scene) from how
+        your posted videos did (learn.py, intelligence/learner.py). ("", `wpm`, 0) before there are results."""
+        from .. import learn
+        from ..intelligence import learner
+
+        lessons = learn.for_settings(self.s)
+        if lessons is None or lessons.empty:
+            return "", wpm, 0.0
+        cid = category.id if category else ""
+        few = learner.guide(self.s, req.prompt, category_id=cid, sport=category.sport if category else "",
+                            purpose="script")
+        text = few or lessons.creator_text(cid)
+        if text:
+            n = sum(1 for o in lessons.outcomes if o.creator)
+            self.log(f"Learning from how your earlier videos did ({n} Creator video{'s' if n != 1 else ''}"
+                     f" with results" + (", and your clips' hooks)." if "your TikTok clips" in text
+                                          else "; the openings closest to this one)." if few else ")."))
+        scene_seconds = 0.0
+        pace = learner.calibrate(lessons.outcomes, cid, default_wpm=wpm)
+        if pace.wpm:
+            # The voice is sped up or slowed to land on the length (0.8-1.2x): aim where it can reach.
+            wpm = round(max(wpm * 0.85, min(wpm * 1.15, pace.wpm)), 1)
+            scene_seconds = pace.scene_seconds or 0.0
+            self.log(pace.note)
+        return text, wpm, scene_seconds
+
+    def scene_limit(self, given: int) -> int:
+        """The most scenes a storyboard or script handed in may have. `given`: the most it could come to
+        (tidying a storyboard can split a long scene in two and the hook off the first, so twice its scenes
+        and one)."""
+        return director.MAX_SCENES + 4
+
+    def say_cut(self, board: director.Storyboard) -> None:
+        for note in board.notes:
+            if note.startswith("kept the first"):
+                self.log(f"This is longer than one video takes: {note}. Make the rest as a second video"
+                         + ("." if type(self).scene_limit is not VideoCreatorOrchestrator.scene_limit
+                            else ", or make it with the Studio, which takes long videos."))
+
     def voice(self, board: director.Storyboard, req: CreateRequest, work: Path, seconds: float,
               rewards: bool) -> voice_engine.VoiceTrack:
         """Step 2: the narration, at a speed that lands it on the target length."""
@@ -257,20 +284,12 @@ class VideoCreatorOrchestrator:
         try:
             track = voice_engine.synthesize(board.scenes, self.s, work / "voice.wav", voice=voice, log=self.log,
                                             progress=report, check=self.check)
-            # How far off the length is: aim the speech (not the breath and tail) at the target.
-            fixed = track.duration - track.speech_seconds + voice_engine.LEAD_IN
-            want_speech = max(5.0, seconds - fixed)
-            have = track.speech_seconds
-            factor = have / want_speech
-            if rewards and track.duration < REWARDS_MIN:
-                factor = min(factor, have / max(5.0, REWARDS_MIN + 0.8 - fixed))
-            if abs(factor - 1) > SPEED_STEP:
-                speed = max(0.8, min(1.2, factor))
-                self.log(f"The voice ran {track.duration:.0f} s for a {seconds:.0f} s target: reading it again "
+            speed = self.voice_speed(track, seconds, rewards)
+            if speed != 1.0:
+                how = "fitting it" if track.engine_key in voice_engine.CLOUD_ENGINES else "reading it again"
+                self.log(f"The voice ran {track.duration:.0f} s for a {seconds:.0f} s target: {how} "
                          f"{'slower' if speed < 1 else 'faster'} ({speed:.2f}x).")
-                track = voice_engine.synthesize(board.scenes, self.s, work / "voice.wav", voice=voice, log=self.log,
-                                                progress=report, check=self.check, speed=speed,
-                                                engines=[track.engine_key])
+                track = self.reread(board, track, voice, speed, work, report)
         except voice_engine.VoiceError as exc:
             raise CreatorError(str(exc)) from exc
         voice_engine.remember_wpm(voice, track.wpm, track.speed, track.engine_key)
@@ -280,6 +299,31 @@ class VideoCreatorOrchestrator:
                  f"{track.wpm:.0f} words a minute; word times {track.timing}.")
         self._timed("voice", started)
         return track
+
+    def voice_speed(self, track: voice_engine.VoiceTrack, seconds: float, rewards: bool) -> float:
+        """How much faster (over 1) or slower the narration must be read to land on `seconds`; 1.0 when it's
+        close enough as it is."""
+        # How far off the length is: aim the speech (not the breath and tail) at the target.
+        fixed = track.duration - track.speech_seconds + voice_engine.LEAD_IN
+        want_speech = max(5.0, seconds - fixed)
+        have = track.speech_seconds
+        factor = have / want_speech
+        if rewards and track.duration < REWARDS_MIN:
+            factor = min(factor, have / max(5.0, REWARDS_MIN + 0.8 - fixed))
+        return max(0.8, min(1.2, factor)) if abs(factor - 1) > SPEED_STEP else 1.0
+
+    def reread(self, board: director.Storyboard, track: voice_engine.VoiceTrack, voice: str, speed: float,
+               work: Path, report: Progress) -> voice_engine.VoiceTrack:
+        """The narration again at `speed`, by the engine that read it. A cloud engine (ElevenLabs) charges for
+        every character it reads, so its recording is fitted to the length instead (same pitch), not paid
+        for twice."""
+        if track.engine_key in voice_engine.CLOUD_ENGINES:
+            from ..studio import voice_studio  # lazy: the Studio's modules import this one
+
+            self.log(f"{track.engine} isn't asked to read it again: the recording is fitted instead.")
+            return voice_studio.retime(track, speed, work / "voice_fitted.wav")
+        return voice_engine.synthesize(board.scenes, self.s, work / "voice.wav", voice=voice, log=self.log,
+                                       progress=report, check=self.check, speed=speed, engines=[track.engine_key])
 
     def create(self, req: CreateRequest, board: director.Storyboard | None = None) -> CreationResult:
         """Make the video. `board`: a storyboard already written (the Creator tab's preview)."""
@@ -400,12 +444,13 @@ class VideoCreatorOrchestrator:
         return out
 
     # ------------------------------------------------------------ checks
-    def checks(self, video: Path, duration: float, rewards: bool, board, warnings: list[str]) -> dict:
+    def checks(self, video: Path, duration: float, rewards: bool, board, warnings: list[str],
+               size: tuple[int, int] = (compositor.WIDTH, compositor.HEIGHT)) -> dict:
         info = probe(video)
         loud = compositor.ebur128(video)
         problems: list[str] = []
-        if (info.width, info.height) != (compositor.WIDTH, compositor.HEIGHT):
-            problems.append(f"It came out {info.width}x{info.height}, not 1080x1920.")
+        if (info.width, info.height) != tuple(size):
+            problems.append(f"It came out {info.width}x{info.height}, not {size[0]}x{size[1]}.")
         if not info.has_audio:
             problems.append("It has no sound.")
         if info.duration < 3:
@@ -456,7 +501,7 @@ class VideoCreatorOrchestrator:
         tags = " ".join(f"#{t}" for t in board.hashtags)
         caption = f"{board.caption} {tags}".strip()
         account = (category.account if category else "") or ""
-        auto = {"permission": PERMISSION, "origins": ["creator"], "how": "creator", "recipe": "Video Creator",
+        auto = {"permission": self.permission, "origins": ["creator"], "how": "creator", "recipe": "Video Creator",
                 "picked_at": time.time(), "category": cat_name or "", "category_id": category.id if category else "",
                 "account": account, "account_id": category.account_id if category else ""}
         creator = {
@@ -474,7 +519,7 @@ class VideoCreatorOrchestrator:
               "to_check": sum(1 for c in board.factcheck.get("claims", [])
                               if c.get("verdict") != "supported" and not c.get("changed"))}
              if board.factcheck else {}),
-        }
+        } | self.creator_extra()
         video_meta = Video(id=cid, title=board.title, channel="ClipMonster Video Creator", upload_date=time.strftime("%Y%m%d"),
                            duration=checks.get("length") or duration, url="", path=folder / name)
         details = [{"qc": checks, "ai_generated": True, "caption": board.caption, "hashtags": board.hashtags,
@@ -483,7 +528,7 @@ class VideoCreatorOrchestrator:
         write_index(folder, video_meta, [clip], [name], ["Video Creator"], "creator",
                     extra={"automation": auto, "creator": creator}, details=details)
         (folder / "storyboard.json").write_text(board.dumps(), encoding="utf-8")
-        (folder / "README.md").write_text(readme(board, creator, checks, name), encoding="utf-8")
+        (folder / "README.md").write_text(self.readme_text(board, creator, checks, name), encoding="utf-8")
         # The video goes in last, under a name posting ignores until it's whole.
         part = folder / (name + ".part")
         shutil.move(str(video), str(part))
@@ -505,6 +550,13 @@ class VideoCreatorOrchestrator:
                      "(Categories tab).")
         return result
 
+    def creator_extra(self) -> dict:
+        """More for clips.json's "creator" block (the Studio adds its own)."""
+        return {}
+
+    def readme_text(self, board: director.Storyboard, creator: dict, checks: dict, file: str) -> str:
+        return readme(board, creator, checks, file)
+
     def _register(self, result: CreationResult, req: CreateRequest) -> None:
         """A done GENERATIVE_CREATOR job in jobs.db, so the Automation tab lists it with the clips."""
         from ..jobs import Job, JobDB, JobType
@@ -515,7 +567,7 @@ class VideoCreatorOrchestrator:
             db = db or JobDB()
             category = find_category(self.s, req.category)
             db.add(Job(id=f"create-{result.id}", url=f"creator:{result.id}", title=result.storyboard.title,
-                       channel="Video Creator", permission=PERMISSION, origins=["creator"], how="creator",
+                       channel="Video Creator", permission=self.permission, origins=["creator"], how="creator",
                        status="done", stage="Done", folder=str(result.folder), clips=1, recipe="Video Creator",
                        category_id=category.id if category else "", kind=JobType.GENERATIVE_CREATOR.value,
                        request=req.to_json()))

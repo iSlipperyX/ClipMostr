@@ -1027,11 +1027,13 @@ class Runner:
         return queue(self.db, request, category_id, self.now())
 
     def process_creation(self, job: Job, s: Settings) -> None:
-        """Make a queued video (a GENERATIVE_CREATOR job) with the Video Creator."""
-        from .creator.orchestrator import CreateRequest, CreatorError, VideoCreatorOrchestrator
+        """Make a queued video (a GENERATIVE_CREATOR job) with the Video Creator, or with the Studio when the
+        request is one of its (an article's address, a wide or long video, a caption style...)."""
+        from .creator.orchestrator import CreatorError, VideoCreatorOrchestrator
+        from .studio.orchestrator import StudioOrchestrator, StudioRequest, read_request
 
         try:
-            req = CreateRequest.from_json(job.request)
+            req = read_request(job.request)
         except (ValueError, TypeError) as exc:
             self.db.update(job.id, self.now(), status="failed", error=f"Its request couldn't be read ({exc})",
                            stage="Can't be made", progress="")
@@ -1039,7 +1041,9 @@ class Runner:
         if job.category_id and not req.category:
             req.category = job.category_id
         now = self.now()
-        self.db.update(job.id, now, status="working", stage="Starting", recipe="Video Creator", error="")
+        studio = isinstance(req, StudioRequest)
+        self.db.update(job.id, now, status="working", stage="Starting",
+                       recipe="Studio" if studio else "Video Creator", error="")
         self.state(f"Making a video: {job.title}")
         self.log(f"Making a video: {job.title}")
         try:
@@ -1065,7 +1069,8 @@ class Runner:
             self._last_flag_check = t
             return self.stop_requested()
 
-        maker = VideoCreatorOrchestrator(s, log=self.log, progress=progress, cancelled=cancelled, register=False)
+        maker = (StudioOrchestrator if studio else VideoCreatorOrchestrator)(
+            s, log=self.log, progress=progress, cancelled=cancelled, register=False)
         try:
             result = maker.create(req)
         except Cancelled:

@@ -46,6 +46,7 @@ MESSAGES: tuple[tuple[str, str], ...] = (
     ("Checking clip", "check"),
     ("Writing the script", "script"), ("Recording the voice", "voice"), ("Lining up the words", "voice"),
     ("Making pictures", "visuals"), ("Animating scene", "render"), ("Mixing the sound", "render"),
+    ("Laying out the timeline", "render"),
     ("Putting the video together", "render"), ("Checking the video", "check"),
 )
 

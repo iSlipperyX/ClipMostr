@@ -352,3 +352,32 @@ def test_ytclip_clean(setup, capsys, monkeypatch):
     assert "Cleared 2 posted clips" in capsys.readouterr().out
     assert not (a / "02.mp4").exists() and (a / "_rejected" / "03.mp4").exists()
     assert cli.main(["clean", "--only", "nonsense"]) == 2
+
+
+def test_a_posted_studio_video_takes_its_timeline_and_files_with_it(tmp_path):
+    out = tmp_path / "out"
+    s = Settings().apply({"output_dir": str(out), "categories": [{"id": "g", "name": "Gaming", "account_id": "acc1"}]})
+    made = _video(out / "Automation" / "Gaming" / "Created" / "2026-01-03 Made [c-12345678]", [("01.mp4", False)],
+                  "c-12345678")
+    data = json.loads((made / "clips.json").read_text(encoding="utf-8"))
+    data["creator"] = {"id": "c-12345678", "studio": {"timeline_file": "timeline.json"}}
+    (made / "clips.json").write_text(json.dumps(data), encoding="utf-8")
+    for name in ("timeline.json", "storyboard.json", "scenes/scene_01.png", "scenes/scene_02_pexels_77.mp4",
+                 "assets/voice.wav", "assets/voice.words.json", "assets/music-epic.wav", "assets/sfx/whoosh-v2.wav"):
+        _write(made / name)
+    yours = _write(made / "Made (edit).mp4")  # a render of your own edit isn't the Studio's to delete
+    tm = PostingLibrary(found=True, posted={_key(made / "01.mp4"): OLD})
+    r = cleanup.apply(cleanup.plan(s, posting=tm, kinds=["posted"]), ["posted"])
+    assert r.removed == 1 and not r.failed
+    assert sorted(p.relative_to(made).as_posix() for p in made.rglob("*")) == ["Made (edit).mp4"]
+    assert yours.is_file()
+    # A plain Creator video (no "studio" block) never loses files it didn't make.
+    plain = _video(out / "Automation" / "Gaming" / "Created" / "2026-01-04 Plain [c-22345678]", [("01.mp4", False)],
+                   "c-22345678")
+    data = json.loads((plain / "clips.json").read_text(encoding="utf-8"))
+    data["creator"] = {"id": "c-22345678"}
+    (plain / "clips.json").write_text(json.dumps(data), encoding="utf-8")
+    kept = _write(plain / "assets" / "notes.txt")
+    tm = PostingLibrary(found=True, posted={_key(plain / "01.mp4"): OLD})
+    cleanup.apply(cleanup.plan(s, posting=tm, kinds=["posted"]), ["posted"])
+    assert kept.is_file() and not (plain / "01.mp4").exists()
