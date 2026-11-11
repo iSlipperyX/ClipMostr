@@ -66,6 +66,8 @@ def read_folder_index(folder: Path) -> dict[str, dict]:
             "caption": str(clip.get("caption") or ""),
             # ClipMonster 3.9: a Studio video rendered again from its edited timeline; it waits for an OK
             "edit_of": str(clip.get("edit_of") or ""),
+            # ClipMonster 3.10: made again from a critique of another video; it waits for an OK too
+            "fix_of": str((data.get("creator") or {}).get("revises") or ""),
             "hashtags": " ".join(f"#{str(h).lstrip('#')}" for h in clip.get("hashtags") or [] if str(h).strip("# ")),
         }
     return out

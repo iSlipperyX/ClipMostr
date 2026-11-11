@@ -543,18 +543,37 @@ ytclip posting --posted 30
 
 ## Your phone (Telegram)
 
-A Telegram bot of your own runs ClipMonster from your phone while automation runs on the PC: ask for videos, watch what's waiting to post, OK it or delete the bad ones from the PC, and hear about what needs you.
+A Telegram bot of your own runs ClipMonster from your phone while automation runs on the PC: watch what's waiting to post in an **app inside Telegram**, OK it or delete the bad ones from the PC, say what's wrong with a video so the AI makes it again, ask for new ones, and hear about what needs you. Two people can share it.
 
 **Setting it up** (five minutes, once):
 
 1. In Telegram, open [@BotFather](https://t.me/BotFather), send `/newbot`, and pick a name and a username for your bot (the username ends in `bot`). BotFather replies with a token like `123456789:AAH…`.
 2. In ClipMonster, **Settings → Telegram**: paste the token, tick **Use the Telegram bot** and press **Check the token**.
-3. Press **Link a phone**. A six-letter code shows for 10 minutes: send it to your bot in Telegram, or press **Open Telegram** and then **Start**. The phone shows up under *Linked phones*.
+3. Press **Link a phone**. A six-letter code shows for 10 minutes: send it to your bot in Telegram, or press **Open Telegram** and then **Start**. The phone shows up under *Who shares the bot*.
 4. **Save**, and keep automation running (Automation → Start, or Start with Windows). The bot runs inside automation, so it answers whenever automation runs, with the window closed too.
+5. In the bot's chat, tap the **ClipMonster** button left of the message box: that's [the app](#the-app-inside-telegram).
 
 Only the phones you link can use it. Anyone else who finds the bot is told it's private, and a chat that sends five wrong codes is ignored for an hour. Only private chats can be linked, not groups; **Unlink** takes a phone off, and **Send a test** says hello to each linked phone. Use a bot just for ClipMonster: Telegram lets one program at a time read a bot's messages, so a bot another project already uses won't work here (the bot says so in automation's log). The token is kept with your other keys in `%APPDATA%\ClipMonster`.
 
-**From the chat.** The buttons under the message box do the same as the commands:
+### The app inside Telegram
+
+The **ClipMonster** button left of the message box opens ClipMonster as a Telegram Mini App, in your Telegram theme:
+
+- **Videos**: what's waiting for an OK, the queue, the library and what's posted. Tap one to watch it full size, **OK to post**, **Post now** or **Delete**, and step to the next.
+- **What should be different?** Under a video the Creator or the Studio made, write what's wrong with it in your own words ("the hook is flat, open with the twist"). The AI that writes your scripts gets the video's storyboard and your critique, rewrites what you named and keeps the rest, and the video is made again. The new version **always waits for an OK** beside the first, each showing what was said and by whom; the first is held meanwhile so it doesn't post as it is. If it can't be made again, the first goes back the way it was and you're told why. A clip of someone else's video can't be rewritten: delete it if it's no good.
+- **Make**: ask for a new video (the idea, the category).
+- **Activity**: who did what, for everyone or one person, and what's being made again right now.
+- **People**: who shares the bot, with **Make an invite**, **Remove** and **Leave**.
+
+With the app up, the bot's messages carry a button into it and videos are watched there rather than uploaded into the chat.
+
+**Sharing it with one more person.** The person linked first makes an invite (*People* in the app, or `/people`): a link that works once, for 10 minutes. Both people see every video. Every OK, delete, post, critique, request, pause and resume carries the name of who did it, the other person gets a quiet line in the chat, and what someone asks for comes back to them and is shown to the other. The first person can remove the second; either can leave, and if the first leaves the other invites from then on. Two people is the limit: a third chat is told the bot is full.
+
+**How it reaches your phone.** Telegram only opens an `https://` address a phone can reach. By default ClipMonster runs Cloudflare's free `cloudflared` (downloaded once, some tens of MB, from Cloudflare's releases on GitHub) to get a temporary one: nothing is opened in your router, and no account is needed. That address is new each time automation starts, so the chat's ClipMonster button is pointed at it again each time, and a button in an older message stops working after a restart. Cloudflare doesn't promise that temporary addresses stay up; when one drops, another is started. For an address that stays, put your own in *Settings → Telegram → Mini App address* (a named Cloudflare tunnel, Tailscale Funnel or a reverse proxy leading to this PC's Mini App port, 47330). The address alone opens nothing: Telegram signs who is opening the app with your bot's token, and ClipMonster only answers the people linked to the bot. Videos you watch pass through Cloudflare (or your own address), encrypted on the way. *Settings → Telegram → Mini App* turns the app off, and when it has no address the bot works from the chat by itself (`/app` says why).
+
+### From the chat
+
+Without the app (or beside it), the buttons under the message box do the same as the commands:
 
 | | |
 |---|---|
@@ -565,6 +584,9 @@ Only the phones you link can use it. Anyone else who finds the bot is told it's 
 | 📋 **Requests** · `/request 10 30-45s Gaming funny reactions only` | A [clip request](#clip-requests) in plain words: how many, how long, the category, links if you have them, and anything special for the AI. `/requests` lists them, with **Cancel**. |
 | ⏯ **Pause or resume** · `/pause`, `/resume` | Pauses clipping and making videos. Posting carries on. |
 | 📅 **This week** · `/week` | The [weekly report](#the-overnight-report-and-the-health-check) for the past 7 days. |
+| 🛠 **Say what to fix**, under a video the AI made | Send what should be different, and it's made again, as in the app. |
+| 👥 `/people` | Who shares the bot: invite one more person, remove them, or leave. |
+| 📱 `/app` | A button into the app, or why it can't be opened right now. |
 
 Anything else you type gets two buttons: make a video about it, or ask for clips about it.
 

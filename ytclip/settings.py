@@ -346,6 +346,12 @@ class Settings:
     telegram_on: bool = False
     telegram_token: str = ""  # from @BotFather
     telegram_send: str = "review, new, posted, news, problems, weekly"  # telegram/bot.SENDS
+    # The Mini App (telegram/webapp.py): the bot as an app inside Telegram, to watch the videos and say what to fix.
+    # Telegram only opens an https:// address a phone can reach: blank = a Cloudflare quick tunnel ClipMonster
+    # runs itself (telegram/tunnel.py), or your own address pointed at this PC's telegram_app_port.
+    telegram_app: bool = True
+    telegram_app_url: str = ""
+    telegram_app_port: int = 47330
     # The Mac app (remote/): automation's HTTPS server for ClipMonster for Mac. The Macs it answers are in
     # remote.json, not here.
     remote_on: bool = False
@@ -1307,6 +1313,19 @@ SCHEMA: list[Field] = [
     Field("telegram_send", "Send me", "Telegram", "multi", choices=TELEGRAM_SENDS,
           help="What the bot tells you without being asked. Whatever you ask for in the chat is always answered "
                "there"),
+    Field("telegram_app", "Mini App: the bot as an app inside Telegram", "Telegram", "bool",
+          help="The ClipMonster button left of the message box opens an app in Telegram: watch the videos waiting "
+               "to post, OK or delete them, say what's wrong with one so the AI makes it again, and see what each "
+               "of the two people sharing the bot did. Off: the bot works by messages and buttons in the chat"),
+    Field("telegram_app_url", "Mini App address", "Telegram", "str", placeholder="blank = automatic",
+          help="Telegram only opens an https:// address your phone can reach. Blank: ClipMonster runs Cloudflare's "
+               "free cloudflared (downloaded once, some tens of MB) for a temporary address, new each time automation "
+               "starts; videos you watch pass through Cloudflare, encrypted, and only the people linked to the bot "
+               "are answered. Or put an address of your own here that leads to this PC's Mini App port (a named "
+               "Cloudflare tunnel, Tailscale Funnel, a reverse proxy)"),
+    Field("telegram_app_port", "Mini App port on this PC", "Telegram", "int", lo=1024, hi=65535,
+          help="Where the Mini App listens on this PC (only this PC can connect to it; the address above leads "
+               "here). Change it only if another program uses 47330"),
     Field("remote_on", "Let my Mac run ClipMonster", "Mac app", "bool",
           help="Automation answers ClipMonster on your Mac: it shows what automation is doing, plays the videos "
                "waiting to post so you can OK or delete them, asks for videos, clips and requests, and lends the "

@@ -461,7 +461,9 @@ class Store:
                         item.part, item.parts = meta.get("part"), meta.get("parts")
                     if needs_credit(meta):
                         item.credit = credit_line(item.source_channel)
-                    if meta.get("edit_of"):  # a re-render of a video that may be queued too: never on its own say-so
+                    # A re-render, or a video made again from a critique: the one it replaces may be queued
+                    # too, so it never posts on its own say-so.
+                    if meta.get("edit_of") or meta.get("fix_of"):
                         item.review = "waiting"
                 else:
                     item.source_group = str(f.parent)

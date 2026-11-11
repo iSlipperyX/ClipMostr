@@ -84,6 +84,11 @@ class Linker:
         self.bot = me.get("username") or ""
         with state.edit(self.state_file) as data:
             state.set_bot(data, me)
+            if state.full(data):
+                self.phase = "error"
+                self.error = (f"{state.MAX_PEOPLE} people share this bot already, which is as many as it takes. "
+                              "Unlink one below first.")
+                return
             self.code = state.new_code(data, self.now())
             self.until = data["pairing"]["until"]
             before = set(state.chat_ids(data))
@@ -143,6 +148,8 @@ class Linker:
                 said = stranger(data, chat, text, self.now())
         try:
             if said == "linked":
+                with state.edit(self.state_file) as data:  # the other person sees it in the app's Activity
+                    state.note_activity(data, int(chat["id"]), "join", "", self.now())
                 api.send(int(chat["id"]), welcome_html(), tg.keyboard(MENU))
             elif said == "automation off":
                 api.send(int(chat["id"]), "ClipMonster's automation isn't running on the PC right now, so I can't do "

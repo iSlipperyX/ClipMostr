@@ -1,4 +1,5 @@
-"""Settings → Telegram, under the fields: the bot's state, Link a phone, the linked phones, Send a test.
+"""Settings → Telegram, under the fields: the bot's state, the Mini App's, Link a phone, the people who share
+the bot (two at most), Send a test.
 
 The token is the one typed above (not saved yet is fine). Linking shows a code; while the dialog is open the
 window listens to Telegram for it (telegram/pair.Linker), unless automation's bot is running as the same
@@ -44,13 +45,19 @@ class TelegramLink(QWidget):
             "1. In Telegram, open <a href='%s' style='color:%s'>@BotFather</a>, send <b>/newbot</b>, and pick a name "
             "and a username for your bot.<br>2. Paste the token it gives you above, and tick Use the Telegram bot."
             "<br>3. Press <b>Link a phone</b> and send the code to your bot. Then Save, and keep automation running "
-            "(Automation tab, or Start with Windows): the bot runs with it." % (BOTFATHER, theme.ACCENT_2))
+            "(Automation tab, or Start with Windows): the bot runs with it.<br>4. In the bot's chat, the "
+            "<b>ClipMonster</b> button left of the message box opens the app: watch the videos, OK or delete them, "
+            "and say what to fix. To share the bot with one more person, open People in the app (or send /people) "
+            "and make an invite." % (BOTFATHER, theme.ACCENT_2))
         how.setOpenExternalLinks(True)
         how.setProperty("muted", True)
         v.addWidget(how)
 
         self.bot_line = forms.WrapLabel("")
         v.addWidget(self.bot_line)
+        self.app_line = forms.WrapLabel("")
+        self.app_line.hide()
+        v.addWidget(self.app_line)
 
         row = QHBoxLayout()
         self.check_btn = QPushButton("Check the token")
@@ -92,7 +99,7 @@ class TelegramLink(QWidget):
         self.result.hide()
         v.addWidget(self.result)
 
-        head = QLabel("Linked phones")
+        head = QLabel(f"Who shares the bot ({state.MAX_PEOPLE} people at most)")
         head.setStyleSheet("font-weight: 600;")
         v.addWidget(head)
         self.chats_box = QVBoxLayout()
@@ -133,14 +140,19 @@ class TelegramLink(QWidget):
         if token and not self._on():
             line += f" <span style='color:{theme.WARN}'>Tick Use the Telegram bot to turn it on.</span>"
         self.bot_line.setText(line)
-        self.link_btn.setEnabled(bool(token) and not self._linking())
+        self.app_line.setText(app_line(status))
+        self.app_line.setVisible(bool(self.app_line.text()))
+        full = state.full(data)
+        self.link_btn.setEnabled(bool(token) and not self._linking() and not full)
+        self.link_btn.setToolTip(f"{state.MAX_PEOPLE} people share the bot already: unlink one first" if full else
+                                 "Shows a code to send to your bot from the phone")
         self.check_btn.setEnabled(bool(token) and not self._busy)
         self.test_btn.setEnabled(bool(token) and bool(data["chats"]) and not self._busy)
         self._show_linker()
         sig = tuple((c["id"], c.get("name"), c.get("username"), c.get("blocked")) for c in data["chats"])
         if sig != self._sig:
             self._sig = sig
-            self._fill_chats(data["chats"])
+            self._fill_chats(state.people(data))
 
     def _fill_chats(self, chats: list[dict]) -> None:
         while self.chats_box.count():
@@ -166,6 +178,8 @@ class TelegramLink(QWidget):
             when = time.strftime("%d %b %Y", time.localtime(c.get("linked_at") or 0)) if c.get("linked_at") else ""
             text = f"📱 {_esc(state.chat_name(c))}" + (f"<span style='color:{theme.MUTED}'> · linked {when}</span>"
                                                        if when else "")
+            if c is chats[0] and len(chats) > 1:
+                text += f"<span style='color:{theme.MUTED}'> · linked first: invites and removes from the phone</span>"
             if c.get("blocked"):
                 text += f" <span style='color:{theme.WARN}'>(blocked the bot: send it a message to carry on)</span>"
             label = QLabel(text)
@@ -297,3 +311,17 @@ class TelegramLink(QWidget):
         if self.linker is not None:
             self.linker.stop()
             self.linker = None
+
+
+def app_line(status: dict) -> str:
+    """What the page says about the Mini App, from the bot's heartbeat ("" when the bot isn't running)."""
+    if not status.get("running") or "app" not in status:
+        return ""
+    if status.get("app"):
+        return (f"<span style='color:{theme.GOOD}'>●</span> The Mini App is up: open it with the ClipMonster button in "
+                f"the bot's chat. <span style='color:{theme.MUTED}'>{_esc(status['app'])}</span>")
+    if status.get("app_error"):
+        return f"<span style='color:{theme.WARN}'>The Mini App has no address: {_esc(status['app_error'])}</span>"
+    if status.get("app_on"):
+        return f"<span style='color:{theme.MUTED}'>The Mini App is getting its address…</span>"
+    return ""
