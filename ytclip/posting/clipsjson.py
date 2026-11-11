@@ -72,6 +72,9 @@ def read_folder_index(folder: Path) -> dict[str, dict]:
             # ClipMonster 3.11: made for a Telegram request, to minimums (compliance/requirements.py); one that
             # falls short waits for an OK, with why
             "hold": _hold(auto.get("requires"), clip),
+            # ClipMonster 3.13: asked for as a download (a sports request from Telegram): it's kept in the
+            # library for whoever asked to save to their own device, and isn't queued for any account
+            "keep": "download" if str(auto.get("keep") or "") == "download" else "",
         }
     return out
 

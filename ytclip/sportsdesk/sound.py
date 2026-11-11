@@ -32,6 +32,7 @@ RATE = 48000
 GAME_LUFS = -18.0
 NARRATOR_LUFS = -16.0
 MUSIC_DB = -15.0  # under the game, before ducking
+MUSIC_STEPS = {"low": -6.0, "normal": 0.0, "loud": 5.0}  # the editor's "Music": dB on MUSIC_DB
 CROWD_LIFT_DB = 5.0  # the sides, around each play's moment
 CROWD_BASE_DB = 1.0  # the sides, the rest of the time
 LIFT_BEFORE, LIFT_AFTER = 0.6, 3.6  # seconds around the moment the crowd is lifted
@@ -49,6 +50,7 @@ class Sound:
     narrator_gain_db: float = 0.0
     game_gain_db: float = 0.0
     music: Path | None = None
+    music_db: float = MUSIC_DB
     effects: list[tuple[float, Path, float]] = field(default_factory=list)  # (reel seconds, file, gain dB)
 
 
@@ -145,7 +147,7 @@ def mix_graph(reel: Reel, snd: Sound, measured: dict | None = None, *, stage: st
         args += ["-stream_loop", "-1", "-i", str(snd.music)]
         fade_out = max(0.0, d - 2.0)
         parts.append(f"[{n}:a]atrim=0:{d:.3f},asetpts=PTS-STARTPTS,aresample={RATE},aformat=channel_layouts=stereo,"
-                     f"volume={MUSIC_DB:.1f}dB,afade=t=in:d=0.6,afade=t=out:st={fade_out:.3f}:d=2.0[mus]")
+                     f"volume={snd.music_db:.1f}dB,afade=t=in:d=0.6,afade=t=out:st={fade_out:.3f}:d=2.0[mus]")
         if len(keys) > 1:
             parts.append("".join(f"[{k}]" for k in keys) + f"amix=inputs={len(keys)}:normalize=0[key]")
             key = "key"

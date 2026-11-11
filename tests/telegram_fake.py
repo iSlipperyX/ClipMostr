@@ -20,7 +20,9 @@ def parse_multipart(body: bytes, kind: str) -> dict:
         content = content[:-2] if content.endswith(b"\r\n") else content
         name = re.search(rb'name="([^"]+)"', head).group(1).decode()
         if b"filename=" in head:
-            out[name] = {"file": True, "size": len(content), "head": content[:16]}
+            called = re.search(rb'filename="([^"]*)"', head)
+            out[name] = {"file": True, "size": len(content), "head": content[:16],
+                         "name": called.group(1).decode() if called else ""}
         else:
             text = content.decode("utf-8")
             try:
@@ -86,6 +88,11 @@ class FakeTelegram:
         assert p["video"]["file"]
         return self._new(int(p["chat_id"]), caption=p.get("caption", ""), markup=p.get("reply_markup"),
                          video={"size": p["video"]["size"]})
+
+    def m_sendDocument(self, p):
+        assert p["document"]["file"]
+        return self._new(int(p["chat_id"]), caption=p.get("caption", ""), markup=p.get("reply_markup"),
+                         document={"size": p["document"]["size"], "name": p["document"]["name"]})
 
     def _edit(self, p, **fields):
         key = (int(p["chat_id"]), int(p["message_id"]))

@@ -15,8 +15,14 @@ header, so they carry a second token in their address that opens videos and pict
   GET  /api/videos                        every video waiting (to review, queued, in the library), with what
                                           was said about each and by whom
   GET  /api/posted                        the latest posts and their numbers
-  GET  /api/videos/<id>/file | thumb ?m=  the video (with Range, so it streams) and its picture
+  GET  /api/videos/<id>/file | thumb ?m=  the video (with Range, so it streams) and its picture; file?dl=1 hands
+                                          it over as a download (the full-quality file, under its headline)
   POST /api/videos/<id>/ok | post-now | retry | delete
+  POST /api/videos/<id>/send              the bot sends the file into the chat, to save from there
+  POST /api/videos/<id>/queue {category}  a video made to download joins a posting queue after all
+  GET  /api/videos/<id>/edit              what the sports editor opens: the plays, the words, the look
+  POST /api/videos/<id>/edit {changes}    cut it again on the PC with those changes: the answer is v2
+  GET  /api/sports/source/<game> ?m=      the game's own footage, streamed, for the editor to show a cut
   POST /api/videos/<id>/critique {text}   change it or make it again (review_pipeline.py): the answer is v2
   POST /api/videos/<id>/approve           this version posts; its other versions are deleted from the PC
   GET  /api/status                        POST /api/pause {paused}
@@ -53,7 +59,7 @@ import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
-from urllib.parse import parse_qs, parse_qsl, urlsplit
+from urllib.parse import parse_qs, parse_qsl, quote, urlsplit
 
 from .. import __version__
 from ..remote.host import Host, HostError, pc_name
@@ -320,8 +326,25 @@ class WebApp:
         it = store.get(v["id"])
         v["fixable"] = bool(v.get("exists")) and self.bot.fixable(it)
         # Which version it is, and the versions to choose between (approving one deletes the others)
+        v["editable"] = self.bot.editable(it) if it is not None and v.get("exists") else ""
         v["version"] = self.bot.version_label(it, data) if it is not None else ""
         v["versions"] = self.bot.versions_json(it, data, store) if it is not None else []
+
+    def source_file(self, game_id: str) -> Path:
+        """The footage of a game on the Sports page, as it was downloaded to this PC: the editor plays a cut
+        from it before the cut is made. Only a game the desk lists, and only its own download in the cache."""
+        from ..sportsdesk import editor
+        from ..sportsdesk.desk import DeskError
+
+        try:
+            g = self.bot.desk.game(game_id)
+        except DeskError as exc:
+            raise HostError(exc.status, exc.message) from exc
+        path = editor.source_file(self.bot.settings(), g.get("video") or "")
+        if path is None:
+            raise HostError(404, "This game's footage isn't on the PC any more (it's downloaded again when an "
+                                 "edit is made).")
+        return path
 
     def api(self, method: str, path: str, body: dict, chat: dict) -> dict:
         me = chat["id"]
@@ -372,7 +395,7 @@ class WebApp:
         if path == "/api/sports/order" and method == "POST":
             if body.get("game"):  # a game picked from the games played, not typed
                 r = bot.sports_game(me, str(body["game"])[:80], str(body.get("want") or "reel"), body.get("plays"),
-                                    str(body.get("category") or ""))
+                                    str(body.get("category") or ""), str(body.get("deliver") or "")[:12])
             else:
                 r = bot.sports_order(me, body)
             return {k: r[k] for k in ("order", "message", "notes")}
@@ -385,7 +408,8 @@ class WebApp:
             ids = body.get("ids") if isinstance(body.get("ids"), list) else []
             r = bot.sports_moments(me, str(body.get("game") or "")[:80], [str(i)[:40] for i in ids[:8]],
                                    str(body.get("want") or "clips"),
-                                   str(body["category"]) if body.get("category") else None)
+                                   str(body["category"]) if body.get("category") else None,
+                                   str(body.get("deliver") or "")[:12])
             return {k: r[k] for k in ("order", "message", "notes")}
         if path == "/api/sports/basket" and method == "POST":
             return bot.app_basket(str(body.get("game") or "")[:80], str(body.get("id") or "")[:40],
@@ -409,6 +433,18 @@ class WebApp:
             except (TypeError, ValueError):
                 raise HostError(400, "Say who to remove.") from None
             return bot.remove(me, other)
+        m = re.fullmatch(r"/api/videos/([A-Za-z0-9_-]{1,64})/edit", path)
+        if m and method == "GET":
+            return bot.edit_doc(m.group(1))
+        if m and method == "POST":
+            changes = body.get("changes")
+            r = bot.edit(me, m.group(1), changes if isinstance(changes, dict) else {})
+            return {k: r[k] for k in ("critique", "edit", "version", "held", "message")}
+        m = re.fullmatch(r"/api/videos/([A-Za-z0-9_-]{1,64})/(send|queue)", path)
+        if m and method == "POST":
+            if m.group(2) == "send":
+                return bot.send_file(me, m.group(1))
+            return bot.queue_download(me, m.group(1), str(body.get("category") or "")[:64])
         m = re.fullmatch(r"/api/videos/([A-Za-z0-9_-]{1,64})/(ok|post-now|retry|delete|critique|approve)", path)
         if m and method == "POST":
             item, what = m.groups()
@@ -467,7 +503,9 @@ class _Handler(BaseHTTPRequestHandler):
         if self.command != "HEAD":
             self.wfile.write(body)
 
-    def send_file(self, path: Path) -> None:
+    def send_file(self, path: Path, save_as: str = "") -> None:
+        """A file, with Range (so a video streams and seeks). `save_as` hands it over as a download under that
+        name instead of something to play."""
         size = path.stat().st_size
         start, end, status = 0, size - 1, 200
         m = re.fullmatch(r"bytes=(\d*)-(\d*)", (self.headers.get("Range") or "").strip())
@@ -491,6 +529,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_header("Accept-Ranges", "bytes")
         self.send_header("Cache-Control", "private, max-age=300")
         self.send_header("X-Content-Type-Options", "nosniff")
+        if save_as:
+            plain = re.sub(r"[^A-Za-z0-9 ._()-]+", "_", save_as).strip(" .") or "video.mp4"
+            self.send_header("Content-Disposition",
+                             f"attachment; filename=\"{plain}\"; filename*=UTF-8''{quote(save_as, safe='')}")
+            # Telegram's own downloader (WebApp.downloadFile) fetches it from the web client's origin
+            self.send_header("Access-Control-Allow-Origin", "https://web.telegram.org")
         if status == 206:
             self.send_header("Content-Range", f"bytes {start}-{end}/{size}")
         self.end_headers()
@@ -561,7 +605,15 @@ class _Handler(BaseHTTPRequestHandler):
             if m and method == "GET":
                 app.who((query.get("m") or [""])[0], "media")
                 item, what = m.groups()
-                self.send_file(app.host.video_file(item) if what == "file" else app.host.thumb_file(item))
+                if what == "file" and (query.get("dl") or [""])[0] == "1":
+                    self.send_file(app.host.video_file(item), save_as=app.host.download_name(item))
+                else:
+                    self.send_file(app.host.video_file(item) if what == "file" else app.host.thumb_file(item))
+                return
+            m = re.fullmatch(r"/api/sports/source/([A-Za-z0-9_.:-]{1,80})", path)
+            if m and method == "GET":
+                app.who((query.get("m") or [""])[0], "media")
+                self.send_file(app.source_file(m.group(1)))
                 return
             auth = self.headers.get("Authorization") or ""
             chat = app.who(auth[4:].strip() if auth.lower().startswith("tma ") else "")

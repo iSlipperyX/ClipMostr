@@ -102,6 +102,8 @@ def assign(store: Store, accounts: Accounts | list[Account], items: list[VideoIt
         series_to: dict[str, str] = {i.series: i.account for i in store.items.values()
                                      if i.series and i.account in ids and i.id not in new}
     for it in series_order(items):
+        if it.keep:  # asked for as a download: nobody's queue takes it
+            continue
         owner = None
         if it.series and series_to.get(it.series) in ids:
             owner = next(a for a in accounts if a.id == series_to[it.series])
@@ -122,4 +124,30 @@ def unassigned(store: Store) -> list[VideoItem]:
     """Automation's clips still waiting for an account (their category has none): the Queue tab says so."""
     with store.lock:
         return [i for i in store.items.values()
-                if i.imported_by == "auto" and i.status == "new" and not i.account and i.exists()]
+                if i.imported_by == "auto" and i.status == "new" and not i.account and not i.keep and i.exists()]
+
+
+def downloads(store: Store) -> list[VideoItem]:
+    """The videos made to be downloaded, not posted (VideoItem.keep), that are still on the PC: newest first."""
+    with store.lock:
+        found = [i for i in store.items.values() if i.keep and i.status == "new" and i.exists()]
+    return sorted(found, key=lambda i: -i.added_at)
+
+
+def to_queue(store: Store, accounts: Accounts | list[Account], item: VideoItem, main=None,
+             category=None) -> Account | None:
+    """Post a video that was made to be downloaded after all: it stops being a download and joins the queue of
+    the account its category posts to (`category`, when another one is picked for it). Returns that account,
+    or None when no account takes it (then it's left as it was)."""
+    with store.lock:
+        before = (item.keep, item.category_id, item.category_name, item.for_account)
+        item.keep = ""
+        if category is not None:
+            item.category_id, item.category_name = category.id, category.name
+            item.for_account = getattr(category, "account_id", "") or ""
+    got = assign(store, accounts, [item], main)
+    if not got:
+        with store.lock:
+            item.keep, item.category_id, item.category_name, item.for_account = before
+        return None
+    return next(a for a in accounts if a.id in got)

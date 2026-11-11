@@ -306,13 +306,17 @@ class Service:
             return []
         if items:
             where = ", ".join(f"{n} for {self.accounts.label_for(aid)}" for aid, n in got.items())
-            self.log(f"{len(items)} new clip{'s' * (len(items) != 1)} ready to post"
-                     + (f": {where}." if where else "."))
+            kept = sum(1 for i in items if i.keep)
+            ready = len(items) - kept
+            if ready:
+                self.log(f"{ready} new clip{'s' * (ready != 1)} ready to post" + (f": {where}." if where else "."))
+            if kept:
+                self.log(f"{kept} new video{'s' * (kept != 1)} kept to download (not queued to post).")
             for aid, n in got.items():
                 a = self.accounts.get(aid)
                 self.event(a, "queued", f"{n} new clip{'s' * (n != 1)} queued for {a.handle if a else aid}.")
             for it in items:
-                if it.review == "waiting":
+                if it.review == "waiting" and not it.keep:
                     a = self.accounts.get(it.account)
                     self.event(a, "review", f"⏸ “{it.headline}” waits for your OK before it posts to "
                                             f"{a.handle if a else 'its account'}: watch it in the Queue tab "

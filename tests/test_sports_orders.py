@@ -114,8 +114,8 @@ def test_an_order_that_cant_be_taken_says_why(desk, worker):  # noqa: F811
 
 
 def test_an_order_is_done_from_the_search_to_the_clips_and_the_reel(desk, worker, search, reels):  # noqa: F811
-    oid = desk.order({"sport": "basketball", "teams": "Lakers vs Celtics", "want": "both", "plays": 3},
-                     by="Sam", by_id=5002)["id"]
+    oid = desk.order({"sport": "basketball", "teams": "Lakers vs Celtics", "want": "both", "plays": 3,
+                      "deliver": "post"}, by="Sam", by_id=5002)["id"]
     assert worker.step()  # the search: the game with both teams is picked, not the reaction video or another game
     o = desk.orders()[0]
     assert search == ["Lakers extended highlights", "Celtics extended highlights"]

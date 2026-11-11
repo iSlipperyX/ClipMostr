@@ -289,7 +289,7 @@ class Host:
             store = self.posting()[0]
             with store.lock:
                 sig = sorted((i.id, i.status, i.review, i.queue_pos, int(i.planned_at or 0), i.caption, i.hashtags,
-                              i.account, i.thumb) for i in store.items.values())
+                              i.account, i.thumb, i.keep) for i in store.items.values())
             return rev(sig)
         except Exception:  # noqa: BLE001
             return ""
@@ -310,6 +310,8 @@ class Host:
             state = "review"
         elif it.queue_pos is not None:
             state = "queued"
+        elif it.keep and it.status == "new":
+            state = "download"  # made to be saved to someone's own device: no account, no queue
         else:
             state = "library"
         logged_in = bool(a is not None and a.logged_in)
@@ -319,7 +321,7 @@ class Host:
             size = 0
         return {
             "id": it.id, "headline": it.headline, "title": it.name, "state": state, "status": it.status,
-            "review": it.review, "account": it.account, "account_handle": a.handle if a else "",
+            "review": it.review, "keep": it.keep if it.status == "new" else "", "account": it.account, "account_handle": a.handle if a else "",
             "signed_in": logged_in, "category": it.category_name, "category_id": it.category_id,
             "part": it.part_label, "planned_at": it.planned_at, "pinned_at": it.pinned_at, "posted_at": it.posted_at,
             "added_at": it.added_at, "tiktok_url": it.tiktok_url, "duration": it.duration or float(
@@ -340,6 +342,7 @@ class Host:
                 "retry": it.status == "failed" and it.last_error != INTERRUPTED,
                 "delete": it.status in ("queued", "failed", "new"),
                 "edit": it.status in EDITABLE,
+                "queue": state == "download",
             },
         }
 
@@ -469,6 +472,36 @@ class Host:
             if r.failed:
                 msg += f" {_plural(len(r.failed), 'file')} couldn't go: {_trim(r.failed[0][1], 100)}"
             return {"message": msg, "freed": r.freed}
+
+    def to_queue(self, item_id: str, category_id: str = "") -> dict:
+        """Post a video that was made to download after all: it joins the queue of the account its category
+        posts to (`category_id`, when another category is picked for it)."""
+        from ..posting import intake
+
+        with self.lock:
+            it, store, accounts, svc = self._item(item_id)
+            if not it.keep or it.status != "new":
+                raise HostError(409, "It isn't a download waiting in the library.")
+            s = self.settings()
+            cat = self._category(category_id, s) if category_id else None
+            owner = intake.to_queue(store, list(accounts), it, s, cat)
+            if owner is None:
+                name = cat.name if cat is not None else it.category_name
+                raise HostError(409, (f"{name} has no TikTok account to post to." if name else
+                                      "Pick the category it should post for: none is set for it.")
+                                + " It's still yours to download.")
+            self._save(store)
+            wait = " It waits for an OK first." if it.review == "waiting" else ""
+            self.log(f"Queued the download “{_trim(it.headline, 80)}” to post to {owner.handle}.")
+            return {"message": f"Queued to post to {owner.handle}.{wait}", "video": self.video_json(it, accounts, svc)}
+
+    def download_name(self, item_id: str) -> str:
+        """A file name for a video saved to a phone: its headline, made safe, with the file's own ending."""
+        from ..organize import safe_name
+
+        it, *_ = self._item(item_id)
+        ext = Path(it.path).suffix.lower() if it.path else ".mp4"
+        return (safe_name(it.headline or it.name or "video", 80) or "video") + (ext or ".mp4")
 
     def edit(self, item_id: str, caption: str | None = None, hashtags: str | None = None) -> dict:
         with self.lock:

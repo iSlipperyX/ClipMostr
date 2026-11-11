@@ -114,7 +114,8 @@ def test_find_searches_a_game_and_sends_its_moments_as_cards(finder, reels):  # 
     w.fake.clear()
     w.press("fm:r:v0", mid, SAM)
     said = to(w, SAM)[-1]["text"]
-    assert said.startswith("🎞 Got it: ") and "usually comes in under a minute, so it will wait for your OK" in said
+    assert said.startswith("🎞 Got it: ") and "I'll tell you when it's ready to download." in said
+    assert "it will wait for your OK" not in said  # a download isn't posted, so nothing is held
     w.work()
     assert reels and [e["id"] for e in reels[-1]["events"]] == ["e1"]
     # a button from a search that was since replaced says so

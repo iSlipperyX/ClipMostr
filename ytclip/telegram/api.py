@@ -129,8 +129,10 @@ def _urllib(url: str, body, headers: dict, timeout: float) -> tuple[int, bytes]:
 _urllib.streams = True  # it sends an Upload as it reads it (a stand-in transport gets bytes)
 
 
-def _parts(fields: dict, files: dict[str, Path], boundary: str) -> list[bytes | Path]:
-    """A multipart/form-data body in pieces: the bytes around each file, and the files themselves (as paths)."""
+def _parts(fields: dict, files: dict[str, Path], boundary: str,
+           names: dict[str, str] | None = None) -> list[bytes | Path]:
+    """A multipart/form-data body in pieces: the bytes around each file, and the files themselves (as paths).
+    `names` gives a file the name the phone saves it under (a document's), instead of its field's."""
     out: list[bytes | Path] = []
     head = bytearray()
     for name, value in fields.items():
@@ -146,7 +148,8 @@ def _parts(fields: dict, files: dict[str, Path], boundary: str) -> list[bytes | 
         ext = Path(path).suffix.lower().lstrip(".") or "bin"
         kind = {"mp4": "video/mp4", "jpg": "image/jpeg", "jpeg": "image/jpeg", "png": "image/png"}.get(
             ext, "application/octet-stream")
-        head += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{name}.{ext}\"\r\n"
+        called = re.sub(r'[\x00-\x1f"\\/]+', " ", str((names or {}).get(name) or "")).strip()[:120] or f"{name}.{ext}"
+        head += (f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"; filename=\"{called}\"\r\n"
                  f"Content-Type: {kind}\r\n\r\n").encode()
         out += [bytes(head), Path(path)]
         head = bytearray(b"\r\n")
@@ -168,10 +171,11 @@ class Upload:
     reads it), saying how far along it is to `progress(sent, total)`. Its length is known up front, so
     Telegram is told it (Content-Length) and nothing is chunked on the wire."""
 
-    def __init__(self, fields: dict, files: dict[str, Path], progress: Callable[[int, int], None] | None = None):
+    def __init__(self, fields: dict, files: dict[str, Path], progress: Callable[[int, int], None] | None = None,
+                 names: dict[str, str] | None = None):
         self.boundary = "clipmonster-" + secrets.token_hex(12)
         self.kind = f"multipart/form-data; boundary={self.boundary}"
-        self.parts = _parts(fields, files, self.boundary)
+        self.parts = _parts(fields, files, self.boundary, names)
         self.total = sum(os.path.getsize(p) if isinstance(p, Path) else len(p) for p in self.parts)
         self.progress = progress
         self.sent = 0
@@ -306,7 +310,8 @@ class Api:
         self.throttle = throttle if throttle is not None else (Throttle(sleep=sleep) if transport is None else None)
 
     def call(self, method: str, params: dict | None = None, files: dict[str, Path] | None = None,
-             timeout: float = 30.0, progress: Callable[[int, int], None] | None = None):
+             timeout: float = 30.0, progress: Callable[[int, int], None] | None = None,
+             names: dict[str, str] | None = None):
         """One Bot API call; its result. A 429 is waited out (twice at most) when it's short; a call Telegram
         failed on its own side (5xx), or that got no answer, is tried again when that can't send anything
         twice. `progress(sent, total)` hears how far a file's upload has got."""
@@ -318,7 +323,7 @@ class Api:
             if self.throttle is not None and method in COUNTED:
                 self.throttle.wait(chat)
             if files:
-                up = Upload(params, files, progress)
+                up = Upload(params, files, progress, names)
                 body, kind = (up if getattr(self.transport, "streams", False) else bytes(up)), up.kind
             else:
                 body, kind = json.dumps(params, ensure_ascii=False).encode("utf-8"), "application/json"
@@ -402,6 +407,15 @@ class Api:
                                        "duration": int(round(duration)) or None, "reply_markup": buttons,
                                        "disable_notification": True if quiet else None},
                          files={"video": Path(video)}, timeout=600.0, progress=progress)
+
+    def send_document(self, chat: int, file: Path, caption: str = "", buttons: dict | None = None,
+                      name: str = "", progress: Callable[[int, int], None] | None = None) -> dict:
+        """A file as it is (a video sent this way isn't compressed again: it's the one to save). `name` is
+        what it's called on the phone."""
+        return self.call("sendDocument", {"chat_id": chat, "caption": clip_text(caption, CAPTION_LIMIT),
+                                          "parse_mode": "HTML", "reply_markup": buttons,
+                                          "disable_content_type_detection": True},
+                         files={"document": Path(file)}, timeout=600.0, progress=progress, names={"document": name})
 
     def answer(self, callback: str, text: str = "", alert: bool = False) -> None:
         """Stop the spinner on a pressed button (with a short note at the top of the chat)."""

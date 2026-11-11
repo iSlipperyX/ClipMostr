@@ -54,6 +54,7 @@ from typing import Callable
 from . import api as tg
 from . import state, streamer
 from .api import ApiError, NetworkError, app_button, inline
+from .editor_handler import EditorHandler
 from .common import (DIGEST_MAX, GB, MODE_LIFE, PAGE, PENDING_LIFE, URL, Refused, app_link, attr, esc,  # noqa: F401
                      length_text, pc_name, plural, trim)
 from .review_pipeline import (ReviewPipeline, _items_in, _made, _shape, card_buttons, card_html,  # noqa: F401
@@ -172,6 +173,10 @@ ACTIVITY = {
     "sports": "🏆 <b>{name}</b> asked for sports highlights: {title}.",
     "find": "🔎 <b>{name}</b> is searching a game: {title}.",
     "approve": "✅ <b>{name}</b> picked {title} to post; the other version was deleted.",
+    "keep": "✅ <b>{name}</b> kept {title}; the other version was deleted.",
+    "edit": "✂️ <b>{name}</b> edited “{title}”:\n<i>{text}</i>",
+    "download": "⬇ <b>{name}</b> took the file of “{title}”.",
+    "queue": "📤 <b>{name}</b> queued “{title}” to post.",
     "cancel": "✖ <b>{name}</b> cancelled the request for {title}.",
     "pause": "⏸ <b>{name}</b> paused automation.",
     "resume": "▶ <b>{name}</b> resumed automation.",
@@ -219,7 +224,7 @@ def split_command(text: str) -> tuple[str, str]:
     return head[1:].split("@", 1)[0].lower(), rest.strip()
 
 
-class Bot(StudioHandler, SportsHandler, ReviewPipeline):
+class Bot(StudioHandler, SportsHandler, EditorHandler, ReviewPipeline):
     def __init__(self, runner, api_factory: Callable[[str], tg.Api] = tg.Api, state_file: Path | None = None,
                  status_file: Path | None = None, previews: Path | None = None, now: Callable[[], float] = time.time,
                  posting=None):
@@ -677,7 +682,8 @@ class Bot(StudioHandler, SportsHandler, ReviewPipeline):
                    "reqs": self.press_requests, "fix": self.press_fix, "ppl": self.press_people,
                    "gl": self.press_league, "gg": self.press_game, "so": self.press_sports_cancel,
                    "lk": self.press_link, "rc": self.press_recat, "rcp": self.press_recat_pick,
-                   "fg": self.press_find_game, "fm": self.press_moment, "apv": self.press_approve}.get(kind)
+                   "fg": self.press_find_game, "fm": self.press_moment, "apv": self.press_approve,
+                   "dl": self.press_file, "pq": self.press_queue}.get(kind)
         if handler is None:
             self.api.answer(q.get("id", ""), "That button is from an older version: send /help.")
             return
@@ -770,6 +776,13 @@ class Bot(StudioHandler, SportsHandler, ReviewPipeline):
                 stage = streamer.stage_text(str(o.get("doing") or "").split(": ", 1)[-1])
                 icon = o.get("emoji") or "🏆"
                 buttons = inline([[("✖ Cancel it", f"so:{ident}")]])
+            elif kind == "edit":
+                e = self.edit_progress(ident)
+                if e is None or e.get("status") != "working":
+                    continue
+                title, frac = ask.get("title") or "", e.get("frac")
+                stage = streamer.stage_text(e.get("stage") or "")
+                icon, verb = "✂️", "Cutting the edit of"
             else:
                 continue
             if chat and key not in going:
@@ -1447,6 +1460,41 @@ class Bot(StudioHandler, SportsHandler, ReviewPipeline):
                 text = self.sports_report(o, len(items), bool(folders))
                 if items:
                     buttons = digest_html("", items, accounts, now, self.app_url)[1]
+            elif kind == "edit":
+                with self.lock:  # as sync_critiques just left it
+                    made = next((c for c in state.load(self.state_file)["critiques"].values()
+                                 if c.get("desk") == ident), None)
+                if made is None:
+                    done.append(key)
+                    self.live.finish(key)
+                    continue
+                if made.get("status") in ("queued", "working"):
+                    continue
+                title = esc(trim(ask.get("title", ""), 80))
+                if made.get("status") == "failed":
+                    text = (f"✖ Couldn't make the edit of “{title}”: "
+                            f"{esc(trim(made.get('error') or 'it failed', 300))}\nThe first version is as it was.")
+                else:
+                    fixed = store.get(made.get("fixed") or "")
+                    if fixed is None:
+                        text = f"The edit of “{title}” was made, but it isn't in the library any more."
+                    else:
+                        done.append(key)
+                        answered.add(fixed.id)
+                        if chat:
+                            who = esc(state.first_name(data, chat))
+                            label = esc(self.version_label(fixed) or "v2 (Edited)")
+                            both = ("Both versions are yours to download; keep one and the other is deleted, or "
+                                    "keep both." if fixed.keep else
+                                    "Both versions wait for an OK: approve the one to post, and the other is "
+                                    "deleted.")
+                            self.show_later(chat, fixed, f"✂️ <b>{label}</b>: here's your edit of “{title}”. {both}",
+                                            live=key)
+                            for other in (c["id"] for c in data["chats"] if c["id"] != chat and not c.get("blocked")):
+                                self.show_later(other, fixed, f"✂️ <b>{label}</b>: {who}'s edit of “{title}”.")
+                        else:
+                            self.live.finish(key)
+                        continue
             done.append(key)
             if not chat:
                 continue

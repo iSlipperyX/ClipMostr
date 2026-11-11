@@ -121,6 +121,28 @@ class Reel:
                 "eligible": self.eligible, "notes": self.notes, "final": self.final,
                 "starts": self.starts(), "segments": [asdict(s) for s in self.segments], "story": asdict(self.story)}
 
+    @classmethod
+    def from_json(cls, d: dict) -> "Reel":
+        """A reel as to_json() wrote it (a made reel's reel.json), to cut again. Raises ReelError when it can't
+        be read."""
+        try:
+            segments = [Segment(kind=str(s["kind"]), hid=str(s["hid"]), start=float(s["start"]), end=float(s["end"]),
+                                moment=float(s.get("moment", s["start"])), rank=int(s.get("rank") or 0),
+                                label=str(s.get("label") or ""), play=str(s.get("play") or ""),
+                                title=str(s.get("title") or ""), players=[str(x) for x in s.get("players") or []][:3],
+                                badge=str(s.get("badge") or "")) for s in d["segments"]]
+            st = d.get("story") or {}
+            story = Story(opening=str(st.get("opening") or ""), hook=str(st.get("hook") or ""),
+                          caption=str(st.get("caption") or ""),
+                          hashtags=[str(h) for h in st.get("hashtags") or []],
+                          badges={str(k): str(v) for k, v in (st.get("badges") or {}).items()},
+                          written_by=str(st.get("written_by") or ""), note="")
+            return cls(segments, float(d.get("transition") or TRANSITION), str(d.get("order") or "countdown"), [],
+                       story, str(d.get("final") or ""), str(d.get("style") or "mix"), str(d.get("kind") or "plays"),
+                       str(d.get("title") or ""))
+        except (KeyError, TypeError, ValueError, AttributeError) as exc:
+            raise ReelError("This reel's plan can't be read, so it can't be edited.") from exc
+
 
 class ReelError(RuntimeError):
     """A plain-English reason a reel can't be made."""

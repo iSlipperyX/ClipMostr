@@ -20,6 +20,8 @@ from . import safefile
 from .config import app_dir
 from .media import VIDEO_EXTS
 
+EXPORTING = ".exporting"  # the engine leaves this in a folder while its clips are exported (organize.EXPORTING)
+
 # Item status lifecycle: new -> queued -> uploading -> posted | failed
 # last_error of a video whose upload was cut off by the app closing. It may be on TikTok already,
 # so it is never retried by itself; the next stats refresh marks it posted if it finds it there.
@@ -101,6 +103,9 @@ class VideoItem:
     record_at: float = 0.0  # when the record was last written
     snapshots: dict = field(default_factory=dict)  # "1h" / "24h" / "7d" -> [at, views, likes, comments, shares]
     keep_reason: str = ""  # why its files were kept after posting (e.g. not seen on the profile after 2 days)
+    # "download": made to be saved to someone's own device (a sports request from Telegram), not to post. It
+    # stays in the library, no account takes it, and it's queued only when someone says so (Host.to_queue).
+    keep: str = ""
 
     @property
     def total(self) -> float | None:
@@ -430,6 +435,14 @@ class Store:
                     try:
                         if now - f.stat().st_mtime < settle:
                             continue  # still being written
+                        # Its folder is still being exported: clips.json, which says what this clip is
+                        # (and whether it's only to download), comes last. A marker left by a crash is
+                        # ignored after six hours.
+                        if now - (f.parent / EXPORTING).stat().st_mtime < 6 * 3600:
+                            continue
+                    except FileNotFoundError:
+                        if not f.exists():
+                            continue
                     except OSError:
                         continue
                 known.add(key)
@@ -470,6 +483,15 @@ class Store:
                     if meta.get("hold"):
                         item.review = "waiting"
                         item.warnings.append(meta["hold"])
+                    item.keep = meta.get("keep") or ""
+                    if item.keep and meta.get("edit_of"):
+                        # An edit of a download that was queued to post after all goes where that one went.
+                        src_key = _key(f.parent / str(meta["edit_of"]))
+                        src = next((i for i in self.items.values() if i.path and _key(i.path) == src_key), None)
+                        if src is not None and not src.keep and src.status != "posted":
+                            item.keep = ""
+                            item.category_id, item.category_name = src.category_id, src.category_name
+                            item.for_account = src.for_account or src.account
                 else:
                     item.source_group = str(f.parent)
                 self.items[item.id] = item
@@ -545,6 +567,7 @@ class Store:
                 if not it or it.status == "posted" or it.queue_pos is not None:
                     continue
                 it.queue_pos, it.status, it.last_error, it.account = nxt, "queued", "", account
+                it.keep = ""  # queued by hand: it isn't only a download any more
                 nxt += 1
             self._renumber()
 

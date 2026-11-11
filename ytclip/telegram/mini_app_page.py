@@ -8,6 +8,12 @@ What it does: the videos waiting to post (to review, queued, in the library) and
 screen to watch it, OK it, post it now or delete it, and to say what's wrong with it so the AI makes it again;
 what each of the two people sharing the bot said and did, by name; asking for a new video; and who shares the
 bot (invite, remove, leave).
+
+Sports clips and reels asked for here are downloads (Videos → Downloads): the full file saved to the phone, or
+sent into the chat, and nothing queued to post. Each opens in the editor (openEditor): the plays of a reel
+trimmed against the game's own footage, reordered, dropped or added, its words, narrator, music and framing;
+a single clip's cut, words, captions and shape. The page sends the whole draft; the PC says what changed and
+cuts the new version (sportsdesk/editor.py).
 """
 
 PAGE = r"""<!doctype html>
@@ -255,6 +261,45 @@ input[type=text]:focus { border-color: var(--btn); }
   text-align: center; padding: 14px; background: var(--bg2); border-radius: 11px; margin: 10px 0; user-select: all; }
 .pad { padding: 0 12px; }
 .gap { height: 10px; }
+.acts.wrap { flex-wrap: wrap; }
+.acts.wrap .btn { flex: 1 1 30%; }
+.small.pad { padding: 0 16px; }
+.sheet.editor { z-index: 12; display: flex; flex-direction: column; }
+.sheet.editor .sheet-in { flex: 1 0 auto; width: 100%; padding-bottom: 12px; }
+.ed-stage video { max-height: 30vh; }
+.ed-stage.pin { position: sticky; top: 54px; z-index: 2; box-shadow: 0 1px 0 var(--line, rgba(128,128,128,.25)); }
+.ed-stage .gone { padding: 26px 22px; }
+.ed-foot { position: sticky; bottom: 0; z-index: 3; display: flex; gap: 12px; align-items: center; background: var(--bg);
+  border-top: 1px solid var(--line); padding: 10px 14px calc(10px + var(--safe-b)); }
+.ed-foot .sum { flex: 1; min-width: 0; font-weight: 700; font-size: 15px; }
+.ed-foot .sum small { display: block; font-weight: 400; font-size: 12px; color: var(--hint); overflow-wrap: anywhere; }
+.ed-foot .sum.bad small { color: var(--danger); }
+.play { padding: 10px 0; border-top: 1px solid var(--line); }
+.play:first-of-type { border-top: 0; padding-top: 0; }
+.play .head { display: flex; align-items: center; gap: 8px; }
+.play .num { flex: none; width: 24px; height: 24px; border-radius: 50%; background: var(--bg2); color: var(--hint);
+  font-size: 12px; font-weight: 700; display: grid; place-items: center; }
+.play.on .num { background: var(--btn); color: var(--btn-text); }
+.play .name { flex: 1; min-width: 0; text-align: left; min-height: 40px; }
+.play .name b { display: block; font-size: 14px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.play .name span { display: block; font-size: 12px; color: var(--hint); white-space: nowrap; overflow: hidden;
+  text-overflow: ellipsis; }
+.icon { flex: none; width: 36px; height: 36px; border-radius: 10px; background: var(--bg2); color: var(--text);
+  font-size: 13px; display: grid; place-items: center; }
+.icon.danger { color: var(--danger); }
+.trim { margin-top: 10px; padding: 12px; background: var(--bg2); border-radius: 12px; }
+.trim .line { display: flex; align-items: center; gap: 6px; margin-top: 10px; }
+.trim .line:first-child { margin-top: 0; }
+.trim .line .lbl { flex: none; width: 38px; font-size: 13px; color: var(--hint); }
+.trim .line .t { flex: 1; min-width: 0; text-align: center; font: 600 15px/1 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.trim .line .btn { background: var(--bg); padding-left: 8px; padding-right: 8px; flex: 1; white-space: nowrap; }
+.trim .line .btn.primary { background: var(--btn); }
+.trim .textbtn { margin-top: 8px; }
+.nudge { flex: none; min-width: 42px; height: 36px; border-radius: 9px; background: var(--bg); color: var(--link);
+  font-size: 13px; font-weight: 600; }
+input[type=range] { width: 100%; margin: 8px 0 0; height: 28px; accent-color: var(--btn); }
+.play input[type=text], .trim + .field input[type=text] { background: var(--bg2); }
+.ends { display: flex; justify-content: space-between; font-size: 12px; color: var(--hint); }
 #toast { position: fixed; left: 50%; bottom: calc(86px + var(--safe-b)); transform: translate(-50%, 20px); z-index: 30;
   background: #2c2c30; color: #fff; padding: 11px 16px; border-radius: 12px; font-size: 14px; line-height: 1.35;
   width: max-content; max-width: min(88vw, 520px); opacity: 0; pointer-events: none;
@@ -271,8 +316,8 @@ var S = { token: '', media: '', me: null, people: [], pc: '', videos: null, post
           cats: null, tab: 'videos', filter: 'review', who: 'all', open: null, busy: false, invite: null,
           draft: {}, idea: '', cat: 'auto', last: {}, make: 'video', sports: null,
           sp: { sport: '', league: '', teams: '', since: 'week', want: 'reel', games: 1, plays: 5, cat: '',
-                how: 'pick', psport: '', pleague: '', game: '', all: false, query: '', fgame: '' },
-          secs: 0,
+                how: 'pick', psport: '', pleague: '', game: '', all: false, query: '', fgame: '', deliver: 'download' },
+          secs: 0, qcat: {}, catsAsked: false,
           played: null, playedAt: 0, playedBusy: false };
 var app = document.getElementById('app');
 var sheet = null;       // the open video's screen
@@ -457,6 +502,7 @@ function videosIn(filter) {
   var v = S.videos || [];
   if (filter === 'review') return v.filter(function (x) { return x.state === 'review'; });
   if (filter === 'queue') return v.filter(function (x) { return x.state === 'queued' || x.state === 'posting' || x.state === 'failed'; });
+  if (filter === 'download') return v.filter(function (x) { return x.state === 'download'; });
   if (filter === 'library') return v.filter(function (x) { return x.state === 'library'; });
   return S.posted || [];
 }
@@ -520,9 +566,10 @@ function nav() {
 }
 
 // --- videos ----------------------------------------------------------------------------------------
-var FILTERS = [['review', 'To review'], ['queue', 'Queue'], ['library', 'Library'], ['posted', 'Posted']];
+var FILTERS = [['review', 'To review'], ['download', 'Downloads'], ['queue', 'Queue'], ['library', 'Library'], ['posted', 'Posted']];
 var EMPTY = {
   review: ['Nothing to review', 'Videos that wait for an OK before they post show up here.'],
+  download: ['Nothing to download', 'Sports clips and reels you ask for land here: yours to save, edit or queue to post. No account is tied to them.'],
   queue: ['The queue is empty', 'Videos OK’d to post wait here for their time.'],
   library: ['Nothing in the library', 'Clips whose category has no TikTok account yet wait here.'],
   posted: ['Nothing posted yet', 'Posts and their numbers show up here.']
@@ -545,10 +592,15 @@ function stateTag(v) {
   if (v.state === 'failed') return h('span', { class: 'tag bad', text: "Didn't post" });
   if (v.state === 'queued') return h('span', { class: 'tag', text: v.planned_at ? 'Posts ' + when(v.planned_at) : 'In the queue' });
   if (v.state === 'posted') return h('span', { class: 'tag good', text: 'Posted ' + when(v.posted_at) });
+  if (v.state === 'download') return h('span', { class: 'tag good', text: 'To download' });
   return h('span', { class: 'tag', text: 'Library' });
+}
+function editing(v) {
+  return (v.critiques || []).some(function (c) { return c.item === v.id && c.how === 'edit' && (c.status === 'queued' || c.status === 'working'); });
 }
 function card(v) {
   var said = v.critiques || [];
+  var words = said.filter(function (c) { return c.how !== 'edit'; });
   var meta = [v.account_handle, v.category, v.part].filter(Boolean).join(' · ');
   return h('button', { class: 'card', onclick: function () { openVideo(v.id); } },
     h('span', { class: 'thumb' }, v.has_thumb ? h('img', { src: mediaUrl(v, 'thumb'), alt: '', loading: 'lazy' }) : null,
@@ -560,8 +612,9 @@ function card(v) {
       h('span', { class: 'tags' }, stateTag(v),
         v.version ? h('span', { class: 'tag ver', text: v.version }) : null,
         v.fix_of && !v.version ? h('span', { class: 'tag fix', text: 'Made again' }) : null,
-        v.fixing ? h('span', { class: 'tag fix', text: 'Being made again' }) : null,
-        said.length && !v.fix_of ? h('span', { class: 'tag', text: plural(said.length, 'critique') }) : null)));
+        v.editable && v.state !== 'download' ? h('span', { class: 'tag', text: 'Sports' }) : null,
+        v.fixing ? h('span', { class: 'tag fix', text: editing(v) ? 'Being edited' : 'Being made again' }) : null,
+        words.length && !v.fix_of ? h('span', { class: 'tag', text: plural(words.length, 'critique') }) : null)));
 }
 
 // --- one video ---------------------------------------------------------------------------------------
@@ -588,6 +641,7 @@ function openVideo(id) {
 }
 function closeSheet(quiet) {
   if (!sheet) return;
+  if (ed) closeEditor(true);
   var vid = sheet.root.querySelector('video');
   if (vid) { try { vid.pause(); vid.removeAttribute('src'); vid.load(); } catch (e) {} }
   document.body.removeChild(sheet.root);
@@ -600,7 +654,7 @@ function paintSheet() {
   var v = find(sheet.id);
   if (!v) { closeSheet(); toast('That video is gone from the library.'); return; }
   if (same('sheet', [v, S.busy, S.people])) return;  // (v carries its versions)
-  var group = videosIn(v.state === 'review' ? 'review' : v.state === 'library' ? 'library' : v.state === 'posted' ? 'posted' : 'queue');
+  var group = videosIn(v.state === 'review' ? 'review' : v.state === 'library' ? 'library' : v.state === 'download' ? 'download' : v.state === 'posted' ? 'posted' : 'queue');
   var at = group.map(function (x) { return x.id; }).indexOf(v.id);
   clear(sheet.bar);
   add(sheet.bar, [h('button', { class: 'back', text: '‹ Back', onclick: function () { closeSheet(); } }),
@@ -615,6 +669,7 @@ function paintSheet() {
   else if (v.state === 'posting') stateLine = 'Posting now…';
   else if (v.state === 'failed') { stateLine = "Didn't post: " + (v.last_error || 'something went wrong'); cls += ' bad'; }
   else if (v.state === 'posted') stateLine = 'Posted ' + when(v.posted_at);
+  else if (v.state === 'download') stateLine = 'Yours to download: not queued to post, no account tied to it';
   else stateLine = 'In the library, not queued' + (v.account_handle ? '' : ' (its category has no TikTok account)');
   var bits = [v.account_handle, v.category, v.part, len(v.duration), v.ai_generated ? 'AI-generated, labelled as such' : ''].filter(Boolean);
   var from = v.prompt ? (v.prompt === 'your script' ? 'Made from your own script' : 'Made from “' + clip(v.prompt, 160) + '”')
@@ -624,8 +679,9 @@ function paintSheet() {
   clear(sheet.info);
   add(sheet.info, [
     origin ? h('div', { class: 'block' }, h('div', { class: 'note' },
-      h('div', { text: 'Made again from ' + (isMe(origin.by) ? 'your' : origin.name + '’s') + ' critique of the first version:' }),
-      h('div', { class: 'q', text: '“' + origin.text + '”' })),
+      h('div', { text: origin.how === 'edit' ? (isMe(origin.by) ? 'Your' : origin.name + '’s') + ' edit of the first version:'
+                                            : 'Made again from ' + (isMe(origin.by) ? 'your' : origin.name + '’s') + ' critique of the first version:' }),
+      h('div', { class: 'q', text: origin.how === 'edit' ? origin.text : '“' + origin.text + '”' })),
       find(origin.item) ? h('button', { class: 'textbtn', style: 'margin-top:8px', text: 'Watch the first version ›', onclick: function () { openVideo(origin.item); } }) : null) : null,
     h('div', { class: 'block' }, h('h2', { text: v.headline }),
       bits.length ? h('p', { class: 'sub', text: bits.join(' · ') }) : null,
@@ -637,24 +693,35 @@ function paintSheet() {
 
   var vers = v.versions || [];
   if (vers.length > 1) {
-    add(sheet.info, h('div', { class: 'block' }, h('h3', { text: 'Pick the version to post' }),
+    var keeping = v.state === 'download';
+    add(sheet.info, h('div', { class: 'block' }, h('h3', { text: keeping ? 'Versions' : 'Pick the version to post' }),
       h('div', { class: 'vers' }, vers.map(function (x) {
         var others = vers.filter(function (o) { return o.id !== x.id; }).map(function (o) { return 'v' + o.version; }).join(' and ');
         return h('div', { class: 'vrow' + (x.id === v.id ? ' on' : '') },
           h('div', { class: 'col' },
             h('div', { class: 'name', text: x.label || 'v' + x.version }),
-            h('div', { class: 'why', text: x.critique ? '“' + clip(x.critique, 110) + '”' + (x.by ? ' · ' + x.by : '') : 'As it was first made' }),
+            h('div', { class: 'why', text: x.critique ? (x.how === 'edit' ? clip(x.critique, 110) : '“' + clip(x.critique, 110) + '”') + (x.by ? ' · ' + x.by : '') : 'As it was first made' }),
             x.id !== v.id ? h('button', { class: 'textbtn', text: 'Watch this one ›', onclick: function () { openVideo(x.id); } }) : null),
-          h('button', { class: 'btn primary slim', text: 'Approve v' + x.version, disabled: S.busy || v.fixing, onclick: function () {
-            ask('Post v' + x.version + ' and delete ' + others + ' from the PC?', function () {
+          h('button', { class: 'btn slim' + (keeping ? '' : ' primary'), text: (keeping ? 'Keep only v' : 'Approve v') + x.version, disabled: S.busy || v.fixing, onclick: function () {
+            ask((keeping ? 'Keep v' : 'Post v') + x.version + ' and delete ' + others + ' from the PC?', function () {
               act(api('POST', 'api/videos/' + x.id + '/approve'), function () { if (x.id !== v.id) closeSheet(true); });
             });
           } }));
       })),
-      h('p', { class: 'small', text: 'Neither posts until you pick. Approving one queues it and deletes the other from the PC.' })));
+      h('p', { class: 'small', text: keeping ? 'Each version is yours to download. Keeping only one deletes the others from the PC; there’s no need to pick.'
+                                              : 'Neither posts until you pick. Approving one queues it and deletes the other from the PC.' })));
   }
 
-  var can = v.can || {}, btns = [];
+  var can = v.can || {}, btns = [], more = [];
+  if (v.exists && v.state !== 'posting') {
+    btns.push(h('button', { class: 'btn' + (v.state === 'download' ? ' primary' : ''), text: '⬇ Download', onclick: function () { download(v); } }));
+    more.push(h('button', { class: 'btn', text: 'Send the file to our chat', disabled: S.busy, onclick: function () {
+      act(api('POST', 'api/videos/' + v.id + '/send'));
+    } }));
+  }
+  if (v.editable && v.state !== 'posted' && v.state !== 'posting') {
+    btns.push(h('button', { class: 'btn' + (v.state === 'download' ? '' : ' primary'), text: '✂️ Edit', disabled: S.busy || v.fixing, onclick: function () { openEditor(v.id); } }));
+  }
   if (can.ok && vers.length < 2) btns.push(h('button', { class: 'btn primary', text: 'OK to post', disabled: S.busy, onclick: function () {
     act(api('POST', 'api/videos/' + v.id + '/ok'));
   } }));
@@ -673,10 +740,13 @@ function paintSheet() {
     if (tg && tg.openLink) tg.openLink(v.tiktok_url); else window.open(v.tiktok_url, '_blank', 'noopener');
   } }));
   clear(sheet.acts);
-  if (btns.length) add(sheet.acts, h('div', { class: 'acts' }, btns));
+  if (btns.length) add(sheet.acts, h('div', { class: 'acts wrap' }, btns));
+  if (more.length) add(sheet.acts, h('div', { class: 'acts' }, more));
+  if (v.exists && v.state !== 'posting') add(sheet.acts, h('p', { class: 'small pad', text: 'Download saves the full-quality file' + (v.size ? ' (' + mb(v.size) + ')' : '') + ' to this device. If your Telegram doesn’t save it, have the file sent to our chat and save it from there (up to 50 MB).' }));
+  if (can.queue) add(sheet.acts, queueBlock(v));
 
   // What's wrong with it? The AI makes it again. (Left alone while it's being typed in.)
-  if (!same('sheetfix', [v.id, v.state, v.fixing, v.fixable, v.ai_generated, S.busy])) paintFix(v);
+  if (!same('sheetfix', [v.id, v.state, v.fixing, v.fixable, v.ai_generated, v.editable, S.busy])) paintFix(v);
   paintThread(v);
 }
 function paintFix(v) {
@@ -684,8 +754,15 @@ function paintFix(v) {
   clear(sheet.fix); sheet.text = null;
   if (v.state !== 'posted' && v.state !== 'posting') {
     var box = h('div', { class: 'block' }, h('h3', { text: 'What should be different?' }));
-    if (v.fixing) {
+    if (v.fixing && editing(v)) {
+      box.appendChild(h('p', { class: 'sub', style: 'margin:0', text: 'The PC is cutting your edit now. The new version shows up beside this one when it’s ready.' }));
+    } else if (v.fixing) {
       box.appendChild(h('p', { class: 'sub', style: 'margin:0', text: 'A new version is being made from the critique below. When it’s ready, both wait here and you approve the one to post.' }));
+    } else if (v.editable) {
+      add(box, [h('p', { class: 'sub', style: 'margin:0 0 12px', text: v.editable === 'reel'
+          ? 'Open the editor to trim, reorder, add or drop plays, change the words, the narrator, the music and the framing. The PC cuts a new version from the game’s footage.'
+          : 'Open the editor to move where the clip starts and ends, change its words, turn captions on or off and choose how the picture is framed.' }),
+        h('button', { class: 'btn primary wide', text: v.editable === 'reel' ? '✂️ Edit this reel' : '✂️ Edit this clip', disabled: S.busy, onclick: function () { openEditor(v.id); } })]);
     } else if (v.fixable) {
       var count = h('span', { class: 'count', text: keep.length + ' / 2000' });
       sheet.text = h('textarea', { maxlength: 2000, placeholder: 'Say it in your own words. Make the captions yellow. The music is too loud. Use the British voice. The hook is flat, open with the twist.',
@@ -722,12 +799,13 @@ function paintThread(v) {
   var said = (v.critiques || []).filter(function (c) { return c.item === v.id; });
   clear(sheet.thread);
   if (said.length) {
-    sheet.thread.appendChild(h('div', { class: 'block' }, h('h3', { text: 'What was said' }), said.map(function (c) {
+    sheet.thread.appendChild(h('div', { class: 'block' }, h('h3', { text: said.every(function (c) { return c.how === 'edit'; }) ? 'Edits' : 'What was said' }), said.map(function (c) {
       var st, cl = 'st';
-      if (c.status === 'queued') { st = 'Waiting to be made again'; cl += ' going'; }
-      else if (c.status === 'working') { st = 'Being made again' + (c.stage ? ': ' + c.stage : '…'); cl += ' going'; }
-      else if (c.status === 'done') { st = (c.how === 'retouch' ? 'Changed on its timeline' : c.how === 'voice' ? 'Voiced again' : 'Made again') + ': v' + (c.version || 2); cl += ' good'; }
-      else { st = 'Couldn’t be made again' + (c.error ? ': ' + c.error : ''); cl += ' bad'; }
+      var ed = c.how === 'edit';
+      if (c.status === 'queued') { st = ed ? 'Waiting for the PC to cut it' : 'Waiting to be made again'; cl += ' going'; }
+      else if (c.status === 'working') { st = (ed ? 'Being cut' : 'Being made again') + (c.stage ? ': ' + c.stage : '…'); cl += ' going'; }
+      else if (c.status === 'done') { st = (ed ? 'Edited' : c.how === 'retouch' ? 'Changed on its timeline' : c.how === 'voice' ? 'Voiced again' : 'Made again') + ': v' + (c.version || 2); cl += ' good'; }
+      else { st = (ed ? 'The edit couldn’t be made' : 'Couldn’t be made again') + (c.error ? ': ' + c.error : ''); cl += ' bad'; }
       return h('div', { class: 'said' }, face({ id: c.by, first: c.name }, 'sm'),
         h('div', { class: 'col' },
           h('div', { class: 'who' }, nameOf(c.by, c.name), h('span', { class: 'when', text: ago(c.at) })),
@@ -736,6 +814,381 @@ function paintThread(v) {
           c.status === 'done' && c.fixed && find(c.fixed) ? h('button', { class: 'textbtn', text: 'Watch the new version ›', onclick: function () { openVideo(c.fixed); } }) : null));
     })));
   }
+}
+
+// --- saving a video to this device -------------------------------------------------------------------
+function mb(n) { return n >= 1e6 ? (n / 1e6).toFixed(n >= 1e7 ? 0 : 1) + ' MB' : Math.max(1, Math.round(n / 1e3)) + ' KB'; }
+function fileName(v) {
+  var s = String(v.headline || v.title || 'video').replace(/[\\\/:*?"<>|\u0000-\u001f]+/g, ' ').replace(/\s+/g, ' ').trim().slice(0, 80) || 'video';
+  return s + '.mp4';
+}
+function download(v) {
+  var url = new URL(mediaUrl(v, 'file') + '&dl=1', window.location.href).href, name = fileName(v);
+  if (tg && tg.downloadFile && tg.isVersionAtLeast && tg.isVersionAtLeast('8.0')) {
+    // Telegram asks the person, then saves it with the phone's own downloads
+    try { tg.downloadFile({ url: url, file_name: name }, function (ok) { if (ok) toast('Downloading “' + clip(v.headline, 50) + '”'); }); return; } catch (e) {}
+  }
+  var a = h('a', { href: url, download: name, rel: 'noopener', style: 'display:none' });
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  toast('Downloading “' + clip(v.headline, 50) + '”');
+}
+// A download, posted after all: the queue of the account its category (or another one) posts to.
+function queueBlock(v) {
+  if (!S.cats && !S.catsAsked) {
+    S.catsAsked = true;
+    api('GET', 'api/categories').then(function (d) { S.cats = d.items || []; S.last.sheet = null; if (sheet) paintSheet(); }, function () { S.catsAsked = false; });
+  }
+  var cats = S.cats || [];
+  var pick = h('select', { 'aria-label': 'Category to post it for', onchange: function () { S.qcat[v.id] = pick.value; } },
+    h('option', { value: '', text: v.category ? 'Its own category: ' + v.category : 'Pick a category…' }),
+    cats.map(function (c) { return h('option', { value: c.id, selected: S.qcat[v.id] === c.id, disabled: !c.account, text: c.name + (c.account ? ' · ' + c.account : ' (no account)') }); }));
+  return h('div', { class: 'block' }, h('h3', { text: 'Post it after all' }),
+    h('div', { class: 'field' }, h('label', { text: 'Queue it for' }), pick),
+    h('div', { class: 'gap' }),
+    h('button', { class: 'btn wide', style: 'background:var(--bg2)', text: '📤 Queue it to post', disabled: S.busy || v.fixing, onclick: function () {
+      ask('Queue “' + clip(v.headline, 60) + '” to post? It joins the queue of that category’s TikTok account.', function () {
+        act(api('POST', 'api/videos/' + v.id + '/queue', { category: pick.value }));
+      });
+    } }),
+    h('p', { class: 'small', text: 'Only if you want ClipMonster to post it. Until then it stays a download: no account, no schedule.' }));
+}
+
+// --- the sports editor -------------------------------------------------------------------------------
+// A made reel or clip, cut again: the page keeps a draft of what the PC says can change (GET …/edit), and sends
+// the whole draft back (POST …/edit). The PC works out what changed and cuts the new version from the footage.
+var ed = null;
+function stamp(t) {
+  t = Math.max(0, Number(t) || 0);
+  var m = Math.floor(t / 60), s = t - m * 60;
+  return m + ':' + (s < 10 ? '0' : '') + s.toFixed(1);
+}
+function secs(t) { return (Math.round(t * 10) / 10).toFixed(1).replace(/\.0$/, '') + ' s'; }
+function round1(x) { return Math.round(x * 10) / 10; }
+function copy(x) { return JSON.parse(JSON.stringify(x)); }
+function draftOf(doc) {
+  if (doc.kind === 'reel') {
+    return { plays: doc.plays.map(function (p) { return { id: p.id, start: p.start, end: p.end, label: p.label || '', badge: p.badge || '', title: p.title || '' }; }),
+             opening: copy(doc.opening), words: copy(doc.words), look: copy(doc.look) };
+  }
+  return { cut: copy(doc.cut), words: copy(doc.words), look: copy(doc.look) };
+}
+function changesOf() {
+  var d = ed.d;
+  if (ed.doc.kind === 'reel') {
+    return { plays: d.plays.map(function (p) { return { id: p.id, start: p.start, end: p.end, label: p.label, badge: p.badge }; }),
+             opening: d.opening, words: d.words, look: d.look };
+  }
+  return { cut: d.cut, words: d.words, look: d.look };
+}
+// What the PC would read from a draft: spaces squeezed, labels in capitals, hashtags as a list. Two drafts that
+// read the same aren't a change (the PC would answer "Nothing was changed").
+function edNorm(x) {
+  x = copy(x);
+  var t = function (v) { return String(v || '').split(/\s+/).filter(Boolean).join(' '); };
+  var tags = function (v) { return String(v || '').split(/[\s,]+/).map(function (w) { return w.replace(/^#+/, '').toLowerCase(); }).filter(Boolean).join(' '); };
+  (x.plays || []).forEach(function (p) { p.label = t(p.label).toUpperCase(); p.badge = t(p.badge).toUpperCase(); });
+  if (x.opening) { x.opening.hook = t(x.opening.hook); x.opening.words = t(x.opening.words); }
+  if (x.words) Object.keys(x.words).forEach(function (k) { x.words[k] = k === 'hashtags' ? tags(x.words[k]) : t(x.words[k]); });
+  if (x.look && 'aspect' in x.look && x.look.aspect !== 'vertical_crop') delete x.look.crop_x;
+  return x;
+}
+function edDirty() { return !!ed && !!ed.doc && JSON.stringify(edNorm(ed.d)) !== JSON.stringify(edNorm(draftOf(ed.doc))); }
+function reelLength() {
+  var d = ed.d, lim = ed.doc.limits, n = d.plays.length, tr = lim.transition || 0.25;
+  var total = d.plays.reduce(function (a, p) { return a + (p.end - p.start); }, 0);
+  var teaser = d.opening.on && n > 1;
+  if (teaser) total += lim.teaser || 3.2;
+  return Math.max(0, total - Math.max(0, n + (teaser ? 1 : 0) - 1) * tr);
+}
+// What stops this draft from being made, in words ('' = nothing).
+function edProblem() {
+  var doc = ed.doc, d = ed.d, lim = doc.limits;
+  if (doc.why) return doc.why;
+  if (doc.kind === 'reel') {
+    if (!d.plays.length) return 'A reel needs at least one play.';
+    var total = reelLength();
+    if (total > lim.longest) return 'That’s ' + len(total) + ': ' + len(lim.longest) + ' at most. Trim a play or take one out.';
+    if (total < 5) return 'That’s under 5 seconds.';
+    if (d.opening.voice !== 'off' && !String(d.opening.words || '').trim()) return 'Write what the narrator says, or pick No narrator.';
+  }
+  return '';
+}
+function openEditor(id) {
+  var v = find(id);
+  if (!v) { toast("That video isn't in the library any more.", true); return; }
+  closeEditor(true);
+  if (sheet) { var playing = sheet.root.querySelector('video'); if (playing) { try { playing.pause(); } catch (e) {} } }
+  ed = { id: id, doc: null, d: null, open: -1, adding: false, stop: null, busy: false, video: null,
+         title: h('span', { class: 'where', text: 'Editor' }), stage: h('div', { class: 'stage ed-stage' }), body: h('div'),
+         foot: h('div', { class: 'ed-foot' }), root: null };
+  ed.root = h('div', { class: 'sheet editor', role: 'dialog', 'aria-label': 'Edit ' + v.headline },
+    h('div', { class: 'sheet-in' },
+      h('div', { class: 'bar' }, h('button', { class: 'back', text: '‹ Back', onclick: function () { leaveEditor(); } }), ed.title, h('span', { class: 'step' })),
+      ed.stage, ed.body),
+    ed.foot);
+  ed.body.appendChild(h('div', { class: 'empty' }, h('div', { class: 'spin', style: 'margin:0 auto 10px' }), 'Reading its plan from the PC…'));
+  document.body.appendChild(ed.root);
+  document.body.style.overflow = 'hidden';
+  if (tg && tg.BackButton) { try { tg.BackButton.show(); } catch (e) {} }
+  api('GET', 'api/videos/' + encodeURIComponent(id) + '/edit').then(function (doc) {
+    if (!ed || ed.id !== id) return;
+    ed.doc = doc; ed.d = draftOf(doc);
+    edStage(); paintEditor();
+  }, function (e) {
+    if (!ed || ed.id !== id) return;
+    closeEditor();
+    if (e.status === 401) locked(e); else toast(e.message || 'The editor couldn’t open.', true);
+  });
+}
+function closeEditor(quiet) {
+  if (!ed) return;
+  if (ed.video) { try { ed.video.pause(); ed.video.removeAttribute('src'); ed.video.load(); } catch (e) {} }
+  document.body.removeChild(ed.root);
+  ed = null;
+  if (!sheet) {
+    document.body.style.overflow = '';
+    if (tg && tg.BackButton) { try { tg.BackButton.hide(); } catch (e) {} }
+  }
+  if (!quiet) paint();
+}
+function leaveEditor() {
+  if (ed && edDirty() && !ed.busy) ask('Leave the editor? Your changes haven’t been made into a version.', function () { closeEditor(); });
+  else closeEditor();
+}
+// The game's own footage, to play a cut before it's made.
+function edStage() {
+  var doc = ed.doc;
+  clear(ed.stage);
+  if (doc.game && doc.game.source && doc.game.id) {
+    ed.video = h('video', { src: 'api/sports/source/' + encodeURIComponent(doc.game.id) + '?m=' + encodeURIComponent(S.media), controls: true,
+                            playsinline: true, 'webkit-playsinline': true, preload: 'metadata' });
+    ed.video.addEventListener('timeupdate', function () {
+      if (ed && ed.stop != null && ed.video.currentTime >= ed.stop) { ed.video.pause(); ed.stop = null; }
+    });
+    // Scrubbing somewhere else by hand lets go of "stop at the cut's end".
+    ed.video.addEventListener('seeking', function () { if (ed && !ed.cue) ed.stop = null; });
+    ed.video.addEventListener('seeked', function () { if (ed) ed.cue = false; });
+    ed.video.addEventListener('error', function () {
+      if (!ed) return;
+      ed.video = null;
+      ed.stage.classList.remove('pin');
+      clear(ed.stage).appendChild(h('div', { class: 'gone', text: 'This phone can’t play the game’s footage, so cuts can’t be previewed here. The times still work.' }));
+      paintEditor();
+    });
+    ed.stage.appendChild(ed.video);
+    ed.stage.classList.add('pin');  // the footage stays in view under the bar while the cuts below are worked on
+    var bar = ed.root.querySelector('.bar');
+    if (bar && bar.offsetHeight) ed.stage.style.top = bar.offsetHeight + 'px';
+  } else {
+    ed.stage.appendChild(h('div', { class: 'gone', text: 'The game’s footage isn’t on the PC right now, so cuts can’t be previewed here. The times still work: the PC downloads it again when the edit is made.' }));
+  }
+}
+function playCut(a, b) {
+  if (!ed || !ed.video) return;
+  ed.cue = true; ed.stop = b;
+  try { ed.video.currentTime = a; var p = ed.video.play(); if (p && p.catch) p.catch(function () {}); } catch (e) { ed.cue = false; }
+}
+function epicks(label, options, value, set) {
+  return h('div', { class: 'field' }, h('label', { text: label }), h('div', { class: 'picks', role: 'group', 'aria-label': label }, options.map(function (o) {
+    var on = String(value) === String(o[0]);
+    return h('button', { class: 'pick' + (on ? ' on' : ''), 'aria-pressed': on ? 'true' : 'false', disabled: !!ed.doc.why, onclick: function () { set(o[0]); paintEditor(); } }, o[1]);
+  })));
+}
+function etext(label, value, max, set, area, placeholder) {
+  var el = h(area ? 'textarea' : 'input', { type: area ? null : 'text', maxlength: max, 'aria-label': label, placeholder: placeholder || null, autocomplete: 'off',
+                                         disabled: !!ed.doc.why, oninput: function () { set(el.value); paintFoot(); } });
+  el.value = value || '';
+  return h('div', { class: 'field' }, h('label', { text: label }), el);
+}
+function opts(list) { return (list || []).map(function (o) { return [o.id, o.label]; }); }
+// Start and end of one stretch of the footage: nudges, sliders, "where the video is now".
+function trimmer(span, orig, min, max, onLength) {
+  var doc = ed.doc, dur = doc.game.duration || 0, reach = doc.limits.reach || 20;
+  var lo = Math.max(0, round1(Math.min(orig.start, span.start) - reach));
+  var hi = round1(Math.max(orig.end, span.end) + reach);
+  if (dur) hi = Math.min(hi, Math.floor(dur * 10) / 10);
+  var tA = h('span', { class: 't', text: stamp(span.start) }), tB = h('span', { class: 't', text: stamp(span.end) });
+  var rA, rB;
+  function put(which, value, repaint) {
+    value = round1(value);
+    if (which === 'start') {
+      value = Math.max(0, Math.min(value, span.end - min));
+      if (span.end - value > max) value = round1(span.end - max);
+      span.start = value;
+    } else {
+      value = Math.max(value, span.start + min);
+      if (dur) value = Math.min(value, Math.floor(dur * 10) / 10);
+      if (value - span.start > max) value = round1(span.start + max);
+      span.end = value;
+    }
+    tA.textContent = stamp(span.start); tB.textContent = stamp(span.end);
+    if (onLength) onLength();
+    paintFoot();
+    if (repaint) paintEditor(); else { rA.value = span.start; rB.value = span.end; }
+  }
+  function line(which, label, t) {
+    return h('div', { class: 'line' }, h('span', { class: 'lbl', text: label }),
+      [-1, -0.2].map(function (n) { return h('button', { class: 'nudge', text: (n < 0 ? '−' : '+') + Math.abs(n), 'aria-label': label + ' ' + n + ' seconds', onclick: function () { put(which, span[which] + n, true); } }); }),
+      t,
+      [0.2, 1].map(function (n) { return h('button', { class: 'nudge', text: '+' + n, 'aria-label': label + ' +' + n + ' seconds', onclick: function () { put(which, span[which] + n, true); } }); }));
+  }
+  rA = h('input', { type: 'range', min: lo, max: hi, step: 0.1, 'aria-label': 'Where it starts', oninput: function () { put('start', Number(rA.value)); }, onchange: function () { paintEditor(); } });
+  rB = h('input', { type: 'range', min: lo, max: hi, step: 0.1, 'aria-label': 'Where it ends', oninput: function () { put('end', Number(rB.value)); }, onchange: function () { paintEditor(); } });
+  rA.value = span.start; rB.value = span.end;
+  var here = ed.video ? h('div', { class: 'line' },
+    h('button', { class: 'btn slim primary', text: '▶ Play this cut', onclick: function () { playCut(span.start, span.end); } }),
+    h('button', { class: 'btn slim', text: 'Start here', title: 'Start where the video above is now', onclick: function () { put('start', ed.video.currentTime, true); } }),
+    h('button', { class: 'btn slim', text: 'End here', title: 'End where the video above is now', onclick: function () { put('end', ed.video.currentTime, true); } })) : null;
+  return h('div', { class: 'trim' }, here, line('start', 'Start', tA), rA, line('end', 'End', tB), rB,
+    Math.abs(span.start - orig.start) > 0.04 || Math.abs(span.end - orig.end) > 0.04
+      ? h('button', { class: 'textbtn', text: 'Back to ' + stamp(orig.start) + ' – ' + stamp(orig.end), onclick: function () { span.start = orig.start; span.end = orig.end; paintEditor(); } }) : null);
+}
+function playRow(p, i) {
+  var d = ed.d, doc = ed.doc, lim = doc.limits, open = ed.open === i;
+  var orig = doc.plays.filter(function (x) { return x.id === p.id; })[0] || (doc.more || []).filter(function (x) { return x.id === p.id; })[0] || p;
+  var length = h('span', { text: secs(p.end - p.start) + ' · ' + stamp(p.start) + ' – ' + stamp(p.end) });
+  var row = h('div', { class: 'play' + (open ? ' on' : '') },
+    h('div', { class: 'head' },
+      h('span', { class: 'num', text: i + 1 }),
+      h('button', { class: 'name', 'aria-expanded': open ? 'true' : 'false', onclick: function () { ed.open = open ? -1 : i; paintEditor(); } },
+        h('b', { text: [p.label, p.title || p.badge].filter(Boolean).join(' · ') || 'Play ' + (i + 1) }), length),
+      h('button', { class: 'icon', text: '▲', 'aria-label': 'Move play ' + (i + 1) + ' earlier', disabled: i === 0, onclick: function () { move(i, -1); } }),
+      h('button', { class: 'icon', text: '▼', 'aria-label': 'Move play ' + (i + 1) + ' later', disabled: i === d.plays.length - 1, onclick: function () { move(i, 1); } }),
+      h('button', { class: 'icon danger', text: '✕', 'aria-label': 'Take play ' + (i + 1) + ' out', disabled: d.plays.length < 2, onclick: function () {
+        d.plays.splice(i, 1); ed.open = -1; paintEditor();
+      } })));
+  if (open) {
+    add(row, [trimmer(p, { start: orig.start, end: orig.end }, lim.play_min, lim.play_max, function () {
+        length.textContent = secs(p.end - p.start) + ' · ' + stamp(p.start) + ' – ' + stamp(p.end);
+      }),
+      h('div', { class: 'field pair', style: 'margin-top:10px' },
+        h('div', {}, h('label', { text: 'Big label' }), tin(p.label, lim.label, function (v) { p.label = v; }, 'PLAY 3')),
+        h('div', {}, h('label', { text: 'Lower third' }), tin(p.badge, lim.badge, function (v) { p.badge = v; }, 'WHO · WHAT')))]);
+  }
+  return row;
+}
+function tin(value, max, set, placeholder) {
+  var el = h('input', { type: 'text', maxlength: max, placeholder: placeholder, autocomplete: 'off', oninput: function () { set(el.value); paintFoot(); } });
+  el.value = value || '';
+  return el;
+}
+function move(i, by) {
+  var p = ed.d.plays, j = i + by;
+  if (j < 0 || j >= p.length) return;
+  var x = p[i]; p[i] = p[j]; p[j] = x;
+  if (ed.open === i) ed.open = j; else if (ed.open === j) ed.open = i;
+  paintEditor();
+}
+function paintEditor() {
+  if (!ed || !ed.doc) return;
+  var doc = ed.doc, d = ed.d, lim = doc.limits, y = ed.root.scrollTop, out = [];
+  ed.title.textContent = (doc.kind === 'reel' ? 'Edit reel' : 'Edit clip') + (doc.version ? ' · ' + doc.version.split(' ')[0] : '');
+  if (doc.why) out.push(h('div', { class: 'block' }, h('p', { class: 'warns', style: 'margin:0', text: '⚠ ' + doc.why })));
+  else if (doc.editing) out.push(h('div', { class: 'block' }, h('p', { class: 'sub', style: 'margin:0', text: 'An edit of this one is being made right now. Wait for that version, then edit again.' })));
+  out.push(h('div', { class: 'block' }, h('h2', { text: doc.title }),
+    h('p', { class: 'sub', text: [doc.game.matchup, doc.kind === 'reel' ? 'Recap reel' : 'Single play', len(doc.length)].filter(Boolean).join(' · ') }),
+    ed.video ? h('p', { class: 'small', text: 'Above is the game’s own footage, uncropped. “Play this cut” shows a stretch of it; the new version is framed, mixed and titled when the PC makes it.' }) : null));
+  if (doc.kind === 'reel') {
+    var used = d.plays.map(function (p) { return p.id; });
+    var spare = (doc.more || []).filter(function (m) { return used.indexOf(m.id) < 0; });
+    out.push(h('div', { class: 'block' }, h('h3', { text: 'Plays, in the order they run' }),
+      d.plays.map(playRow),
+      h('div', { class: 'acts', style: 'margin:12px 0 0' },
+        h('button', { class: 'btn slim', style: 'background:var(--bg2);flex:1', text: ed.adding ? 'Done adding' : '＋ Add a play' + (spare.length ? ' (' + spare.length + ')' : ''), disabled: !spare.length || d.plays.length >= lim.plays,
+                      onclick: function () { ed.adding = !ed.adding; paintEditor(); } }),
+        h('button', { class: 'btn slim', style: 'background:var(--bg2);flex:1', text: 'Number them again', title: 'PLAY 5 … NUMBER 1, in this order', onclick: function () {
+          var n = d.plays.length;
+          d.plays.forEach(function (p, i) { p.label = n - i === 1 ? 'NUMBER 1' : 'PLAY ' + (n - i); });
+          paintEditor();
+        } })),
+      ed.adding && spare.length ? h('div', { class: 'games', style: 'margin-top:10px' }, spare.map(function (m) {
+        var end = Math.min(m.end, m.start + 24);
+        return h('button', { class: 'game', disabled: d.plays.length >= lim.plays, onclick: function () {
+          d.plays.push({ id: m.id, start: m.start, end: end, label: '', badge: '', title: m.title });
+          ed.open = d.plays.length - 1;
+          if (!(doc.more || []).some(function (x) { return x.id !== m.id && used.indexOf(x.id) < 0; })) ed.adding = false;
+          paintEditor();
+        } },
+          h('span', { class: 'em', text: m.found ? '🎯' : '＋' }),
+          h('span', { class: 'col' }, h('span', { class: 'line', text: m.title }), h('span', { class: 'lg', text: (m.found ? 'Found moment' : m.rank ? 'Ranked #' + m.rank : 'A play') + ' · ' + stamp(m.start) + ' into the video' })),
+          h('span', { class: 'when', text: secs(end - m.start) }));
+      })) : null,
+      h('p', { class: 'small', text: 'Tap a play to trim it. Each runs ' + lim.play_min + ' to ' + lim.play_max + ' seconds; the reel, ' + len(lim.longest) + ' at most.' })));
+    var o = d.opening, voice = h('select', { 'aria-label': 'Narrator', onchange: function () { o.voice = voice.value; paintEditor(); } },
+      (doc.choices.voices || []).map(function (x) { return h('option', { value: x.id, selected: o.voice === x.id, text: x.label }); }));
+    out.push(h('div', { class: 'block' }, h('h3', { text: 'Opening' }),
+      epicks('Teaser: the last play, cut off just before its moment', [['1', 'On'], ['', 'Off']], o.on ? '1' : '', function (v) { o.on = !!v; }),
+      etext('Headline over the opening', o.hook, lim.hook, function (v) { o.hook = v; }, false, 'A NIGHT OF BUZZER BEATERS'),
+      h('div', { class: 'field' }, h('label', { text: 'Narrator' }), voice),
+      o.voice !== 'off' ? etext('What the narrator says', o.words, lim.words, function (v) { o.words = v; }, true, 'Two sentences that set the game up.') : null,
+      o.voice !== 'off' ? h('p', { class: 'small', text: 'A narrator’s voice is synthetic, so the video is labelled AI-generated if it’s ever posted.' }) : null));
+    var k = d.look;
+    out.push(h('div', { class: 'block' }, h('h3', { text: 'Sound and picture' }),
+      epicks('Music', opts(doc.choices.music), k.music, function (v) { k.music = v; }),
+      epicks('The game’s own sound', opts(doc.choices.game), k.game, function (v) { k.game = v; }),
+      epicks('Picture', opts(doc.choices.framing), k.framing, function (v) { k.framing = v; }),
+      epicks('Between plays', opts(doc.choices.styles), k.style, function (v) { k.style = v; }),
+      epicks('Score bug', [['1', 'On'], ['', 'Off']], k.bug ? '1' : '', function (v) { k.bug = !!v; })));
+    var w = d.words;
+    out.push(h('div', { class: 'block' }, h('h3', { text: 'Words that go with it' }),
+      etext('Final score line, over the last play', w.final, lim.final, function (v) { w.final = v; }, false, 'Lakers 108-106 Celtics'),
+      etext('Caption', w.caption, lim.caption, function (v) { w.caption = v; }, true),
+      etext('Hashtags', w.hashtags, 200, function (v) { w.hashtags = v; }, false, '#nba #lakers')));
+  } else {
+    var c = d.cut, cw = d.words, ck = d.look;
+    var clen = h('p', { class: 'sub', text: secs(c.end - c.start) + ' · ' + stamp(c.start) + ' – ' + stamp(c.end) + ' of the footage' });
+    out.push(h('div', { class: 'block' }, h('h3', { text: 'The cut' }), clen,
+      trimmer(c, doc.cut, lim.clip_min, lim.clip_max, function () { clen.textContent = secs(c.end - c.start) + ' · ' + stamp(c.start) + ' – ' + stamp(c.end) + ' of the footage'; }),
+      h('p', { class: 'small', text: 'A clip runs ' + lim.clip_min + ' to ' + lim.clip_max + ' seconds.' })));
+    out.push(h('div', { class: 'block' }, h('h3', { text: 'Picture' }),
+      epicks('Shape', opts(doc.choices.aspects), ck.aspect, function (v) { ck.aspect = v; }),
+      ck.aspect === 'vertical_crop' ? h('div', { class: 'field' }, h('label', { text: 'Which part of the picture fills the screen' }),
+        (function () {
+          var r = h('input', { type: 'range', min: 0, max: 1, step: 0.05, 'aria-label': 'Crop position, left to right', oninput: function () { ck.crop_x = Number(r.value); paintFoot(); } });
+          r.value = ck.crop_x; return r;
+        })(), h('div', { class: 'ends' }, h('span', { text: 'Left' }), h('span', { text: 'Middle' }), h('span', { text: 'Right' }))) : null,
+      epicks('Captions of what’s said', [['1', 'On'], ['', 'Off']], ck.captions ? '1' : '', function (v) { ck.captions = !!v; })));
+    out.push(h('div', { class: 'block' }, h('h3', { text: 'Words' }),
+      etext('Headline over the clip (empty for none)', cw.headline, lim.headline, function (v) { cw.headline = v; }, false, 'HE CALLED GAME'),
+      etext('Caption', cw.caption, lim.caption, function (v) { cw.caption = v; }, true),
+      etext('Hashtags', cw.hashtags, 200, function (v) { cw.hashtags = v; }, false, '#nba #lakers')));
+  }
+  out.push(h('div', { class: 'gap' }));
+  // The control that was pressed is drawn again: keep the keyboard's place on it.
+  var sel = 'button,input,select,textarea', at = -1, was = document.activeElement;
+  if (was && ed.body.contains(was)) at = Array.prototype.indexOf.call(ed.body.querySelectorAll(sel), was);
+  clear(ed.body); add(ed.body, out);
+  if (at >= 0) {
+    var now = ed.body.querySelectorAll(sel)[at];
+    if (now && now.tagName === was.tagName && now.type === was.type && !now.disabled) { try { now.focus({ preventScroll: true }); } catch (e) {} }
+  }
+  ed.root.scrollTop = y;
+  paintFoot();
+}
+function paintFoot() {
+  if (!ed || !ed.doc) return;
+  var doc = ed.doc, d = ed.d, why = edProblem(), dirty = edDirty();
+  var total = doc.kind === 'reel' ? reelLength() : d.cut.end - d.cut.start;
+  var head = doc.kind === 'reel' ? len(total) + ' · ' + plural(d.plays.length, 'play') : secs(total);
+  var note = why && !doc.why ? why : doc.why ? 'Can’t be edited' : doc.editing ? 'An edit is being made' : dirty ? 'The PC cuts a new version; this one stays' : 'Nothing changed yet';
+  clear(ed.foot);
+  add(ed.foot, [h('div', { class: 'sum' + (why && !doc.why ? ' bad' : '') }, head, h('small', { text: note })),
+    dirty ? h('button', { class: 'textbtn', text: 'Reset', disabled: ed.busy, onclick: function () { ed.d = draftOf(doc); ed.open = -1; ed.adding = false; paintEditor(); } }) : null,
+    h('button', { class: 'btn primary slim', text: ed.busy ? 'Sending…' : 'Make this version', disabled: ed.busy || !dirty || !!why || !!doc.editing, onclick: function () {
+      var id = ed.id;
+      ed.busy = true; paintFoot();
+      api('POST', 'api/videos/' + encodeURIComponent(id) + '/edit', { changes: changesOf() }).then(function (r) {
+        if (ed && ed.id === id) closeEditor(true);
+        toast(r.message || 'The PC is cutting the new version.');
+        S.last.sheet = S.last.sheetfix = null;
+        paint(true);
+        return refresh();
+      }, function (e) {
+        if (ed && ed.id === id) { ed.busy = false; paintFoot(); }
+        if (e.status === 401) { closeEditor(true); return locked(e); }
+        toast(e.message || 'The edit couldn’t be sent.', !(e.status === 400 && /Nothing was changed/.test(e.message || '')));
+      });
+    } })]);
 }
 
 // --- make --------------------------------------------------------------------------------------------
@@ -764,7 +1217,13 @@ function onPC() {
 function wantPicks(d, f) {
   var need = (d.requires || {}).min_seconds;
   return [picks('Make', [['reel', 'A recap reel'], ['both', 'Reel and single plays'], ['clips', 'Single plays']], f.want, function (v) { f.want = v; }),
-    f.want !== 'reel' && need ? h('p', { class: 'small warnline', text: 'Single plays run 15 to 40 seconds, and a request’s videos have to be over ' + Math.round(need - 1) + ' s: they’ll wait for an OK instead of posting.' }) : null];
+    f.want !== 'reel' && need && f.deliver === 'post' ? h('p', { class: 'small warnline', text: 'Single plays run 15 to 40 seconds, and a request’s videos have to be over ' + Math.round(need - 1) + ' s: they’ll wait for an OK instead of posting.' }) : null];
+}
+// Where it goes: yours to download (no account, no queue), or the posting queue of a category's account.
+function deliverPick(d, f, sportId) {
+  return [picks('When it’s made', [['download', 'I’ll download it'], ['post', 'Queue it to post']], f.deliver, function (v) { f.deliver = v; }),
+    f.deliver === 'post' ? catPick(d, f, sportId)
+      : h('p', { class: 'small', text: 'It lands under Videos → Downloads: save it to your device, edit it, or queue it to post later. It isn’t tied to a TikTok account and nothing posts by itself.' })];
 }
 function catPick(d, f, sportId) {
   var cats = d.categories || [];
@@ -786,7 +1245,7 @@ function sportsForm() {
   var orders = d.orders || [];
   return [onPC(), h('div', { class: 'block' }, how, form,
       full ? h('p', { class: 'small', text: plural(open.length, 'request') + ' are waiting or under way: wait for one to finish, or cancel one.' }) : null,
-      h('p', { class: 'small', text: 'Automation finds the game’s highlights on YouTube, picks its best plays and makes them on the PC, with your name on the request. What it makes is checked before it’s handed over: over a minute, upright, with sound. League footage often gets copyright claims on TikTok.' })),
+      h('p', { class: 'small', text: 'Automation finds the game’s highlights on YouTube, picks its best plays and makes them on the PC, with your name on the request. What’s queued to post is checked first: over a minute, upright, with sound. League footage often gets copyright claims on TikTok.' })),
     orders.length ? h('div', { class: 'block' }, h('h3', { text: 'Sports requests' }), orders.map(orderRow)) : null];
 }
 // Pick a game: the last 24 hours from the scoreboards, by drop-down or from the list under it.
@@ -825,8 +1284,8 @@ function pickForm(d, f, full) {
   }));
   var go = h('button', { class: 'btn primary wide', text: chosen ? (f.want === 'clips' ? 'Make its best plays' : 'Make its reel') : 'Pick a game first',
                          disabled: S.busy || full || !chosen, onclick: function () {
-    var body = { game: f.game, want: f.want, plays: f.plays };
-    if (f.cat) body.category = f.cat;
+    var body = { game: f.game, want: f.want, plays: f.plays, deliver: f.deliver };
+    if (f.cat && f.deliver === 'post') body.category = f.cat;
     act(api('POST', 'api/sports/order', body), function () { f.game = ''; });
   } });
   var finals = games.filter(function (g) { return g.ready; }).length;
@@ -842,7 +1301,7 @@ function pickForm(d, f, full) {
       (p.problems || []).length ? h('p', { class: 'small warnline', text: 'Not read: ' + p.problems.slice(0, 3).join(' ') }) : null),
     wantPicks(d, f),
     f.want !== 'reel' ? picks('Single plays', [3, 5, 7].map(function (n) { return [n, 'Top ' + n]; }), f.plays, function (v) { f.plays = v; }) : null,
-    catPick(d, f, chosen ? chosen.sport : f.psport),
+    deliverPick(d, f, chosen ? chosen.sport : f.psport),
     h('div', { class: 'gap' }), go,
     h('p', { class: 'small', text: 'A game still being played can be picked once it’s over. The scoreboards cover soccer, basketball, American football, hockey and baseball; for anything else, describe it.' }));
 }
@@ -872,8 +1331,8 @@ function sayForm(d, f, full) {
   function can() { return !S.busy && !full && !!(f.sport || f.league.trim() || f.teams.trim()); }
   function ready() { go.disabled = !can(); }
   var go = h('button', { class: 'btn primary wide', text: f.want === 'clips' ? 'Make the best plays' : 'Make the reel', disabled: !can(), onclick: function () {
-    var body = { sport: f.sport, league: f.league.trim(), teams: f.teams.trim(), since: f.since, want: f.want, games: f.games, plays: f.plays };
-    if (f.cat) body.category = f.cat;
+    var body = { sport: f.sport, league: f.league.trim(), teams: f.teams.trim(), since: f.since, want: f.want, games: f.games, plays: f.plays, deliver: f.deliver };
+    if (f.cat && f.deliver === 'post') body.category = f.cat;
     act(api('POST', 'api/sports/order', body), function () { f.teams = ''; });
     teams.blur(); league.blur();
   } });
@@ -887,7 +1346,7 @@ function sayForm(d, f, full) {
     wantPicks(d, f),
     f.want !== 'reel' ? picks('Single plays per game', [3, 5, 7].filter(function (n) { return n <= most.plays; }).map(function (n) { return [n, 'Top ' + n]; }), f.plays, function (v) { f.plays = v; }) : null,
     picks('Games', [1, 2, 3].filter(function (n) { return n <= most.games; }).map(function (n) { return [n, n === 1 ? 'The newest' : 'Newest ' + n]; }), f.games, function (v) { f.games = v; }),
-    catPick(d, f, sport ? sport.id : ''),
+    deliverPick(d, f, sport ? sport.id : ''),
     h('div', { class: 'gap' }), go);
 }
 // Find a moment: say it, and (when the words don't name the game) pick the game it's in.
@@ -927,7 +1386,7 @@ function momentRow(o, m, baskets) {
     m.quote ? h('div', { class: 'q', text: '“' + clip(m.quote, 200) + '”' }) : null,
     h('div', { class: 'acts' },
       h('button', { class: 'btn slim', text: '🎬 Clip play (' + secs + 's)', disabled: S.busy, onclick: function () {
-        act(api('POST', 'api/sports/moments', { game: m.game, ids: [m.id], want: 'clips' }));
+        act(api('POST', 'api/sports/moments', { game: m.game, ids: [m.id], want: 'clips', deliver: S.sp.deliver }));
       } }),
       h('button', { class: 'btn slim' + (inside ? ' primary' : ''), text: inside ? '✓ In the reel' : '➕ Add to reel', disabled: S.busy, onclick: function () {
         act(api('POST', 'api/sports/basket', { game: m.game, id: m.id, add: !inside }).then(function (r) { return { message: inside ? 'Taken out of the reel' : plural(r.basket.length, 'moment') + ' set aside for the reel' }; }));
@@ -957,12 +1416,14 @@ function orderRow(o) {
                 : h('div', { class: 'now', text: 'Nothing found. Try the words a commentator would use, or a player’s name.' }),
       ms.map(function (m) { return momentRow(o, m, baskets); }),
       set.length ? h('button', { class: 'btn primary wide', style: 'margin-top:10px', text: '🎞 Make the reel (' + plural(set.length, 'moment') + ')', disabled: S.busy, onclick: function () {
-        act(api('POST', 'api/sports/moments', { game: gid, ids: set, want: 'reel' }));
+        act(api('POST', 'api/sports/moments', { game: gid, ids: set, want: 'reel', deliver: S.sp.deliver }));
       } }) : null,
-      ms.length ? h('p', { class: 'small', text: 'A single play is under a minute, so a clipped moment waits for an OK instead of posting by itself. Three or more moments make a reel that’s over a minute.' }) : null);
+      ms.length ? picks('What’s made from these', [['download', 'I’ll download it'], ['post', 'Queue it to post']], S.sp.deliver, function (v) { S.sp.deliver = v; }) : null,
+      ms.length && S.sp.deliver === 'post' ? h('p', { class: 'small', text: 'A single play is under a minute, so a clipped moment waits for an OK instead of posting by itself. Three or more moments make a reel that’s over a minute.' }) : null);
   }
   var now = open ? h('div', { class: 'now', text: o.doing || 'Waiting its turn on the PC' })
-    : o.status === 'done' ? h('div', { class: 'now good' }, made.length ? ['Ready under Videos', h('ul', {}, made.map(function (s) { return h('li', { text: s.said || s.kind }); }))] : (o.message || 'Done'))
+    : o.status === 'done' ? h('div', { class: 'now good' }, made.length ? [o.deliver === 'download' ? 'Ready to download' : 'Ready under Videos', h('ul', {}, made.map(function (s) { return h('li', { text: s.said || s.kind }); })),
+        o.deliver === 'download' ? h('button', { class: 'textbtn', text: 'Open Downloads ›', onclick: function () { S.tab = 'videos'; S.filter = 'download'; paint(true); window.scrollTo(0, 0); } }) : null] : (o.message || 'Done'))
     : o.status === 'cancelled' ? h('div', { class: 'now', text: 'Cancelled' })
     : h('div', { class: 'now bad', text: 'Couldn’t be done: ' + (o.error || 'it failed') });
   var rv = o.review || {}, check = null;
@@ -1018,7 +1479,8 @@ function videoForm() {
 var DID = {
   ok: ['OK’d', ' to post'], 'delete': ['deleted', ''], post_now: ['posted', ' right away'], retry: ['queued', ' to post again'],
   critique: ['asked for', ' to be made again'], make: ['asked for a video about', ''], clip: ['asked to clip', ''],
-  request: ['asked for', ''], sports: ['asked for sports highlights:', ''], find: ['searched a game:', ''], approve: ['picked', ' to post'],
+  request: ['asked for', ''], sports: ['asked for sports highlights:', ''], find: ['searched a game:', ''], approve: ['picked', ' to post'], keep: ['kept', ''],
+  edit: ['edited', ''], download: ['took the file of', ''], queue: ['queued', ' to post'],
   cancel: ['cancelled the request for', ''], pause: ['paused automation', ''],
   resume: ['resumed automation', ''], join: ['joined', ''], leave: ['left', ''], remove: ['removed', '']
 };
@@ -1096,8 +1558,10 @@ function start() {
   }).then(function () {
     if (!S.me || !S.videos) return;
     if (S.invite && S.people.length > 1) S.invite = null;
-    var want = new URLSearchParams(window.location.search).get('v') || (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) || '';
-    if (want && find(want)) openVideo(want);
+    var asked = new URLSearchParams(window.location.search);
+    var want = asked.get('v') || (tg && tg.initDataUnsafe && tg.initDataUnsafe.start_param) || '';
+    if (want && find(want)) { S.filter = find(want).state === 'download' ? 'download' : S.filter; openVideo(want); if (asked.get('e') === '1' && find(want).editable) openEditor(want); }
+    else if (!videosIn('review').length && videosIn('download').length) { S.filter = 'download'; paint(); }
     else if (!videosIn('review').length && videosIn('queue').length) { S.filter = 'queue'; paint(); }
     clearInterval(timer);
     timer = setInterval(function () { if (!document.hidden && !S.busy) refresh().then(function () { if (S.invite && S.people.length > 1) { S.invite = null; paint(); } }); }, 8000);
@@ -1111,10 +1575,10 @@ function start() {
 }
 if (tg) {
   try { tg.ready(); tg.expand(); } catch (e) {}
-  if (tg.BackButton) { try { tg.BackButton.onClick(function () { closeSheet(); }); } catch (e) {} }
+  if (tg.BackButton) { try { tg.BackButton.onClick(function () { if (ed) leaveEditor(); else closeSheet(); }); } catch (e) {} }
 }
 document.addEventListener('visibilitychange', function () { if (!document.hidden && S.me) refresh(); });
-window.__clipmonster = { state: S, open: openVideo };
+window.__clipmonster = { state: S, open: openVideo, edit: openEditor, editor: function () { return ed; } };
 start();
 })();
 """
