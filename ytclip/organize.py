@@ -16,6 +16,8 @@ _ILLEGAL = re.compile(r'[<>:"/\\|?*\x00-\x1f]')
 PATH_LIMIT = 250
 
 
+EXPORTING = ".exporting"  # in a folder whose clips are still being exported: its clips.json isn't written yet
+
 def safe_name(text: str, max_len: int = 60) -> str:
     text = _ILLEGAL.sub("", str(text))
     text = " ".join(text.split()).strip(" .")

@@ -880,7 +880,19 @@ function changesOf() {
   }
   return { cut: d.cut, words: d.words, look: d.look };
 }
-function edDirty() { return !!ed && !!ed.doc && JSON.stringify(ed.d) !== JSON.stringify(draftOf(ed.doc)); }
+// What the PC would read from a draft: spaces squeezed, labels in capitals, hashtags as a list. Two drafts that
+// read the same aren't a change (the PC would answer "Nothing was changed").
+function edNorm(x) {
+  x = copy(x);
+  var t = function (v) { return String(v || '').split(/\s+/).filter(Boolean).join(' '); };
+  var tags = function (v) { return String(v || '').split(/[\s,]+/).map(function (w) { return w.replace(/^#+/, '').toLowerCase(); }).filter(Boolean).join(' '); };
+  (x.plays || []).forEach(function (p) { p.label = t(p.label).toUpperCase(); p.badge = t(p.badge).toUpperCase(); });
+  if (x.opening) { x.opening.hook = t(x.opening.hook); x.opening.words = t(x.opening.words); }
+  if (x.words) Object.keys(x.words).forEach(function (k) { x.words[k] = k === 'hashtags' ? tags(x.words[k]) : t(x.words[k]); });
+  if (x.look && 'aspect' in x.look && x.look.aspect !== 'vertical_crop') delete x.look.crop_x;
+  return x;
+}
+function edDirty() { return !!ed && !!ed.doc && JSON.stringify(edNorm(ed.d)) !== JSON.stringify(edNorm(draftOf(ed.doc))); }
 function reelLength() {
   var d = ed.d, lim = ed.doc.limits, n = d.plays.length, tr = lim.transition || 0.25;
   var total = d.plays.reduce(function (a, p) { return a + (p.end - p.start); }, 0);
@@ -897,6 +909,7 @@ function edProblem() {
     var total = reelLength();
     if (total > lim.longest) return 'That’s ' + len(total) + ': ' + len(lim.longest) + ' at most. Trim a play or take one out.';
     if (total < 5) return 'That’s under 5 seconds.';
+    if (d.opening.voice !== 'off' && !String(d.opening.words || '').trim()) return 'Write what the narrator says, or pick No narrator.';
   }
   return '';
 }
@@ -952,6 +965,9 @@ function edStage() {
     ed.video.addEventListener('timeupdate', function () {
       if (ed && ed.stop != null && ed.video.currentTime >= ed.stop) { ed.video.pause(); ed.stop = null; }
     });
+    // Scrubbing somewhere else by hand lets go of "stop at the cut's end".
+    ed.video.addEventListener('seeking', function () { if (ed && !ed.cue) ed.stop = null; });
+    ed.video.addEventListener('seeked', function () { if (ed) ed.cue = false; });
     ed.video.addEventListener('error', function () {
       if (!ed) return;
       ed.video = null;
@@ -969,8 +985,8 @@ function edStage() {
 }
 function playCut(a, b) {
   if (!ed || !ed.video) return;
-  ed.stop = b;
-  try { ed.video.currentTime = a; var p = ed.video.play(); if (p && p.catch) p.catch(function () {}); } catch (e) {}
+  ed.cue = true; ed.stop = b;
+  try { ed.video.currentTime = a; var p = ed.video.play(); if (p && p.catch) p.catch(function () {}); } catch (e) { ed.cue = false; }
 }
 function epicks(label, options, value, set) {
   return h('div', { class: 'field' }, h('label', { text: label }), h('div', { class: 'picks', role: 'group', 'aria-label': label }, options.map(function (o) {
@@ -1138,7 +1154,14 @@ function paintEditor() {
       etext('Hashtags', cw.hashtags, 200, function (v) { cw.hashtags = v; }, false, '#nba #lakers')));
   }
   out.push(h('div', { class: 'gap' }));
+  // The control that was pressed is drawn again: keep the keyboard's place on it.
+  var sel = 'button,input,select,textarea', at = -1, was = document.activeElement;
+  if (was && ed.body.contains(was)) at = Array.prototype.indexOf.call(ed.body.querySelectorAll(sel), was);
   clear(ed.body); add(ed.body, out);
+  if (at >= 0) {
+    var now = ed.body.querySelectorAll(sel)[at];
+    if (now && now.tagName === was.tagName && now.type === was.type && !now.disabled) { try { now.focus({ preventScroll: true }); } catch (e) {} }
+  }
   ed.root.scrollTop = y;
   paintFoot();
 }
@@ -1163,7 +1186,7 @@ function paintFoot() {
       }, function (e) {
         if (ed && ed.id === id) { ed.busy = false; paintFoot(); }
         if (e.status === 401) { closeEditor(true); return locked(e); }
-        toast(e.message || 'The edit couldn’t be sent.', true);
+        toast(e.message || 'The edit couldn’t be sent.', !(e.status === 400 && /Nothing was changed/.test(e.message || '')));
       });
     } })]);
 }

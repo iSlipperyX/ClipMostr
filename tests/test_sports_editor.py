@@ -634,3 +634,147 @@ def test_the_page_has_downloads_and_the_editor():
                    "I’ll download it", "Number them again", "Make this version"):
         assert needle in js, needle
     assert ".ed-foot" in mini_app_page.CSS and ".trim" in mini_app_page.CSS
+
+
+# ---------------------------------------------------------------- what a second review found
+
+
+def test_a_folder_still_being_exported_is_left_alone_until_its_index_is_written(world):  # noqa: F811
+    """clips.json comes last in an export, and it's what says a clip is only to download: a clip that's been
+    sitting finished for over a minute isn't taken (and queued) before it."""
+    import os
+
+    from ytclip.organize import EXPORTING
+
+    w = world
+    folder = w.root / "Sports" / "Highlights" / "2026-11-11 Heat at Knicks"
+    folder.mkdir(parents=True)
+    clip = folder / "01 - dunk.mp4"
+    make_video(clip)
+    old = w.clock[0] - 90
+    os.utime(clip, (old, old))
+    (folder / EXPORTING).write_text("")
+    os.utime(folder / EXPORTING, (w.clock[0] - 30, w.clock[0] - 30))
+    assert w.take() == [] and w.store.queue() == []
+    (folder / "clips.json").write_text(json.dumps({
+        "video": {"id": "v1"}, "automation": {"keep": "download"}, "clips": [ROW | {"rank": 1, "qc": {"ok": True}}]}))
+    (folder / EXPORTING).unlink()
+    it, = w.take()
+    assert (it.keep, it.status, it.account) == ("download", "new", "")
+    # a marker a crash left behind doesn't strand a folder for good
+    other = w.root / "Sports" / "Highlights" / "2026-11-10 Old"
+    other.mkdir(parents=True)
+    make_video(other / "01 - old.mp4")
+    os.utime(other / "01 - old.mp4", (old, old))
+    (other / EXPORTING).write_text("")
+    os.utime(other / EXPORTING, (w.clock[0] - 7 * 3600, w.clock[0] - 7 * 3600))
+    assert len(w.take()) == 1
+
+
+def test_the_engine_marks_a_folder_while_it_exports(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from ytclip import engine as eng
+    from ytclip.organize import EXPORTING
+
+    seen = []
+    e = eng.Engine.__new__(eng.Engine)
+    e.s = SimpleNamespace(output_path=tmp_path, folder_template="")
+    monkeypatch.setattr(eng, "video_dir", lambda root, v, t: tmp_path / "out")
+
+    def into(p, clips, folder):
+        seen.append((folder / EXPORTING).is_file())
+        raise RuntimeError("stopped")
+
+    e._export_into = into
+    with pytest.raises(RuntimeError):
+        e._export(SimpleNamespace(video=object(), media=object()))
+    assert seen == [True] and not (tmp_path / "out" / EXPORTING).exists()  # and taken away however it ends
+
+
+def test_an_edit_of_a_download_that_was_queued_goes_where_that_one_went(editing):
+    w = editing
+    d = w.session(SAM)
+    status, r, _ = w.call("POST", f"/api/videos/{w.it.id}/queue", {"category": "h1"}, token=d["token"])
+    assert status == 200 and (w.it.keep, w.it.status, w.it.account) == ("", "queued", w.account.id)
+    status, r, _ = w.call("POST", f"/api/videos/{w.it.id}/edit", {"changes": {"look": {"bug": False}}},
+                          token=d["token"])
+    assert status == 200 and r["held"] is True and "approve the one to post" in r["message"]
+    run(w.worker)
+    new, = w.take()
+    assert (new.keep, new.status, new.account, new.category_id) == ("", "queued", w.account.id, "h1")
+    # and keeping a download never deletes a version that's queued to post
+    new.keep, new.status, new.account, new.queue_pos = "download", "new", "", None
+    w.bot.check(w.clock[0])
+    status, r, _ = w.call("POST", f"/api/videos/{new.id}/approve", token=d["token"])
+    assert status == 200 and w.store.get(w.it.id) is not None and Path(w.it.path).is_file()
+
+
+def test_a_reel_made_before_its_plan_noted_how_is_edited_as_it_was_really_made(tmp_path):
+    folder = reel_folder(tmp_path)
+    name = "01 - Lakers at Celtics.mp4"
+    plan = plan_json()
+    (folder / "reel.json").write_text(json.dumps(plan))  # no "made"
+    index = json.loads((folder / "clips.json").read_text())
+    index["sports"]["made"] = {"framing": [{"framing": "fit"}, {"framing": "fit"}],
+                               "narrator": {"voice": "en_calm", "engine": "kokoro"}}
+    (folder / "clips.json").write_text(json.dumps(index))
+    got = E.plan_of(folder, name)
+    assert got["made"] == {"framing": "fit", "voice": "en_calm"}
+    doc = E.describe(folder, name, game())
+    assert (doc["look"]["framing"], doc["opening"]["voice"]) == ("fit", "en_calm")
+    ed = E.reel_edit(got, {"words": {"caption": "New"}}, game())
+    assert (ed.framing, ed.voice, ed.changed) == ("fit", "en_calm", ["changed the caption"])
+    index["sports"]["made"] = {"framing": [{"framing": "follow"}]}  # no narrator was laid in: none is added
+    (folder / "clips.json").write_text(json.dumps(index))
+    assert E.plan_of(folder, name)["made"] == {"framing": "follow", "voice": "off"}
+
+
+def test_small_things_the_phone_can_send():
+    plan = plan_json()
+    plays = rows(plan)
+    # a number too big to be one is read as "not given", not a crash
+    ed = E.reel_edit(plan, {"plays": [dict(plays[0], start=10 ** 400)] + plays[1:], "words": {"caption": "x"}},
+                     game())
+    assert ed.reel.plays[0].start == plays[0]["start"]
+    # the opening is never cut from before its play's own (trimmed) start
+    best = plan["segments"][0]["hid"]
+    p = next(x for x in plays if x["id"] == best)
+    moment = next(s["moment"] for s in plan["segments"] if s["kind"] == "play" and s["hid"] == best)
+    trimmed = [dict(x, start=round(moment - 1.0, 2)) if x["id"] == best else x for x in plays]
+    assert p["start"] < moment - 1.0
+    ed = E.reel_edit(plan, {"plays": trimmed}, game())
+    teaser = ed.reel.segments[0]
+    play = next(s for s in ed.reel.plays if s.hid == best)
+    assert teaser.kind != "teaser" or teaser.start >= play.start
+    # a category's own shape (square, say) stays unless one of the editor's two is picked
+    look = LOOK | {"aspect": "square_blur"}
+    ed = E.clip_edit(ROW, look, {"words": {"caption": "New"}, "look": {"aspect": "square_blur"}}, 800.0)
+    assert ed.look["aspect"] == "square_blur" and ed.changed == ["changed the caption"]
+    with pytest.raises(E.EditError, match="Pick the picture's shape"):
+        E.clip_edit(ROW, look, {"look": {"aspect": "round"}}, 800.0)
+
+
+def test_post_as_part_of_another_word_isnt_a_request_to_post():
+    from ytclip.telegram import bot as botmod
+
+    for text in ("NBA Lakers vs Celtics post-game", "NFL post season Chiefs Bills", "UFC post fight"):
+        assert "deliver" not in botmod.parse_sports(text), text
+    assert botmod.parse_sports("NBA Heat Knicks post")["deliver"] == "post"
+    assert botmod.parse_sports("NBA Lakers Celtics and post them to TikTok please")["deliver"] == "post"
+
+
+def test_a_failed_edit_leaves_the_game_as_it_was(desk, worker, edits, monkeypatch):  # noqa: F811
+    from ytclip.sportsdesk import reel as R
+
+    folder, name = desk_reel(desk, worker)
+    r = desk.edit(folder, name, {"look": {"bug": False}})
+
+    def boom(*a, **k):
+        raise RuntimeError("ffmpeg fell over")
+
+    monkeypatch.setattr(R, "make", boom)
+    run(worker)
+    g = desk.game("v0")
+    assert desk.edit_state(r["id"])["status"] == "failed" and "ffmpeg fell over" in desk.edit_state(r["id"])["error"]
+    assert (g["status"], g.get("error") or "") == ("ready", "")

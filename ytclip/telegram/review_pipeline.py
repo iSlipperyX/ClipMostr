@@ -549,6 +549,9 @@ class ReviewPipeline:
                 raise Refused("Another version of it is still being made. Wait for it, then pick.")
             mine = self.version_label(it, data) or "this one"
             others = [(n, x) for n, x in self.versions(it, data, store) if x.id != it.id]
+            if it.keep and it.status == "new":
+                # Keeping a download deletes the other downloads, never a version that's queued to post.
+                others = [(n, x) for n, x in others if x.keep and x.status == "new"]
             if store.approve([it.id]):
                 self.save(store)
             gone, kept = [], []
@@ -720,6 +723,7 @@ class ReviewPipeline:
                 chat, item_id, note, live = self.uploads.get(timeout=1.0)
             except queue.Empty:
                 continue
+            key = (chat, f"file:{item_id}" if note == FILE_NOTE else item_id)
             try:
                 if note == FILE_NOTE:  # the file itself, to save (editor_handler.py)
                     if not self.stop_event.is_set():
@@ -734,7 +738,7 @@ class ReviewPipeline:
                 self.log(f"⚠ Couldn't send a video: {type(exc).__name__}: {exc}")
             finally:
                 with self._sending_lock:
-                    self.sending.discard((chat, item_id))
+                    self.sending.discard(key)
 
     @contextmanager
     def _busy(self, chat: int, action: str = "typing"):

@@ -21,7 +21,7 @@ from .download import Video, download, is_url, local_video
 from .export import export_clip, thumbnail, tiktok_warnings
 from .export import frame as export_frame
 from .ffmpeg import Cancelled, MediaInfo, probe
-from .organize import clip_filename, video_dir, write_index
+from .organize import EXPORTING, clip_filename, video_dir, write_index
 from .scenes import detect_scenes
 from .settings import Settings, work_folder
 from .stackpool import StackPool, pool_files
@@ -673,13 +673,31 @@ class Engine:
                                    - (p.timings.get("check", 0.0) - check_before))
 
     def _export(self, p: Project, clips: list[Clip] | None = None) -> Path:
-        v, media = p.video, p.media
-        assert v is not None and media is not None
+        v = p.video
+        assert v is not None and p.media is not None
+        folder = video_dir(self.s.output_path, v, self.s.folder_template)
+        folder.mkdir(parents=True, exist_ok=True)
+        # Until clips.json is written, the clips already in the folder say nothing about themselves (their
+        # category, their caption, whether they're only to download): posting leaves the folder alone
+        # while this is here (posting/store.py).
+        marker = folder / EXPORTING
+        try:
+            marker.write_text("", encoding="utf-8")
+        except OSError:
+            pass
+        try:
+            return self._export_into(p, clips, folder)
+        finally:
+            try:
+                marker.unlink()
+            except OSError:
+                pass
+
+    def _export_into(self, p: Project, clips: list[Clip] | None, folder: Path) -> Path:
+        v = p.video
         clips = [c for c in (clips if clips is not None else p.clips) if c.enabled]
         self.retype(p, clips)  # clips added or moved since: their own words, before captions are made
-        folder = video_dir(self.s.output_path, v, self.s.folder_template)
         thumbs = folder / "thumbnails"
-        folder.mkdir(parents=True, exist_ok=True)
         if self.s.thumbnails:
             thumbs.mkdir(exist_ok=True)
         self._remove_previous_export(folder)

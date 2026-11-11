@@ -1667,6 +1667,8 @@ class DeskWorker:
                                  self.desk.order_step(order, task["game"], task["kind"], "failed", why))
             if task["kind"] == "order":
                 pass  # (the Sports page's own search isn't this one)
+            elif task["kind"] == "edit":
+                self._settle(task, "")  # the game is as it was; why is on the edit (edit_state)
             elif task["game"]:
                 def fn(g):
                     g.update(status="failed" if not g.get("highlights") or task["kind"] == "highlights" else "ready",
@@ -2288,7 +2290,7 @@ class DeskWorker:
                                               "of": src, "length": round(length, 1), "by": pay.get("by") or "",
                                               "changed": list(ed.changed)[:8]})
             x["edits"] = x["edits"][-20:]
-            x.update(status="ready", stage="", frac=None, error="")
+            x.update(status="ready" if x.get("highlights") else "found", stage="", frac=None, error="")
 
         self.desk.change(g["id"], fn)
         task["out"] = {"folder": str(folder), "file": str(folder / new), "clips": 1, "length": round(length, 1)}

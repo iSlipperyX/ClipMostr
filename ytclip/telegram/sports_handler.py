@@ -84,7 +84,9 @@ def parse_sports(text: str) -> dict:
     if m:
         out["games"] = int(m.group(1))
     # Made to download unless posting is asked for ("... and post it", "queue it")
-    if take(r"\b(?:and\s+)?(?:post|queue)(?:\s+(?:it|them))?(?:\s+to\s+tiktok)?\b"):
+    # ("post-game", "post season" and "post fight" are not that: it takes "it", "them", "to TikTok" or the end)
+    if take(r"(?<![\w-])(?:and\s+)?(?:post|queue)(?:\s+(?:it|them)(?:\s+to\s+tiktok)?|\s+to\s+tiktok|(?=[\s.!?]*$))"
+            r"(?![\w-])"):
         out["deliver"] = "post"
     elif take(r"\b(?:to\s+|for\s+)?download(?:s|ing)?(?:\s+only)?\b"):
         out["deliver"] = "download"

@@ -85,6 +85,16 @@ def plan_of(folder: Path, name: str) -> dict | None:
         except (OSError, ValueError):
             continue
         if isinstance(data, dict) and isinstance(data.get("segments"), list):
+            if not isinstance(data.get("made"), dict):
+                # A reel made before 3.13 didn't note how in its plan: clips.json says how it was framed,
+                # and the narrator's voice when one was laid in.
+                info = (index_of(folder).get("sports") or {}).get("made")
+                info = info if isinstance(info, dict) else {}
+                framed = info.get("framing") if isinstance(info.get("framing"), list) else []
+                first = framed[0] if framed and isinstance(framed[0], dict) else {}
+                narrator = info.get("narrator") if isinstance(info.get("narrator"), dict) else {}
+                data["made"] = {"framing": str(first.get("framing") or "follow"),
+                                "voice": str(narrator.get("voice") or "off")}
             return data
     return None
 
@@ -192,9 +202,17 @@ def _tags(v) -> list[str]:
 def _num(v, default: float) -> float:
     try:
         x = float(v)
-    except (TypeError, ValueError):
+    except (TypeError, ValueError, OverflowError):
         return default
     return x if x == x and abs(x) != float("inf") else default
+
+
+def _spare_span(h: dict) -> tuple[float, float]:
+    """The stretch of a play that isn't in the reel yet, as adding it takes it."""
+    a, b = float(h["start"]), float(h["end"])
+    if b - a > 24.0:  # a long found moment: its middle, as the first cut would take it
+        a, b = montage.cut_around(montage.moment_of(h, None), 24.0, a, b, [])
+    return a, b
 
 
 def _voices() -> list[dict]:
@@ -241,7 +259,7 @@ def describe(folder: Path, name: str, game: dict | None, s=None, look: dict | No
                          "moment": round(seg.moment, 2), "label": seg.label,
                          "badge": reel.story.badges.get(seg.hid) or seg.badge, "title": seg.title or seg.play,
                          "rank": seg.rank} for seg in reel.plays]
-        out["more"] = [{"id": h["id"], "start": round(float(h["start"]), 2), "end": round(float(h["end"]), 2),
+        out["more"] = [{"id": h["id"], "start": round(_spare_span(h)[0], 2), "end": round(_spare_span(h)[1], 2),
                         "title": _text(h.get("title") or h.get("play") or h.get("label") or "A play", 80),
                         "rank": h.get("rank") or 0, "found": h.get("origin") == "event"}
                        for h in sorted((game or {}).get("highlights") or [], key=lambda h: h.get("rank") or 99)
@@ -264,9 +282,11 @@ def describe(folder: Path, name: str, game: dict | None, s=None, look: dict | No
                         "caption": _text(row.get("caption") or row.get("hook") or "", CAPTION_MAX),
                         "hashtags": " ".join(f"#{str(h).lstrip('#')}" for h in row.get("hashtags") or [])}
         aspect = str(look.get("aspect") or "vertical_blur")
-        out["look"] = {"captions": bool(look.get("captions")), "aspect": aspect if aspect in ASPECTS else
-                       "vertical_blur", "crop_x": round(max(0.0, min(1.0, _num(look.get("crop_x"), 0.5))), 2)}
-        out["choices"] = {"aspects": _options(ASPECTS)}
+        out["look"] = {"captions": bool(look.get("captions")), "aspect": aspect,
+                       "crop_x": round(max(0.0, min(1.0, _num(look.get("crop_x"), 0.5))), 2)}
+        # A category that exports another shape (square, landscape): it stays unless one of these is picked.
+        out["choices"] = {"aspects": ([] if aspect in ASPECTS else [{"id": aspect, "label": "As it was made"}])
+                          + _options(ASPECTS)}
         out["limits"] |= {"clip_min": CLIP_MIN, "clip_max": CLIP_MAX, "headline": HOOK_MAX}
     return out
 
@@ -336,9 +356,7 @@ def reel_edit(plan: dict, edit: dict, game: dict | None = None, duration: float 
                 seg = copy.deepcopy(old[hid])
             elif hid in spare:
                 h = spare[hid]
-                a, b = float(h["start"]), float(h["end"])
-                if b - a > 24.0:  # a long found moment: its middle, as the first cut would take it
-                    a, b = montage.cut_around(montage.moment_of(h, None), 24.0, a, b, [])
+                a, b = _spare_span(h)
                 seg = montage.Segment("play", hid, round(a, 3), round(b, 3), round(montage.moment_of(h, None), 3),
                                       int(h.get("rank") or 0), "", str(h.get("play") or h.get("label") or ""),
                                       str(h.get("title") or ""), [str(x) for x in h.get("players") or []][:3])
@@ -414,6 +432,7 @@ def reel_edit(plan: dict, edit: dict, game: dict | None = None, duration: float 
         start = round(max(0.0, stop - montage.TEASER), 3)
         if first is not None and best.hid == first.hid and abs(first.end - stop) < 0.5:
             start, stop = first.start, first.end  # the same opening as before
+        start = round(max(start, best.start), 3)  # never footage from before the play's own (trimmed) start
         if stop - start >= 1.5:
             teaser = montage.Segment("teaser", best.hid, start, stop, best.moment, best.rank, play=best.play,
                                      title=best.title)
@@ -522,10 +541,9 @@ def clip_edit(row: dict, look: dict | None, edit: dict, duration: float = 0.0) -
     captions = bool(lk["captions"]) if "captions" in lk else caps_was
     if captions != caps_was:
         changed.append("turned the captions on" if captions else "turned the captions off")
-    aspect_was = str(look.get("aspect") or "vertical_blur")
-    aspect_was = aspect_was if aspect_was in ASPECTS else "vertical_blur"
+    aspect_was = str(look.get("aspect") or "vertical_blur")  # (a category's own shape stays unless one is picked)
     aspect = str(lk.get("aspect") or aspect_was)
-    if aspect not in ASPECTS:
+    if aspect != aspect_was and aspect not in ASPECTS:
         raise EditError("Pick the picture's shape: the whole picture, or filling the screen.")
     if aspect != aspect_was:
         changed.append("made it fill the screen" if aspect == "vertical_crop" else "showed the whole picture")
