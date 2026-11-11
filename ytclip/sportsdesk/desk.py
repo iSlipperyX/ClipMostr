@@ -51,7 +51,10 @@ BUSY = ("queued", "analysing", "making")  # a game's statuses while work is wait
 # What a task is, said before the game's name in a status line ("Making the recap reel of Lakers at Celtics").
 DOING = {"search": "Looking for", "order": "Looking for the games of", "highlights": "Finding the best plays of",
          "make": "Cutting the clips of", "reel": "Making the recap reel of", "events": "Searching the moments of"}
-ORDER_WANTS = {"clips": "clips of the best plays", "reel": "a recap reel", "both": "clips and a recap reel"}
+ORDER_WANTS = {"clips": "clips of the best plays", "reel": "a recap reel", "both": "clips and a recap reel",
+               "find": "a moment found in the game"}
+MOMENT_WANTS = ("clips", "reel")  # what a found moment can be made into (Desk.order_moments)
+FIND_SHOWN = 5  # found moments an order hands back, the surest first
 ORDER_OPEN = ("queued", "searching", "working")  # an order's statuses until it's done, failed or cancelled
 ORDER_ENDED = ("done", "failed", "skipped", "cancelled")  # a step's statuses once nothing more happens to it
 ORDER_GAMES = 3  # games one order works on, at most
@@ -551,9 +554,11 @@ class Desk:
         `by_id` say who asked (the Telegram app tells them, and the other person, how it went)."""
         if not isinstance(values, dict):
             raise DeskError("That request couldn't be read.")
-        want = str(values.get("want") or "both").strip().lower()
-        if want not in ORDER_WANTS:
-            raise DeskError("Say what to make: clips, a reel, or both.")
+        find = " ".join(str(values.get("find") or "").split())[:200]
+        want = "find" if find else str(values.get("want") or "both").strip().lower()
+        if want not in ORDER_WANTS or (want == "find" and len(find) < 3):
+            raise DeskError("Say what to make: clips, a reel, or both." if want != "find" else
+                            "Say the moment to look for, such as “red card” or “4th quarter touchdown”.")
 
         def number(key: str, default: int, most: int) -> int:
             try:
@@ -590,9 +595,12 @@ class Desk:
             raise DeskError(f"{match['label']} hasn't been played yet.", 409)
         from ..compliance import requirements
 
-        need = requirements.rules(s) if by_id or values.get("review") else {}
+        need = requirements.rules(s) if (by_id or values.get("review")) and want != "find" else {}
         now = self.now()
+        if want == "find":
+            games = 1
         o = {"id": "o" + os.urandom(5).hex(), "by": " ".join(str(by or "").split())[:60], "by_id": by_id,
+             "find": find,
              "filter": f.to_json(), "want": want, "games": 1 if match else games, "plays": plays,
              "category": cat["name"] if cat else "", "status": "queued", "stage": "Waiting to look for the games",
              "error": "", "message": "", "created": now, "updated": now, "finished": 0.0, "searched": {},
@@ -600,11 +608,7 @@ class Desk:
         o["title"] = order_title(o)
         o["notes"] = order_notes(o, cat, s)
         with self._tx() as con:
-            live = sum(1 for r in con.execute("SELECT data FROM orders").fetchall()
-                       if json.loads(r["data"]).get("status") in ORDER_OPEN)
-            if live >= MAX_OPEN_ORDERS:
-                raise DeskError(f"{live} sports requests are waiting or under way already. Wait for one to finish, "
-                                "or cancel one.", 409)
+            self._room(con)
             self._put_order(con, o)
             self._add_task(con, "order", "", {"order": o["id"]})
             old = [r["id"] for r in con.execute("SELECT id, data FROM orders ORDER BY created DESC").fetchall()
@@ -614,6 +618,141 @@ class Desk:
             self._bump(con)
         return {"id": o["id"], "order": self._order_public(o, {}), "notes": list(o["notes"]),
                 "message": f"Looking for {order_who(o)}: {order_what(o)}."}
+
+    def find_in(self, game_id: str, query: str, by: str = "", by_id: int | str = 0) -> dict:
+        """Search a game that's on the list already for a moment said in words, as an order (so whoever asked
+        is told what was found). Raises DeskError."""
+        query = " ".join(str(query or "").split())[:200]
+        if len(query) < 3:
+            raise DeskError("Say the moment to look for, such as “red card” or “4th quarter touchdown”.")
+        now = self.now()
+        with self._tx() as con:
+            row = con.execute("SELECT data FROM games WHERE id=?", (str(game_id),)).fetchone()
+            if row is None:
+                raise DeskError("That game isn't in the list any more.", 404)
+            g = json.loads(row["data"])
+            if g.get("status") in BUSY:
+                raise DeskError("That game is being worked on already. Ask again when it's done.", 409)
+            self._room(con)
+            name = g.get("matchup") or g.get("title") or g["id"]
+            f = G.GameFilter.from_json({"sport": g.get("sport"), "league": g.get("league"),
+                                        "category_id": self.filter().category_id})
+            o = {"id": "o" + os.urandom(5).hex(), "by": " ".join(str(by or "").split())[:60], "by_id": by_id,
+                 "find": query, "filter": f.to_json(), "want": "find", "games": 1, "plays": 0, "category": "",
+                 "status": "working", "stage": "", "error": "", "message": "", "created": now, "updated": now,
+                 "finished": 0.0, "searched": {}, "match": None, "requires": {}, "notes": [],
+                 "title": f"{name}: “{query}”",
+                 "steps": [{"game": g["id"], "matchup": name, "kind": "events", "status": "queued"}]}
+            g.update(picked=True, new=False, status="queued", stage=f"Waiting to search for “{query}”", frac=None,
+                     error="")
+            self._put(con, g)
+            self._put_order(con, o)
+            self._add_task(con, "events", g["id"], {"query": query, "feed": "", "anchors": [], "video": g["video"],
+                                                    "order": o["id"]})
+            self._bump(con)
+        return {"id": o["id"], "order": self._order_public(o, {}), "notes": [],
+                "message": f"Searching {name} for “{query}”."}
+
+    def _room(self, con) -> None:
+        """Raise DeskError when as many orders as there may be are waiting or under way already."""
+        live = sum(1 for r in con.execute("SELECT data FROM orders").fetchall()
+                   if json.loads(r["data"]).get("status") in ORDER_OPEN)
+        if live >= MAX_OPEN_ORDERS:
+            raise DeskError(f"{live} sports requests are waiting or under way already. Wait for one to finish, or "
+                            "cancel one.", 409)
+
+    def moment(self, game_id: str, hit_id: str) -> tuple[dict, dict]:
+        """(the game, the found moment `hit_id` in it). Raises DeskError when either is gone."""
+        g = self.game(str(game_id))
+        hit = next((h for h in (g.get("events") or {}).get("hits") or [] if h.get("id") == hit_id), None)
+        if hit is None or not any(h.get("id") == hit_id for h in g.get("highlights") or []):
+            raise DeskError("That moment isn't there any more: the game was searched again since. Search it again.",
+                            404)
+        return g, hit
+
+    def basket(self, game_id: str, hit_id: str = "", add: bool = True) -> list[str]:
+        """The found moments set aside for a game's reel, after adding (or taking out) `hit_id`. With no
+        `hit_id`: the basket as it is. Moments a new search replaced drop out of it."""
+        if hit_id:
+            self.moment(game_id, hit_id)
+        out: list[str] = []
+
+        def fn(g):
+            there = {h.get("id") for h in (g.get("events") or {}).get("hits") or []}
+            kept = [i for i in g.get("basket") or [] if i in there and i != hit_id]
+            if hit_id and add:
+                kept.append(hit_id)
+            g["basket"] = kept[:8]
+            out[:] = g["basket"]
+
+        if hit_id:
+            self.change(str(game_id), fn)
+        else:
+            g = self.game(str(game_id))
+            there = {h.get("id") for h in (g.get("events") or {}).get("hits") or []}
+            out = [i for i in g.get("basket") or [] if i in there]
+        return out
+
+    def order_moments(self, game_id: str, ids: list[str], want: str = "clips", by: str = "",
+                      by_id: int | str = 0, category: str | None = None) -> dict:
+        """Make found moments into videos, as an order: each as a clip of its own (`want` "clips"), or all of
+        them as one reel ("reel"). Raises DeskError."""
+        if want not in MOMENT_WANTS:
+            raise DeskError("Say what to make of it: a clip, or a reel.")
+        s = self.settings()
+        cat_id = self.filter().category_id if category is None else re.sub(r"[^\w-]", "", str(category))
+        cats = category_list(s)
+        from ..compliance import requirements
+
+        need = requirements.rules(s) if by_id else {}
+        now = self.now()
+        with self._tx() as con:
+            row = con.execute("SELECT data FROM games WHERE id=?", (str(game_id),)).fetchone()
+            if row is None:
+                raise DeskError("That game isn't in the list any more.", 404)
+            g = json.loads(row["data"])
+            if g.get("status") in BUSY:
+                raise DeskError("That game is being worked on already. Ask again when it's done.", 409)
+            hits = {h.get("id"): h for h in (g.get("events") or {}).get("hits") or []}
+            listed = {h["id"] for h in g.get("highlights") or [] if h.get("origin") == "event"}
+            want_ids = [i for i in dict.fromkeys(_ids(ids)) if i in hits and i in listed]
+            if not want_ids:
+                raise DeskError("Those moments aren't there any more: the game was searched again since.", 404)
+            self._room(con)
+            if not cat_id:  # the one category that's for this sport, when there's just one
+                mine = [c for c in cats if c["sport"] and c["sport"] == g.get("sport")]
+                cat_id = mine[0]["id"] if len(mine) == 1 else ""
+            cat = next((c for c in cats if c["id"] == cat_id), None)
+            if cat_id and cat is None:
+                raise DeskError("That category isn't there any more. Pick another.")
+            name = g.get("matchup") or g.get("title") or g["id"]
+            label = hits[want_ids[0]].get("label") or "Moment"
+            what = (f"a reel of {_plural(len(want_ids), 'found moment')}" if want == "reel" else
+                    f"{label.lower()} as a clip" if len(want_ids) == 1 else f"{len(want_ids)} found moments as clips")
+            f = G.GameFilter.from_json({"sport": g.get("sport"), "league": g.get("league"), "category_id": cat_id})
+            page = self.filter()
+            f.reel_voice, f.reel_framing, f.reel_order = page.reel_voice, page.reel_framing, page.reel_order
+            o = {"id": "o" + os.urandom(5).hex(), "by": " ".join(str(by or "").split())[:60], "by_id": by_id,
+                 "find": "", "filter": f.to_json(), "want": want, "games": 1, "plays": len(want_ids),
+                 "category": cat["name"] if cat else "", "status": "working", "stage": "", "error": "",
+                 "message": "", "created": now, "updated": now, "finished": 0.0, "searched": {}, "match": None,
+                 "requires": need, "title": f"{name}: {what}", "moment": True,
+                 "steps": [{"game": g["id"], "matchup": name, "kind": want, "status": "queued"}]}
+            o["notes"] = order_notes(o, cat, s)
+            g.update(status="queued", stage="Waiting to make " + ("the reel" if want == "reel" else
+                                                                  _plural(len(want_ids), "clip")), frac=None, error="")
+            if want == "reel":
+                g["basket"] = []
+            self._put(con, g)
+            self._put_order(con, o)
+            if want == "reel":
+                self._add_task(con, "reel", g["id"], {"ids": want_ids, "category_id": cat_id, "events": True,
+                                                      "order": o["id"]})
+            else:
+                self._add_task(con, "make", g["id"], {"ids": want_ids, "category_id": cat_id, "order": o["id"]})
+            self._bump(con)
+        return {"id": o["id"], "order": self._order_public(o, {}), "notes": list(o["notes"]),
+                "message": f"Making {what} from {name}."}
 
     def find_order(self, order_id: str) -> dict | None:
         """An order as it's kept (None when there's no such order)."""
@@ -670,6 +809,8 @@ class Desk:
                                                 "clips", "length", "review")} for st in o.get("steps") or []]
         out["notes"] = list(o.get("notes") or [])
         out["line"] = (o.get("match") or {}).get("line") or ""
+        out["find"] = o.get("find") or ""
+        out["moments"] = list(o.get("moments") or [])
         out["requires"] = dict(o.get("requires") or {})
         out["review"] = order_review(o)
         out["doing"], out["frac"] = o.get("stage") or "", None
@@ -758,7 +899,15 @@ class Desk:
                 self._bump(con)
                 return []
             o.update(status="working", stage="", steps=[])
-            for g in picked:
+            for g in picked if o["want"] == "find" else []:
+                name = g.get("matchup") or g.get("title") or g["id"]
+                o["steps"].append({"game": g["id"], "matchup": name, "kind": "events", "status": "queued"})
+                g.update(picked=True, new=False, status="queued", stage=f"Waiting to search for “{o['find']}”",
+                         frac=None, error="")
+                self._add_task(con, "events", g["id"], {"query": o["find"], "feed": "", "anchors": [],
+                                                        "video": g["video"], "order": o["id"]})
+                self._put(con, g)
+            for g in picked if o["want"] != "find" else []:
                 name = g.get("matchup") or g.get("title") or g["id"]
                 ready = any(h.get("origin") != "event" for h in g.get("highlights") or [])
                 if not ready:
@@ -813,7 +962,7 @@ class Desk:
         steps = o.get("steps") or []
         if o.get("status") not in ORDER_OPEN or any(st["status"] not in ORDER_ENDED for st in steps):
             return False
-        made = [st for st in steps if st["kind"] in ("clips", "reel") and st["status"] == "done"]
+        made = [st for st in steps if st["kind"] in ("clips", "reel", "events") and st["status"] == "done"]
         failed = [st for st in steps if st["status"] == "failed"]
         if made or not failed:
             o["status"] = "done"
@@ -843,6 +992,8 @@ class Desk:
             for k in ("folder", "file", "clips", "length", "review"):
                 if out and out.get(k) is not None:
                     st[k] = out[k]
+            if out and out.get("moments") is not None:  # what an event search found, the surest first
+                o["moments"] = list(out["moments"])[:FIND_SHOWN]
             if step_kind != "highlights":
                 left = [x["kind"] for x in o["steps"] if x["game"] == game_id and x["status"] == "queued"]
                 row = con.execute("SELECT data FROM games WHERE id=?", (game_id,)).fetchone() if left else None
@@ -1144,6 +1295,8 @@ def order_who(o: dict) -> str:
 
 def order_what(o: dict) -> str:
     """'the top 5 plays as clips and a recap reel, of the 2 newest games'"""
+    if o.get("want") == "find":
+        return f"“{o.get('find') or 'a moment'}”"
     n = int(o.get("plays") or 5)
     clips = f"the top {n} plays as clips" if n > 1 else "the best play as a clip"
     what = {"clips": clips, "reel": "a recap reel", "both": f"{clips} and a recap reel"}[o.get("want") or "both"]
@@ -1176,6 +1329,8 @@ def order_notes(o: dict, cat: dict | None, s) -> list[str]:
     from ..compliance import requirements
 
     notes: list[str] = []
+    if o.get("want") == "find":  # a search makes nothing: there's nothing to warn of yet
+        return notes
     need = o.get("requires") or {}
     if need and o.get("want") in ("clips", "both"):
         least = requirements.over(float(need.get("min_seconds") or 0))
@@ -1189,7 +1344,7 @@ def order_notes(o: dict, cat: dict | None, s) -> list[str]:
     elif not cat.get("posts", bool(cat.get("account"))):
         notes.append(f"{cat['name']} has no TikTok account: what's made stays in the Library until it has one.")
     try:
-        if not ai_state(s)["ready"]:
+        if not o.get("moment") and not ai_state(s)["ready"]:
             notes.append("No AI is set up, so the plays are ranked by the crowd's noise alone.")
     except Exception:  # noqa: BLE001 - the note is a courtesy
         pass
@@ -1652,7 +1807,7 @@ class DeskWorker:
         g = self.desk.game(task["game"])
         pay = task["payload"]
         s = self.settings()
-        f = self.desk.filter()
+        f = self._filter(task)
         sport = sports.get(g.get("sport", "")) or f.sport_info
         base, _label, _cat = self._settings_for(s, f.category_id, g["video"], g["url"])
         es = base.apply({"sport": sport.id, "mode": "auto", "series_parts": 1, "ai_polish": False})
@@ -1737,6 +1892,13 @@ class DeskWorker:
                 f"Nothing found for “{query.text}” in {name}")
         self.log(f"Sports: {said}." + (f" {result.notes[0]}" if result.notes else ""))
         self.events("sports", f"{sport.emoji} {said}")
+        # For the order that asked (a search from Telegram): the moments, the surest first, as its cards show them
+        task["out"] = {"moments": [
+            {"game": g["id"], "id": h.id, "t": round(h.t_event, 1), "start": round(h.start, 1),
+             "end": round(h.end, 1), "label": h.label, "quote": " ".join(h.quote.split())[:240],
+             "why": " ".join(h.why.split())[:200], "score": round(h.score), "certain": bool(h.certain),
+             "badge": h.badge} for h in sorted(result.hits, key=lambda h: -h.score)[:FIND_SHOWN]],
+            "notes": result.notes[:2]}
         return said
 
     def do_make(self, task: dict) -> str:

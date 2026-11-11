@@ -13,7 +13,7 @@ What to know about it:
   Cloudflare tunnel, Tailscale Funnel, or a reverse proxy, pointed at this PC's port);
 * the videos you watch in the Mini App travel through Cloudflare to your phone, encrypted on the way;
 * the address by itself opens nothing: the Mini App's server only answers the people linked to the bot, as
-  signed by Telegram (webapp.verify_init_data).
+  signed by Telegram (mini_app.verify_init_data).
 
 cloudflared is looked for beside ClipMonster's own files and on the PATH. When it isn't there it is downloaded
 once (some tens of MB) from Cloudflare's releases on GitHub, unless Settings → Telegram → Mini App address is

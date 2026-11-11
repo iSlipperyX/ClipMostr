@@ -12,7 +12,12 @@
   (a video to make, a link to clip, a request), to send you when it's done;
 * which chats' menu button (left of the message box) opens the Mini App, and at which address (menus);
 * the critiques people wrote of a video, each with who wrote it and the video made again from it, and the
-  last things each person did (activity), which the Mini App shows with their names.
+  last things each person did (activity), which the Mini App shows with their names. A critique's new video
+  is a version of the first one (v2, v3…): versions() and family() read that chain;
+* the progress messages still being kept up to date (live), so a restart goes on editing the same message.
+
+Who may use the bot is decided here and nowhere else: authorized() says whether an update's chat and sender
+are one of the linked people. Everything a chat can do goes through it first.
 
 The window and automation both change it, so every change reads the file, changes it and writes it under
 its lock (edit()). telegram-status.json is the bot's heartbeat for the window: whether it's running in
@@ -54,7 +59,8 @@ def status_path() -> Path:
 
 def empty() -> dict:
     return {"version": 1, "bot": {}, "chats": [], "pairing": {}, "strikes": {}, "offset": 0, "shown": {},
-            "asked": {}, "told": {}, "noted": {}, "seen_at": 0.0, "critiques": {}, "activity": [], "menus": {}}
+            "asked": {}, "told": {}, "noted": {}, "seen_at": 0.0, "critiques": {}, "activity": [], "menus": {},
+            "live": {}}
 
 
 def load(where: Path | None = None) -> dict:
@@ -89,6 +95,29 @@ def chat_ids(data: dict) -> list[int]:
 
 def is_linked(data: dict, chat_id: int) -> bool:
     return chat_id in chat_ids(data)
+
+
+def authorized(data: dict, chat: dict | None, sender: dict | None = None) -> bool:
+    """Is this update from one of the linked people? Its chat must be a private chat that is linked, and its
+    sender (when Telegram names one) must be that same person, not a bot and not someone else writing into
+    the chat's place (a button pressed on a forwarded message, a channel post)."""
+    if not isinstance(chat, dict) or chat.get("type") not in (None, "private"):
+        return False
+    try:
+        chat_id = int(chat.get("id") or 0)
+    except (TypeError, ValueError):
+        return False
+    if not chat_id or not is_linked(data, chat_id):
+        return False
+    if isinstance(sender, dict) and sender:
+        if sender.get("is_bot"):
+            return False
+        try:
+            if int(sender.get("id") or 0) != chat_id:
+                return False
+        except (TypeError, ValueError):
+            return False
+    return True
 
 
 def chat_name(chat: dict) -> str:
@@ -166,7 +195,7 @@ def set_bot(data: dict, me: dict) -> bool:
     data["bot"] = {"id": me.get("id"), "username": me.get("username") or "", "name": me.get("first_name") or ""}
     if changed:
         data.update(chats=[], offset=0, shown={}, asked={}, strikes={}, pairing={}, noted={}, seen_at=0.0,
-                    menus={})
+                    menus={}, live={})
     return changed
 
 
@@ -242,6 +271,8 @@ def tidy(data: dict, now: float) -> None:
     data["critiques"] = {k: v for k, v in data.get("critiques", {}).items()
                          if isinstance(v, dict) and now - float(v.get("at") or 0) < CRITIQUES_KEEP}
     data["activity"] = [a for a in data.get("activity", []) if isinstance(a, dict)][-ACTIVITY_MAX:]
+    data["live"] = {k: v for k, v in data.get("live", {}).items()
+                    if isinstance(v, dict) and now - float(v.get("started") or 0) < ASKED_KEEP}
 
 
 # --- who did what ---------------------------------------------------------------------------------------
@@ -258,13 +289,44 @@ def note_activity(data: dict, chat_id: int, what: str, title: str, now: float, i
     return entry
 
 
-def add_critique(data: dict, chat_id: int, item: str, title: str, text: str, job: str, now: float) -> dict:
+def add_critique(data: dict, chat_id: int, item: str, title: str, text: str, job: str, now: float,
+                 how: str = "rewrite", file: str = "") -> dict:
+    """`how` is how the new version is made: "rewrite" (the AI writes the storyboard again), "voice" (the same
+    script, another voice) or "retouch" (the same video, its timeline changed and rendered again). `file` is
+    the new video's file name when that's known up front (a retouch renders beside the first version)."""
     cid = secrets.token_hex(5)
     entry = {"id": cid, "item": item, "title": " ".join(str(title or "").split())[:120], "text": text,
              "by": int(chat_id), "name": first_name(data, chat_id), "at": now, "job": job, "status": "queued",
-             "error": "", "fixed": ""}
+             "error": "", "fixed": "", "how": how, "file": file, "version": version_of(data, item) + 1}
     data.setdefault("critiques", {})[cid] = entry
     return entry
+
+
+def version_of(data: dict, item: str) -> int:
+    """Which version a video is: 1 for one nobody critiqued into being, else the number its critique gave it."""
+    made = [c for c in (data.get("critiques") or {}).values() if c.get("fixed") == item and item]
+    if not made:
+        return 1
+    try:
+        return max(2, int(made[0].get("version") or 2))
+    except (TypeError, ValueError):
+        return 2
+
+
+def family(data: dict, item: str) -> list[str]:
+    """Every version of a video, `item` among them: the one it was made again from, the ones made again from
+    it, and so on along the critiques (oldest version first)."""
+    links = [(c.get("item") or "", c.get("fixed") or "") for c in (data.get("critiques") or {}).values()
+             if c.get("item") and c.get("fixed")]
+    found = {item}
+    grew = True
+    while grew:
+        grew = False
+        for a, b in links:
+            if (a in found) != (b in found):
+                found |= {a, b}
+                grew = True
+    return sorted(found, key=lambda i: (version_of(data, i), i))
 
 
 def critiques_of(data: dict, item: str) -> list[dict]:

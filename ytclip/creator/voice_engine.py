@@ -99,6 +99,34 @@ ALIASES = {"deep_male": "en_male_deep", "male_deep": "en_male_deep", "deep": "en
            "british": "en_british_male", "calm": "en_male_calm", "calm_male": "en_male_calm"}
 
 
+# A category's name, or words in its special requests, suggest a voice (as director.STYLE_WORDS suggest a look).
+VOICE_WORDS = (
+    ("en_hushed", ("scary", "horror", "creepy", "paranormal", "haunted", "ghost", "nosleep", "sleep")),
+    ("en_male_deep", ("crime", "true crime", "unsolved", "dark", "psychology", "manipulation", "conspiracy",
+                      "secrets", "mystery", "mysteries")),
+    ("en_documentary", ("history", "historical", "ancient", "empire", "medieval", "science", "space", "nature",
+                        "documentary", "explained")),
+    ("en_storyteller", ("gaming", "games", "gamer", "sports", "motivation", "hustle", "stories", "story", "funny",
+                        "comedy", "memes", "facts", "anime")),
+    ("en_male_calm", ("finance", "money", "business", "investing", "crypto", "tech", "technology", "ai")),
+    ("en_female_warm", ("self-improvement", "self improvement", "wellness", "relationship", "relationships",
+                        "health", "mindful", "stoic", "stoicism", "parenting")),
+    ("en_female_bright", ("food", "cooking", "recipes", "beauty", "fashion", "travel", "lifestyle")),
+)
+
+
+def voice_for(category: str, instructions: str = "") -> str:
+    """The voice that suits a category ("" when nothing in its name or special requests says: Settings' is
+    used). Crime gets the deep narrator, gaming the energetic one, history the documentary voice."""
+    import re
+
+    text = f" {category} {instructions} ".lower()
+    for key, words in VOICE_WORDS:
+        if any(re.search(rf"\b{re.escape(w)}\b", text) for w in words):
+            return key
+    return ""
+
+
 def profile(key: str) -> VoiceProfile:
     k = str(key or "").strip().lower().replace("-", "_").replace(" ", "_")
     k = ALIASES.get(k, k)

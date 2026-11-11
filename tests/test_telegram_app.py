@@ -428,7 +428,7 @@ def test_saying_what_to_fix_from_the_chat(world):
     creator_video(world.root)
     it = world.take()[0]
     world.bot.show(JUSTYN["id"], it)
-    assert ("🛠 Say what to fix", f"fix:{it.id}") in buttons(world.fake.last("sendVideo")["reply_markup"])
+    assert ("🛠 Critique / Regenerate", f"fix:{it.id}") in buttons(world.fake.last("sendVideo")["reply_markup"])
     world.press(f"fix:{it.id}")
     assert "What should be different about “The Stanford Prison Myth”?" in world.fake.last()["text"]
     reply = world.say("the hook is flat")
@@ -784,7 +784,8 @@ def test_the_app_gets_an_address_and_each_chat_a_button_into_it(world):
         world.fake.clear()
         world.bot.show(JUSTYN["id"], it)
         assert world.fake.sent("sendVideo") == []
-        assert buttons(world.fake.last()["reply_markup"]) == [("▶ Watch it in the app", f"{tun.url}/?v={it.id}")]
+        assert buttons(world.fake.last()["reply_markup"]) == [("▶ Watch it in the app", f"{tun.url}/?v={it.id}"),
+                                                              ("🛠 Critique / Regenerate", f"fix:{it.id}")]
         assert "in the app" in world.say("/videos")["reply_markup"]["inline_keyboard"][0][0]["text"]
         assert "Everything is in the app" in world.say("/help")["text"]
         assert "opens inside Telegram" in world.say("/app")["text"]

@@ -329,6 +329,30 @@ class Categories(QWidget):
         self.creator_topics.textChanged.connect(lambda: self._set("creator_topics",
                                                                   self.creator_topics.toPlainText()))
         form.addRow("Topics", self.creator_topics)
+        from ..settings import CREATOR_STYLES, CREATOR_VISUALS, CREATOR_VOICES, STUDIO_CAPTIONS
+
+        # How its made videos sound and look. Automatic = what suits the category, else Settings → Creator's.
+        self.creator_voice, self.creator_visuals = QComboBox(), QComboBox()
+        self.creator_captions, self.creator_style = QComboBox(), QComboBox()
+        pictures = (*CREATOR_VISUALS[:1], ("stock", "Stock footage first (Studio)"), *CREATOR_VISUALS[1:])
+        for combo, key, label, choices, tip in (
+                (self.creator_voice, "creator_voice", "Voice", CREATOR_VOICES,
+                 "The narrator of this category's made videos. Automatic picks one that suits it (the deep "
+                 "narrator for crime, the energetic one for gaming), else the voice in Settings → Creator"),
+                (self.creator_visuals, "creator_visuals", "Pictures from", pictures,
+                 "Where this category's pictures come from: stock footage, AI pictures or your B-roll folder. "
+                 "Automatic uses Settings → Creator's"),
+                (self.creator_captions, "creator_captions", "Captions", (*STUDIO_CAPTIONS, ("off", "No captions")),
+                 "The caption style of the videos the Studio makes for this category. Automatic uses Settings → "
+                 "Creator's"),
+                (self.creator_style, "creator_style", "Look", tuple(c for c in CREATOR_STYLES if c[0]),
+                 "The pictures' look and the caption colours. Automatic picks from the category's name")):
+            combo.addItem("Automatic", "")
+            for value, text in choices:
+                combo.addItem(text, value)
+            combo.setToolTip(tip + ". A video asked for from Telegram for this category is made this way")
+            combo.activated.connect(lambda _i, c=combo, k=key: self._set(k, c.currentData()))
+            form.addRow(label, combo)
         self.creator_note = note("")
 
         buttons = QHBoxLayout()
@@ -476,6 +500,9 @@ class Categories(QWidget):
             self.instructions.setPlainText(n.instructions)
             self.creator_daily.setValue(n.creator_daily)
             self.creator_topics.setPlainText(n.creator_topics)
+            for combo, value in ((self.creator_voice, n.creator_voice), (self.creator_visuals, n.creator_visuals),
+                                 (self.creator_captions, n.creator_captions), (self.creator_style, n.creator_style)):
+                combo.setCurrentIndex(max(0, combo.findData(value)))
             self._creator_note(n)
         finally:
             self._filling = False

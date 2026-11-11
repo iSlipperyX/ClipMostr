@@ -77,6 +77,9 @@ class CreateRequest:
     # made from, the AI rewrites it to answer `critique`, and `revises` is that video's title.
     critique: str = ""
     revises: str = ""
+    # The critique asks for nothing to be rewritten (another voice, say): the storyboard is made again as it is,
+    # and the critique is only kept as the reason the new version exists.
+    keep_script: bool = False
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -111,6 +114,28 @@ class CreationResult:
 
 def new_id() -> str:
     return "c-" + uuid.uuid4().hex[:8]
+
+
+def with_presets(req: "CreateRequest", s: Settings) -> "CreateRequest":
+    """`req` with what its category chooses for the videos made for it (Categories → Video Creator: voice,
+    pictures, captions, look) filled in wherever the request itself says nothing. A choice the engine that
+    will make it doesn't have (stock footage, for the classic Creator) is left to Settings."""
+    import dataclasses
+
+    cat = find_category(s, req.category)
+    if cat is None or (isinstance(getattr(req, "retouch", None), dict) and req.retouch):
+        return req
+    studio = hasattr(req, "captions")
+    changes = {}
+    for field_name, key in (("voice", "creator_voice"), ("visuals", "creator_visuals"), ("style", "creator_style"),
+                            ("captions", "creator_captions")):
+        want = getattr(cat, key, "")
+        if not want or not hasattr(req, field_name) or getattr(req, field_name):
+            continue
+        if field_name == "visuals" and not studio and want not in visual_generator.BACKENDS:
+            continue
+        changes[field_name] = want
+    return dataclasses.replace(req, **changes) if changes else req
 
 
 def find_category(s: Settings, text: str) -> cats.Category | None:
@@ -195,11 +220,14 @@ class VideoCreatorOrchestrator:
             if req.critique.strip():
                 from . import critique
 
-                report("Writing the script: answering the critique", None)
-                try:
-                    given = critique.revise(self.s, given, req.critique, log=self.log, check=self.check)
-                except critique.CritiqueError as exc:
-                    raise CreatorError(str(exc)) from exc
+                if req.keep_script:
+                    self.log("The script stays as it is: the critique asks for nothing to be rewritten.")
+                else:
+                    report("Writing the script: answering the critique", None)
+                    try:
+                        given = critique.revise(self.s, given, req.critique, log=self.log, check=self.check)
+                    except critique.CritiqueError as exc:
+                        raise CreatorError(str(exc)) from exc
                 self.revision = {"revises": req.revises or given.title, "critique": critique.clean(req.critique)}
             board = director.normalise(given, director.get_style(style), hook_words=40,
                                        max_scenes=self.scene_limit(2 * len(given.scenes) + 1))
