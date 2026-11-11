@@ -1043,7 +1043,7 @@ class Runner:
     def process_creation(self, job: Job, s: Settings) -> None:
         """Make a queued video (a GENERATIVE_CREATOR job) with the Video Creator, or with the Studio when the
         request is one of its (an article's address, a wide or long video, a caption style...)."""
-        from .creator.orchestrator import CreatorError, VideoCreatorOrchestrator
+        from .creator.orchestrator import CreatorError, VideoCreatorOrchestrator, with_presets
         from .studio.orchestrator import StudioOrchestrator, StudioRequest, read_request
 
         try:
@@ -1054,6 +1054,7 @@ class Runner:
             return
         if job.category_id and not req.category:
             req.category = job.category_id
+        req = with_presets(req, s)  # its category's own voice, pictures, captions and look, where it says none
         now = self.now()
         studio = isinstance(req, StudioRequest)
         self.db.update(job.id, now, status="working", stage="Starting",
@@ -1106,7 +1107,8 @@ class Runner:
             self.db.note("ai", self.now())  # a cloud AI wrote it: counts towards the daily AI limit
         self.db.update(job.id, self.now(), status="done", stage="Done", folder=str(result.folder), progress="",
                        clips=1, title=result.storyboard.title)
-        self.db.set_meta("creator_timings", json.dumps(result.timings))
+        if result.timings and not getattr(req, "retouch", None):  # (a retouch is one step: not a full video's pace)
+            self.db.set_meta("creator_timings", json.dumps(result.timings))
         self.log(f"✓ Made {result.storyboard.title} ({result.duration:.0f} s) → {result.folder}")
 
     def process(self, job: Job, s: Settings) -> None:
@@ -1383,8 +1385,8 @@ class Runner:
         except Exception as exc:  # noqa: BLE001 - automation runs without it
             self.log(f"⚠ The Telegram bot couldn't start: {type(exc).__name__}: {exc}")
             return None
-        try:  # the bot as an app inside Telegram (telegram/webapp.py): it waits quietly until it's wanted
-            from .telegram.webapp import WebApp
+        try:  # the bot as an app inside Telegram (telegram/mini_app.py): it waits quietly until it's wanted
+            from .telegram.mini_app import WebApp
 
             bot.webapp = WebApp(bot)
             bot.webapp.start()

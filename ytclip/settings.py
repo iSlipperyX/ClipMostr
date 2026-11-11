@@ -346,7 +346,7 @@ class Settings:
     telegram_on: bool = False
     telegram_token: str = ""  # from @BotFather
     telegram_send: str = "review, new, posted, news, problems, weekly"  # telegram/bot.SENDS
-    # The Mini App (telegram/webapp.py): the bot as an app inside Telegram, to watch the videos and say what to fix.
+    # The Mini App (telegram/mini_app.py): the bot as an app inside Telegram, to watch the videos and say what to fix.
     # Telegram only opens an https:// address a phone can reach: blank = a Cloudflare quick tunnel ClipMonster
     # runs itself (telegram/tunnel.py), or your own address pointed at this PC's telegram_app_port.
     telegram_app: bool = True
@@ -356,6 +356,10 @@ class Settings:
     # may be, in seconds (61 = over a minute, what Creator Rewards pays for; 0 = no check). One that falls short
     # is held for an OK, not posted.
     telegram_min_seconds: float = 61.0
+    # What makes the videos asked for from Telegram: the Studio (an editable timeline, so a critique like "make
+    # the captions yellow" changes the video instead of making it again, and a link can be turned into a video)
+    # or the classic Video Creator.
+    telegram_engine: str = "studio"
     # The Mac app (remote/): automation's HTTPS server for ClipMonster for Mac. The Macs it answers are in
     # remote.json, not here.
     remote_on: bool = False
@@ -1337,6 +1341,11 @@ SCHEMA: list[Field] = [
                "more, with sound. One that falls short is kept and held for your OK with the reason beside it, "
                "never posted by itself. Sports requests make a recap reel (65-85 s) for this reason: a single play "
                "is 15-40 s. 0 turns the check off"),
+    Field("telegram_engine", "Make Telegram's videos with", "Telegram", "choice", choices=CREATOR_ENGINES,
+          help="What makes a video asked for from the chat or the Mini App. The Studio keeps an editable timeline "
+               "of each video, so a critique such as \"make the captions yellow\" or \"the music is too loud\" "
+               "changes that video in one render instead of making it again, and a link to an article can be "
+               "turned into a video. The classic Video Creator makes them as the Creator tab does by default"),
     Field("remote_on", "Let my Mac run ClipMonster", "Mac app", "bool",
           help="Automation answers ClipMonster on your Mac: it shows what automation is doing, plays the videos "
                "waiting to post so you can OK or delete them, asks for videos, clips and requests, and lends the "

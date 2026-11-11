@@ -633,9 +633,10 @@ def _clip_record(video: Path) -> dict | None:
 
 
 def _clip_companions(video: Path) -> list[Path]:
-    """The clip's .srt and its thumbnail in the video folder."""
+    """The clip's .srt and its thumbnail in the video folder, and the timeline of its own a version made by a
+    retouch has (studio/retouch.py: "<name>.timeline.json")."""
     rec = _clip_record(video)
-    out = [video.with_suffix(".srt")]
+    out = [video.with_suffix(".srt"), video.with_name(video.stem + ".timeline.json")]
     if rec is not None and isinstance(rec.get("rank"), int):
         out.append(video.parent / "thumbnails" / f"{rec['rank']:02d}.jpg")
     return out
@@ -683,7 +684,7 @@ def _studio_files(folder: Path) -> list[Path]:
     """What the Studio keeps beside a video to render it again (studio/orchestrator.py): its timeline, the
     scenes' stock clips, and everything in assets/ (voice, music, effects)."""
     scenes, assets = folder / "scenes", folder / "assets"
-    out = [folder / "timeline.json"]
+    out = [folder / "timeline.json", *sorted(folder.glob("*.timeline.json"))]  # (and its versions' own)
     if scenes.is_dir():
         out += sorted({p for pattern in SCENE_CLIPS for p in scenes.glob(pattern)})
     if assets.is_dir():

@@ -83,6 +83,11 @@ class StudioRequest(CreateRequest):
     tts: str = ""  # the voice engine: auto | kokoro | piper | windows | espeak | elevenlabs ("" = Settings)
     ai: str = ""  # who writes: local_first | cloud_first | cloud_deep | local_only | cloud_only ("" = Settings)
     fps: int = 30
+    # Changes to make on the timeline once it's laid out (studio/retouch.py's edits: caption colour and size,
+    # the music's level): what a critique asked for beside its rewrite.
+    look: dict | None = None
+    # A finished video changed without making it again: {"folder", "source", "name", "edits"} (retouch.render).
+    retouch: dict | None = None
 
     def label(self) -> str:
         return super().label() if (self.title or self.prompt or self.script) else (self.url or "A new video")[:80]
@@ -361,6 +366,8 @@ class StudioOrchestrator(VideoCreatorOrchestrator):
         """Make the video. `board`: a storyboard already written (a preview that was edited)."""
         self.timings = {}
         cid = new_id()
+        if isinstance(getattr(req, "retouch", None), dict) and req.retouch:
+            return self.run(lambda: self.retouch(as_request(req), cid))
 
         def all_of_it():
             request = self.accept(req)
@@ -371,6 +378,37 @@ class StudioOrchestrator(VideoCreatorOrchestrator):
                 written = board
             return self._make(written, request, cid)
         return self.run(all_of_it)
+
+    def retouch(self, req: StudioRequest, cid: str) -> CreationResult:
+        """A finished video's timeline changed and rendered again as a new version beside it (retouch.py):
+        no script, no voice and no pictures are made, so it takes one render."""
+        from . import retouch
+
+        want = req.retouch or {}
+        folder = Path(str(want.get("folder") or ""))
+        source, name = str(want.get("source") or ""), str(want.get("name") or "")
+        if not folder.is_dir() or not (folder / source).is_file():
+            raise CreatorError("The video this would change isn't on the PC any more.")
+        if not name or Path(name).name != name or not name.lower().endswith(".mp4"):
+            raise CreatorError("The new version has no usable file name.")
+        for state in ("input", "script", "voice", "visuals", "timeline"):  # nothing to do in the first four
+            self.enter(state)
+        try:
+            board = director.Storyboard.from_json(json.loads((folder / "storyboard.json").read_text("utf-8")))
+        except (OSError, ValueError, TypeError):
+            board = director.Storyboard(title=Path(source).stem)
+        self.enter("render")
+        started = time.monotonic()
+        made = retouch.render(folder, source, name, want.get("edits") or {}, settings=self.s, log=self.log,
+                              progress=self.stage("Putting the video together"), check_cancel=self.check)
+        self._timed("render", started)
+        self.enter("check")
+        warnings = list(getattr(made.report, "warnings", []) or [])
+        self.enter("deliver")
+        self.log(f"A new version beside the first: {made.video.name} ({'; '.join(made.changed)}).")
+        self.enter("done")
+        return CreationResult(cid, folder, made.video, board, made.duration, {"changed": made.changed}, warnings,
+                              {}, category=req.category)
 
     def render(self, board: director.Storyboard, req: CreateRequest, cid: str | None = None) -> CreationResult:
         """Everything after the script, for a storyboard written earlier."""
@@ -437,6 +475,11 @@ class StudioOrchestrator(VideoCreatorOrchestrator):
             if title and tl.track(timeline_builder.TITLES) is not None:
                 until = tl.track(timeline_builder.TITLES).events[-1].end
                 self.hook_card = {"at": round(min(1.0, until / 2), 2), "until": round(until, 2)}
+            if req.look:  # what a critique asked of the captions or the levels, beside its rewrite
+                from . import retouch
+
+                for change in retouch.apply(tl, req.look):
+                    self.log(f"As asked: {change}.")
             gather_files(tl, pkg)
             tl.dump(pkg / "timeline.json")
             self.tl = tl

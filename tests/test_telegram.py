@@ -281,7 +281,8 @@ def test_make_a_video_from_the_chat(world):
     reply = world.say("/make the real story of the Bermuda Triangle")
     assert "Which category" in reply["text"]
     choices = buttons(reply["reply_markup"])
-    assert [c[0] for c in choices[:2]] == ["Psychology", "Gaming"] and ("No category", choices[2][1]) in choices
+    assert [c[0] for c in choices[:2]] == ["Psychology · @psych", "Gaming · @psych"]  # each with its TikTok account
+    assert ("No category", choices[2][1]) in choices
     world.press(choices[0][1])
     (job,) = world.runner.db.jobs()
     assert job.is_creation and job.origins == ["creator", "telegram"] and job.category_id == "p1"
@@ -451,7 +452,7 @@ def test_a_big_video_goes_as_a_smaller_copy(world, monkeypatch):
     sent = world.fake.last("sendVideo")
     copy = world.tmp / "previews" / f"{it.id}.mp4"
     assert copy.is_file() and sent["video"]["size"] == copy.stat().st_size < Path(it.path).stat().st_size
-    assert "A smaller copy" in sent["caption"]
+    assert "📱 Mobile Preview (" in sent["caption"] and "Master Saved on Host)" in sent["caption"]
     made = copy.stat().st_mtime
     world.press(f"v:{it.id}", 1)
     assert copy.stat().st_mtime == made  # made once
@@ -882,7 +883,7 @@ def test_settings_and_the_bot_agree():
     assert [k for k, _ in TELEGRAM_SENDS] == list(botmod.SENDS)
     fields = {f.name: f for f in SCHEMA if f.group == "Telegram"}
     assert set(fields) == {"telegram_on", "telegram_token", "telegram_send", "telegram_app", "telegram_app_url",
-                           "telegram_app_port", "telegram_min_seconds"}
+                           "telegram_app_port", "telegram_min_seconds", "telegram_engine"}
     assert fields["telegram_token"].kind == "secret"
     assert Settings().telegram_min_seconds == 61.0  # over a minute, the length Creator Rewards pays for
     assert {k.strip() for k in Settings().telegram_send.split(",")} == set(botmod.SENDS)

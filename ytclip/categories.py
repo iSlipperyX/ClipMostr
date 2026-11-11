@@ -69,6 +69,14 @@ def folder_name(name: str) -> str:
     return folder
 
 
+# A category's choices for its made videos (a test keeps them the same as the Creator's and the Studio's own)
+_VOICES = ("", "en_male_deep", "en_storyteller", "en_documentary", "en_female_warm", "en_female_bright", "en_hushed",
+           "en_british_male", "en_male_calm")
+_VISUALS = ("", "auto", "stock", "comfyui", "sdxl_turbo", "flux_schnell", "local_broll", "texture")
+_CAPTIONS = ("", "pop", "karaoke", "bounce", "plain", "off")
+_STYLES = ("", "cinematic", "documentary", "history", "horror", "bright", "dreamy")
+
+
 @dataclass
 class Category:
     id: str = ""
@@ -94,6 +102,12 @@ class Category:
     creator_topics: str = ""  # ideas for them, one per line (# starts a comment); trending topics fill in
     sport: str = ""  # a sports category (sports.py): crowd, commentary and whole plays pick its clips; "" = not sports
     send_to_macs: bool = False  # each new clip also goes to the linked Macs' inbox (remote/deliveries.py)
+    # How this category's made videos sound and look ("" = automatic: what suits its name and special requests,
+    # else Settings → Creator's). A request from Telegram is made with these without saying them each time.
+    creator_voice: str = ""  # creator/voice_engine.VOICES
+    creator_visuals: str = ""  # where the pictures come from: studio/visual_sourcer.CHOICES ("stock", "local_broll"…)
+    creator_captions: str = ""  # studio/timeline_builder.CAPTION_PRESETS
+    creator_style: str = ""  # creator/director.STYLES
 
     @classmethod
     def from_json(cls, d) -> "Category | None":
@@ -120,6 +134,10 @@ class Category:
         if n.min_len and n.max_len and n.max_len < n.min_len:
             n.min_len, n.max_len = n.max_len, n.min_len
         n.name = " ".join(n.name.split())
+        for key, known in (("creator_voice", _VOICES), ("creator_visuals", _VISUALS), ("creator_captions", _CAPTIONS),
+                           ("creator_style", _STYLES)):
+            if getattr(n, key) not in known:  # a choice that isn't one any more (or a typo by hand): automatic
+                setattr(n, key, "")
         from .sports import get as sport_named
 
         n.sport = sport.id if (sport := sport_named(n.sport)) else ""
