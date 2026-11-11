@@ -480,6 +480,45 @@ def test_a_first_picture_one_frame_long_is_kept(tmp_path):
         assert not near(f[61, 100, 90], BLUE) and not near(f[61, 100, 90], RED)  # mid-crossfade at the cut
 
 
+def test_a_transition_starts_on_its_own_frame_whatever_the_time_rounds_to(tmp_path):
+    """A transition that starts on frame 26 of a 30 fps video starts at 0.86667 s. Written to four places that
+    is 0.8667, just after the frame, so the transition began a frame late, and so did the clip after it and
+    every cut after that: one transition in three, a frame each, on every ffmpeg."""
+    tl = T.standard("late", T.Canvas(W, H, 30), 4.0)
+    colours(tl, red=RED, blue=BLUE, white=WHITE)
+    tl.track(T.VIDEO_BASE).clips += [
+        T.VideoClip("a", "red", 0.0, 1.0),
+        T.VideoClip("b", "blue", 1.0, 1.0, transition_in=T.Transition("crossfade", 0.3)),  # frames 26 to 33
+        T.VideoClip("c", "white", 2.0, 1.0),
+        T.VideoClip("d", "red", 3.0, 1.0, transition_in=T.Transition("crossfade", 0.3))]  # frames 86 to 93
+    render(tl, tmp_path)
+    f = frames(tmp_path / "out.mp4")
+    assert len(f) == 120
+    assert near(f[25, 100, 90], RED) and not near(f[27, 100, 90], RED) and near(f[34, 100, 90], BLUE)
+    assert near(f[59, 100, 90], BLUE) and near(f[60, 100, 90], WHITE)  # the cut after it, on its frame
+    assert near(f[85, 100, 90], WHITE) and not near(f[87, 100, 90], WHITE) and near(f[94, 100, 90], RED)
+    assert near(f[119, 100, 90], RED)
+
+
+def test_after_a_first_picture_of_one_frame_a_placed_clip_keeps_its_last_frame(tmp_path):
+    """ffmpeg 7.1 (the Windows and Mac builds' own): a clip laid over the background (fitted inside the
+    frame, turned, see-through) lost its last frame after a first picture of one frame, and a first picture
+    of one frame that is itself placed was lost. Every cut after it came a frame early."""
+    sq = picture(tmp_path / "wide.png", flat(RED, 320, 180))  # a wide picture, fitted inside the upright frame
+    for name, first in (("gap", []), ("placed", [T.VideoClip("z", "wide", 0.0, 1 / 30, fit="contain")])):
+        tl = T.standard("fit", T.Canvas(W, H, 30, background="#14EB14"), 61 / 30)
+        colours(tl, blue=BLUE)
+        tl.assets["wide"] = T.Asset("image", sq.name)
+        tl.track(T.VIDEO_BASE).clips += [*first, T.VideoClip("a", "wide", 1 / 30, 1.0, fit="contain"),
+                                         T.VideoClip("b", "blue", 31 / 30, 1.0)]
+        render(tl, tmp_path, f"fit-{name}.mp4")
+        f = frames(tmp_path / f"fit-{name}.mp4")
+        assert len(f) == 61, name
+        assert near(f[0, 160, 90], RED) == bool(first), name  # the frame's middle: the picture, or nothing yet
+        assert near(f[1, 160, 90], RED) and near(f[30, 160, 90], RED), name
+        assert near(f[31, 160, 90], BLUE) and near(f[60, 160, 90], BLUE), name
+
+
 def test_inputs_are_named_from_the_work_folder_when_that_is_shorter(tmp_path):
     work = tmp_path / "work"
     clip = tmp_path / "pkg" / "scenes" / "scene_001_pexels_123.mp4"

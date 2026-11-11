@@ -400,6 +400,7 @@ _GATED = re.compile(r"(?i)paywall|premium[-_ ]?content|subscribers?[-_ ]?only|me
 # say who may read count ("category-members-only"). And some names say the opposite ("no-paywall").
 _LABEL = re.compile(r"(?i)^(?:tags?|category|categories|cat|term|topic)[-_]")
 _LABEL_GATED = re.compile(r"(?i)premium[-_]?content|subscribers?[-_]?only|members?[-_]?only")
+_SPACED = re.compile(r"(?i)\b(?:premium content|subscribers? only|members? only)\b")
 _UNGATED = re.compile(r"(?i)^(?:no|non|not|without)[-_]?(?:paywall|regwall)|"
                       r"(?:paywall|regwall)[-_]?(?:off|free|false|disabled|none|exempt|inactive)$")
 
@@ -409,8 +410,10 @@ def _gated(tag: str, a: dict) -> bool:
     subscriber-only, members-only...). Never the page's own <body> or <html>."""
     if tag in ("body", "html"):
         return False
-    names = str(a.get("class") or "").split() + [str(a.get(k)) for k in ("id", "role") if a.get(k)]
-    for name in names:
+    classes = str(a.get("class") or "").split()
+    if _SPACED.search(" ".join(classes)):  # "premium content", "members only": two class names that say it together
+        return True
+    for name in classes + [str(a.get(k)) for k in ("id", "role") if a.get(k)]:
         if _UNGATED.search(name):
             continue
         if (_LABEL_GATED if _LABEL.match(name) else _GATED).search(name):
@@ -558,39 +561,79 @@ def _read_blocks(doc: str, strict: bool) -> str:
     return "\n\n".join(out)
 
 
-# Elements whose end tag pages leave out, and the start tags that end them.
-_BLOCK_STARTS = {"p", "div", "ul", "ol", "dl", "table", "section", "article", "aside", "header", "footer", "nav",
-                 "main", "figure", "blockquote", "pre", "form", "hr", "h1", "h2", "h3", "h4", "h5", "h6",
-                 "address", "details", "fieldset", "figcaption", "menu"}
-_ROWS = {"tr", "tbody", "thead", "tfoot"}
-_ENDED_BY = {"li": {"li"}, "p": _BLOCK_STARTS | {"li", "dt", "dd"}, "dt": {"dt", "dd"}, "dd": {"dt", "dd"},
-             "td": {"td", "th"} | _ROWS, "th": {"td", "th"} | _ROWS, "tr": _ROWS, "tbody": _ROWS - {"tr"},
-             "thead": _ROWS - {"tr"}, "tfoot": _ROWS - {"tr"}, "option": {"option", "optgroup"},
-             "optgroup": {"optgroup"}}
-# What a start tag never reaches past when it looks for the element it ends: a new <li> ends the open <li> of
-# its own list, not the one a nested list sits in.
-_WALLS = {"ul", "ol", "dl", "table", "select", "section", "article", "aside", "nav", "header", "footer", "main",
-          "blockquote", "figure", "form", "fieldset", "details", "td", "th", "caption", "button", "object",
-          "template", "body", "html"}
-
-
-# Elements that sit inside a line of text. Their end tag never closes a block: in "<a><div>one</a>two</div>" a
-# browser keeps "two" in the <div>.
+# How the cut of a marked element ends. The rule that matters: a cut may take more than the element, never
+# less, because what's left is read. The measure is what a browser makes of the page, broken tags and all
+# (tests/test_studio_scraper.py holds the cases an HTML5 parser was asked about), and wherever this simpler
+# reading can't be sure of it, the cut goes on.
+#
+# A marked element ends at its own end tag, when a browser would heed that tag there:
+#   - what opens inside it is followed as a browser follows it: a </div> ends the <div> opened last, a </li>
+#     doesn't reach out of a list inside the item, a </span> is ignored while a block is open in the span;
+#   - while a table, a text box, a drawing or the like is open inside it, tags aren't counted at all;
+#   - a marked element still open inside it when it ends keeps the cut going until that one has ended too;
+#   - one that nothing ends takes the rest of the page.
+#
+# The exception is the handful of elements whose end tag HTML lets a page leave out, where "the rest of the
+# page" would be a free article lost to a menu item. Those also end where a browser is sure to have ended
+# them, unless a table, a text box or a marked element is open inside them:
+#   - at the tag that takes their place: a <p> at the next block (<p>, <div>, <h2>...), an <li> at the next
+#     <li>, a cell at the next cell or row;
+#   - an <li>, a cell or a row at the end of the list or table it's in, when that list or table has held
+#     nothing unusual since it opened (so there's no doubt it is still open).
 _INLINE = {"a", "span", "b", "i", "em", "strong", "small", "u", "s", "font", "label", "code", "sup", "sub", "mark",
            "time", "abbr", "cite", "q", "strike", "big", "tt", "nobr", "kbd", "var", "samp", "dfn", "bdi", "bdo"}
-
-
-def _ends(stack: list[str], tag: str) -> int:
-    """How far down the open elements a start tag reaches: the index of the lowest one it ends (everything
-    above goes with it), or len(stack) when it ends none."""
-    walls = {"table"} if tag in _ROWS or tag in ("td", "th") else _WALLS
-    cut = len(stack)
-    for i in range(len(stack) - 1, -1, -1):
-        if tag in _ENDED_BY.get(stack[i], ()):
-            cut = i  # and the one under it too, when the tag ends that as well (<tr> ends the cell, then the row)
-        elif cut < len(stack) or stack[i] in walls:
-            break
-    return cut
+_TEXT = _INLINE | _VOID  # what never stands between an element and the tag that ends it
+# The start tags that always end an open <p>. Not <form> (ignored inside another form) or <table> (not on
+# every page), nor the newest elements, which an older browser reads as plain ones.
+_ENDS_P = {"address", "article", "aside", "blockquote", "center", "details", "dir", "div", "dl", "fieldset",
+           "figcaption", "figure", "footer", "header", "main", "menu", "nav", "ol", "p", "section", "summary",
+           "ul", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "li", "dd", "dt", "hr"}
+_HEADINGS = ("h1", "h2", "h3", "h4", "h5", "h6")
+# The elements a browser treats in a way of its own: one left open is opened again in the block that follows,
+# and its end tag reaches it through the blocks opened inside it.
+_FORMATTING = {"a", "b", "big", "code", "em", "font", "i", "nobr", "s", "small", "strike", "strong", "tt", "u"}
+# The blocks whose end tag ends them whatever is open inside them...
+_BLOCK_ENDS = {"address", "article", "aside", "blockquote", "button", "center", "details", "dir", "div", "dl",
+               "fieldset", "figure", "footer", "header", "listing", "menu", "nav", "ol", "pre", "section", "ul"}
+# ...the ones only today's browsers count among those (they get the careful reading of both)...
+_UNSURE = {"main", "figcaption", "summary", "hgroup", "search", "dialog"}
+_TABLE_PARTS = {"td", "th", "tr", "tbody", "thead", "tfoot", "caption"}
+# ...and everything that, open inside a <span>, a <label> or a made-up tag, makes a browser ignore that
+# element's end tag.
+_BLOCKING = _BLOCK_ENDS | _UNSURE | _TABLE_PARTS | set(_HEADINGS) | {"p", "li", "dd", "dt", "form", "table"}
+# What an end tag doesn't reach through, looking for the element it ends.
+_STOPS = {"li": {"ul", "ol", "table"}, "p": {"button", "table"}, "table": set()}
+# Start tags that end a <select> they are in (a table's only in some places).
+_ENDS_SELECT = {"select", "input", "textarea", "keygen", "table", "caption", "tbody", "tfoot", "thead", "tr", "td", "th"}
+_DEEP = 7  # a browser carries a <b> (<i>, <a>...) on into the blocks open inside it: eight deep, no further
+_MOST = 2000  # elements open inside one marked element; past that, the cut takes the rest of the page
+# Elements that change how what's inside them is read: an end tag there doesn't reach an element outside.
+_SHUT = {"table", "object", "applet", "marquee", "template", "svg", "math", "select", "textarea", "title",
+         "noscript", "iframe", "noembed", "noframes", "xmp", "plaintext", "listing", "script", "style", "frameset"}
+_LISTS, _GROUPS, _BLOCKS = {"ul", "ol", "menu"}, {"tbody", "thead", "tfoot"}, {"p", "div", "address"}
+_ROWS = {"tr"} | _GROUPS
+# The elements whose end tag a page may leave out, and the start tags that end one.
+_LEFT_OPEN = {
+    "p": _ENDS_P, "li": {"li"}, "dt": {"dt", "dd"}, "dd": {"dt", "dd"},
+    "td": {"td", "th"} | _ROWS, "th": {"td", "th"} | _ROWS, "tr": _ROWS,
+    "tbody": _GROUPS, "thead": _GROUPS, "tfoot": _GROUPS, "option": {"option", "optgroup"},
+}
+# What holds such elements: (the tags that may come and go inside it without a doubt that it's still open,
+# what it holds and the end tags that then end one).
+_CELL_TAGS = {"td", "th", "col", "colgroup"} | _ROWS
+_HOLDERS = {
+    "ul": (_TEXT | {"li", "p"}, {"li": {"ul"}}), "ol": (_TEXT | {"li", "p"}, {"li": {"ol"}}),
+    "menu": (_TEXT | {"li", "p"}, {"li": {"menu"}}),
+    "dl": (_TEXT | {"dt", "dd", "p"}, {"dt": {"dl"}, "dd": {"dl"}}),
+    "table": (_TEXT | _CELL_TAGS | {"p"}, {"td": {"tr", "table"}, "th": {"tr", "table"}, "tr": {"table"},
+                                          "tbody": {"table"}, "thead": {"table"}, "tfoot": {"table"}}),
+    "select": ({"option", "optgroup"}, {"option": {"select"}}),
+    "datalist": ({"option"} | _VOID, {"option": {"datalist"}}),
+}
+# The items each holds, whose end tag HTML lets a page leave out.
+_ITEMS = {"ul": {"li"}, "ol": {"li"}, "menu": {"li"}, "dl": {"dt", "dd"}, "table": _TABLE_PARTS,
+          "select": {"option", "optgroup"}, "datalist": {"option"}}
+_MURKY = (_SHUT | {"button"}) - {"table", "script", "style"}  # inside these, a list isn't sure to be a list
 
 
 class _Gates(HTMLParser):
@@ -601,44 +644,243 @@ class _Gates(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
         self.spans: list[tuple[tuple[int, int], tuple[int, int] | None, bool]] = []
-        self.stack: list[str] = []  # the open elements
-        self.gate: int | None = None  # where in the stack the marked element being passed over is
+        # The open lists and tables outside any marked element: [tag, still sure, its items open now].
+        self.lists: list[list] = []
+        self.murk: dict[str, int] = {}  # the text boxes, drawings... open there
+        self.styled: dict[str, int] = {}  # the <b>, <i>, <a>... open anywhere
+        self.gate = ""  # the tag of the marked element being passed over
         self.began = (0, 0)
+        # What's open inside it, in order: (tag, is it marked too, has what it was opened in ended).
+        self.open: list[tuple[str, bool, bool]] = []
+        # The <b>, <i>, <a>... open inside it, by tag: (is it marked, how much was open when it opened).
+        self.marks: dict[str, list[tuple[bool, int]]] = {}
+        self.shut: dict[str, int] = {}  # the tables, text boxes... open inside it
+        self.formed = False  # it's a form, and its </form> has come while something was open inside it
+        self.ends: set[str] = set()  # the end tags of what holds it, where it's sure to be held
+        self.owed = False  # it has ended, but a marked element opened inside it hasn't
+        self.endless = False  # nothing ends it
 
     def _end(self, whole: bool) -> None:
         self.spans.append((self.began, self.getpos(), whole))
-        self.gate = None
+        self.gate = ""
+
+    def _doubt(self) -> None:
+        for entry in self.lists:
+            entry[1] = False
+
+    def _shuts(self, tag: str) -> bool:
+        """Whether a tag inside the marked element is one that opens (or closes) a table, a text box...
+        (A table in a marked cell or row is followed like any other element.)"""
+        return tag in _SHUT and not (tag == "table" and self.gate in _TABLE_PARTS)
+
+    def _marked(self) -> bool:
+        """Whether a marked element is open inside the one being passed over."""
+        return any(marked for _, marked, _ in self.open) or any(
+            marked for opened in self.marks.values() for marked, _ in opened)
+
+    def _bare(self) -> bool:
+        """Whether nothing is open inside the marked element now."""
+        return not (self.open or self.owed or self.endless or any(self.marks.values()) or any(self.shut.values()))
+
+    def _settled(self) -> bool:
+        """Whether a tag that ends the marked element from outside ends everything open inside it too: a
+        table, a text box or a marked element in there is another matter."""
+        return not (self.owed or self.endless or any(self.shut.values()) or self._marked()
+                    or any(tag == "table" for tag, _, _ in self.open))
+
+    def _replaced(self, tag: str) -> bool:
+        """Whether a start tag takes the marked element's place, as a browser reads it: a <p> at the next
+        block, an <li> at the next <li>, a cell at the next cell or row."""
+        if tag not in _LEFT_OPEN.get(self.gate, ()) or not self._settled():
+            return False
+        if self.gate == "option":
+            return self._bare()
+        if self.gate == "p":
+            return not any(inside == "button" for inside, _, _ in self.open)
+        if self.gate in ("li", "dd", "dt"):  # the nearest item, with no block but a <div> or a <p> in between
+            return not any(inside in _BLOCKING and inside not in _BLOCKS for inside, _, _ in self.open)
+        return True
+
+    def _blocks(self, since: int = 0) -> int:
+        return sum(1 for tag, _, _ in self.open[since:] if tag in _BLOCKING)
+
+    def _find(self, tag: str, stops, ordinary: bool = False) -> int:
+        """Which open element inside the marked one an end tag ends: its place, -1 when it's none of them,
+        -2 when a browser ignores the tag there."""
+        for i in range(len(self.open) - 1, -1, -1):
+            inside = self.open[i][0]
+            if inside == tag:
+                return i
+            if inside in stops or ordinary and inside in _BLOCKING:
+                return -2
+        return -1
+
+    def _drop(self, at: int) -> None:
+        """An element open inside the marked one has ended, and with it what was open inside it. Except a
+        marked element in there, which only its own end tag ends: if a tag that wasn't followed had already
+        ended the element, that one opened after it and is still open. (Such a one's end tag then ends
+        nothing but it: what opened after it may not be inside it.)"""
+        if self.open[at][2]:
+            del self.open[at]
+        else:
+            self.open[at:] = [(tag, True, True) for tag, marked, _ in self.open[at + 1:] if marked]
+
+    def _opened(self, tag: str, marked: bool, styled: bool) -> None:
+        """Follow a start tag inside the marked element."""
+        if (self.gate == "select" or self.shut.get("select")) and (marked or tag in _ENDS_SELECT):
+            self.endless = True  # a list of choices that a browser may have ended here, or not
+            return
+        if self._shuts(tag):
+            self.shut[tag] = self.shut.get(tag, 0) + 1
+            return
+        if any(self.shut.values()) or tag in _VOID:
+            return
+        if tag in _FORMATTING:
+            self.marks.setdefault(tag, []).append((marked, len(self.open)))
+            return
+        if (tag in _TABLE_PARTS or tag == "colgroup") and self.gate not in _TABLE_PARTS and not any(
+                inside == "table" for inside, _, _ in self.open):
+            return  # outside a table, a browser reads a cell's or a row's tag as nothing at all
+        if tag in _ENDS_P and (at := self._find("p", _STOPS["p"])) >= 0:
+            self._drop(at)  # a block ends the paragraph before it, and what was open in that
+        if tag in ("li", "dd", "dt"):  # and the item before it, unless a block stands between them
+            same = ("li",) if tag == "li" else ("dd", "dt")
+            for i in range(len(self.open) - 1, -1, -1):
+                inside = self.open[i][0]
+                if inside in same:
+                    self._drop(i)
+                    break
+                if inside in _BLOCKING and inside not in _BLOCKS:
+                    break
+        elif tag in _HEADINGS and self.open and self.open[-1][0] in _HEADINGS and not styled:
+            self.open.pop()  # a heading right inside a heading ends it (not one in a <b> in a heading)
+        elif tag == "button" and (at := self._find("button", {"table"})) >= 0:
+            self._drop(at)  # nor a button a button
+        if tag == "form" and marked and styled:
+            self.endless = True  # a <b> (<i>, <a>...) open before a form outlasts the </form>, inside the form
+        self.open.append((tag, marked, False))
+        if len(self.open) > _MOST:
+            self.endless = True
+
+    def _closed(self, tag: str) -> str:
+        """Follow an end tag inside the marked element: "own" when it's that element's own and a browser
+        heeds it there, "in" when it belongs to something inside it (or is ignored there), "out" when it
+        is neither."""
+        if self.shut.get(tag):
+            self.shut[tag] -= 1
+            return "in"
+        if any(self.shut.values()):
+            return "in"
+        if tag in _FORMATTING:
+            if opened := self.marks.get(tag):
+                marked, since = opened[-1]
+                if not (marked and self._blocks(since) >= _DEEP):  # (carried too deep: it stays open)
+                    opened.pop()
+                return "in"
+            if tag != self.gate:
+                return "out"
+            return "own" if self._blocks() < _DEEP else "in"
+        if tag in _HEADINGS:  # any heading's end tag ends the heading opened last, whatever its number
+            for i in range(len(self.open) - 1, -1, -1):
+                if self.open[i][0] in _HEADINGS:
+                    self._drop(i)
+                    return "in"
+                if self.open[i][0] == "table":
+                    return "in"
+            return "own" if self.gate in _HEADINGS else "out"
+        at = self._find(tag, _STOPS.get(tag, {"table"}), ordinary=tag not in _BLOCKING or tag in _UNSURE)
+        if at >= 0:
+            if tag != "form":
+                self._drop(at)
+            elif at == len(self.open) - 1 and not any(self.marks.values()):
+                self.open.pop()
+            elif not self.open[at][1]:
+                del self.open[at]  # a </form> leaves open what is open inside the form, still inside it
+            return "in"
+        if at == -2:
+            return "in"
+        if tag != self.gate:
+            return "out"
+        if tag == "form":  # the same goes for the marked form itself: it ends when those have ended
+            self.formed = True
+            return "in"
+        return "own"
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)  # "<div/>" opens a <div>: a browser doesn't heed the slash
 
     def handle_starttag(self, tag, attrs):
-        if tag in _VOID:
-            return
-        # An element whose end tag was left out ends where its next sibling starts (<li> by <li>, <p> by a block).
-        cut = _ends(self.stack, tag)
-        if cut < len(self.stack):
-            del self.stack[cut:]
-            if self.gate is not None and self.gate >= cut:
-                self._end(False)
-        if self.gate is None and _gated(tag, dict(attrs)):
-            self.gate, self.began = len(self.stack), self.getpos()
-        self.stack.append(tag)
+        marked = _gated(tag, dict(attrs))
+        styled = any(self.styled.values())
+        if tag in _FORMATTING:
+            self.styled[tag] = self.styled.get(tag, 0) + 1
+        if self.gate:
+            if self._replaced(tag):
+                self._end(False)  # the tag that takes its place; it's read like any other tag, below
+            else:
+                if not self.endless:
+                    self._opened(tag, marked, styled)
+                return
+        # Outside a marked element: is the list (the table) this sits in still surely open?
+        sure = not any(self.murk.values())
+        top = self.lists[-1] if self.lists else None
+        if tag in _HOLDERS:
+            if not (top and tag in _LISTS and top[0] in _LISTS):  # a list in a list item is nothing unusual
+                self._doubt()
+            if not marked:
+                self.lists.append([tag, sure, set()])
+        elif not (top and tag in _HOLDERS[top[0]][0]):
+            self._doubt()
+        elif tag in _ITEMS[top[0]]:  # the item (the cell, the row) that is open in it now
+            keep = _ROWS if tag in ("td", "th") else _GROUPS if tag == "tr" else ()
+            top[2] = {inside for inside in top[2] if inside in keep} | {tag}
+        if tag in _MURKY and tag not in _VOID and not marked:
+            self.murk[tag] = self.murk.get(tag, 0) + 1
+        if marked and tag not in _VOID:
+            held = _HOLDERS[top[0]][1].get(tag, set()) if top and top[1] and sure else set()
+            self.gate, self.began, self.ends = tag, self.getpos(), set(held)
+            self.open, self.marks, self.shut, self.owed, self.formed = [], {}, {}, False, False
+            # In a <select> a browser may not read a tag as a tag at all. And a <b> (<i>, <a>...) left open
+            # before a form is opened again inside it, and stays open past the </form>.
+            self.endless = bool(self.murk.get("select")) or tag == "form" and styled
 
     def handle_endtag(self, tag):
-        if tag in _VOID:
-            return
-        for i in range(len(self.stack) - 1, -1, -1):
-            if self.stack[i] == tag:  # closes back to its match, as pages that leave <p> and <li> open need
-                if tag in _INLINE and any(e not in _INLINE for e in self.stack[i + 1:]):
-                    break  # misplaced: a block opened since, and it stays open
-                if self.gate is not None and i <= self.gate:
-                    self._end(i == self.gate)  # its own end tag, or its parent's
-                del self.stack[i:]
-                break
+        if self.styled.get(tag):
+            self.styled[tag] -= 1
+        if self.gate:
+            if self.endless:
+                return
+            what = self._closed(tag)
+            if self.owed or what == "own" or self.formed and self._bare():
+                # A marked <b> (<i>, <a>...) left open inside it is carried on into what follows by a
+                # browser, until its own end tag. And any marked element inside it may have outlived it,
+                # if a tag before this one had already ended it.
+                self.owed = self._marked()
+                if not self.owed:
+                    self._end(True)
+                    self._doubt()  # what closed inside it may have closed more than it
+                return
+            if not (what == "out" and tag in self.ends and self._settled()
+                    and (self.gate != "option" or self._bare())):
+                return
+            self._end(False)  # the list (the row, the table) it's in ends here: so has it
+        if self.murk.get(tag):
+            self.murk[tag] -= 1
+        top = self.lists[-1] if self.lists else None
+        if top and tag == top[0]:
+            self.lists.pop()
+        elif tag in _HOLDERS or not (top and tag in _HOLDERS[top[0]][0]):
+            self._doubt()
+        elif tag in _ITEMS[top[0]]:
+            if tag not in top[2]:
+                self._doubt()  # an item's end tag with no item open: it may end one outside, and the list
+            top[2] -= {"td", "th"} if tag in ("td", "th") else {"td", "th", "tr"} if tag == "tr" else set(top[2])
 
     def close(self):
         super().close()
-        if self.gate is not None:  # nothing around it ever closes: nothing after it is read
+        if self.gate:  # never closed: nothing after it is read
             self.spans.append((self.began, None, True))
-            self.gate = None
+            self.gate = ""
 
 
 def ungated(doc: str) -> str:
@@ -750,8 +992,10 @@ def article_from(doc: str, url: str, asked: str = "", only: str = "") -> Article
         raise paid
     if words < MIN_WORDS:
         # Too little to retell, and either the page speaks of subscribing or a part marked as the
-        # subscribers' was left unread: say that, not "no article".
-        if PAYWALL.search(web.clean(doc)[:20000]) or ungated(doc) != doc:
+        # subscribers' was left unread that could have been the article (not a menu item or an empty box):
+        # say that, not "no article".
+        whole = web.clean(doc)
+        if PAYWALL.search(whole[:20000]) or len(whole.split()) - len(web.clean(ungated(doc)).split()) >= MIN_WORDS:
             raise paid
         raise ScrapeError(f"No article text was found at {host} ({words} words). The page may be a video, a list of "
                           "links, or drawn by JavaScript. Paste its text as a prompt or script instead.")
