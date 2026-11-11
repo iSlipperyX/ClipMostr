@@ -122,3 +122,119 @@ def test_the_linked_mac_shows_the_pcs_sports_and_makes_clips_there(app, window, 
     assert wait(app, lambda: desk.game("v0")["status"] == "queued")
     world.host.add_event("sports", "Lakers at Celtics: 2 clips made")
     assert wait(app, lambda: any("2 clips made" in t for _, t in window.notify_calls), timeout=20)
+
+
+# --- the games played: the last 24 hours, by drop-down and by list --------------------------------------------
+
+
+def played_page(app, page):
+    """The page on its "Last 24 hours" view, the stand-in scoreboards read."""
+    import time
+
+    from test_telegram_sports import scoreboards
+
+    page.desk.slate_get = scoreboards(time.time())
+    page.view_buttons["played"].click()
+    p = page.played
+    assert wait(app, lambda: p.data is not None and p.list.count() == 5)
+    return p
+
+
+def test_the_last_24_hours_are_listed_with_drop_downs(app, page):
+    assert wait(app, lambda: page.list.count() == 3)
+    p = played_page(app, page)
+    assert p.isVisible() and not page.list.isVisible() and not page.list_foot.isVisible()
+    assert [p.sport.itemText(i) for i in range(p.sport.count())] == ["All sports", "🏀  Basketball", "🏒  Ice hockey"]
+    assert [p.league.itemData(i) for i in range(p.league.count())] == ["", "NBA", "NHL"]
+    games = [p.game.itemText(i) for i in range(p.game.count())]
+    assert games[0] == "Pick a game…" and "NBA: Lakers 108, Celtics 112  ·  Final" in games
+    assert "5 games · 3 finished · 1 being played" in p.note.text() and "Not read:" in p.note.text()
+    assert not p.reel_btn.isEnabled() and not p.find_btn.isEnabled()
+    # one sport, then one league: the lists follow
+    p.sport.setCurrentIndex(p.sport.findData("hockey"))
+    assert p.list.count() == 1 and [p.league.itemData(i) for i in range(p.league.count())] == ["", "NHL"]
+    p.sport.setCurrentIndex(0)
+    p.league.setCurrentIndex(p.league.findData("NBA"))
+    assert p.list.count() == 4 and p.game.itemText(1).startswith("Warriors 88, Nuggets 91")
+    # a game still being played is listed but can't be asked for
+    live = p.game.findData("nba-402")
+    assert not p.game.model().item(live).isEnabled()
+    p.list.setCurrentRow(0)
+    assert p.chosen == "nba-402" and not p.reel_btn.isEnabled() and "still being played" in p.hint.text()
+    # picking in the drop-down picks the row, and the other way round
+    p.game.setCurrentIndex(p.game.findData("nba-401"))
+    assert p.list.currentItem().data(0x0100) == "nba-401" and p.reel_btn.isEnabled() and not p.hint.isVisible()
+    p.list.setCurrentRow(2)
+    assert p.game.currentData() == p.chosen == "nba-404"
+    # back to the games found: the list and its buttons return
+    page.view_buttons["all"].click()
+    assert wait(app, lambda: page.list.isVisible() and page.list.count() == 3 and not p.isVisible())
+
+
+def test_a_listed_games_reel_is_asked_for_in_one_click(app, page):
+    said = []
+    page.notice.connect(said.append)
+    p = played_page(app, page)
+    p.game.setCurrentIndex(p.game.findData("nba-401"))
+    p.reel_btn.click()
+    assert wait(app, lambda: len(page.desk.orders()) == 1)
+    o = page.desk.orders()[0]
+    assert (o["title"], o["want"], o["by"], o["line"]) == ("Lakers at Celtics (NBA): a recap reel", "reel", "The PC",
+                                                           "Lakers 108, Celtics 112")
+    assert o["requires"] == {}  # asked for at the PC: the Telegram minimums don't hold it
+    assert wait(app, lambda: said and said[0].startswith("Asked for Lakers at Celtics (NBA): a recap reel for Hoops"))
+    assert "Asked for Lakers at Celtics" in p.hint.text()
+    task = page.desk.claim("test:1")
+    assert task["kind"] == "order"
+    # and the status line says what's being worked on
+    page.refresh(force=True)
+    assert wait(app, lambda: page.now_line.text() == "Now: Looking for the games of Lakers at Celtics (NBA)")
+    page.desk.finish(task, "queued")
+    page.refresh(force=True)
+    assert wait(app, lambda: not page.now_line.isVisible())
+
+
+def test_find_its_footage_searches_for_the_picked_game(app, page):
+    p = played_page(app, page)
+    p.list.setCurrentRow(next(i for i in range(p.list.count()) if p.list.item(i).data(0x0100) == "nhl-501"))
+    p.find_btn.click()
+    assert wait(app, lambda: page.desk.state()["search"]["status"] == "queued")
+    f = page.desk.filter()
+    assert (f.sport, f.league, f.team_list, f.since) == ("hockey", "NHL", ["Avalanche", "Maple Leafs"], "3days")
+    assert page.view == "all" and page.list.isVisible()
+
+
+def test_scoreboards_that_cant_be_read_say_so(app, page):
+    from ytclip.sportsdesk import feeds
+
+    def down(url, headers):
+        raise feeds.FeedError("The feed answered 503.")
+
+    page.desk.slate_get = down
+    page.view_buttons["played"].click()
+    p = page.played
+    assert wait(app, lambda: p.data is not None)
+    assert not p.list.isVisible() and p.empty.isVisible() and "Not read:" in p.note.text()
+    assert p.refresh_btn.isEnabled() and p.refresh_btn.text() == "Refresh"
+
+
+def test_the_linked_mac_lists_the_games_and_asks_for_a_reel(app, window, world):  # noqa: F811
+    import time
+
+    from test_telegram_sports import scoreboards
+
+    desk = world.host.desk
+    desk.slate_get = scoreboards(time.time())
+    assert wait(app, lambda: window.session.state == "online")
+    window.nav.setCurrentIndex(window.i_sports)
+    view = window.sports.view
+    view.view_buttons["played"].click()
+    p = view.played
+    assert wait(app, lambda: p.data is not None and p.list.count() == 5, timeout=15)
+    assert "on your PC" in p.reel_btn.toolTip()
+    p.game.setCurrentIndex(p.game.findData("nhl-501"))
+    p.reel_btn.click()
+    assert wait(app, lambda: len(desk.orders()) == 1, timeout=15)
+    o = desk.orders()[0]
+    assert o["title"] == "Avalanche at Maple Leafs (NHL): a recap reel" and o["by"] not in ("", "The PC")
+    assert wait(app, lambda: "Asked for Avalanche at Maple Leafs" in p.hint.text(), timeout=15)

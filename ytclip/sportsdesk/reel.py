@@ -171,7 +171,7 @@ def make(p, game: dict, highlights: list[dict], s, out_root: Path, *, ids: list[
          category=None, voice: str = "en_storyteller", framing_mode: str = "follow", order: str = "countdown",
          log: Log | None = None, progress: Progress | None = None, check: Callable[[], None] | None = None,
          work: Path | None = None, events: list[dict] | None = None, events_title: str = "",
-         timeline: list[dict] | None = None) -> ReelResult:
+         timeline: list[dict] | None = None, requires: dict | None = None, asked_by: str = "") -> ReelResult:
     """Make the reel of `game` from `p` (opened and measured). Raises montage.ReelError for a game that can't
     make one, and whatever `check` raises to stop.
 
@@ -344,13 +344,15 @@ def make(p, game: dict, highlights: list[dict], s, out_root: Path, *, ids: list[
         if result_checks.get("lufs") is not None and abs(result_checks["lufs"] + 14) > 1.0:
             warnings.append(f"Its sound came out at {result_checks['lufs']} LUFS, not -14.")
         info["timings"] = timings
-        return _deliver(p, game, reel, out, folder, s, category, sport, result_checks, info, warnings, bool(nar_path))
+        return _deliver(p, game, reel, out, folder, s, category, sport, result_checks, info, warnings, bool(nar_path),
+                        requires=requires, asked_by=asked_by)
     finally:  # stopped, failed or done: the work folder (framed plays, sound, graphics) goes either way
         shutil.rmtree(work, ignore_errors=True)
 
 
 def _deliver(p, game: dict, reel: montage.Reel, video: Path, folder: Path, s, category, sport, result_checks: dict,
-             info: dict, warnings: list[str], narrated: bool) -> ReelResult:
+             info: dict, warnings: list[str], narrated: bool, requires: dict | None = None,
+             asked_by: str = "") -> ReelResult:
     from ..analyze import Clip
     from ..download import Video
     from ..export import thumbnail
@@ -371,6 +373,11 @@ def _deliver(p, game: dict, reel: montage.Reel, video: Path, folder: Path, s, ca
     tags = " ".join(f"#{t}" for t in st.hashtags)
     auto = {"permission": PERMISSION, "origins": ["sports"], "how": "manual", "recipe": "Sports recap reel",
             "picked_at": time.time()}
+    if asked_by:
+        auto |= {"permission": f"Asked for by {asked_by} from Telegram: a recap reel of the game's best plays",
+                 "origins": ["sports", "telegram"]}
+    if requires:  # the minimums it was made to: posting's intake holds it if it falls short
+        auto["requires"] = dict(requires)
     if category is not None:
         auto |= {"category": category.name, "category_id": category.id, "account": category.account,
                  "account_id": category.account_id}

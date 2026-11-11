@@ -465,6 +465,11 @@ class Store:
                     # too, so it never posts on its own say-so.
                     if meta.get("edit_of") or meta.get("fix_of"):
                         item.review = "waiting"
+                    # Made for a Telegram request and short of its minimums (under a minute, say): it's kept,
+                    # and it doesn't post until someone OKs it.
+                    if meta.get("hold"):
+                        item.review = "waiting"
+                        item.warnings.append(meta["hold"])
                 else:
                     item.source_group = str(f.parent)
                 self.items[item.id] = item

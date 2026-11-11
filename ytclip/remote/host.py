@@ -830,6 +830,18 @@ class Host:
             self.log(f"{device_name or 'A Mac'}: {out['message']}")
         return out
 
+    def sports_played(self, sport: str = "any", league: str = "") -> dict:
+        """The games of the last 24 hours (the scoreboards), for a Mac's Sports page."""
+        return self._desk_call(lambda d: d.played(sport or "any", league or ""))
+
+    def sports_order_game(self, body: dict, device_name: str = "") -> dict:
+        """A listed game's recap reel (or plays), asked for from a Mac."""
+        body = body if isinstance(body, dict) else {}
+        out = self._desk_call(lambda d: d.order_game(str(body.get("game") or ""), str(body.get("want") or "reel"),
+                                                     by=device_name or "A Mac"))
+        self.log(f"{device_name or 'A Mac'}: {out['message']}")
+        return out
+
     def sports_thumb(self, game_id: str, highlight_id: str) -> Path:
         return self._desk_call(lambda d: d.thumb(game_id, highlight_id))
 

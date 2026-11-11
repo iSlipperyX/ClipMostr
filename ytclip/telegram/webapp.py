@@ -21,7 +21,8 @@ header, so they carry a second token in their address that opens videos and pict
   GET  /api/status                        POST /api/pause {paused}
   GET  /api/categories                    POST /api/make {idea, category}
   GET  /api/sports                        the sports form's choices, and the sports requests so far
-  POST /api/sports/order {sport, league, teams, since, want, games, plays, category}
+  GET  /api/sports/played ?sport= &league=  the games of the last 24 hours, to pick from (sportsdesk/slate.py)
+  POST /api/sports/order {game} or {sport, league, teams, since, want, games, plays, category}
   POST /api/sports/orders/<id>/cancel     a game's best plays and a recap reel, made without anyone picking
   GET  /api/activity                      who did what, lately
   POST /api/people/invite | leave         POST /api/people/remove {id}
@@ -298,7 +299,16 @@ class WebApp:
             st = host.status()
             auto = st.get("automation") or {}
             job = st.get("job")
+            try:  # what the Sports worker is on: the game, the step, how far (and how many wait)
+                sport = bot.desk.doing()
+                sport_waiting = sport["waiting"] if sport else bot.desk.waiting()
+            except Exception:  # noqa: BLE001 - sports.db busy for a moment
+                sport, sport_waiting = None, 0
             return {"paused": bool(auto.get("paused")), "doing": (auto.get("activity") or {}).get("text") or "",
+                    "state": str(auto.get("state") or ""),
+                    "sports": ({k: sport[k] for k in ("kind", "what", "title", "stage", "frac", "text", "emoji", "by",
+                                                      "waiting")} if sport else None),
+                    "sports_waiting": sport_waiting,
                     "job": {"title": job["title"], "making": job["making"], "stage": job["stage"]} if job else None,
                     "queue": st.get("queue") or {}, "posting": st.get("posting"),
                     "problems": list(st.get("problems") or [])[:5]}
@@ -317,8 +327,15 @@ class WebApp:
             for o in out["orders"]:
                 o["mine"] = o.get("by_id") == me
             return out
+        if path == "/api/sports/played" and method == "GET":
+            return bot.played_json(str(body.get("sport") or "any"), str(body.get("league") or ""))
         if path == "/api/sports/order" and method == "POST":
-            return bot.sports_order(me, body)
+            if body.get("game"):  # a game picked from the games played, not typed
+                r = bot.sports_game(me, str(body["game"])[:80], str(body.get("want") or "reel"), body.get("plays"),
+                                    str(body.get("category") or ""))
+            else:
+                r = bot.sports_order(me, body)
+            return {k: r[k] for k in ("order", "message", "notes")}
         m = re.fullmatch(r"/api/sports/orders/([a-z0-9]{1,24})/cancel", path)
         if m and method == "POST":
             return bot.sports_cancel(me, m.group(1))
@@ -476,7 +493,7 @@ class _Handler(BaseHTTPRequestHandler):
             if method == "GET" and path in ("/", "/index.html", "/app.css", "/app.js"):
                 self.send_page({"/app.css": "css", "/app.js": "js"}.get(path, "page"))
                 return
-            body = self.read_json() if method == "POST" else {}
+            body = self.read_json() if method == "POST" else {k: v[0] for k, v in query.items() if v}
             if path == "/api/session" and method == "POST":
                 token, media, chat = app.session_for(str(body.get("init_data") or ""))
                 self.send_json(200, {"token": token, "media": media, **app.me_json(chat)})

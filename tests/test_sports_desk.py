@@ -378,6 +378,13 @@ class FakeEngine:
         return folder
 
 
+def play_sized(path):
+    """A made clip as ffmpeg would read it: 24 seconds, 1080 x 1920, with sound."""
+    from ytclip.ffmpeg import MediaInfo
+
+    return MediaInfo(duration=24.0, width=1080, height=1920, fps=30.0, has_audio=True)
+
+
 @pytest.fixture
 def worker(desk, tmp_path, monkeypatch):
     s = Settings(output_dir=str(tmp_path / "out"), auto_output_dir=str(tmp_path / "Automation"),
@@ -390,6 +397,7 @@ def worker(desk, tmp_path, monkeypatch):
     w = DeskWorker(desk, lambda: s, "test:1", log=lambda m: None, events=lambda k, t: news.append((k, t)),
                    deliver=lambda folder, cat: sent.append((folder, cat.name)) or 2, engine_factory=FakeEngine)
     w.news, w.sent, w.s = news, sent, s
+    w.probe = play_sized  # what a request's review measures: a single play, upright, with sound
     monkeypatch.setattr(DeskWorker, "_youtube_pause", lambda self: None)
     return w
 

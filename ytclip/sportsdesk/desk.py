@@ -48,6 +48,9 @@ WAIT_RETRY = 600.0  # s before a task waiting out YouTube's sign-in pause is loo
 KEEP_TASKS = 7 * 86400.0  # finished tasks are forgotten after this long
 KINDS = ("search", "highlights", "make", "reel", "events", "order")
 BUSY = ("queued", "analysing", "making")  # a game's statuses while work is waiting or under way
+# What a task is, said before the game's name in a status line ("Making the recap reel of Lakers at Celtics").
+DOING = {"search": "Looking for", "order": "Looking for the games of", "highlights": "Finding the best plays of",
+         "make": "Cutting the clips of", "reel": "Making the recap reel of", "events": "Searching the moments of"}
 ORDER_WANTS = {"clips": "clips of the best plays", "reel": "a recap reel", "both": "clips and a recap reel"}
 ORDER_OPEN = ("queued", "searching", "working")  # an order's statuses until it's done, failed or cancelled
 ORDER_ENDED = ("done", "failed", "skipped", "cancelled")  # a step's statuses once nothing more happens to it
@@ -211,7 +214,12 @@ class Desk:
         now = self.now()
         working = [t for t in tasks if t["status"] in ("working", "cancel") and (t["lease"] or 0) > now]
         search = self._search_state(tasks)
+        try:
+            doing = (self.doing() or {}).get("text", "")
+        except Exception:  # noqa: BLE001 - the line is a courtesy; the page still shows its games
+            doing = ""
         return {"rev": rev, "filter": f.to_json(), "describe": f.describe(), "games": [public(g) for g in gs],
+                "doing": doing,
                 "search": search, "waiting": sum(1 for t in tasks if t["status"] == "queued"),
                 "worker": (working[0]["owner"] or "").split(":")[0] if working else "",
                 "ai": ai_state(s), "youtube": "api" if _youtube_key(s) else "free",
@@ -574,13 +582,23 @@ class Desk:
             if len(mine) == 1:
                 f.category_id = mine[0]["id"]
         cat = next((c for c in cats if c["id"] == f.category_id), None)
+        match = _match(values.get("match"))
+        if match and match["state"] == "live":
+            raise DeskError(f"{match['label']} is still being played: its highlights aren't up yet. Ask again "
+                            "when it's over.", 409)
+        if match and match["state"] == "soon":
+            raise DeskError(f"{match['label']} hasn't been played yet.", 409)
+        from ..compliance import requirements
+
+        need = requirements.rules(s) if by_id or values.get("review") else {}
         now = self.now()
         o = {"id": "o" + os.urandom(5).hex(), "by": " ".join(str(by or "").split())[:60], "by_id": by_id,
-             "filter": f.to_json(), "want": want, "games": games, "plays": plays,
+             "filter": f.to_json(), "want": want, "games": 1 if match else games, "plays": plays,
              "category": cat["name"] if cat else "", "status": "queued", "stage": "Waiting to look for the games",
              "error": "", "message": "", "created": now, "updated": now, "finished": 0.0, "searched": {},
-             "steps": []}
+             "steps": [], "match": match, "requires": need}
         o["title"] = order_title(o)
+        o["notes"] = order_notes(o, cat, s)
         with self._tx() as con:
             live = sum(1 for r in con.execute("SELECT data FROM orders").fetchall()
                        if json.loads(r["data"]).get("status") in ORDER_OPEN)
@@ -594,13 +612,41 @@ class Desk:
             for oid in old:
                 con.execute("DELETE FROM orders WHERE id=?", (oid,))
             self._bump(con)
-        return {"id": o["id"], "order": self._order_public(o, {}),
+        return {"id": o["id"], "order": self._order_public(o, {}), "notes": list(o["notes"]),
                 "message": f"Looking for {order_who(o)}: {order_what(o)}."}
 
     def find_order(self, order_id: str) -> dict | None:
         """An order as it's kept (None when there's no such order)."""
         with self.lock:
             return self._load_order(self.con, order_id)
+
+    # --- the games played: the last 24 hours from the scoreboards (slate.py) --------------------------------
+
+    slate_get = None  # a stand-in for the scoreboards' fetch (tests)
+
+    def played(self, sport: str = "any", league: str = "") -> dict:
+        """Every game of the last 24 hours for the Sports tab's list and drop-downs (slate.public's shape)."""
+        from . import slate
+
+        sport = sport if sports.get(str(sport or "")) else "any"
+        now = self.now()
+        return slate.public(slate.played(sport, " ".join(str(league or "").split())[:60], now=now,
+                                         get=self.slate_get), now)
+
+    def order_game(self, game_id: str, want: str = "reel", by: str = "", category: str = "") -> dict:
+        """Ask for a listed game's recap reel (or its best plays, or both) by its id on the list: the game's
+        highlights are looked for, its plays ranked and the videos made, hands-off. Raises DeskError."""
+        from . import slate
+
+        g = slate.find(str(game_id or ""), now=self.now(), get=self.slate_get)
+        if g is None:
+            raise DeskError("That game isn't in the last 24 hours any more. Load the games again.", 404)
+        r = self.order(slate.order_values(g, want or "reel", None, str(category or "")), by=by or "The PC")
+        o = r["order"]
+        where = f" for {o['category']}" if o.get("category") else ""
+        r["message"] = (f"Asked for {o['title']}{where}: its highlights are looked for, its best plays picked and "
+                        "the video made, one step after another.")
+        return r
 
     def orders(self, limit: int = 20) -> list[dict]:
         """The orders, newest first, each with what's being done for it right now."""
@@ -621,7 +667,11 @@ class Desk:
         f = G.GameFilter.from_json(o.get("filter"))
         out["sport"], out["emoji"] = f.sport, f.sport_info.emoji
         out["steps"] = [{k: st.get(k) for k in ("game", "matchup", "kind", "status", "said", "folder", "file",
-                                                "clips")} for st in o.get("steps") or []]
+                                                "clips", "length", "review")} for st in o.get("steps") or []]
+        out["notes"] = list(o.get("notes") or [])
+        out["line"] = (o.get("match") or {}).get("line") or ""
+        out["requires"] = dict(o.get("requires") or {})
+        out["review"] = order_review(o)
         out["doing"], out["frac"] = o.get("stage") or "", None
         if o.get("status") == "working":
             ids = list(dict.fromkeys(st["game"] for st in o.get("steps") or [] if st.get("status") not in ORDER_ENDED))
@@ -681,9 +731,11 @@ class Desk:
                     found.append(json.loads(row["data"]))
             teams = f.team_list
 
+            sides = (o.get("match") or {}).get("sides") or [[t] for t in teams[:2]]
+
             def both(g: dict) -> bool:
                 text = f"{g.get('title', '')} {g.get('home', '')} {g.get('away', '')}"
-                return len(teams) > 1 and all(G.mentions(text, [t]) for t in teams[:2])
+                return len(sides) > 1 and all(G.mentions(text, list(side)) for side in sides[:2])
 
             def made(g: dict) -> bool:
                 return bool(g.get("made") or g.get("reels"))
@@ -788,7 +840,7 @@ class Desk:
             if st is None:
                 return None
             st.update(status=status, said=said)
-            for k in ("folder", "file", "clips", "length"):
+            for k in ("folder", "file", "clips", "length", "review"):
                 if out and out.get(k) is not None:
                     st[k] = out[k]
             if step_kind != "highlights":
@@ -941,6 +993,51 @@ class Desk:
                                    (self.now(),)).fetchone()
         return int(row["n"])
 
+    def doing(self) -> dict | None:
+        """What's being worked on right now, in words for a status line (automation's state, the Telegram bot's
+        /status, the Mini App): {"kind", "what", "title", "stage", "frac", "text", "emoji", "by", "order",
+        "waiting"}. None when nothing is under way (the tasks waiting are counted in Desk.waiting)."""
+        now = self.now()
+        with self.lock:
+            rows = [dict(r) for r in self.con.execute(
+                "SELECT id, kind, game, status, payload, lease FROM tasks WHERE status IN ('queued', 'working', "
+                "'cancel') ORDER BY id").fetchall()]
+            t = next((r for r in rows if r["status"] in ("working", "cancel") and (r["lease"] or 0) > now), None)
+            if t is None:
+                return None
+            try:
+                payload = json.loads(t["payload"] or "{}")
+            except ValueError:
+                payload = {}
+            o = self._load_order(self.con, str(payload.get("order") or "")) if payload.get("order") else None
+            row = self.con.execute("SELECT data FROM games WHERE id=?", (t["game"],)).fetchone() if t["game"] else None
+        g = json.loads(row["data"]) if row is not None else {}
+        waiting = sum(1 for r in rows if r["status"] == "queued")
+        title = g.get("matchup") or g.get("title") or ""
+        what = DOING.get(t["kind"], "Working on")
+        if t["kind"] in ("search", "order"):
+            f = G.GameFilter.from_json(o.get("filter")) if o else self.filter()
+            title = order_who(o) if o else f.describe()
+            stage, frac = (o.get("stage") if o else self._meta("search_stage", "")) or "", None
+            if stage.startswith("Waiting"):  # what it said while it queued: it's being done now
+                stage = ""
+            emoji = f.sport_info.emoji
+        else:
+            stage, frac = g.get("stage") or "", g.get("frac")
+            sp = sports.get(g.get("sport", ""))
+            emoji = sp.emoji if sp else "🏆"
+        if t["status"] == "cancel":
+            stage = "Stopping"
+        text = f"{what} {title}".strip()
+        if stage:
+            text += f": {stage}"
+        if isinstance(frac, (int, float)) and "%" not in stage:
+            text += f" ({round(100 * float(frac))}%)"
+        return {"kind": t["kind"], "what": what, "title": title, "stage": stage,
+                "frac": frac if isinstance(frac, (int, float)) else None, "text": text, "emoji": emoji,
+                "game": t["game"] or "", "by": (o or {}).get("by") or "", "order": (o or {}).get("id") or "",
+                "waiting": waiting}
+
     def stage(self, game_id: str, stage: str, frac: float | None = None, status: str | None = None) -> None:
         def fn(g):
             g["stage"] = stage
@@ -1037,6 +1134,8 @@ def order_who(o: dict) -> str:
     """'Lakers vs Celtics', 'Premier League', 'NBA basketball': whose games an order is for."""
     f = G.GameFilter.from_json(o.get("filter"))
     teams = f.team_list
+    if (o.get("match") or {}).get("label"):  # a game picked from the games played: as its scoreboard names it
+        return o["match"]["label"] + (f" ({f.league})" if f.league else "")
     if teams:
         return (" vs ".join(teams) if len(teams) == 2 else ", ".join(teams[:4])) + (f" ({f.league})" if f.league else "")
     sp = f.sport_info
@@ -1056,6 +1155,65 @@ def order_title(o: dict) -> str:
     return f"{order_who(o)}: {order_what(o)}"
 
 
+def _match(d) -> dict | None:
+    """A game picked from the games played (slate.order_values), cleaned: {id, label, line, state, sides}."""
+    if not isinstance(d, dict) or not d.get("label"):
+        return None
+
+    def text(v, n: int) -> str:
+        return " ".join(str(v or "").split())[:n]
+
+    sides = [[text(n, 40) for n in side if text(n, 40)][:4] for side in d.get("sides") or []
+             if isinstance(side, (list, tuple))][:2]
+    return {"id": re.sub(r"[^\w.-]", "", str(d.get("id") or ""))[:60], "label": text(d.get("label"), 90),
+            "line": text(d.get("line"), 120), "sides": [s for s in sides if s],
+            "state": str(d.get("state") or "final") if str(d.get("state") or "") in ("final", "live", "soon")
+            else "final"}
+
+
+def order_notes(o: dict, cat: dict | None, s) -> list[str]:
+    """What whoever asks should know before the work starts (the review of the request itself)."""
+    from ..compliance import requirements
+
+    notes: list[str] = []
+    need = o.get("requires") or {}
+    if need and o.get("want") in ("clips", "both"):
+        least = requirements.over(float(need.get("min_seconds") or 0))
+        notes.append(f"Single plays run 15 to 40 seconds, and a video from Telegram has to be {least}: the clips "
+                     "will wait for your OK, not post by themselves."
+                     + (" The reel is the one that's over a minute." if o["want"] == "both"
+                        else " Ask for a reel to get one that's over a minute."))
+    if cat is None:
+        notes.append("No category is set for this sport: what's made goes in the Sports folder and isn't queued "
+                     "to post.")
+    elif not cat.get("posts", bool(cat.get("account"))):
+        notes.append(f"{cat['name']} has no TikTok account: what's made stays in the Library until it has one.")
+    try:
+        if not ai_state(s)["ready"]:
+            notes.append("No AI is set up, so the plays are ranked by the crowd's noise alone.")
+    except Exception:  # noqa: BLE001 - the note is a courtesy
+        pass
+    return notes
+
+
+def order_review(o: dict) -> dict:
+    """How an order's videos did against the minimums it was made to: {"checked", "passed", "held", "why": [...]}
+    ({} when it was made to none)."""
+    if not o.get("requires"):
+        return {}
+    out = {"checked": 0, "passed": 0, "held": 0, "why": []}
+    for st in o.get("steps") or []:
+        r = st.get("review") if isinstance(st.get("review"), dict) else None
+        if r is None:
+            continue
+        out["checked"] += int(r.get("checked") or 0)
+        out["passed"] += int(r.get("passed") or 0)
+        out["held"] += int(r.get("held") or 0)
+        out["why"] += [w for w in r.get("why") or [] if w not in out["why"]]
+    out["why"] = out["why"][:6]
+    return out
+
+
 def category_list(s) -> list[dict]:
     from .. import categories
 
@@ -1063,7 +1221,8 @@ def category_list(s) -> list[dict]:
     for c in categories.load(s):
         sp = c.sport_info
         out.append({"id": c.id, "name": c.name, "account": c.account, "sport": sp.id if sp else "",
-                    "emoji": sp.emoji if sp else "", "macs": bool(c.send_to_macs), "state": c.state})
+                    "emoji": sp.emoji if sp else "", "macs": bool(c.send_to_macs), "state": c.state,
+                    "posts": bool(c.account_id)})
     out.sort(key=lambda c: (not c["sport"], c["name"].lower()))
     return out
 
@@ -1089,6 +1248,7 @@ class DeskWorker:
         self.events = events or (lambda kind, text: None)
         self.deliver = deliver
         self.engine_factory = engine_factory
+        self.probe = None  # reads a made video's length and shape (ffmpeg's; a stand-in in tests)
         self.poll = poll
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -1218,6 +1378,14 @@ class DeskWorker:
         order = str(task["payload"].get("order") or "")
         o = self.desk.find_order(order) if order else None
         return G.GameFilter.from_json(o.get("filter")) if o else self.desk.filter()
+
+    def _review(self, need: dict, files: list[Path]) -> dict:
+        """Check the videos a request made against its minimums ({} when it has none)."""
+        if not need or not files:
+            return {}
+        from ..compliance import requirements
+
+        return _review_json([requirements.review_file(f, need, probe=self.probe) for f in files])
 
     def _settle(self, task: dict, stage: str) -> None:
         """A game's status after its task stopped part-way."""
@@ -1605,6 +1773,9 @@ class DeskWorker:
         if cat:
             p.meta["automation"] |= {"category": cat.name, "category_id": cat.id, "account": cat.account,
                                      "account_id": cat.account_id}
+        need = dict((asked or {}).get("requires") or {})
+        if need:  # posting's intake holds a clip that falls short (compliance/requirements.py)
+            p.meta["automation"]["requires"] = need
         try:
             engine.open(p)
             engine.measure(p)
@@ -1640,9 +1811,12 @@ class DeskWorker:
         self.desk.change(g["id"], fn)
         n = len(files) - rejected
         task["out"] = {"folder": str(folder), "clips": n}
+        checked = self._review(need, [folder / x for x in files if not x.startswith("_rejected")])
+        if checked:
+            task["out"]["review"] = checked
         said = (f"Made {_plural(n, 'clip')} from {g.get('matchup') or g.get('title')}"
                 + (f" ({rejected} rejected by the quality check)" if rejected else "")
-                + (f", for {cat.name}" if cat else ""))
+                + (f", for {cat.name}" if cat else "") + _held_words(checked, n))
         self.log(f"Sports: {said} → {folder}")
         self.events("sports", f"{sport.emoji} {said}")
         return said
@@ -1666,6 +1840,8 @@ class DeskWorker:
         base, _label, cat = self._settings_for(s, task["payload"].get("category_id", ""), g["video"], g["url"])
         root = (s.auto_output_path / cat.folder if cat else s.auto_output_path / "Sports") / "Reels"
         es = base.apply({"sport": sport.id, "mode": "auto", "series_parts": 1})
+        asked = self.desk.find_order(str(task["payload"].get("order") or "")) if task["payload"].get("order") else None
+        need = dict((asked or {}).get("requires") or {})
         self._youtube_pause()
         progress = self._progress(g["id"], "making")
         progress("Starting the reel", None)
@@ -1675,6 +1851,7 @@ class DeskWorker:
             engine.open(p)
             engine.measure(p)
             res = R.make(p, g, hl, es, root, ids=(None if hits else want or None), category=cat,
+                         requires=need, asked_by=(asked or {}).get("by") or "",
                          voice=f.reel_voice, framing_mode=f.reel_framing,
                          order=("timeline" if hits and f.reel_order == "countdown" else f.reel_order), log=self.log,
                          progress=progress, check=self.check, events=hits or None,
@@ -1702,15 +1879,45 @@ class DeskWorker:
 
         self.desk.change(g["id"], fn)
         task["out"] = {"folder": str(res.folder), "file": str(res.file), "clips": 1, "length": round(length, 1)}
+        checked = {}
+        if need:
+            from ..compliance import requirements
+
+            one = requirements.review(need, length=length, width=res.checks.get("width"),
+                                      height=res.checks.get("height"), sound=res.checks.get("sound"),
+                                      lufs=res.checks.get("lufs"), name=Path(res.file).name)
+            checked = _review_json([one])
+            task["out"]["review"] = checked
         what = (f"{_plural(len(res.reel.plays), 'found moment')} in {g.get('matchup') or g.get('title')}" if hits else
-                f"{g.get('matchup') or g.get('title')}'s top {len(res.reel.plays)} plays")
+                f"the top {len(res.reel.plays)} plays of {g.get('matchup') or g.get('title')}")
         said = (f"Made a {length:.0f} s reel of {what}" + (f", for {cat.name}" if cat else "")
-                + ("" if res.checks.get("rewards") else " (under a minute: not for Creator Rewards)"))
+                + (_held_words(checked, 1) if need else
+                   "" if res.checks.get("rewards") else " (under a minute: not for Creator Rewards)"))
         self.log(f"Sports: {said} → {res.file}")
         for w in res.warnings:
             self.log(f"⚠ {w}")
         self.events("sports", f"{sport.emoji} {said}")
         return said
+
+
+def _review_json(reviews: list) -> dict:
+    """What a step keeps of its videos' reviews: {"checked", "passed", "held", "why": [...], "passed_as": "..."}."""
+    held = [r for r in reviews if not r.ok]
+    out = {"checked": len(reviews), "passed": len(reviews) - len(held), "held": len(held),
+           "why": list(dict.fromkeys(r.why() for r in held))[:4]}
+    ok = next((r for r in reviews if r.ok), None)
+    if ok is not None:
+        out["passed_as"] = ok.passed()
+    return out
+
+
+def _held_words(checked: dict, n: int) -> str:
+    """' (2 held for your OK: 26 s (needs over 60 s))' for what a request's review held back."""
+    if not checked or not checked.get("held"):
+        return ""
+    held = int(checked["held"])
+    who = "held" if n == 1 and held == 1 else f"{'both' if held == n == 2 else 'all' if held == n else held} held"
+    return f" ({who} for your OK: {'; '.join(checked.get('why') or ['under the minimums'])})"
 
 
 def _clip_files(folder: Path) -> list[str]:

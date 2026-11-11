@@ -16,6 +16,8 @@ from .client import ApiError
 
 OLD_PC = ("The ClipMonster on your PC is older than this Mac's and has no Sports section yet. Update it on the PC "
           "(it updates itself overnight, or Settings → General → Check for updates now).")
+OLD_PC_PLAYED = ("The ClipMonster on your PC is older than this Mac's and can't list the games played yet. Update "
+                 "it on the PC (Settings → General → Check for updates now).")
 
 
 class RemoteBackend(Backend):
@@ -49,7 +51,7 @@ class RemoteBackend(Backend):
                 return request(client, *args)
             except ApiError as exc:
                 if exc.status == 404 and exc.message in ("No such request.", "The PC said 404."):
-                    raise ApiError(404, OLD_PC) from exc
+                    raise ApiError(404, OLD_PC_PLAYED if name in ("played", "order_game") else OLD_PC) from exc
                 raise
 
         s.call(run, ok, fail)
@@ -107,6 +109,14 @@ class RemoteBackend(Backend):
     def _find_events(c, query: str, ids: list | None = None, feed: str = "", anchors: list | None = None):
         return c.post("/api/sports/events", {"query": query, "ids": list(ids or []), "feed": feed,
                                              "anchors": list(anchors or [])})
+
+    @staticmethod
+    def _played(c, sport: str = "any", league: str = ""):
+        return c.get("/api/sports/played", sport=sport or None, league=league or None)
+
+    @staticmethod
+    def _order_game(c, game_id: str, want: str = "reel"):
+        return c.post("/api/sports/played/order", {"game": game_id, "want": want})
 
     @staticmethod
     def _version(c, game_id: str, video: str):
